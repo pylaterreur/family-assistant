@@ -8,6 +8,7 @@ import os  # Import os for environment variable resolution
 import random
 import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -91,6 +92,7 @@ MCP_SERVER_STATUS_CANCELLED = "cancelled"
 # seen healthy doubles the wait, up to half an hour.
 DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS = 30
 DEFAULT_TOOL_REFRESH_INTERVAL_SECONDS = 30 * 60.0  # 30 minutes
+DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 30 * 60.0
 
 DEFAULT_RECONNECT_BACKOFF_BASE_SECONDS = 30.0
 DEFAULT_RECONNECT_BACKOFF_MAX_SECONDS = 30 * 60.0
@@ -230,6 +232,7 @@ class MCPToolsProvider:
         reconnect_backoff_max_seconds: float = DEFAULT_RECONNECT_BACKOFF_MAX_SECONDS,
         tool_refresh_interval_seconds: float
         | None = DEFAULT_TOOL_REFRESH_INTERVAL_SECONDS,
+        tool_call_timeout_seconds: float = DEFAULT_TOOL_CALL_TIMEOUT_SECONDS,
     ) -> None:
         self._mcp_server_configs = dict(mcp_server_configs)
         self._user_identity: (
@@ -247,6 +250,7 @@ class MCPToolsProvider:
                     reconnect_backoff_base_seconds=reconnect_backoff_base_seconds,
                     reconnect_backoff_max_seconds=reconnect_backoff_max_seconds,
                     tool_refresh_interval_seconds=tool_refresh_interval_seconds,
+                    tool_call_timeout_seconds=tool_call_timeout_seconds,
                 )
 
         # Validated here so a malformed block fails at startup rather than at
@@ -260,6 +264,7 @@ class MCPToolsProvider:
         self._initialization_timeout_seconds = initialization_timeout_seconds
         self._health_check_interval_seconds = health_check_interval_seconds
         self._tool_refresh_interval_seconds = tool_refresh_interval_seconds
+        self._tool_call_timeout_seconds = tool_call_timeout_seconds
         self._reconnect_backoff_base_seconds = reconnect_backoff_base_seconds
         self._reconnect_backoff_max_seconds = reconnect_backoff_max_seconds
         self._reconnect_backoff: dict[str, _ReconnectBackoff] = {
@@ -1637,7 +1642,11 @@ class MCPToolsProvider:
 
             async def call_tool_result(active_session: ClientSession) -> str:
                 mcp_result = await active_session.call_tool(
-                    name=self._remote_tool_name(server_id, name), arguments=arguments
+                    name=self._remote_tool_name(server_id, name),
+                    arguments=arguments,
+                    read_timeout_seconds=timedelta(
+                        seconds=self._tool_call_timeout_seconds
+                    ),
                 )
 
                 # Process MCP result content
@@ -1667,6 +1676,20 @@ class MCPToolsProvider:
 
             try:
                 return await call_tool_result(active)
+            except McpError as e:
+                if e.error.code != httpx.codes.REQUEST_TIMEOUT:
+                    raise
+                # Not retried: the server may still be working on the call, and
+                # running it again could repeat its side effects.
+                logger.error(
+                    f"MCP tool '{name}' on server '{server_id}' timed out after "
+                    f"{self._tool_call_timeout_seconds:g}s"
+                )
+                return (
+                    f"Error: MCP tool '{name}' timed out after "
+                    f"{self._tool_call_timeout_seconds:g} seconds. The operation may "
+                    "have completed; check its state before retrying."
+                )
             except Exception as e:
                 if attempt == 0:
                     # First attempt failed, try to reconnect
@@ -1869,6 +1892,7 @@ class _UserMCPConnections:
         reconnect_backoff_base_seconds: float,
         reconnect_backoff_max_seconds: float,
         tool_refresh_interval_seconds: float | None,
+        tool_call_timeout_seconds: float,
     ) -> None:
         auth = MCPUserAuthConfig.model_validate(config.get("user_auth"))
         if config.get("token") or config.get("transport", "stdio").lower() not in {
@@ -1892,6 +1916,7 @@ class _UserMCPConnections:
                 reconnect_backoff_base_seconds=reconnect_backoff_base_seconds,
                 reconnect_backoff_max_seconds=reconnect_backoff_max_seconds,
                 tool_refresh_interval_seconds=tool_refresh_interval_seconds,
+                tool_call_timeout_seconds=tool_call_timeout_seconds,
             )
             provider._user_identity = (credential, auth.identity_check)
             self.connections[user_id] = _UserMCPConnection(provider)

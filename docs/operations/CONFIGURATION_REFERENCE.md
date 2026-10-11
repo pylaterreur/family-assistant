@@ -3157,6 +3157,24 @@ periodic background discovery entirely.
 
 ______________________________________________________________________
 
+### mcp_tool_call_timeout_seconds
+
+How long to wait for a single MCP tool call before giving up on it.
+
+| Property  | Value                                                                 |
+| --------- | --------------------------------------------------------------------- |
+| YAML Path | `default_profile_settings.tools_config.mcp_tool_call_timeout_seconds` |
+| Required  | No                                                                    |
+| Default   | `1800` (30 minutes)                                                   |
+| Sensitive | No                                                                    |
+| Example   | `3600`                                                                |
+
+A call that runs past this returns an error to the model saying the operation may have completed,
+and is not retried, since the server may still be working on it. Servers configured with `user_auth`
+also apply their own `call_timeout_seconds`, and the shorter of the two wins.
+
+______________________________________________________________________
+
 ### TOOLS_REQUIRING_CONFIRMATION
 
 Comma-separated list of tools requiring user confirmation.

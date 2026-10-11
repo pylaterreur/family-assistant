@@ -44,6 +44,7 @@ from family_assistant.tools.types import ToolExecutionContext, ToolResult
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from datetime import timedelta
 
     from mcp import ClientSession
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -384,7 +385,9 @@ def _recording_session() -> tuple[ClientSession, list[MCPArguments]]:
     """A session that records the arguments each call_tool receives."""
     calls: list[MCPArguments] = []
 
-    async def call_tool(*, name: str, arguments: MCPArguments) -> CallToolResult:
+    async def call_tool(
+        *, name: str, arguments: MCPArguments, read_timeout_seconds: timedelta
+    ) -> CallToolResult:
         calls.append(arguments)
         return CallToolResult(content=[TextContent(type="text", text="ok")])
 
@@ -553,7 +556,9 @@ async def test_a_file_path_is_still_readable_while_the_server_is_called() -> Non
 
     seen: list[anyio.Path] = []
 
-    async def call_tool(*, name: str, arguments: MCPArguments) -> CallToolResult:
+    async def call_tool(
+        *, name: str, arguments: MCPArguments, read_timeout_seconds: timedelta
+    ) -> CallToolResult:
         path = anyio.Path(arguments["image_url"])
         assert await path.read_bytes() == IMAGE_BYTES
         seen.append(path)
