@@ -7,16 +7,27 @@ token, while every other endpoint stays protected.
 
 from __future__ import annotations
 
+import hashlib
+import secrets
+import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
 
+from family_assistant.llm.messages import UserMessage
+from family_assistant.services.attachment_registry import AttachmentRegistry
+from family_assistant.storage.database import Database
 from family_assistant.web.app_creator import app as fastapi_app
 from family_assistant.web.dependencies import DIAGNOSTICS_READONLY_TOKEN_ENV_VAR
+from family_assistant.web.route_auth import DIAGNOSTICS_TOKEN_HEADER
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import httpx
     import pytest as _pytest
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 READONLY_ENDPOINTS = [
     "/api/errors/",
@@ -173,3 +184,123 @@ async def test_readonly_token_does_not_unlock_other_endpoints(
         assert response.status_code == 401
     finally:
         _restore_auth(original)
+
+
+async def _shared_conversation(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> tuple[str, str, str]:
+    """Persist a shared conversation; return (share token, conversation id, attachment id)."""
+    db = Database(engine=db_engine)
+    conversation_id = str(uuid.uuid4())
+    await db.message_history.add_message(
+        UserMessage.from_trusted_user(content="Why did the brief not fire?"),
+        interface_type="web",
+        conversation_id=conversation_id,
+        timestamp=datetime.now(UTC),
+        user_id="test_user",
+    )
+    attachment_registry = AttachmentRegistry(str(tmp_path), db_engine)
+    fastapi_app.state.attachment_registry = attachment_registry
+    attachment = await attachment_registry.register_user_attachment(
+        db,
+        b"trace details",
+        "trace.txt",
+        "text/plain",
+        conversation_id=conversation_id,
+        user_id="test_user",
+    )
+    token = secrets.token_urlsafe(32)
+    await db.conversation_shares.rotate(
+        conversation_id,
+        "test_user",
+        hashlib.sha256(token.encode()).hexdigest(),
+    )
+    return token, conversation_id, attachment.attachment_id
+
+
+@pytest.mark.asyncio
+async def test_readonly_token_header_reads_shared_conversation(
+    api_client: httpx.AsyncClient,
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: _pytest.MonkeyPatch,
+) -> None:
+    """The diagnostics token in X-Diagnostics-Token reads a shared transcript."""
+    token, _, _ = await _shared_conversation(db_engine, tmp_path)
+    monkeypatch.setenv(DIAGNOSTICS_READONLY_TOKEN_ENV_VAR, READONLY_TOKEN)
+    original = _enable_auth()
+    try:
+        response = await api_client.get(
+            f"/api/v1/shared-conversations/{token}/messages",
+            headers={DIAGNOSTICS_TOKEN_HEADER: READONLY_TOKEN},
+        )
+    finally:
+        _restore_auth(original)
+    assert response.status_code == 200
+    assert [m["content"] for m in response.json()["messages"]] == [
+        "Why did the brief not fire?"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_readonly_token_header_reads_shared_attachment(
+    api_client: httpx.AsyncClient,
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: _pytest.MonkeyPatch,
+) -> None:
+    """The diagnostics token also fetches an attachment of the shared conversation."""
+    token, _, attachment_id = await _shared_conversation(db_engine, tmp_path)
+    monkeypatch.setenv(DIAGNOSTICS_READONLY_TOKEN_ENV_VAR, READONLY_TOKEN)
+    original = _enable_auth()
+    try:
+        response = await api_client.get(
+            f"/api/v1/shared-conversations/{token}/attachments/{attachment_id}",
+            headers={DIAGNOSTICS_TOKEN_HEADER: READONLY_TOKEN},
+        )
+    finally:
+        _restore_auth(original)
+    assert response.status_code == 200
+    assert response.content == b"trace details"
+
+
+@pytest.mark.asyncio
+async def test_shared_conversation_rejects_wrong_readonly_token(
+    api_client: httpx.AsyncClient,
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: _pytest.MonkeyPatch,
+) -> None:
+    """A share link alone, with a wrong diagnostics token, is refused."""
+    token, _, _ = await _shared_conversation(db_engine, tmp_path)
+    monkeypatch.setenv(DIAGNOSTICS_READONLY_TOKEN_ENV_VAR, READONLY_TOKEN)
+    original = _enable_auth()
+    try:
+        response = await api_client.get(
+            f"/api/v1/shared-conversations/{token}/messages",
+            headers={DIAGNOSTICS_TOKEN_HEADER: "not-the-right-token"},
+        )
+    finally:
+        _restore_auth(original)
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_readonly_token_does_not_read_unshared_conversation(
+    api_client: httpx.AsyncClient,
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: _pytest.MonkeyPatch,
+) -> None:
+    """Without the share link, the conversation endpoints stay closed to it."""
+    _, conversation_id, _ = await _shared_conversation(db_engine, tmp_path)
+    monkeypatch.setenv(DIAGNOSTICS_READONLY_TOKEN_ENV_VAR, READONLY_TOKEN)
+    original = _enable_auth()
+    try:
+        response = await api_client.get(
+            f"/api/v1/chat/conversations/{conversation_id}/messages",
+            headers={DIAGNOSTICS_TOKEN_HEADER: READONLY_TOKEN},
+        )
+    finally:
+        _restore_auth(original)
+    assert response.status_code == 401

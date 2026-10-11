@@ -2637,6 +2637,18 @@ Covered endpoints:
 - `GET /api/diagnostics/export`
 - `GET /api/diagnostics/taint-audit`
 - `GET /api/debug/profiles/tools`
+- `GET /api/v1/shared-conversations/{token}/messages` and
+  `GET /api/v1/shared-conversations/{token}/attachments/{attachment_id}` — the read-only transcript
+  behind a conversation share link, so a coding agent given a link can read the conversation.
+
+For the shared-conversation reads, send the token as `X-Diagnostics-Token: <token>`. That is the
+only form the public edge accepts there: those routes still require a JWT at Envoy Gateway unless
+the header is present, and then Envoy itself verifies the header against its own copy of the token
+(an API-key SecurityPolicy) before the backend checks it again. The share token in the path is still
+required, so the diagnostics token reads only conversations someone has shared, and revoking the
+link revokes access. The link's page URL `/shared/conversations/{token}` maps to the API path above.
+The route set is published as `diagnostics_token_routes` in `/.well-known/auth-route-classification`
+for the gateway contract check.
 
 `GET /api/diagnostics/taint-audit` summarizes recent taint policy decisions by tool, sink, tier,
 outcome, and source category, and inventories stored message-history rows by interface, role,

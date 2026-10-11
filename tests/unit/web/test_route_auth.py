@@ -3,6 +3,8 @@
 import pytest
 
 from family_assistant.web.route_auth import (
+    DIAGNOSTICS_TOKEN_HEADER,
+    DIAGNOSTICS_TOKEN_ROUTES,
     NO_DEFAULT_AUTH_ROUTES,
     api_route_classification,
     api_route_requires_default_auth,
@@ -43,6 +45,13 @@ from family_assistant.web.route_auth import (
         # Scoped diagnostics/debug prefixes (GET only).
         ("GET", "/api/diagnostics/export", True),
         ("POST", "/api/diagnostics/export", False),
+        # Shared-conversation reads defer to the diagnostics-reader dependency.
+        ("GET", "/api/v1/shared-conversations/tok/messages", True),
+        ("GET", "/api/v1/shared-conversations/tok/attachments/att", True),
+        ("POST", "/api/v1/shared-conversations/tok/messages", False),
+        ("GET", "/api/v1/shared-conversations/tok", False),
+        ("GET", "/api/v1/shared-conversations/tok/messages/extra", False),
+        ("GET", "/api/v1/shared-conversations/a/b/messages", False),
         # Everything else under /api requires default auth — fail closed.
         ("GET", "/api/notes/", False),
         ("POST", "/api/notes/", False),
@@ -110,5 +119,18 @@ def test_published_document_matches_declaration() -> None:
     declared = {
         (match, path, tuple(sorted(methods)), route_class)
         for methods, match, path, route_class in NO_DEFAULT_AUTH_ROUTES
+    }
+    assert published == declared
+
+
+def test_published_diagnostics_token_routes_match_declaration() -> None:
+    document = api_route_classification()
+    published = {
+        (entry["match"], entry["path"], tuple(entry["methods"]), entry["header"])
+        for entry in document["diagnostics_token_routes"]
+    }
+    declared = {
+        (match, path, tuple(sorted(methods)), DIAGNOSTICS_TOKEN_HEADER)
+        for methods, match, path in DIAGNOSTICS_TOKEN_ROUTES
     }
     assert published == declared

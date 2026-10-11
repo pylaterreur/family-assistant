@@ -90,6 +90,7 @@ from family_assistant.web.dependencies import (
     get_attachment_registry,
     get_current_user,
     get_db,
+    get_diagnostics_reader,
     get_processing_service,
     get_user_identity_resolver,
     get_web_chat_interface,
@@ -3142,13 +3143,17 @@ async def get_pending_delegations(
 async def get_shared_conversation_messages(
     token: str,
     request: Request,
-    _current_user: Annotated[dict, Depends(get_current_user)],
+    _reader: Annotated[dict, Depends(get_diagnostics_reader)],
     db_context: Annotated[Database, Depends(get_db)],
     attachment_registry: Annotated[
         "AttachmentRegistry", Depends(get_attachment_registry)
     ],
 ) -> ConversationMessagesResponse:
-    """Return a read-only transcript to an authenticated share-link holder."""
+    """Return a read-only transcript to an authenticated share-link holder.
+
+    The diagnostics readonly token also authenticates here, so a coding agent
+    given the link can read the conversation; see route_auth.DIAGNOSTICS_TOKEN_ROUTES.
+    """
     share = await _get_active_conversation_share(request, db_context, token)
     history_by_chat = await db_context.message_history.get_all_grouped(
         interface_type=None,
@@ -3205,7 +3210,7 @@ async def serve_shared_conversation_attachment(
     attachment_id: str,
     request: Request,
     background_tasks: BackgroundTasks,
-    _current_user: Annotated[dict, Depends(get_current_user)],
+    _reader: Annotated[dict, Depends(get_diagnostics_reader)],
     db_context: Annotated[Database, Depends(get_db)],
     attachment_registry: Annotated[
         "AttachmentRegistry", Depends(get_attachment_registry)

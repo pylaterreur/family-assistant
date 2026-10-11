@@ -13,6 +13,7 @@ from family_assistant.services.user_identity import (
 )
 from family_assistant.storage.database import Database
 from family_assistant.tools import ToolsProvider
+from family_assistant.web import route_auth
 from family_assistant.web.auth import (
     AuthService,
     api_authentication_enabled,
@@ -246,13 +247,16 @@ async def get_diagnostics_reader(request: Request) -> dict:
 
     Grants access either to a normal authenticated user (session or API token,
     via :func:`get_current_user`) or to a holder of the read-only diagnostics
-    token configured in ``DIAGNOSTICS_READONLY_TOKEN``. The read-only token is
+    token configured in ``DIAGNOSTICS_READONLY_TOKEN``, presented in the
+    ``X-Diagnostics-Token`` header or as an API credential. The read-only token is
     checked first so that supplying it as a bearer token does not fall through
     to (and fail) normal API-token validation.
     """
     readonly_token = os.environ.get(DIAGNOSTICS_READONLY_TOKEN_ENV_VAR)
     if readonly_token:
-        provided = _extract_bearer_token(request)
+        provided = request.headers.get(
+            route_auth.DIAGNOSTICS_TOKEN_HEADER
+        ) or _extract_bearer_token(request)
         # Compare as bytes: secrets.compare_digest raises TypeError on non-ASCII
         # str inputs, which would surface as a 500 instead of falling through to
         # normal auth for a malformed token.

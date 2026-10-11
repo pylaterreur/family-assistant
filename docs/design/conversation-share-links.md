@@ -4,7 +4,8 @@
 
 Let a conversation owner give another authorized Family Assistant user a link to a read-only view.
 The link is a privacy speedbump between household members, not an authorization substitute: every
-request still requires an authenticated, allowlisted user.
+request still requires an authenticated, allowlisted user, or a coding agent holding the read-only
+diagnostics token.
 
 ## User experience
 
@@ -39,6 +40,13 @@ Attachment downloads use a share-scoped endpoint. It serves a file only when the
 matches and the attachment registry row names the shared conversation. This avoids granting the
 recipient general access to the owner's attachment registry.
 
+The shared read endpoints also accept the read-only diagnostics token in an `X-Diagnostics-Token`
+header, so a conversation can be handed to a coding agent without being exposed publicly. Public
+access stays gated at the edge: Envoy Gateway still requires a JWT on these routes unless that
+header is present, and then verifies the header against its own copy of the diagnostics token before
+the backend checks it again. The agent needs both secrets, the share token picking the conversation
+and the diagnostics token proving it is an agent the household runs.
+
 The token is intentionally sufficient for any authenticated household user. Shares do not target a
 specific recipient, expire automatically, or provide an audit trail; those controls would add
 machinery beyond the stated household privacy boundary. Rotating or revoking the link is the
@@ -61,5 +69,6 @@ Endpoints:
 - `GET /api/v1/shared-conversations/{token}/messages` returns the visible main-conversation rows.
 - `GET /api/v1/shared-conversations/{token}/attachments/{attachment_id}` serves a scoped file.
 
-All endpoints declare the normal current-user dependency. Invalid, revoked, foreign, and malformed
-tokens return 404 so the API does not distinguish why access failed.
+The owner endpoints declare the normal current-user dependency; the shared read endpoints declare
+the diagnostics-reader dependency, which is a normal user or the diagnostics token. Invalid,
+revoked, foreign, and malformed tokens return 404 so the API does not distinguish why access failed.
