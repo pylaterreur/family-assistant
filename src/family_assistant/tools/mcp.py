@@ -8,7 +8,6 @@ import os  # Import os for environment variable resolution
 import random
 import time
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -1642,11 +1641,7 @@ class MCPToolsProvider:
 
             async def call_tool_result(active_session: ClientSession) -> str:
                 mcp_result = await active_session.call_tool(
-                    name=self._remote_tool_name(server_id, name),
-                    arguments=arguments,
-                    read_timeout_seconds=timedelta(
-                        seconds=self._tool_call_timeout_seconds
-                    ),
+                    name=self._remote_tool_name(server_id, name), arguments=arguments
                 )
 
                 # Process MCP result content
@@ -1674,13 +1669,12 @@ class MCPToolsProvider:
                     )
                     return result_str
 
+            deadline = asyncio.timeout(self._tool_call_timeout_seconds)
             try:
-                return await call_tool_result(active)
+                async with deadline:
+                    return await call_tool_result(active)
             except Exception as e:
-                if (
-                    isinstance(e, McpError)
-                    and e.error.code == httpx.codes.REQUEST_TIMEOUT
-                ):
+                if deadline.expired():
                     # Not retried: the server may still be working on the call,
                     # and running it again could repeat its side effects.
                     logger.error(

@@ -15,11 +15,20 @@ from mcp.types import INVALID_PARAMS, ErrorData
 from family_assistant.tools import MCPToolsProvider
 
 
+@pytest.mark.parametrize(
+    ("outbound_buffer", "requests_sent"),
+    [
+        pytest.param(10, 1, id="request sent, no response"),
+        pytest.param(0, 0, id="request stuck behind a stalled writer"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_a_call_the_server_never_answers_times_out_without_a_retry() -> None:
+async def test_a_call_that_never_finishes_times_out_without_a_retry(
+    outbound_buffer: int, requests_sent: int
+) -> None:
     to_server_send, to_server_receive = anyio.create_memory_object_stream[
         SessionMessage
-    ](10)
+    ](outbound_buffer)
     to_client_send, to_client_receive = anyio.create_memory_object_stream[
         SessionMessage | Exception
     ](10)
@@ -47,7 +56,7 @@ async def test_a_call_the_server_never_answers_times_out_without_a_retry() -> No
 
     assert "timed out after 0.2 seconds" in result
     assert "may have completed" in result
-    assert len(requests) == 1
+    assert len(requests) == requests_sent
 
 
 @pytest.mark.asyncio
