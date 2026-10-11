@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import NoReturn, cast
+
 import anyio
 import pytest
 from mcp import ClientSession
+from mcp.shared.exceptions import McpError
 from mcp.shared.message import SessionMessage
+from mcp.types import INVALID_PARAMS, ErrorData
 
 from family_assistant.tools import MCPToolsProvider
 
@@ -43,3 +48,18 @@ async def test_a_call_the_server_never_answers_times_out_without_a_retry() -> No
     assert "timed out after 0.2 seconds" in result
     assert "may have completed" in result
     assert len(requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_other_mcp_errors_still_become_an_error_result() -> None:
+    async def call_tool(**_: object) -> NoReturn:
+        raise McpError(ErrorData(code=INVALID_PARAMS, message="bad arguments"))
+
+    provider = MCPToolsProvider({"server": {"command": "unused"}})
+    session = cast("ClientSession", SimpleNamespace(call_tool=call_tool))
+
+    result = await provider._call_tool_with_reconnect(
+        "some_tool", {}, "server", session
+    )
+
+    assert result == "Error calling MCP tool 'some_tool': bad arguments"

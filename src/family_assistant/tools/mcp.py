@@ -1676,21 +1676,22 @@ class MCPToolsProvider:
 
             try:
                 return await call_tool_result(active)
-            except McpError as e:
-                if e.error.code != httpx.codes.REQUEST_TIMEOUT:
-                    raise
-                # Not retried: the server may still be working on the call, and
-                # running it again could repeat its side effects.
-                logger.error(
-                    f"MCP tool '{name}' on server '{server_id}' timed out after "
-                    f"{self._tool_call_timeout_seconds:g}s"
-                )
-                return (
-                    f"Error: MCP tool '{name}' timed out after "
-                    f"{self._tool_call_timeout_seconds:g} seconds. The operation may "
-                    "have completed; check its state before retrying."
-                )
             except Exception as e:
+                if (
+                    isinstance(e, McpError)
+                    and e.error.code == httpx.codes.REQUEST_TIMEOUT
+                ):
+                    # Not retried: the server may still be working on the call,
+                    # and running it again could repeat its side effects.
+                    logger.error(
+                        f"MCP tool '{name}' on server '{server_id}' timed out after "
+                        f"{self._tool_call_timeout_seconds:g}s"
+                    )
+                    return (
+                        f"Error: MCP tool '{name}' timed out after "
+                        f"{self._tool_call_timeout_seconds:g} seconds. The operation "
+                        "may have completed; check its state before retrying."
+                    )
                 if attempt == 0:
                     # First attempt failed, try to reconnect
                     logger.warning(
