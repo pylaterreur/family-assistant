@@ -1900,6 +1900,21 @@ def test_a_retuned_review_prompt_changes_the_prompt_revision(
     assert review_prompt_revision() != before
 
 
+@pytest.mark.no_db
+def test_retuned_answered_reply_guidance_changes_the_prompt_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = review_prompt_revision()
+
+    monkeypatch.setattr(
+        tool_call_review_module,
+        "_USER_ANSWERED_EXPLANATION",
+        tool_call_review_module._USER_ANSWERED_EXPLANATION + " Be strict.",
+    )
+
+    assert review_prompt_revision() != before
+
+
 def _reviewed_state() -> TurnTaintState:
     return TurnTaintState.empty().add_source(
         TaintSource(

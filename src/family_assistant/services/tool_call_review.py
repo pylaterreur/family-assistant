@@ -1067,6 +1067,7 @@ def review_prompt_revision() -> str:
         _AMBIENT_ADMISSION_SYSTEM_PROMPT,
         _SCRIPT_REVIEW_ADDENDUM,
         _ARGUMENTS_HEADER,
+        _USER_ANSWERED_EXPLANATION,
     ))
     return hashlib.sha256(fixed.encode("utf-8")).hexdigest()[:12]
 
