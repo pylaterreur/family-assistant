@@ -123,7 +123,12 @@ Adopted from the risk-adjudication design, with one amendment each where marked:
    endorses what it plainly said the assistant would do, the same trust an approved confirmation
    prompt carries. This follows Codex Auto-review, whose reviewer sees the assistant updates the
    user was shown. The visibility ablation found no verdict change from showing quarantined attacker
-   text to the judge.)*
+   text to the judge. The reply is inferred from the model's history window: the row just before the
+   human's message, when it has the shape of a delivered reply. That is best effort, not a delivery
+   record. A reply whose send failed, or a profile switch that leaves an older reply adjacent in the
+   window, can be shown as answered. Both are rare, and the human's answer still has to read as
+   assent to that reply before it carries any authority, so we accept them rather than plumb
+   delivery state into the reviewer.)*
 4. **Fail closed, degrade to today or stricter.** Reviewer unavailable, timing out, or returning a
    malformed verdict resolves to the delegating cell or rule's **fallback outcome**: for an
    `adjudicate` matrix cell that defaults to the outcome the cell had before adjudication (so a
