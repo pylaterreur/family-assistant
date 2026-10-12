@@ -5262,6 +5262,7 @@ class TaskWorker:
                         task_id=task_id,
                         status="done",
                         error=completion_note,
+                        replace_error=True,
                         payload=self._payload_with_schedule_automation_advance_outbox(
                             task,
                             advance_request,

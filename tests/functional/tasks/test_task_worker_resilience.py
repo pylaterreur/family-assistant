@@ -1444,3 +1444,65 @@ async def test_shutdown_stops_worker(db_engine: AsyncEngine) -> None:
 
     # Task should be done
     assert worker_task.done()
+
+
+@pytest.mark.asyncio
+async def test_success_after_retry_clears_the_earlier_error(
+    task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
+) -> None:
+    """A task that succeeds on retry does not keep the failed attempt's error."""
+    worker, new_task_event, _ = task_worker_manager(
+        processing_service=MagicMock(),
+        chat_interface=MagicMock(),
+    )
+    engine = worker.engine
+    assert engine is not None
+    attempts = 0
+
+    async def flaky_handler(
+        exec_context: ToolExecutionContext,
+        # ast-grep-ignore: no-dict-any - task payload has dynamic mixed-type fields
+        payload: dict[str, Any],
+    ) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("first attempt fails")
+
+    worker.register_task_handler("flaky", flaky_handler)
+    await Database(engine=engine).tasks.enqueue(
+        task_id="succeeds_on_retry",
+        task_type="flaky",
+        payload={},
+        max_retries_override=1,
+        priority=TaskPriority.INTERACTIVE,
+    )
+    new_task_event.set()
+
+    async def task_rescheduled_for_retry() -> TaskDict | None:
+        task = await _get_task(engine, "succeeds_on_retry")
+        if task is not None and task["status"] == "pending" and task["error"]:
+            return task
+        return None
+
+    await wait_for_condition(
+        task_rescheduled_for_retry,
+        timeout=10.0,
+        description="task rescheduled for retry after first failure",
+    )
+    mock_clock.advance(timedelta(seconds=10))
+    new_task_event.set()
+    # The pending retry still carries its error, which this helper would
+    # otherwise report as a failure before the second attempt runs.
+    await wait_for_tasks_to_complete(
+        engine=engine,
+        timeout_seconds=10.0,
+        task_ids={"succeeds_on_retry"},
+        allow_failures=True,
+    )
+
+    task = await _get_task(engine, "succeeds_on_retry")
+    assert task is not None
+    assert task["status"] == "done"
+    assert task["error"] is None

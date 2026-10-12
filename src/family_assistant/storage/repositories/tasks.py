@@ -686,18 +686,22 @@ class TasksRepository(BaseRepository):
         status: str,
         error: str | None = None,
         payload: Mapping[str, Any] | None = None,
+        *,
+        replace_error: bool = False,
     ) -> None:
         """
         Updates the status of a task.
 
         Args:
             task_id: The unique task identifier
-            status: New status ('completed', 'failed', etc.')
+            status: New status ('done', 'failed', etc.)
             error: Optional error message if the task failed
             payload: Optional replacement payload
+            replace_error: Write ``error`` even when it is None, clearing an
+                error left by an earlier attempt
         """
         values: dict[str, object] = {"status": status}
-        if error is not None:
+        if error is not None or replace_error:
             values["error"] = error
         if payload is not None:
             values["payload"] = payload
