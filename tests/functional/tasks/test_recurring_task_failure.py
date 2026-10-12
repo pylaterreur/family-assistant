@@ -41,12 +41,17 @@ async def test_recurring_task_failure_continues_recurrence(
 
     worker.register_task_handler("fail_recur", failing_handler)
 
-    # Create recurring task with NO retries allowed (for speed)
+    # Create recurring task with NO retries allowed (for speed). The task is
+    # scheduled at the worker's (frozen) clock time so the recurrence base and
+    # the "now" the worker computes the next occurrence from agree; falling
+    # back to the wall-clock created_at would let a second boundary between the
+    # two put the next occurrence before created_at.
     db_context = Database(engine=engine)
     await db_context.tasks.enqueue(
         task_id="recur_fail_test",
         task_type="fail_recur",
         payload={},
+        scheduled_at=worker.clock.now(),
         max_retries_override=0,  # Fail immediately
         recurrence_rule="FREQ=MINUTELY;INTERVAL=1",
         priority=TaskPriority.INTERACTIVE,
@@ -100,5 +105,5 @@ async def test_recurring_task_failure_continues_recurrence(
     assert next_task["status"] == "pending"
     assert next_task["recurrence_rule"] == "FREQ=MINUTELY;INTERVAL=1"
     assert next_task["scheduled_at"] is not None
-    assert task["created_at"] is not None
-    assert next_task["scheduled_at"] > task["created_at"]
+    assert task["scheduled_at"] is not None
+    assert next_task["scheduled_at"] > task["scheduled_at"]
