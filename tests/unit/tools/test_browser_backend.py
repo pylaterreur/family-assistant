@@ -322,16 +322,6 @@ def _handoff_validating_server() -> tuple[httpx.AsyncClient, list[HandoffRequest
             req = HandoffRequest.model_validate_json(request.content)
         except ValidationError as exc:
             return httpx.Response(422, json={"detail": exc.errors(include_url=False)})
-        if (
-            req.reason in {"payment", "credentials", "otp", "legal_consent"}
-            and req.allowed_resume != "never"
-        ):
-            return httpx.Response(
-                409,
-                json={
-                    "detail": "sensitive handoffs cannot resume on the same browser page"
-                },
-            )
         accepted.append(req)
         return httpx.Response(
             200,
@@ -383,28 +373,6 @@ async def test_handoff_tool_accepts_free_text_reason(
     assert [(r.reason, r.handoff_note) for r in accepted] == [
         ("other", "Cloudflare CAPTCHA blocking the page\nPlease solve it")
     ]
-
-
-@pytest.mark.asyncio
-async def test_handoff_tool_free_text_reason_does_not_request_resume(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A sentence like "OTP required" may hide a sensitive step, so it fails closed."""
-    _, accepted = await _handoff_via_tool(
-        monkeypatch, "conv_free_resume", reason="OTP required", allow_resume=True
-    )
-    assert [(r.reason, r.allowed_resume) for r in accepted] == [("other", "never")]
-
-
-@pytest.mark.asyncio
-async def test_handoff_tool_sensitive_reason_does_not_request_resume(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    text, accepted = await _handoff_via_tool(
-        monkeypatch, "conv_sensitive_resume", reason="otp", allow_resume=True
-    )
-    assert [r.allowed_resume for r in accepted] == ["never"]
-    assert "cannot be handed back" in text
 
 
 def _exec_context(

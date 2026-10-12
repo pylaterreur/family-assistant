@@ -674,14 +674,6 @@ _HANDOFF_REASONS = (
     "cookie_consent",
     "other",
 )
-# browser-server refuses to resume the same page after these, since the human
-# may have typed a secret into it.
-_NON_RESUMABLE_HANDOFF_REASONS = frozenset({
-    "payment",
-    "credentials",
-    "otp",
-    "legal_consent",
-})
 
 
 @browser_operation()
@@ -704,17 +696,9 @@ async def browser_request_handoff_tool(
     logger.info("browser_request_handoff: reason=%s", reason)
     # Models routinely ignore the enum and pass a sentence as the reason, which
     # browser-server rejects with a 422. Keep the sentence as the note instead.
-    # Such a sentence may describe a password or OTP step, so it is never
-    # resumable: browser-server's sensitive-reason guard cannot see it.
-    classified = reason in _HANDOFF_REASONS
-    if not classified:
+    if reason not in _HANDOFF_REASONS:
         handoff_note = f"{reason}\n{handoff_note}".strip()
         reason = "other"
-    resume_dropped = allow_resume and (
-        not classified or reason in _NON_RESUMABLE_HANDOFF_REASONS
-    )
-    if resume_dropped:
-        allow_resume = False
     try:
         result = await backend.request_handoff(
             reason=reason,
@@ -733,18 +717,13 @@ async def browser_request_handoff_tool(
             data={"error": "handoff_failed", "detail": str(exc)},
         )
     handoff_url = result.get("handoff_url")
-    text = (
-        f"Handoff requested ({reason}). Ask the user to open this link to take "
-        f"over the browser: {handoff_url}"
+    return ToolResult(
+        text=(
+            f"Handoff requested ({reason}). Ask the user to open this link to take "
+            f"over the browser: {handoff_url}"
+        ),
+        data=result,
     )
-    if resume_dropped:
-        text += (
-            " This handoff cannot be handed back to the agent (only captcha, "
-            "cookie_consent and other can resume): the session closes when the "
-            "human finishes, so continue afterwards with browser_open in a "
-            "fresh session."
-        )
-    return ToolResult(text=text, data=result)
 
 
 @browser_operation()
@@ -1052,7 +1031,7 @@ BROWSER_DOM_TOOLS_DEFINITION: list[ToolDefinition] = [
                     },
                     "allow_resume": {
                         "type": "boolean",
-                        "description": "If true, the human can hand the browser back to the agent after completing their task. The agent will then call browser_claim_handback with the session_id and handback_token the human receives. Only honoured for captcha, cookie_consent and other; any other handoff closes the session when the human finishes.",
+                        "description": "If true, the human can hand the browser back to the agent after completing their task. The agent will then call browser_claim_handback with the session_id and handback_token the human receives.",
                     },
                 },
                 "required": ["reason"],
