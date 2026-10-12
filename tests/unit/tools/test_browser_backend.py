@@ -15,11 +15,14 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from browser_handoff_service.models import HandoffRequest
 from browser_handoff_service.runtime import CHECK_REF_JS as SERVER_CHECK_REF_JS
 from browser_handoff_service.runtime import SNAPSHOT_JS as SERVER_SNAPSHOT_JS
+from pydantic import ValidationError
 
 from family_assistant.config_models import BrowserHandoffConfig, RemoteA2AAuthConfig
 from family_assistant.security.taint import InMemoryTurnTaintTracker, TurnTaintState
+from family_assistant.tools import browser_dom
 from family_assistant.tools.browser_backend import (
     CHECK_REF_JS,
     SNAPSHOT_JS,
@@ -30,6 +33,8 @@ from family_assistant.tools.browser_backend import (
     StaleRefError,
     get_browser_backend,
 )
+from family_assistant.tools.browser_dom import browser_request_handoff_tool
+from family_assistant.tools.browser_session import close_browser_session
 
 if TYPE_CHECKING:
     from family_assistant.tools.types import ToolExecutionContext
@@ -300,6 +305,95 @@ async def test_remote_backend_request_handoff_returns_url() -> None:
     )
     assert result["handoff_url"].endswith("token=abc")
     await backend.close()
+
+
+def _handoff_validating_server() -> tuple[httpx.AsyncClient, list[HandoffRequest]]:
+    """A browser-server whose handoff endpoint validates with the real request model."""
+    accepted: list[HandoffRequest] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions":
+            return httpx.Response(
+                200, json={"session_id": "bs_h", "state": "agent_active"}
+            )
+        if request.url.path.endswith("/close"):
+            return httpx.Response(200, json={})
+        try:
+            req = HandoffRequest.model_validate_json(request.content)
+        except ValidationError as exc:
+            return httpx.Response(422, json={"detail": exc.errors(include_url=False)})
+        if (
+            req.reason in {"payment", "credentials", "otp", "legal_consent"}
+            and req.allowed_resume != "never"
+        ):
+            return httpx.Response(
+                409,
+                json={
+                    "detail": "sensitive handoffs cannot resume on the same browser page"
+                },
+            )
+        accepted.append(req)
+        return httpx.Response(
+            200,
+            json={"handoff_url": "https://browser.test/sessions/bs_h?token=abc"},
+        )
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler)), accepted
+
+
+async def _handoff_via_tool(
+    monkeypatch: pytest.MonkeyPatch, conversation_id: str, **kwargs: object
+) -> tuple[str, list[HandoffRequest]]:
+    client, accepted = _handoff_validating_server()
+    backend = RemoteBrowserBackend(_config(), conversation_id, client=client)
+
+    async def _backend(_ctx: object) -> RemoteBrowserBackend:
+        return backend
+
+    monkeypatch.setattr(browser_dom, "get_browser_backend", _backend)
+    ctx = cast(
+        "ToolExecutionContext",
+        SimpleNamespace(
+            conversation_id=conversation_id,
+            subconversation_id=None,
+            tool_call_batch=None,
+            tool_call_id=None,
+        ),
+    )
+    try:
+        result = await browser_request_handoff_tool(ctx, **kwargs)  # pyright: ignore[reportArgumentType]
+    finally:
+        await backend.close()
+        await close_browser_session(ctx)
+    return result.get_text(), accepted
+
+
+@pytest.mark.asyncio
+async def test_handoff_tool_accepts_free_text_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Models pass a sentence as the reason; it must not cost a 422 round trip."""
+    text, accepted = await _handoff_via_tool(
+        monkeypatch,
+        "conv_free_reason",
+        reason="Cloudflare CAPTCHA blocking the page",
+        handoff_note="Please solve it",
+    )
+    assert "browser.test/sessions/bs_h" in text
+    assert [(r.reason, r.handoff_note) for r in accepted] == [
+        ("other", "Cloudflare CAPTCHA blocking the page\nPlease solve it")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handoff_tool_sensitive_reason_does_not_request_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text, accepted = await _handoff_via_tool(
+        monkeypatch, "conv_sensitive_resume", reason="otp", allow_resume=True
+    )
+    assert [r.allowed_resume for r in accepted] == ["never"]
+    assert "cannot be handed back" in text
 
 
 def _exec_context(
