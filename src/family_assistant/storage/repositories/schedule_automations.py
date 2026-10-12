@@ -30,6 +30,7 @@ from family_assistant.security.taint import TurnTaintState
 from family_assistant.storage.database import DatabaseExecutor, DatabaseTransaction
 from family_assistant.storage.datetime_utils import normalize_datetime
 from family_assistant.storage.repositories.base import BaseRepository
+from family_assistant.storage.repositories.tasks import TERMINAL_TASK_STATUSES
 from family_assistant.storage.schedule_automations import schedule_automations_table
 from family_assistant.storage.tasks import TaskPriority, tasks_table
 from family_assistant.storage.types import (
@@ -1701,7 +1702,8 @@ class ScheduleAutomationsRepository(BaseRepository):
             .where(
                 tasks_table.c.payload["automation_id"].as_string() == str(automation_id)
             )
-            .where(tasks_table.c.status.in_(["completed", "failed"]))
+            .where(tasks_table.c.task_type != SCHEDULE_AUTOMATION_ADVANCE_TASK_TYPE)
+            .where(tasks_table.c.status.in_(TERMINAL_TASK_STATUSES))
             .order_by(tasks_table.c.created_at.desc())
             .limit(10)
         )

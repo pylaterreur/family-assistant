@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from family_assistant.storage.database import Database
 from family_assistant.storage.repositories.events import EventsRepository
+from family_assistant.storage.tasks import TaskPriority
 
 
 @pytest_asyncio.fixture(scope="function")
@@ -593,6 +594,43 @@ class TestAutomationsRepository:
         assert stats["recent_executions"] == []
         assert stats["next_scheduled_at"] is not None
         assert stats["next_scheduled_at"] == stored["next_scheduled_at"]
+
+    @pytest.mark.asyncio
+    async def test_get_execution_stats_lists_finished_runs(
+        self, db_context: Database
+    ) -> None:
+        """Successful and failed runs both appear; pending ones do not."""
+        conversation_id = str(uuid.uuid4())
+        automation_id = await db_context.schedule_automations.create(
+            name="Test Auto",
+            recurrence_rule="FREQ=DAILY;BYHOUR=9",
+            action_type="wake_llm",
+            action_config={"context": "test"},
+            conversation_id=conversation_id,
+            timezone=ZoneInfo("UTC"),
+        )
+
+        for task_id, status in (
+            ("run-done", "done"),
+            ("run-failed", "failed"),
+            ("run-pending", None),
+        ):
+            await db_context.tasks.enqueue(
+                task_id=task_id,
+                task_type="llm_callback",
+                payload={"automation_id": str(automation_id)},
+                priority=TaskPriority.BACKGROUND,
+            )
+            if status is not None:
+                await db_context.tasks.update_status(task_id, status)
+
+        stats = await db_context.schedule_automations.get_execution_stats(automation_id)
+        assert stats is not None
+        statuses = {
+            execution["task_id"]: execution["status"]
+            for execution in stats["recent_executions"]
+        }
+        assert statuses == {"run-done": "done", "run-failed": "failed"}
 
     @pytest.mark.asyncio
     async def test_get_execution_stats_event(self, db_context: Database) -> None:
