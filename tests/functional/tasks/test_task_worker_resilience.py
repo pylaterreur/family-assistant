@@ -723,13 +723,7 @@ async def test_schedule_advance_enqueue_failure_does_not_retry_completed_action(
         action_config={"script_code": "print('done')"},
         conversation_id="schedule-success-advance-enqueue-failure",
     )
-    original_task = await _make_schedule_task_due_now(
-        engine,
-        automation_id,
-        worker.clock.now(),
-        max_retries=3,
-    )
-
+    # Patch before the task is due: the running worker can pick it up unprompted.
     original_enqueue = TasksRepository.enqueue
     advance_enqueue_attempted = asyncio.Event()
 
@@ -761,6 +755,13 @@ async def test_schedule_advance_enqueue_failure_does_not_retry_completed_action(
         )
 
     monkeypatch.setattr(TasksRepository, "enqueue", fail_advance_enqueue)
+
+    original_task = await _make_schedule_task_due_now(
+        engine,
+        automation_id,
+        worker.clock.now(),
+        max_retries=3,
+    )
 
     new_task_event.set()
     await wait_for_tasks_to_complete(
@@ -815,13 +816,7 @@ async def test_schedule_advance_enqueue_failure_preserves_failed_source_status(
         },
         conversation_id="schedule-failed-advance-enqueue-failure",
     )
-    original_task = await _make_schedule_task_due_now(
-        engine,
-        automation_id,
-        worker.clock.now(),
-        max_retries=0,
-    )
-
+    # Patch before the task is due: the running worker can pick it up unprompted.
     original_enqueue = TasksRepository.enqueue
     advance_enqueue_attempted = asyncio.Event()
 
@@ -853,6 +848,13 @@ async def test_schedule_advance_enqueue_failure_preserves_failed_source_status(
         )
 
     monkeypatch.setattr(TasksRepository, "enqueue", fail_advance_enqueue)
+
+    original_task = await _make_schedule_task_due_now(
+        engine,
+        automation_id,
+        worker.clock.now(),
+        max_retries=0,
+    )
 
     new_task_event.set()
     await wait_for_tasks_to_complete(
@@ -984,18 +986,19 @@ async def test_schedule_advance_outbox_drains_after_source_commit(
         action_config={"script_code": "print('done')"},
         conversation_id="schedule-outbox-recovery",
     )
-    original_task = await _make_schedule_task_due_now(
-        engine,
-        automation_id,
-        worker.clock.now(),
-        max_retries=0,
-    )
-
+    # Patch before the task is due: the running worker can pick it up unprompted.
     original_enqueue = TasksRepository.enqueue
     monkeypatch.setattr(
         TasksRepository,
         "enqueue",
         _make_fail_advance_enqueue(original_enqueue),
+    )
+
+    original_task = await _make_schedule_task_due_now(
+        engine,
+        automation_id,
+        worker.clock.now(),
+        max_retries=0,
     )
 
     new_task_event.set()
@@ -1080,18 +1083,19 @@ async def test_schedule_advance_outbox_drain_finds_buried_entries(
         action_config={"script_code": "print('done')"},
         conversation_id="schedule-outbox-buried",
     )
-    original_task = await _make_schedule_task_due_now(
-        engine,
-        automation_id,
-        worker.clock.now(),
-        max_retries=0,
-    )
-
+    # Patch before the task is due: the running worker can pick it up unprompted.
     original_enqueue = TasksRepository.enqueue
     monkeypatch.setattr(
         TasksRepository,
         "enqueue",
         _make_fail_advance_enqueue(original_enqueue),
+    )
+
+    original_task = await _make_schedule_task_due_now(
+        engine,
+        automation_id,
+        worker.clock.now(),
+        max_retries=0,
     )
 
     new_task_event.set()
