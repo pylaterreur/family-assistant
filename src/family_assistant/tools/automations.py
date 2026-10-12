@@ -1288,14 +1288,19 @@ async def get_automation_stats_tool(
             for execution in recent[:5]:  # Show top 5
                 status = execution.get("status", "unknown")
                 created = execution.get("created_at")
+                error = execution.get("error")
                 if created:
+                    detail = f" ({error})" if error else ""
                     lines.append(
-                        f"  - {format_automation_datetime(created, exec_context.timezone)}: {status}"
+                        f"  - {format_automation_datetime(created, exec_context.timezone)}: {status}{detail}"
                     )
-                    recent_list.append({
+                    entry = {
                         "created_at": _to_isoformat(created, exec_context.timezone),
                         "status": status,
-                    })
+                    }
+                    if error:
+                        entry["error"] = error
+                    recent_list.append(entry)
             stats_data["recent_executions"] = recent_list
 
         text = "\n".join(lines)

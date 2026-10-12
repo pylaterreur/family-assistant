@@ -8,6 +8,7 @@ Tests the CRUD operations and execution of stored scripts including:
 - delete_script_tool: Delete scripts
 """
 
+import logging
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
@@ -269,6 +270,39 @@ async def test_run_script_not_found(db_engine: AsyncEngine) -> None:
     assert isinstance(run_result.data, dict)
     assert "error" in run_result.data
     assert "not found" in run_result.data["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_script_not_found_is_logged(
+    db_engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A preparation failure reaches the logs, not only the tool result."""
+    db = Database(engine=db_engine)
+    context = ToolExecutionContext(
+        interface_type="test",
+        conversation_id="test-conv-5",
+        user_name="Test User",
+        turn_id="turn-1",
+        db_context=db,
+        processing_service=None,
+        clock=None,
+        plugins=None,
+        event_sources=None,
+        attachment_registry=None,
+        timezone=ZoneInfo("UTC"),
+        credential_resolvers=None,
+        api_backend=None,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="family_assistant.tools"):
+        await execute_script_tool(context, name="nonexistent")
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert any("'nonexistent'" in msg and "not_found" in msg for msg in warnings)
 
 
 @pytest.mark.asyncio

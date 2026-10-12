@@ -59,6 +59,25 @@ class WakeRequest(TypedDict):
     new_conversation: bool
 
 
+class ScriptToolError(TypedDict):
+    """A tool call made by a script that returned ``status: error``."""
+
+    tool: str
+    error: str
+
+
+_TOOL_ERROR_SUMMARY_CHARS = 500
+
+
+def format_script_tool_errors(tool_errors: list[ScriptToolError]) -> str:
+    """Summarize a script's failed tool calls for a run's history."""
+    details = "; ".join(
+        f"{entry['tool']}: {entry['error'][:_TOOL_ERROR_SUMMARY_CHARS]}"
+        for entry in tool_errors
+    )
+    return f"Completed with {len(tool_errors)} tool error(s): {details}"
+
+
 class AttachmentResultInfo(TypedDict):
     """Attachment metadata returned to scripts from tool results."""
 
@@ -189,6 +208,7 @@ class MontyEngine:
         self.default_timezone = default_timezone
         self._wake_llm_contexts: list[WakeRequest] = []
         self._pending_wake_contexts: list[WakeRequest] = []
+        self._tool_errors: list[ScriptToolError] = []
         # ast-grep-ignore: no-dict-any - Script globals are user-provided Python values keyed by name
         self._script_globals: dict[str, Any] = {}
 
@@ -284,6 +304,7 @@ class MontyEngine:
         output_buffer: ScriptOutputBuffer | None,
     ) -> object:
         self._wake_llm_contexts.clear()
+        self._tool_errors = []
         self._script_globals = globals_dict or {}
 
         ext_fn_impls, inputs = await self._build_execution_context_async(
@@ -499,7 +520,8 @@ class MontyEngine:
                 ),
             )
 
-            logger.debug(f"Tool '{tool_name}' executed successfully (async)")
+            logger.debug(f"Tool '{tool_name}' executed (async)")
+            self._record_tool_error(tool_name, result)
             return await self._format_tool_result_async(
                 result, tool_name, execution_context
             )
@@ -1078,6 +1100,20 @@ class MontyEngine:
             logger.debug(f"Script requested LLM wake with context: {context_dict}")
 
         return wake_llm
+
+    def _record_tool_error(self, tool_name: str, result: object) -> None:
+        if not isinstance(result, ToolResult):
+            return
+        data = result.get_data()
+        if not isinstance(data, dict) or data.get("status") != "error":
+            return
+        error = str(data.get("error") or result.get_text())
+        logger.warning(f"Tool '{tool_name}' returned an error to a script: {error}")
+        self._tool_errors.append(ScriptToolError(tool=tool_name, error=error))
+
+    def get_tool_errors(self) -> list[ScriptToolError]:
+        """Tool calls from the last script execution that returned an error."""
+        return list(self._tool_errors)
 
     def get_pending_wake_contexts(self) -> list[WakeRequest]:
         """Get any pending wake_llm contexts from the last script execution."""

@@ -18,8 +18,9 @@ if TYPE_CHECKING:
     from family_assistant.tools.types import ToolExecutionContext
 
     # The task worker's handler signature: an execution context and the task's
-    # payload, whose shape each task type defines.
-    type TaskHandler = Callable[[ToolExecutionContext, Any], Awaitable[None]]
+    # payload, whose shape each task type defines. A handler may return a note
+    # recorded on the task when it finishes.
+    type TaskHandler = Callable[[ToolExecutionContext, Any], Awaitable[str | None]]
 
 
 @dataclass(frozen=True, slots=True)
