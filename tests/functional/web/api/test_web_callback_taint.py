@@ -180,6 +180,7 @@ async def test_web_callback_reply_is_stored_once_with_turn_taint(
     assert processing_service.last_review_trigger == TriggerReviewInput(
         trigger_type="scheduled_callback",
         active_request_role="user",
+        started_by="stored_definition",
         definition="do the scheduled thing",
         definition_taint_metadata=None,
         payload_present=False,
@@ -261,6 +262,7 @@ def test_callback_requires_explicit_trusted_payload_free_definition() -> None:
         TriggerReviewInput(
             trigger_type="scheduled_callback",
             active_request_role="user",
+            started_by="stored_definition",
             definition="Scheduled intent with missing provenance",
             definition_taint_metadata=None,
             payload_present=False,
@@ -274,6 +276,7 @@ def test_callback_requires_explicit_trusted_payload_free_definition() -> None:
         TriggerReviewInput(
             trigger_type="scheduled_callback",
             active_request_role="user",
+            started_by="stored_definition",
             definition="Scheduled intent with proven provenance",
             definition_taint_metadata=TurnTaintState.empty().to_metadata(),
             payload_present=False,

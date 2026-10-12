@@ -12,10 +12,12 @@ from typing import cast
 from family_assistant.security.definition_records import (
     UNRESOLVED_DEFINITION,
     CreationDisposition,
+    DefinitionArtifactKind,
     DefinitionGateOutcome,
     DefinitionResolution,
     GateLayer,
     GateProvenance,
+    ResolvedArtifact,
     definition_record_from_row,
     legacy_amnesty_gate_outcome,
     legacy_authoring_taint_state,
@@ -253,6 +255,48 @@ def test_an_unresolved_member_governs_the_whole_closure() -> None:
 
     assert not cured.combine(uncured).resolved
     assert not uncured.combine(cured).resolved
+
+
+def test_a_closure_keeps_each_members_own_claim() -> None:
+    """The weakest claim governs; the reviewer is still told every member's."""
+    attested = resolve_definition_record(
+        _record_dict(
+            state=_tainted_state(), disposition=CreationDisposition.HUMAN_CONFIRMED
+        ),
+        CONTENT,
+    ).as_artifact(DefinitionArtifactKind.SCHEDULE_AUTOMATION, "Morning display")
+    judge_cured = resolve_definition_record(
+        _record_dict(
+            state=_tainted_state(), disposition=CreationDisposition.JUDGE_ALLOWED
+        ),
+        CONTENT,
+    ).as_artifact(DefinitionArtifactKind.SCRIPT, "deploy")
+
+    combined = attested.combine(judge_cured).combine(judge_cured)
+
+    assert combined.disposition is CreationDisposition.JUDGE_ALLOWED
+    assert combined.artifacts == (
+        ResolvedArtifact(
+            DefinitionArtifactKind.SCHEDULE_AUTOMATION,
+            "Morning display",
+            CreationDisposition.HUMAN_CONFIRMED,
+            SourceTrustTier.MACHINE_REVIEWED,
+        ),
+        ResolvedArtifact(
+            DefinitionArtifactKind.SCRIPT,
+            "deploy",
+            CreationDisposition.JUDGE_ALLOWED,
+            SourceTrustTier.MACHINE_REVIEWED,
+        ),
+    )
+
+
+def test_an_unresolved_artifact_lists_nothing() -> None:
+    uncured = resolve_definition_record(
+        _record_dict(state=_tainted_state()), CONTENT
+    ).as_artifact(DefinitionArtifactKind.SCRIPT, "deploy")
+
+    assert uncured.artifacts == ()
 
 
 def _amnesty_record() -> object:

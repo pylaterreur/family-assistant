@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from family_assistant.security.definition_records import (
+    DefinitionArtifactKind,
     DefinitionResolution,
     definition_content_hash,
     resolve_definition_record,
@@ -243,7 +244,9 @@ async def resolve_script_closure(
         nonlocal resolution
         pinned = row.model_copy(deep=True)
         content = _script_content(pinned)
-        current = resolve_definition_record(pinned.definition_record, content)
+        current = resolve_definition_record(
+            pinned.definition_record, content
+        ).as_artifact(DefinitionArtifactKind.SCRIPT, pinned.name)
         artifact = ScriptArtifact(pinned, definition_content_hash(content), current)
         artifacts.append(artifact)
         if on_artifact is not None:

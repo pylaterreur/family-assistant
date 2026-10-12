@@ -22,6 +22,7 @@ from family_assistant.llm.messages import ToolMessage
 from family_assistant.processing import ProcessingService, ProcessingServiceConfig
 from family_assistant.security.definition_records import (
     CreationDisposition,
+    DefinitionArtifactKind,
     DefinitionGateOutcome,
     GateLayer,
     GateProvenance,
@@ -638,6 +639,49 @@ async def test_a_clean_script_does_not_cure_the_tainted_automation_running_it(
     }
 
     assert (await _fire_script(db_engine, payload)).definition_taint_metadata is None
+
+
+@pytest.mark.asyncio
+async def test_a_script_firing_tells_the_reviewer_each_artifacts_own_status(
+    db_engine: AsyncEngine,
+) -> None:
+    """A human-confirmed automation naming a clean script reads as exactly that."""
+    db = Database(engine=db_engine)
+    await db.scripts.save(
+        name="greet",
+        description="Say hello",
+        script_code="capture_trigger()",
+        definition_taint_state=TurnTaintState.empty(),
+    )
+    automation_id = await _create_schedule(
+        db_engine,
+        tracker=_tainted_tracker(),
+        action_type="script",
+        action_config={"script_name": "greet"},
+        gate_outcome=_gate_outcome(CreationDisposition.HUMAN_CONFIRMED),
+        tools_provider=_capture_tools([]),
+    )
+    payload: ScriptExecutionPayload = {
+        "script_name": "greet",
+        "automation_id": str(automation_id),
+        "automation_type": "schedule",
+        "conversation_id": "test_conv",
+    }
+
+    trigger = await _fire_script(db_engine, payload)
+
+    assert trigger.started_by == "stored_definition"
+    assert trigger.definition_disposition is CreationDisposition.CLEAN
+    assert {
+        (artifact.kind, artifact.disposition)
+        for artifact in trigger.definition_artifacts
+    } == {
+        (
+            DefinitionArtifactKind.SCHEDULE_AUTOMATION,
+            CreationDisposition.HUMAN_CONFIRMED,
+        ),
+        (DefinitionArtifactKind.SCRIPT, CreationDisposition.CLEAN),
+    }
 
 
 def _taint_capturing_service(captured: list[TurnTaintState]) -> ProcessingService:

@@ -23,7 +23,12 @@ from pydantic import (
 
 from family_assistant.llm.messages import dict_to_message
 from family_assistant.scripting.invocation import ScriptReviewContext
-from family_assistant.security.taint import SinkClass, TurnTaintState
+from family_assistant.security.definition_records import (
+    CreationDisposition,
+    DefinitionArtifactKind,
+    ResolvedArtifact,
+)
+from family_assistant.security.taint import SinkClass, SourceTrustTier, TurnTaintState
 from family_assistant.services.tool_call_review import (
     BrowserActionReviewInput,
     DelegatingPolicyContext,
@@ -211,6 +216,27 @@ def require_canonical_taint_metadata(metadata: object, *, field: str) -> None:
         )
 
 
+class ArtifactSpec(BaseModel):
+    """One member of a trigger definition's executable closure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: DefinitionArtifactKind
+    name: str | None = None
+    disposition: CreationDisposition | None = None
+    tier: str
+    """The tier's config value, as taint metadata spells it (``machine_reviewed``)."""
+
+    def to_resolved_artifact(self) -> ResolvedArtifact:
+        """Build the runtime closure member this spec serializes."""
+        return ResolvedArtifact(
+            self.kind,
+            self.name,
+            self.disposition,
+            SourceTrustTier.from_value(self.tier),
+        )
+
+
 class TriggerSpec(BaseModel):
     """Serialized trigger context for a conversation case.
 
@@ -223,8 +249,12 @@ class TriggerSpec(BaseModel):
 
     trigger_type: str
     active_request_role: Literal["user", "system"]
+    started_by: Literal["stored_definition", "delegation"]
     definition: str | None = None
     definition_taint_metadata: dict[str, object] | None = None
+    definition_disposition: CreationDisposition | None = None
+    definition_creator: str | None = None
+    definition_artifacts: list[ArtifactSpec] = Field(default_factory=list)
     payload_present: StrictBool = True
     originating_request: str | None = None
     originating_request_taint_metadata: dict[str, object] | None = None
@@ -245,9 +275,16 @@ class TriggerSpec(BaseModel):
         return TriggerReviewInput(
             trigger_type=self.trigger_type,
             active_request_role=self.active_request_role,
+            started_by=self.started_by,
             definition=self.definition,
             definition_taint_metadata=cast(
                 "TaintMetadata | None", self.definition_taint_metadata
+            ),
+            definition_disposition=self.definition_disposition,
+            definition_creator=self.definition_creator,
+            definition_artifacts=tuple(
+                artifact.to_resolved_artifact()
+                for artifact in self.definition_artifacts
             ),
             payload_present=self.payload_present,
             originating_request=self.originating_request,

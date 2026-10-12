@@ -682,6 +682,7 @@ async def test_delegate_to_service_background_reference_and_completion_notificat
     assert target_service.calls[0]["tool_call_review_trigger"] == TriggerReviewInput(
         trigger_type="delegation_request",
         active_request_role="user",
+        started_by="delegation",
         definition="do this in the background",
         definition_taint_metadata=None,
         payload_present=False,
@@ -1262,6 +1263,7 @@ async def test_source_wake_delivery_failure_falls_back_without_recording_deliver
         TriggerReviewInput(
             trigger_type="delegation_completion",
             active_request_role="system",
+            started_by="delegation",
             definition="do the thing",
             definition_taint_metadata=None,
             payload_present=True,
@@ -2299,6 +2301,7 @@ async def test_delegation_runs_synchronously_when_async_disabled(
     assert target_service.calls[0]["tool_call_review_trigger"] == TriggerReviewInput(
         trigger_type="delegation_request",
         active_request_role="user",
+        started_by="delegation",
         definition='[{"text": "do it now", "type": "text"}]',
         definition_taint_metadata=None,
         payload_present=False,
@@ -4758,6 +4761,7 @@ async def test_delegating_from_a_completion_wake_propagates_no_wake_data(
         tool_call_review_trigger=TriggerReviewInput(
             trigger_type="delegation_completion",
             active_request_role="system",
+            started_by="delegation",
             definition="do the thing",
             payload_present=True,
         ),

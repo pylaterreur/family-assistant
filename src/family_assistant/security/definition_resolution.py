@@ -101,7 +101,7 @@ def _resolve_script_record(script: ScriptRow) -> DefinitionResolution:
             script_code=script.script_code,
             parameters_schema=script.parameters_schema,
         ),
-    )
+    ).as_artifact(DefinitionArtifactKind.SCRIPT, script.name)
 
 
 async def _resolve_one(db: Database, ref: DefinitionRef) -> DefinitionResolution:
@@ -119,6 +119,8 @@ async def _resolve_one(db: Database, ref: DefinitionRef) -> DefinitionResolution
                     action_type=automation["action_type"],
                     action_config=automation["action_config"],
                 ),
+            ).as_artifact(
+                DefinitionArtifactKind.SCHEDULE_AUTOMATION, automation["name"]
             )
         case EventListenerRef(listener_id=listener_id):
             listener = await db.events.get_event_listener_by_id(listener_id)
@@ -135,7 +137,7 @@ async def _resolve_one(db: Database, ref: DefinitionRef) -> DefinitionResolution
                     action_config=listener["action_config"],
                     condition_script=listener["condition_script"],
                 ),
-            )
+            ).as_artifact(DefinitionArtifactKind.EVENT_LISTENER, listener["name"])
         case LoadedScriptRef(script=script):
             closure = await resolve_script_closure(
                 db, script.script_code, loaded_root=script
@@ -147,7 +149,9 @@ async def _resolve_one(db: Database, ref: DefinitionRef) -> DefinitionResolution
                 else root
             )
         case PayloadDefinitionRef(record=record, content=content):
-            return resolve_definition_record(record, content)
+            return resolve_definition_record(record, content).as_artifact(
+                DefinitionArtifactKind.TASK_PAYLOAD, None
+            )
 
 
 async def resolve_definition_closure(

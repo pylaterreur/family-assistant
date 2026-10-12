@@ -755,6 +755,22 @@ def stamp_callback_definition(
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedArtifact:
+    """One member of a firing's executable closure, as the reviewer is told of it.
+
+    The closure's combined resolution is the weakest of its members, which is
+    right for the tier and the destination echo but, as the only description,
+    hides a human attestation behind a weaker neighbour. Each member therefore
+    keeps its own disposition and tier, so the reviewer can be told both.
+    """
+
+    kind: DefinitionArtifactKind
+    name: str | None
+    disposition: CreationDisposition | None
+    tier: SourceTrustTier
+
+
+@dataclass(frozen=True, slots=True)
 class DefinitionResolution:
     """What a firing may make of one definition artifact's stored record.
 
@@ -774,6 +790,8 @@ class DefinitionResolution:
 
     taint_metadata: TaintMetadata | None
     disposition: CreationDisposition | None = None
+    artifacts: tuple[ResolvedArtifact, ...] = ()
+    """The closure members this resolution combines, each with its own status."""
 
     @property
     def resolved(self) -> bool:
@@ -810,6 +828,22 @@ class DefinitionResolution:
         return DefinitionResolution(
             taint_metadata=weaker.taint_metadata,
             disposition=_weakest_claim(self.disposition, other.disposition),
+            artifacts=tuple(dict.fromkeys((*self.artifacts, *other.artifacts))),
+        )
+
+    def as_artifact(
+        self, kind: DefinitionArtifactKind, name: str | None
+    ) -> DefinitionResolution:
+        """This single artifact's resolution, listing itself as the closure member.
+
+        An unresolved artifact lists nothing: it renders as a stub, and combining
+        with it yields it unchanged.
+        """
+        if not self.resolved:
+            return self
+        return replace(
+            self,
+            artifacts=(ResolvedArtifact(kind, name, self.disposition, self.tier),),
         )
 
 
