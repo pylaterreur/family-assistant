@@ -30,6 +30,7 @@ from family_assistant.tools.infrastructure import (
     CompositeToolsProvider,
     LocalToolsProvider,
 )
+from family_assistant.tools.outcomes import classify_tool_outcome, is_error_data
 from family_assistant.tools.types import ToolParametersSchema, ToolResult
 
 from .apis import time as time_api
@@ -60,7 +61,7 @@ class WakeRequest(TypedDict):
 
 
 class ScriptToolError(TypedDict):
-    """A tool call made by a script that returned ``status: error``."""
+    """A tool call made by a script whose result reported a failure."""
 
     tool: str
     error: str
@@ -74,7 +75,7 @@ _TOOL_ERROR_CHARS = 500
 
 @dataclass
 class ScriptToolErrors:
-    """The tool calls in one script run that returned ``status: error``."""
+    """The tool calls in one script run whose results reported a failure."""
 
     count: int = 0
     examples: list[ScriptToolError] = field(default_factory=list)
@@ -1120,12 +1121,18 @@ class MontyEngine:
         return wake_llm
 
     def _record_tool_error(self, tool_name: str, result: object) -> None:
-        if not isinstance(result, ToolResult):
+        if isinstance(result, ToolResult):
+            data = result.data
+            text = result.get_text()
+        elif isinstance(result, str):
+            data = None
+            text = result
+        else:
             return
-        data = result.get_data()
-        if not isinstance(data, dict) or data.get("status") != "error":
+        if not is_error_data(data) and classify_tool_outcome(text, None) == "succeeded":
             return
-        error = str(data.get("error") or result.get_text())
+        detail = data.get("error") if isinstance(data, dict) else None
+        error = str(detail or text)
         logger.warning(f"Tool '{tool_name}' returned an error to a script: {error}")
         self._tool_errors.record(tool_name, error)
 

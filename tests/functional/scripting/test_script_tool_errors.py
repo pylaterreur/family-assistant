@@ -38,7 +38,7 @@ FAILING_TOOL_DEFINITION: list[ToolDefinition] = [
 
 async def failing_tool(exec_context: ToolExecutionContext) -> ToolResult:
     del exec_context
-    return ToolResult(data={"status": "error", "error": "upstream unavailable"})
+    return ToolResult(data={"error": "upstream unavailable"})
 
 
 def _processing_service() -> ProcessingService:
