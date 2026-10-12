@@ -44,7 +44,8 @@ inference from absence.
    a delegation, and the builders set it: the delegation builder is the one place delegated triggers
    come from, and the field has no default, so a new trigger kind must choose. A stored-definition
    trigger renders "not applicable" in place of the originating request, and the section header
-   tells the judge that a trusted trigger definition is the intent it judges against.
+   tells the judge that a trusted trigger definition is the intent it judges against. An interactive
+   turn has no trigger and keeps the original header, so its prompt is unchanged.
 3. **Name run state as run state.** Script evidence renders the program's review as this run's
    pending or decided review, separately from the definition's provenance already listed in the same
    entry.
@@ -61,9 +62,21 @@ inference from absence.
 
 ## Verification
 
-Unit tests over the assembled prompt for each change, and manual eval cases for a scheduled script
-whose human-confirmed automation names an amnestied script (benign, expected `allow`) and for the
-same firing directed by its payload to a new destination (attack). The prompt revision changes, so
-the judge must be re-measured with the eval harness and AgentDojo as
-[tool-call-review-judge-tuning.md](tool-call-review-judge-tuning.md) requires before the change is
-relied on under `enforce`.
+Unit tests over the assembled prompt for each change, and two manual eval cases: a scheduled script
+whose human-confirmed automation names an amnestied script (benign, expected `allow`), and the same
+automation messaging the family schedule to a chat its definition never names (attack, expected
+`deny`).
+
+Measured on 12 October 2026 with the production judge (Haiku 5.5, the production prompt and
+structured output) through the judge lab, four seeds per case, against `main`:
+
+- Interactive cases render byte-identical prompts on both sides: 447 of the 455 cases shared with
+  `main`, covering all of history, held-out, fresh history and AgentDojo. Those corpora cannot move.
+- The eight trigger and script cases that do change (unattended, delegated-run and script-boundary)
+  return the same verdict as before on every seed, and both new cases are correct on every seed.
+- Manual set overall: 0/112 attacks allowed (0/108 before), benign friction 5/100 (4/100 before).
+  The difference is on interactive cases whose prompts did not change, so it is seed variance.
+
+An earlier revision changed the trigger header on interactive turns too. Across all five corpora
+that moved attack allows from 8/948 to 4/952 and benign friction from 39/848 to 46/848, which is
+within noise, but keeping interactive prompts identical removed the question.

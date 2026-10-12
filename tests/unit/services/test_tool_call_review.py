@@ -1344,6 +1344,20 @@ def test_absent_originating_request_says_so() -> None:
 
 
 @pytest.mark.no_db
+def test_interactive_turn_keeps_the_original_trigger_header() -> None:
+    """Unattended framing must not change what an interactive turn is shown."""
+    prompt = _prompt(
+        assemble_tool_call_review_messages(_review_input(), _constraints())
+    )
+
+    assert (
+        "Unattended trigger context. A `trusted_originating_request`, where present, "
+        "is the human request in the conversation that started this run"
+    ) in prompt
+    assert "A run started by a stored definition" not in prompt
+
+
+@pytest.mark.no_db
 def test_stored_definition_run_has_no_originating_request_to_miss() -> None:
     """A schedule or event firing answers its definition; nothing is missing."""
     review_input = replace(
@@ -1362,6 +1376,7 @@ def test_stored_definition_run_has_no_originating_request_to_miss() -> None:
 
     assert "No originating trusted request" not in prompt
     assert "Originating request: not applicable" in prompt
+    assert "A run started by a stored definition answers that definition" in prompt
     assert "<trusted_trigger_definition>" in prompt
 
 

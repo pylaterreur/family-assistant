@@ -826,6 +826,29 @@ def _render_trigger(trigger: TriggerReviewInput | None) -> str:
     return f"{definition}\n{payload}\n{_render_originating_request(trigger)}"
 
 
+def _trigger_header(trigger: TriggerReviewInput | None) -> str:
+    """Introduce the trigger section, explaining what kind of run it describes.
+
+    An interactive turn keeps the original wording: it has no trigger, and its
+    prompt should not change because unattended framing did.
+    """
+    if trigger is None:
+        return (
+            "Unattended trigger context. A `trusted_originating_request`, where "
+            "present, is the human request in the conversation that started this "
+            "run; the trigger definition and the proposed call must be derivable "
+            "from it:\n"
+        )
+    return (
+        "Unattended trigger context. A run started by a stored definition "
+        "answers that definition: a `trusted_trigger_definition` is the request "
+        "to judge the call against, as trusted rows are on an interactive turn. "
+        "A delegated run answers a human request in another conversation: a "
+        "`trusted_originating_request`, where present, is that request, and the "
+        "trigger definition and the proposed call must be derivable from it:\n"
+    )
+
+
 def _local_tool_description(descriptor: ToolDescriptor) -> str | None:
     if descriptor.origin != "local":
         return None
@@ -1057,13 +1080,7 @@ def assemble_tool_call_review_messages(
         "Trusted operator guidance:\n<trusted_guidance>\n"
         + _neutralize_review_boundaries(guidance)
         + "\n</trusted_guidance>",
-        "Unattended trigger context. A run started by a stored definition "
-        "answers that definition: a `trusted_trigger_definition` is the request "
-        "to judge the call against, as trusted rows are on an interactive turn. "
-        "A delegated run answers a human request in another conversation: a "
-        "`trusted_originating_request`, where present, is that request, and the "
-        "trigger definition and the proposed call must be derivable from it:\n"
-        + _render_trigger(review_input.trigger),
+        _trigger_header(review_input.trigger) + _render_trigger(review_input.trigger),
         "Destination echo signal:\n" + destination_echo,
     ])
     if review_input.sink_class is SinkClass.AMBIENT_PROMPT_WRITE:
