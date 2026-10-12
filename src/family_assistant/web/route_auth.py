@@ -14,6 +14,11 @@ design:
   readonly token) or a custom transport-level credential (the Asterisk
   WebSocket's query-token handshake, which cannot carry headers/cookies).
 
+Separately, :data:`DIAGNOSTICS_TOKEN_ROUTES` are routes the edge still guards:
+it requires a JWT, unless the request carries the diagnostics token in
+:data:`DIAGNOSTICS_TOKEN_HEADER`, which the gateway verifies itself. Default
+auth defers to the route's ``get_diagnostics_reader`` dependency for them too.
+
 The same classification drives the edge deployment's JWT-enforcement route
 split (see docs/design/jwt-edge-auth.md): it is published at
 ``/.well-known/auth-route-classification`` so the gateway configuration can be
@@ -35,11 +40,21 @@ RouteExemption = TypedDict(
 )
 
 
+class EdgeKeyedRoute(TypedDict):
+    """A route the edge admits with a gateway-verified key header instead of a JWT."""
+
+    match: str
+    path: str
+    methods: list[str]
+    header: str
+
+
 class RouteClassificationDocument(TypedDict):
     """The document served at /.well-known/auth-route-classification."""
 
     jwt_required_prefixes: list[str]
     no_jwt_routes: list["RouteExemption"]
+    diagnostics_token_routes: list[EdgeKeyedRoute]
 
 
 # (methods, match, path, class). "exact" matches only that path; "prefix"
@@ -83,6 +98,44 @@ NO_DEFAULT_AUTH_ROUTES: list[tuple[frozenset[str], str, str, RouteClass]] = [
 ]
 
 
+# The header carrying the diagnostics readonly token on DIAGNOSTICS_TOKEN_ROUTES.
+# A dedicated header rather than Authorization: the gateway selects the
+# key-verified route by its presence, so it must not collide with the JWT a
+# browser or native client sends to the same paths.
+DIAGNOSTICS_TOKEN_HEADER = "X-Diagnostics-Token"
+
+# (methods, match, path). Shared-conversation reads, so a coding agent holding
+# the diagnostics token can pull a conversation whose share link it was given.
+# Both secrets are needed: the share token selects the conversation, and the
+# diagnostics token is checked at the edge before the backend sees the request.
+DIAGNOSTICS_TOKEN_ROUTES: list[tuple[frozenset[str], str, str]] = [
+    (
+        frozenset({"GET"}),
+        "regex",
+        r"^/api/v1/shared-conversations/[^/]+/(messages|attachments/[^/]+)$",
+    ),
+]
+
+
+def _route_matches(
+    method: str,
+    path: str,
+    methods: frozenset[str],
+    match: str,
+    route_path: str,
+) -> bool:
+    if method.upper() not in methods:
+        return False
+    if match == "exact":
+        return path == route_path
+    if match == "prefix":
+        prefix = route_path.rstrip("/")
+        return path == prefix or path.startswith(f"{prefix}/")
+    if match == "regex":
+        return re.fullmatch(route_path, path) is not None
+    raise ValueError(f"Unknown route match type: {match}")
+
+
 def is_api_path(path: str) -> bool:
     """Whether a request path is under the API prefix."""
     return path == "/api" or path.startswith("/api/")
@@ -106,19 +159,14 @@ def api_route_requires_default_auth(method: str, path: str) -> bool:
     """
     if not is_api_path(path):
         return False
-    for methods, match, route_path, _ in NO_DEFAULT_AUTH_ROUTES:
-        if method.upper() not in methods:
-            continue
-        if match == "exact":
-            if path == route_path:
-                return False
-        elif match == "prefix":
-            prefix = route_path.rstrip("/")
-            if path == prefix or path.startswith(f"{prefix}/"):
-                return False
-        elif match == "regex" and re.fullmatch(route_path, path):
-            return False
-    return True
+    routes = [
+        (methods, match, route_path)
+        for methods, match, route_path, _ in NO_DEFAULT_AUTH_ROUTES
+    ] + DIAGNOSTICS_TOKEN_ROUTES
+    return not any(
+        _route_matches(method, path, methods, match, route_path)
+        for methods, match, route_path in routes
+    )
 
 
 def is_public_error_intake(method: str, path: str) -> bool:
@@ -141,6 +189,15 @@ def api_route_classification() -> RouteClassificationDocument:
                 "class": route_class,
             }
             for methods, match, route_path, route_class in NO_DEFAULT_AUTH_ROUTES
+        ],
+        "diagnostics_token_routes": [
+            {
+                "match": match,
+                "path": route_path,
+                "methods": sorted(methods),
+                "header": DIAGNOSTICS_TOKEN_HEADER,
+            }
+            for methods, match, route_path in DIAGNOSTICS_TOKEN_ROUTES
         ],
     }
 
