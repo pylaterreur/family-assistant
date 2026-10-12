@@ -18,7 +18,11 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from family_assistant.security.definition_records import CreationDisposition
+from family_assistant.security.definition_records import (
+    CreationDisposition,
+    DefinitionArtifactKind,
+    ResolvedArtifact,
+)
 from family_assistant.security.taint import (
     SinkClass,
     SourceTrustTier,
@@ -271,9 +275,15 @@ class TriggerReviewInput:
 
     trigger_type: str
     active_request_role: Literal["user", "system"]
+    started_by: Literal["stored_definition", "delegation"]
+    """What started the run. A delegated run answers a human request made in
+    another conversation; any other run answers its own stored definition, and
+    has no originating request to show."""
     definition: str | None = None
     definition_taint_metadata: TaintMetadata | None = None
     definition_disposition: CreationDisposition | None = None
+    definition_artifacts: tuple[ResolvedArtifact, ...] = ()
+    """Each member of the definition's executable closure, with its own status."""
     definition_creator: str | None = None
     payload_present: bool = True
     originating_request: str | None = None
@@ -306,22 +316,13 @@ class TriggerReviewInput:
         closed and the values are ours, never the definition's, so nothing the
         definition contains can dress itself up as a stronger status.
 
-        Only a *resolved* definition renders, and the non-curative dispositions
-        do not resolve, so the remaining cases all mean the same thing: the
-        stamp itself was trusted and no cure was needed.
+        For a closure of several artifacts this is the weakest claim among
+        them; :func:`_render_definition_review_status` lists each one's own.
         """
-        if self.definition_disposition is CreationDisposition.HUMAN_CONFIRMED:
-            return "attested by a human at creation"
-        if self.definition_disposition is CreationDisposition.JUDGE_ALLOWED:
-            return "judge-allowed at creation"
-        if self.definition_disposition is CreationDisposition.LEGACY_AMNESTIED:
-            return "operator-amnestied as predating provenance; examined by no gate"
-        if (
-            _metadata_tier(self.definition_taint_metadata)
-            is SourceTrustTier.MACHINE_REVIEWED
-        ):
-            return "composed from reviewed material at creation"
-        return "clean at creation"
+        return _definition_status_text(
+            self.definition_disposition,
+            _metadata_tier(self.definition_taint_metadata),
+        )
 
     @property
     def definition_echo_eligible_text(self) -> str | None:
@@ -638,8 +639,19 @@ def _render_provenance_digest(
 
 
 def _script_review_data(script: ScriptReviewContext) -> dict[str, object]:
-    """Render program evidence without exposing external provenance free text."""
+    """Render program evidence without exposing external provenance free text.
+
+    The program's review decision and approval describe *this run* -- a program
+    no gate asked about is decided by its first reviewed operation -- so they
+    are named as run state, apart from the definition's provenance, which a
+    bare "unreviewed" would otherwise read as.
+    """
     result = asdict(replace(script, definition=None))
+    decision = result.pop("decision")
+    result["program_review_this_run"] = (
+        "not yet decided" if decision == "unreviewed" else decision
+    )
+    result["program_allowed_this_run"] = result.pop("approval_active")
     definition = script.definition
     if definition is not None:
         result["definition"] = {
@@ -683,6 +695,12 @@ def _render_policy_contexts(
 
 def _render_originating_request(trigger: TriggerReviewInput) -> str:
     """Render the human request a delegated turn ultimately answers."""
+    if trigger.started_by == "stored_definition":
+        return (
+            "[Originating request: not applicable. This run was started by its "
+            "stored definition (a schedule, event, or reminder), not by a request "
+            "in another conversation.]"
+        )
     if trigger.originating_request is None:
         return "[No originating trusted request was supplied.]"
     trusted = trigger.trusted_originating_request
@@ -707,17 +725,73 @@ def _render_originating_request(trigger: TriggerReviewInput) -> str:
     )
 
 
+def _definition_status_text(
+    disposition: CreationDisposition | None, tier: SourceTrustTier | None
+) -> str:
+    """How a resolved definition came to be trusted, in a closed vocabulary.
+
+    Only a *resolved* definition renders, and the non-curative dispositions do
+    not resolve, so the remaining cases all mean the same thing: the stamp
+    itself was trusted and no cure was needed.
+    """
+    if disposition is CreationDisposition.HUMAN_CONFIRMED:
+        return "attested by a human at creation"
+    if disposition is CreationDisposition.JUDGE_ALLOWED:
+        return "judge-allowed at creation"
+    if disposition is CreationDisposition.LEGACY_AMNESTIED:
+        return "operator-amnestied as predating provenance; examined by no gate"
+    if tier is SourceTrustTier.MACHINE_REVIEWED:
+        return "composed from reviewed material at creation"
+    return "clean at creation"
+
+
+_ARTIFACT_KIND_LABELS = {
+    DefinitionArtifactKind.SCHEDULE_AUTOMATION: "schedule automation",
+    DefinitionArtifactKind.EVENT_LISTENER: "event listener",
+    DefinitionArtifactKind.SCRIPT: "stored script",
+    DefinitionArtifactKind.TASK_PAYLOAD: "one-shot scheduled action",
+}
+
+_ARTIFACT_NAME_MAX_CHARS = 120
+
+
+def _render_artifact_status(artifact: ResolvedArtifact) -> str:
+    """One closure member's own status; its name is part of its hashed content."""
+    name = (
+        f' "{_neutralize_review_boundaries(artifact.name[:_ARTIFACT_NAME_MAX_CHARS])}"'
+        if artifact.name
+        else ""
+    )
+    return (
+        f"- {_ARTIFACT_KIND_LABELS[artifact.kind]}{name}: "
+        f"{_definition_status_text(artifact.disposition, artifact.tier)}"
+    )
+
+
 def _render_definition_review_status(trigger: TriggerReviewInput) -> str:
-    """Render how the definition came to be trusted, and whose it is."""
+    """Render how the definition came to be trusted, and whose it is.
+
+    The overall status is the weakest claim across the closure. Each member is
+    then listed with its own, so a human-attested automation that names a less
+    attested script reads as exactly that rather than as the weaker label alone.
+    """
     creator = (
         _neutralize_review_boundaries(trigger.definition_creator)
         if trigger.definition_creator
         else "unrecorded"
     )
+    status = f"{trigger.definition_review_status}; created by {creator}"
+    if len(trigger.definition_artifacts) > 1:
+        status = (
+            f"Overall (weakest across artifacts): {status}\n"
+            "Each artifact this firing executes, with its own status:\n"
+            + "\n".join(
+                _render_artifact_status(artifact)
+                for artifact in trigger.definition_artifacts
+            )
+        )
     return (
-        "<trigger_definition_review_status>"
-        f"{trigger.definition_review_status}; created by {creator}"
-        "</trigger_definition_review_status>"
+        f"<trigger_definition_review_status>{status}</trigger_definition_review_status>"
     )
 
 
@@ -983,10 +1057,13 @@ def assemble_tool_call_review_messages(
         "Trusted operator guidance:\n<trusted_guidance>\n"
         + _neutralize_review_boundaries(guidance)
         + "\n</trusted_guidance>",
-        "Unattended trigger context. A `trusted_originating_request`, where "
-        "present, is the human request in the conversation that started this "
-        "run; the trigger definition and the proposed call must be derivable "
-        "from it:\n" + _render_trigger(review_input.trigger),
+        "Unattended trigger context. A run started by a stored definition "
+        "answers that definition: a `trusted_trigger_definition` is the request "
+        "to judge the call against, as trusted rows are on an interactive turn. "
+        "A delegated run answers a human request in another conversation: a "
+        "`trusted_originating_request`, where present, is that request, and the "
+        "trigger definition and the proposed call must be derivable from it:\n"
+        + _render_trigger(review_input.trigger),
         "Destination echo signal:\n" + destination_echo,
     ])
     if review_input.sink_class is SinkClass.AMBIENT_PROMPT_WRITE:
@@ -1259,6 +1336,7 @@ async def build_delegation_review_trigger(
     return TriggerReviewInput(
         trigger_type=trigger_type,
         active_request_role=active_request_role,
+        started_by="delegation",
         definition=definition,
         definition_taint_metadata=definition_taint_metadata,
         payload_present=payload_present,

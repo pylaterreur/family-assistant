@@ -476,6 +476,7 @@ async def test_unattended_trigger_reaches_reviewer_as_provenance_stub(
     context.tool_call_review_trigger = TriggerReviewInput(
         trigger_type="event_listener",
         active_request_role="user",
+        started_by="stored_definition",
         definition="UNRENDERED_TRIGGER_DEFINITION",
         definition_taint_metadata=None,
         payload_present=True,
@@ -2493,6 +2494,7 @@ async def test_confined_exemption_requires_every_safety_condition(
         context.tool_call_review_trigger = TriggerReviewInput(
             trigger_type="delegation_completion",
             active_request_role="system",
+            started_by="delegation",
             definition="Handle the completed delegation",
             definition_taint_metadata=TurnTaintState.empty().to_metadata(),
             payload_present=True,

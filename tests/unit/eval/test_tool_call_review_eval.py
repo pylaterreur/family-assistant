@@ -244,6 +244,7 @@ def test_trigger_spec_builds_trigger_input() -> None:
     spec = TriggerSpec.model_validate({
         "trigger_type": "scheduled_task",
         "active_request_role": "system",
+        "started_by": "stored_definition",
         "definition": "Daily brief at 8am",
     })
     trigger_input = spec.to_trigger_input()
@@ -260,6 +261,7 @@ def test_trigger_payload_present_string_is_rejected() -> None:
     payload["trigger"] = {
         "trigger_type": "scheduled_task",
         "active_request_role": "system",
+        "started_by": "stored_definition",
         "payload_present": "false",
     }
     with pytest.raises(ValidationError, match="payload_present"):
@@ -1000,6 +1002,7 @@ def test_a_triggers_definition_taint_metadata_is_checked_too() -> None:
         TriggerSpec(
             trigger_type="schedule",
             active_request_role="system",
+            started_by="stored_definition",
             definition="Send the morning brief.",
             definition_taint_metadata=broken,
         )

@@ -218,6 +218,7 @@ async def test_event_script_propagates_stubbed_reviewer_trigger(
         TriggerReviewInput(
             trigger_type="event_script",
             active_request_role="system",
+            started_by="stored_definition",
             definition="capture_trigger()",
             definition_taint_metadata=None,
             payload_present=True,

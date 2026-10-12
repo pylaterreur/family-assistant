@@ -719,9 +719,11 @@ def _llm_callback_review_trigger(
     return TriggerReviewInput(
         trigger_type=trigger_type,
         active_request_role="user",
+        started_by="stored_definition",
         definition=definition,
         definition_taint_metadata=definition_resolution.taint_metadata,
         definition_disposition=definition_resolution.disposition,
+        definition_artifacts=definition_resolution.artifacts,
         definition_creator=creator if isinstance(creator, str) else None,
         payload_present=payload_present,
     )
@@ -6428,9 +6430,11 @@ async def handle_script_execution(
             tool_call_review_trigger=TriggerReviewInput(
                 trigger_type="event_script" if listener_id else "scheduled_script",
                 active_request_role="system",
+                started_by="stored_definition",
                 definition=script_code,
                 definition_taint_metadata=script_definition_resolution.taint_metadata,
                 definition_disposition=script_definition_resolution.disposition,
+                definition_artifacts=script_definition_resolution.artifacts,
                 # The payload's creator authored the *invocation*. That is the
                 # body's author too when the body is inline, but a stored script
                 # named by this automation is a separate artifact whose author
