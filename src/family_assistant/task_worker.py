@@ -67,7 +67,6 @@ from family_assistant.scripting.invocation import (
     ScriptExecutionScope,
     ScriptReviewContext,
 )
-from family_assistant.scripting.monty_engine import format_script_tool_errors
 from family_assistant.security.definition_records import (
     UNRESOLVED_DEFINITION,
     DefinitionResolution,
@@ -6589,9 +6588,9 @@ async def handle_script_execution(
                 )
 
         tool_errors = engine.get_tool_errors()
-        if not tool_errors:
+        if not tool_errors.count:
             return None
-        note = format_script_tool_errors(tool_errors)
+        note = tool_errors.summary()
         logger.warning(
             f"Script for listener {listener_id} (script {script_name or 'inline'}) {note}"
         )

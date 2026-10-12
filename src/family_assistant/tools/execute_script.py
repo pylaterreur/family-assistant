@@ -30,7 +30,6 @@ from family_assistant.scripting.invocation import (
 from family_assistant.scripting.monty_engine import (
     MontyEngine,
     ScriptOutputBuffer,
-    format_script_tool_errors,
 )
 from family_assistant.security.taint import TaintSourceType
 from family_assistant.tools.taint_helpers import merge_artifact_taint_into_context
@@ -369,10 +368,8 @@ async def execute_script_tool(
             response_parts.append(f"Script result: {result}")
 
         tool_errors = engine.get_tool_errors()
-        if tool_errors:
-            response_parts.append(
-                f"\n--- Tool Errors ---\n{format_script_tool_errors(tool_errors)}"
-            )
+        if tool_errors.count:
+            response_parts.append(f"\n--- Tool Errors ---\n{tool_errors.summary()}")
 
         # Add wake_llm contexts if any
         if wake_contexts:

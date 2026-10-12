@@ -14,7 +14,7 @@ import mimetypes
 import re
 import uuid
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import tzinfo
 from typing import TYPE_CHECKING, Any, TypedDict
 from zoneinfo import ZoneInfo
@@ -66,16 +66,34 @@ class ScriptToolError(TypedDict):
     error: str
 
 
-_TOOL_ERROR_SUMMARY_CHARS = 500
+# A script can call a failing tool in a loop, so only the first few errors are
+# kept, each cut short, while the count covers every one.
+_TOOL_ERROR_EXAMPLES = 10
+_TOOL_ERROR_CHARS = 500
 
 
-def format_script_tool_errors(tool_errors: list[ScriptToolError]) -> str:
-    """Summarize a script's failed tool calls for a run's history."""
-    details = "; ".join(
-        f"{entry['tool']}: {entry['error'][:_TOOL_ERROR_SUMMARY_CHARS]}"
-        for entry in tool_errors
-    )
-    return f"Completed with {len(tool_errors)} tool error(s): {details}"
+@dataclass
+class ScriptToolErrors:
+    """The tool calls in one script run that returned ``status: error``."""
+
+    count: int = 0
+    examples: list[ScriptToolError] = field(default_factory=list)
+
+    def record(self, tool: str, error: str) -> None:
+        self.count += 1
+        if len(self.examples) < _TOOL_ERROR_EXAMPLES:
+            self.examples.append(
+                ScriptToolError(tool=tool, error=error[:_TOOL_ERROR_CHARS])
+            )
+
+    def summary(self) -> str:
+        """Summarize the failed tool calls for a run's history."""
+        details = "; ".join(
+            f"{entry['tool']}: {entry['error']}" for entry in self.examples
+        )
+        if self.count > len(self.examples):
+            details += f"; ... and {self.count - len(self.examples)} more"
+        return f"Completed with {self.count} tool error(s): {details}"
 
 
 class AttachmentResultInfo(TypedDict):
@@ -208,7 +226,7 @@ class MontyEngine:
         self.default_timezone = default_timezone
         self._wake_llm_contexts: list[WakeRequest] = []
         self._pending_wake_contexts: list[WakeRequest] = []
-        self._tool_errors: list[ScriptToolError] = []
+        self._tool_errors = ScriptToolErrors()
         # ast-grep-ignore: no-dict-any - Script globals are user-provided Python values keyed by name
         self._script_globals: dict[str, Any] = {}
 
@@ -304,7 +322,7 @@ class MontyEngine:
         output_buffer: ScriptOutputBuffer | None,
     ) -> object:
         self._wake_llm_contexts.clear()
-        self._tool_errors = []
+        self._tool_errors = ScriptToolErrors()
         self._script_globals = globals_dict or {}
 
         ext_fn_impls, inputs = await self._build_execution_context_async(
@@ -1109,11 +1127,11 @@ class MontyEngine:
             return
         error = str(data.get("error") or result.get_text())
         logger.warning(f"Tool '{tool_name}' returned an error to a script: {error}")
-        self._tool_errors.append(ScriptToolError(tool=tool_name, error=error))
+        self._tool_errors.record(tool_name, error)
 
-    def get_tool_errors(self) -> list[ScriptToolError]:
+    def get_tool_errors(self) -> ScriptToolErrors:
         """Tool calls from the last script execution that returned an error."""
-        return list(self._tool_errors)
+        return self._tool_errors
 
     def get_pending_wake_contexts(self) -> list[WakeRequest]:
         """Get any pending wake_llm contexts from the last script execution."""
