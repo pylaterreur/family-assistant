@@ -214,8 +214,14 @@ Some steps should never be done by the assistant: entering payment details, sign
 credentials, typing a one-time passcode, accepting legal consent, or solving a CAPTCHA. When the
 optional **browser-server** integration is enabled, the assistant can hand the *live* browser
 session over to you: it calls `browser_request_handoff` and replies with a one-time link. You open
-the link, take control of the very same browser (rendered in your own window), finish the sensitive
-step, and mark it done — then control returns to the assistant.
+the link, take control of the very same browser (rendered in your own window), finish the step, and
+mark it done.
+
+What happens next depends on the step. After a CAPTCHA or a cookie-consent prompt you can click
+"Hand over to agent" and give the assistant the token it shows you, and the assistant carries on in
+the same browser. After payment details, a password, a one-time passcode or legal consent, the
+browser closes when you finish, because the page may still hold what you typed; if there is more to
+do, the assistant starts again in a fresh browser.
 
 While you are in control, the assistant has **no** ability to see or drive that browser: it cannot
 take screenshots, read the page, or run actions. This keeps secrets you type (passwords, card
