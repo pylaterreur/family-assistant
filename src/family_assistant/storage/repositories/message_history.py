@@ -2993,6 +2993,7 @@ class MessageHistoryRepository(BaseRepository):
                 tool_calls=msg.get("tool_calls"),
                 provider_metadata=msg.get("provider_metadata"),
                 taint_metadata=msg.get("taint_metadata"),
+                ended_quietly=bool(msg.get("is_internal")),
             )
         elif role == "tool":
             return ToolMessage(

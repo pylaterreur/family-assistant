@@ -2272,6 +2272,30 @@ def test_a_reply_nobody_human_answered_stays_stubbed() -> None:
 
 
 @pytest.mark.no_db
+def test_a_quiet_turns_unsent_note_is_not_an_answered_reply() -> None:
+    """A note the user never saw is skipped for the reply they did see."""
+    tainted = _unknown_state().to_metadata()
+    human = TurnTaintState.empty().to_metadata()
+    review_input = replace(
+        _review_input(),
+        messages=[
+            AssistantMessage(content="VISIBLE REPLY", taint_metadata=tainted),
+            AssistantMessage(
+                content="(Ended without messaging the user: UNSENT NOTE)",
+                taint_metadata=tainted,
+                ended_quietly=True,
+            ),
+            UserMessage(content="yes, do it", taint_metadata=human),
+        ],
+    )
+
+    prompt = _prompt(assemble_tool_call_review_messages(review_input, _constraints()))
+
+    assert '<user_answered_reply index="0">' in prompt
+    assert "UNSENT NOTE" not in prompt
+
+
+@pytest.mark.no_db
 def test_a_triggered_turn_renders_no_answered_reply() -> None:
     """Rows before a triggered turn's request were not answered within it."""
     tainted = _unknown_state().to_metadata()

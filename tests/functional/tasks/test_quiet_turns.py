@@ -21,6 +21,7 @@ from family_assistant.delegation_security import DelegationSecurityLevel
 from family_assistant.interfaces import ChatInterface
 from family_assistant.llm import LLMOutput, ToolCallFunction, ToolCallItem
 from family_assistant.llm.content_parts import text_content
+from family_assistant.llm.messages import AssistantMessage
 from family_assistant.processing import ProcessingService, ProcessingServiceConfig
 from family_assistant.processing.quiet_turn import END_TURN_QUIETLY_TOOL_NAME
 from family_assistant.processing.types import ChatInteractionResult
@@ -220,6 +221,27 @@ async def test_a_woken_turn_can_end_without_messaging_the_user(
     assert closing_row["is_internal"] is True
     assert "Washer still running" in (closing_row["content"] or "")
     assert closing_row["interface_message_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_ends_closing_row_reads_back_as_ended_quietly(
+    db_engine: AsyncEngine,
+) -> None:
+    """History marks the note as unsent, so nothing mistakes it for a reply."""
+    client = _ScriptedLLMClient([LLMOutput(tool_calls=[_quiet_call()])])
+    db_context = Database(engine=db_engine)
+    await handle_llm_callback(
+        _exec_context(db_context, _make_service(client), _chat_interface()),
+        _payload(),
+    )
+
+    history = await db_context.message_history.get_recent(
+        interface_type=TEST_INTERFACE_TYPE, conversation_id=TEST_CONVERSATION_ID
+    )
+
+    assistant_rows = [row for row in history if isinstance(row, AssistantMessage)]
+    assert assistant_rows[-1].ended_quietly is True
+    assert not any(row.ended_quietly for row in assistant_rows[:-1])
 
 
 @pytest.mark.asyncio

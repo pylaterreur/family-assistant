@@ -488,7 +488,8 @@ def _user_answered_reply_indices(messages: Sequence[LLMMessage]) -> frozenset[in
     """Indices of the assistant replies a human answered.
 
     For each row a human typed, the last assistant message with text before it
-    (and after the previous user row) is the reply that human was answering.
+    (and after the previous user row) is the reply that human was answering. A
+    quiet turn's closing note was never sent, so it is not a reply anyone saw.
     """
     messages_module = importlib.import_module("family_assistant.llm.messages")
 
@@ -504,9 +505,11 @@ def _user_answered_reply_indices(messages: Sequence[LLMMessage]) -> frozenset[in
                 continue
             if isinstance(candidate, messages_module.UserMessage):
                 break
-            if isinstance(
-                candidate, messages_module.AssistantMessage
-            ) and _textual_message_content(candidate):
+            if (
+                isinstance(candidate, messages_module.AssistantMessage)
+                and not cast("AssistantMessage", candidate).ended_quietly
+                and _textual_message_content(candidate)
+            ):
                 answered.add(earlier)
                 break
     return frozenset(answered)
