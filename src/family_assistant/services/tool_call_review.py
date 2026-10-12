@@ -487,9 +487,11 @@ _USER_ANSWERED_EXPLANATION = (
 def _user_answered_reply_indices(messages: Sequence[LLMMessage]) -> frozenset[int]:
     """Indices of the assistant replies a human answered.
 
-    For each row a human typed, the last assistant message with text before it
-    (and after the previous user row) is the reply that human was answering. A
-    quiet turn's closing note was never sent, so it is not a reply anyone saw.
+    The row just before one a human typed is the reply they were answering,
+    but only when it is a turn's delivered reply: text with no tool calls, and
+    not a quiet turn's closing note. Anything else there (a turn that ended
+    quietly or mid-loop, an error) delivered nothing the scan can vouch for, so
+    no reply renders and the earlier rows stay stubs.
     """
     messages_module = importlib.import_module("family_assistant.llm.messages")
 
@@ -499,19 +501,24 @@ def _user_answered_reply_indices(messages: Sequence[LLMMessage]) -> frozenset[in
             message, messages_module.UserMessage
         ) or not is_human_direct_metadata(getattr(message, "taint_metadata", None)):
             continue
-        for earlier in range(index - 1, -1, -1):
-            candidate = messages[earlier]
-            if messages_module.is_turn_scaffolding(candidate):
-                continue
-            if isinstance(candidate, messages_module.UserMessage):
-                break
-            if (
-                isinstance(candidate, messages_module.AssistantMessage)
-                and not cast("AssistantMessage", candidate).ended_quietly
-                and _textual_message_content(candidate)
-            ):
-                answered.add(earlier)
-                break
+        previous = next(
+            (
+                earlier
+                for earlier in range(index - 1, -1, -1)
+                if not messages_module.is_turn_scaffolding(messages[earlier])
+            ),
+            None,
+        )
+        if previous is None:
+            continue
+        candidate = messages[previous]
+        if (
+            isinstance(candidate, messages_module.AssistantMessage)
+            and not cast("AssistantMessage", candidate).ended_quietly
+            and not cast("AssistantMessage", candidate).tool_calls
+            and _textual_message_content(candidate)
+        ):
+            answered.add(previous)
     return frozenset(answered)
 
 

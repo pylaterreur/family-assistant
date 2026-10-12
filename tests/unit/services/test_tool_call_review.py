@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 import family_assistant.services.tool_call_review as tool_call_review_module
 from family_assistant.config_models import ToolCallReviewConfig
+from family_assistant.llm import ToolCallFunction, ToolCallItem
 from family_assistant.llm.base import StructuredOutputError
 from family_assistant.llm.messages import (
     AssistantMessage,
@@ -2272,26 +2273,44 @@ def test_a_reply_nobody_human_answered_stays_stubbed() -> None:
 
 
 @pytest.mark.no_db
-def test_a_quiet_turns_unsent_note_is_not_an_answered_reply() -> None:
-    """A note the user never saw is skipped for the reply they did see."""
+def test_a_turn_that_ended_quietly_shows_no_answered_reply() -> None:
+    """Nothing a quiet turn wrote was sent, its interim text included."""
     tainted = _unknown_state().to_metadata()
-    human = TurnTaintState.empty().to_metadata()
     review_input = replace(
         _review_input(),
         messages=[
-            AssistantMessage(content="VISIBLE REPLY", taint_metadata=tainted),
+            AssistantMessage(content="EARLIER VISIBLE REPLY", taint_metadata=tainted),
+            UserMessage(
+                content="Washer finished?",
+                taint_metadata=machine_authored_taint_metadata(TurnTaintState.empty()),
+            ),
+            AssistantMessage(
+                content="UNSENT INTERIM TEXT",
+                tool_calls=[
+                    ToolCallItem(
+                        id="call-1",
+                        type="function",
+                        function=ToolCallFunction(name="echo", arguments="{}"),
+                    )
+                ],
+                taint_metadata=tainted,
+            ),
             AssistantMessage(
                 content="(Ended without messaging the user: UNSENT NOTE)",
                 taint_metadata=tainted,
                 ended_quietly=True,
             ),
-            UserMessage(content="yes, do it", taint_metadata=human),
+            UserMessage(
+                content="yes, do it",
+                taint_metadata=TurnTaintState.empty().to_metadata(),
+            ),
         ],
     )
 
     prompt = _prompt(assemble_tool_call_review_messages(review_input, _constraints()))
 
-    assert '<user_answered_reply index="0">' in prompt
+    assert "<user_answered_reply" not in prompt
+    assert "UNSENT INTERIM TEXT" not in prompt
     assert "UNSENT NOTE" not in prompt
 
 
