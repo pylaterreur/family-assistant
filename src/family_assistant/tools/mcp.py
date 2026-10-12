@@ -732,10 +732,16 @@ class MCPToolsProvider:
         }
 
         # --- Create connection tasks ---
-        connection_tasks = [
-            self._connect_and_discover_mcp(server_id, server_conf)
+        # Each server gets its own task so that a timeout cancels only the
+        # servers still in flight; ones that already connected keep their
+        # sessions and tools.
+        connection_tasks: dict[asyncio.Task[Any], str] = {
+            asyncio.create_task(
+                self._connect_and_discover_mcp(server_id, server_conf),
+                name=f"mcp-connect-{server_id}",
+            ): server_id
             for server_id, server_conf in self._mcp_server_configs.items()
-        ]
+        }
 
         # --- Run tasks concurrently with logging and timeout ---
         stop_logging_event = asyncio.Event()
@@ -746,47 +752,31 @@ class MCPToolsProvider:
             )
         )
 
-        connection_tasks_future = asyncio.gather(
-            *connection_tasks, return_exceptions=True
-        )
-        results: list[Any] = []  # Default to empty list
-
         try:
-            logger.info(
-                f"Waiting for MCP server connections with a timeout of {self._initialization_timeout_seconds} seconds..."
-            )
-            results = await asyncio.wait_for(
-                connection_tasks_future, timeout=self._initialization_timeout_seconds
-            )
-            logger.info("Finished parallel MCP connection attempts (within timeout).")
-        except TimeoutError:
-            logger.error(
-                f"MCPToolsProvider initialization timed out after {self._initialization_timeout_seconds} seconds. "
-                "Proceeding with any tools discovered before timeout or if tasks completed with errors."
-            )
-            # If gather was cancelled by timeout, its tasks might have CancelledError.
-            # We try to get results if the future is done.
-            if connection_tasks_future.done():
-                try:
-                    # This might raise CancelledError if gather itself was cancelled before completing
-                    # its internal result collection.
-                    results = connection_tasks_future.result()
-                except asyncio.CancelledError:
-                    logger.warning(
-                        "MCP connection gather operation was cancelled by timeout before all results could be collected."
+            if connection_tasks:
+                logger.info(
+                    f"Waiting for MCP server connections with a timeout of {self._initialization_timeout_seconds} seconds..."
+                )
+                _, pending = await asyncio.wait(
+                    connection_tasks, timeout=self._initialization_timeout_seconds
+                )
+                if pending:
+                    timed_out = sorted(connection_tasks[task] for task in pending)
+                    logger.error(
+                        f"MCPToolsProvider initialization timed out after {self._initialization_timeout_seconds} seconds "
+                        f"waiting for {timed_out}. Keeping servers that finished; the health check will retry the rest."
                     )
-                    # results remains as its last assigned value (potentially empty or partial from a previous attempt if any)
-                    # or its initial empty list. This is handled by the processing loop below.
-            # If not done, results remains empty, which is also handled.
-        except Exception as e:
-            logger.exception(f"Unexpected error during MCP connection gathering: {e}")
-            # Try to get results if possible
-            if (
-                connection_tasks_future.done()
-                and not connection_tasks_future.cancelled()
-            ):
-                results = connection_tasks_future.result()
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                else:
+                    logger.info(
+                        "Finished parallel MCP connection attempts (within timeout)."
+                    )
         finally:
+            for task in connection_tasks:
+                if not task.done():
+                    task.cancel()
             stop_logging_event.set()
             if not logging_task.done():
                 try:
@@ -803,17 +793,14 @@ class MCPToolsProvider:
             # If logging_task was already done (e.g. error), no need to await/cancel.
 
         # --- Process results ---
-        # This loop will process whatever results were gathered, even if it's an empty list
-        # or a list containing exceptions (including CancelledError for timed-out tasks).
-        for i, res_item in enumerate(results):
-            # Ensure server_id is safely accessed if results list is shorter than expected
-            if i < len(self._mcp_server_configs):
-                server_id = list(self._mcp_server_configs.keys())[i]
+        for task, server_id in connection_tasks.items():
+            res_item: Any
+            if task.cancelled():
+                res_item = asyncio.CancelledError()
+            elif (task_exception := task.exception()) is not None:
+                res_item = task_exception
             else:
-                logger.warning(
-                    f"Result item at index {i} has no corresponding server_id due to partial results. Item: {res_item}"
-                )
-                continue  # Skip processing this anomalous result item
+                res_item = task.result()
 
             if server_id in self._user_connections and not isinstance(
                 res_item, BaseException
@@ -829,7 +816,7 @@ class MCPToolsProvider:
                     self._server_statuses[server_id] = MCP_SERVER_STATUS_CANCELLED
                 else:
                     logger.error(
-                        f"Gather caught exception for server '{server_id}': {res_item}"
+                        f"Connection task raised for server '{server_id}': {res_item}"
                     )
                     # Status should have been set to FAILED by _connect_and_discover_mcp
                     if self._server_statuses[server_id] not in {
