@@ -756,9 +756,17 @@ _ARTIFACT_NAME_MAX_CHARS = 120
 
 
 def _render_artifact_status(artifact: ResolvedArtifact) -> str:
-    """One closure member's own status; its name is part of its hashed content."""
+    """One closure member's own status; its name is part of its hashed content.
+
+    The name may have been composed by a model, so it is encoded as a JSON
+    string: escaped quotes and newlines cannot close it and forge another row
+    of this closed-vocabulary list.
+    """
     name = (
-        f' "{_neutralize_review_boundaries(artifact.name[:_ARTIFACT_NAME_MAX_CHARS])}"'
+        " "
+        + json.dumps(
+            _neutralize_review_boundaries(artifact.name[:_ARTIFACT_NAME_MAX_CHARS])
+        )
         if artifact.name
         else ""
     )
