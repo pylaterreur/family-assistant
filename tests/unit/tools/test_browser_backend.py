@@ -386,6 +386,17 @@ async def test_handoff_tool_accepts_free_text_reason(
 
 
 @pytest.mark.asyncio
+async def test_handoff_tool_free_text_reason_does_not_request_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sentence like "OTP required" may hide a sensitive step, so it fails closed."""
+    _, accepted = await _handoff_via_tool(
+        monkeypatch, "conv_free_resume", reason="OTP required", allow_resume=True
+    )
+    assert [(r.reason, r.allowed_resume) for r in accepted] == [("other", "never")]
+
+
+@pytest.mark.asyncio
 async def test_handoff_tool_sensitive_reason_does_not_request_resume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
