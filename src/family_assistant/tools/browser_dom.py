@@ -665,6 +665,17 @@ async def browser_exec_tool(
     return ToolResult(data=data)
 
 
+_HANDOFF_REASONS = (
+    "payment",
+    "credentials",
+    "otp",
+    "legal_consent",
+    "captcha",
+    "cookie_consent",
+    "other",
+)
+
+
 @browser_operation()
 async def browser_request_handoff_tool(
     exec_context: ToolExecutionContext,
@@ -683,6 +694,11 @@ async def browser_request_handoff_tool(
     """
     backend = await get_browser_backend(exec_context)
     logger.info("browser_request_handoff: reason=%s", reason)
+    # Models routinely ignore the enum and pass a sentence as the reason, which
+    # browser-server rejects with a 422. Keep the sentence as the note instead.
+    if reason not in _HANDOFF_REASONS:
+        handoff_note = f"{reason}\n{handoff_note}".strip()
+        reason = "other"
     try:
         result = await backend.request_handoff(
             reason=reason,
@@ -1002,15 +1018,7 @@ BROWSER_DOM_TOOLS_DEFINITION: list[ToolDefinition] = [
                 "properties": {
                     "reason": {
                         "type": "string",
-                        "enum": [
-                            "payment",
-                            "credentials",
-                            "otp",
-                            "legal_consent",
-                            "captcha",
-                            "cookie_consent",
-                            "other",
-                        ],
+                        "enum": list(_HANDOFF_REASONS),
                         "description": "Why the human needs to take over.",
                     },
                     "handoff_note": {
