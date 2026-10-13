@@ -978,13 +978,13 @@ entry plus a name in that list.
 
 #### The council's seats
 
-The `council` profile convenes three members through the shared `council_member` profile, one
+The `council` profile convenes four members through the shared `council_member` profile, one
 exact-model preset per seat (see [the user guide](../user/council.md) and
 [the design doc](../design/council.md)). Two settings have to agree:
 
-- **The roster** is in the `council` profile's system prompt: which preset sits in seats A, B and C,
-  and which preset is the alternative Anthropic seat. The shipped roster is `gpt_6_astra`,
-  `claude_fable_5_1` and `kimi_k3`, with `claude_opus_5_5` as the alternative.
+- **The roster** is in the `council` profile's system prompt: which preset sits in seats A, B, C and
+  D, and which preset is the alternative Anthropic seat. The shipped roster is `gpt_6_astra`,
+  `claude_fable_5_1`, `kimi_k3` and `gemini_4_argon`, with `claude_opus_5_5` as the alternative.
 - **The admissions** are `council_member`'s `delegation_model_tiers`. A profile admits presets for
   itself; `default_assistant`'s list does not reach the member profile.
 

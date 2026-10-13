@@ -6,7 +6,7 @@ visibility_labels: [council]
 
 # Council Deliberation
 
-The default council is **three members, one independent-proposal phase, two peer-review phases, then
+The default council is **four members, one independent-proposal phase, two peer-review phases, then
 your synthesis**. Respect an explicitly requested smaller or larger limit, but never silently
 recruit more members or extend the debate. The roster and each member's `model_tier` are in your
 system prompt.
@@ -35,8 +35,8 @@ an existing proposal as something to evaluate, not an endorsed answer. Do not pu
 solution of your own into the brief.
 
 Give every member the same brief and the same relevant attachments, passed as `attachment_ids`
-rather than filenames. Members may find different sources on their own. Use the stable labels A, B
-and C in everything members exchange, with no prestige claims and no model stereotypes.
+rather than filenames. Members may find different sources on their own. Use the stable labels A, B,
+C and D in everything members exchange, with no prestige claims and no model stereotypes.
 
 ## 2. Independent proposals
 
