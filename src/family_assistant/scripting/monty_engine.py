@@ -83,9 +83,9 @@ class ScriptToolErrors:
     def record(self, tool: str, error: str) -> None:
         self.count += 1
         if len(self.examples) < _TOOL_ERROR_EXAMPLES:
-            self.examples.append(
-                ScriptToolError(tool=tool, error=error[:_TOOL_ERROR_CHARS])
-            )
+            error = error[:_TOOL_ERROR_CHARS]
+            logger.warning(f"Tool '{tool}' returned an error to a script: {error}")
+            self.examples.append(ScriptToolError(tool=tool, error=error))
 
     def summary(self) -> str:
         """Summarize the failed tool calls for a run's history."""
@@ -1129,12 +1129,12 @@ class MontyEngine:
             text = result
         else:
             return
-        if not is_error_data(data) and classify_tool_outcome(text, None) == "succeeded":
+        # A call deferred to a confirmation or declined is "rejected", not a
+        # failure: it did not run.
+        if not is_error_data(data) and classify_tool_outcome(text, None) != "failed":
             return
         detail = data.get("error") if isinstance(data, dict) else None
-        error = str(detail or text)
-        logger.warning(f"Tool '{tool_name}' returned an error to a script: {error}")
-        self._tool_errors.record(tool_name, error)
+        self._tool_errors.record(tool_name, str(detail or text))
 
     def get_tool_errors(self) -> ScriptToolErrors:
         """Tool calls from the last script execution that returned an error."""
