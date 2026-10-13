@@ -16,6 +16,7 @@ import pytest
 from family_assistant.assistant import Assistant
 from family_assistant.config_models import AppConfig
 from family_assistant.llm.factory import LLMClientFactory
+from family_assistant.llm.model_selection import ModelTierEligibility
 from family_assistant.llm.model_tiers import (
     resolve_profile_llm_model,
     resolve_tier_client_config,
@@ -225,3 +226,34 @@ def test_any_tiered_profile_can_be_pinned_to_a_shipped_preset(
     assert "gemini_4_argon" in (complex_tasks.delegation_model_tiers or [])
     assert validate_profile_model_tier(complex_tasks, shipped_config.model_tiers)
     assert coder.delegation_model_tiers is None
+
+
+def test_profiles_share_one_client_per_tier(
+    shipped_config: AppConfig, provider_api_keys: None
+) -> None:
+    """A tier's client is configured from the tier alone, so it is built once.
+
+    The shipped presets reach every tiered profile, so a client per profile per
+    tier would multiply identical clients by the profile count.
+    """
+    assistant = Assistant(shipped_config, llm_client_overrides={})
+
+    def clients_for(profile_id: str) -> dict[str, object]:
+        profile = shipped_profile(shipped_config, profile_id)
+        tier = validate_profile_model_tier(profile, shipped_config.model_tiers)
+        model = resolve_profile_llm_model(
+            profile.processing_config, tier, shipped_config.model
+        )
+        eligibility = ModelTierEligibility.from_profile(
+            profile, shipped_config.model_tiers
+        )
+        _, clients = assistant._create_profile_llm_clients(
+            profile, model, tier, eligibility
+        )
+        return dict(clients)
+
+    assistant_clients = clients_for("default_assistant")
+    complex_clients = clients_for("complex_tasks")
+
+    assert complex_clients["gemini_4_argon"] is assistant_clients["gemini_4_argon"]
+    assert complex_clients["deep"] is assistant_clients["deep"]
