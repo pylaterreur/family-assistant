@@ -4,6 +4,7 @@ import logging
 import re
 import traceback
 import uuid
+from collections import Counter
 from dataclasses import dataclass, replace
 from string import Formatter
 from typing import TYPE_CHECKING, Literal
@@ -191,7 +192,18 @@ def _tool_row_attachment_ids(message: LLMMessage) -> set[str]:
     }
 
 
-def _selectable_tier_lines(eligibility: ModelTierEligibility) -> list[str]:
+def _delegation_presets(eligibility: ModelTierEligibility) -> list[ModelTierOption]:
+    """Exact-model presets a target admits beyond its own tiers."""
+    tier_ids = {option.id for option in eligibility.auto_options} | {
+        eligibility.default_tier
+    }
+    return [option for option in eligibility.delegation if option.id not in tier_ids]
+
+
+def _selectable_tier_lines(
+    eligibility: ModelTierEligibility,
+    shared_presets: tuple[str, ...] = (),
+) -> list[str]:
     """Catalog lines naming the tiers a delegating model may ask a target for.
 
     Only what a delegating model is admitted to is advertised: a tier the
@@ -199,21 +211,23 @@ def _selectable_tier_lines(eligibility: ModelTierEligibility) -> list[str]:
     suggestion the model can only be refused for taking. Exact-model presets
     are listed apart from capability tiers, because choosing one is choosing a
     specific model rather than how much reasoning the request deserves. A
-    target with nothing beyond its default gets no lines at all, which is most
-    of them.
+    target with nothing beyond its default gets no lines at all. A target whose
+    presets are exactly ``shared_presets`` points at the catalog's one listing
+    of them rather than repeating it.
     """
     tiers = [
         option
         for option in eligibility.auto_options
         if option.id != eligibility.default_tier
     ]
-    tier_ids = {option.id for option in tiers} | {eligibility.default_tier}
-    presets = [option for option in eligibility.delegation if option.id not in tier_ids]
+    presets = _delegation_presets(eligibility)
     lines: list[str] = []
     if tiers:
         lines.append("  Optional `model_tier` values for this profile:")
         lines.extend(_tier_option_line(option) for option in tiers)
-    if presets:
+    if presets and tuple(option.id for option in presets) == shared_presets:
+        lines.append("  Can also be run on any of the specific models listed above.")
+    elif presets:
         lines.append(
             "  Specific models this profile can be run on (pass as `model_tier`):"
         )
@@ -1264,17 +1278,53 @@ class ProcessingService:
         operator's configured profiles (including custom ones). Returns an empty
         string when no registry is available.
         """
-        registry = self.processing_services_registry
+        if not self.processing_services_registry:
+            return ""
+        # A target that refuses this profile as a source is not a target: listing
+        # it only invites a delegation the tool is certain to reject.
+        source_id = self.service_config.id
+        registry = {
+            profile_id: service
+            for profile_id, service in self.processing_services_registry.items()
+            if (
+                allowed := getattr(
+                    service.service_config, "allowed_delegation_sources", None
+                )
+            )
+            is None
+            or source_id in allowed
+        }
         if not registry:
             return ""
+        # Presets usually come from default_profile_settings, so most targets
+        # admit the same ones: list that set once instead of under each.
+        preset_sets = Counter(
+            tuple(_delegation_presets(service.service_config.tier_eligibility))
+            for service in registry.values()
+        )
+        preset_sets.pop((), None)
+        shared: tuple[ModelTierOption, ...] = ()
+        if preset_sets:
+            most_common, count = preset_sets.most_common(1)[0]
+            if count > 1:
+                shared = most_common
         lines: list[str] = []
+        if shared:
+            lines.append(
+                "Specific models a profile marked below can be run on "
+                "(pass as `model_tier`):"
+            )
+            lines.extend(_tier_option_line(option) for option in shared)
+        shared_ids = tuple(option.id for option in shared)
         for profile_id, service in registry.items():
             description = (
                 service.service_config.description or "No description available."
             )
             lines.append(f"- ID: {profile_id}, Description: {description}")
             lines.extend(
-                _selectable_tier_lines(service.service_config.tier_eligibility)
+                _selectable_tier_lines(
+                    service.service_config.tier_eligibility, shared_ids
+                )
             )
         return "\n".join(lines)
 

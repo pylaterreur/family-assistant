@@ -870,6 +870,80 @@ def test_the_catalog_lists_delegation_presets_apart_from_tiers() -> None:
 
 
 @pytest.mark.no_db
+def test_the_catalog_lists_presets_most_profiles_share_once() -> None:
+    """Inherited presets would otherwise repeat under nearly every profile."""
+    sol = ModelTierOption(id="gpt_6_sol", label="GPT-6 Sol")
+    kimi = ModelTierOption(id="kimi_k3", label="Kimi K3")
+
+    def profile(profile_id: str, *presets: ModelTierOption) -> SimpleNamespace:
+        return SimpleNamespace(
+            service_config=SimpleNamespace(
+                id=profile_id,
+                description=profile_id,
+                tier_eligibility=ModelTierEligibility(
+                    default_tier="standard",
+                    selectable=(ModelTierOption(id="standard", label="Standard"),),
+                    auto=frozenset({"standard"}),
+                    delegation=presets,
+                ),
+            )
+        )
+
+    service = _make_service()
+    service.processing_services_registry = cast(
+        "Any",
+        {
+            "first": profile("first", sol, kimi),
+            "second": profile("second", sol, kimi),
+            "odd_one": profile("odd_one", kimi),
+            "none": profile("none"),
+        },
+    )
+
+    rendered = service.render_available_service_profiles()
+
+    assert rendered.count("- gpt_6_sol (GPT-6 Sol)") == 1
+    assert rendered.index("- gpt_6_sol (GPT-6 Sol)") < rendered.index("- ID: first")
+    assert rendered.count("any of the specific models listed above") == 2
+    odd_one = rendered.split("- ID: odd_one")[1].split("- ID: none")[0]
+    assert "- kimi_k3 (Kimi K3)" in odd_one
+    assert "Specific models" not in rendered.split("- ID: none")[1]
+
+
+@pytest.mark.no_db
+def test_the_catalog_omits_targets_that_refuse_this_profile() -> None:
+    """The delegation tool rejects these, so advertising them only invites failure."""
+
+    def profile(profile_id: str, sources: list[str] | None) -> SimpleNamespace:
+        return SimpleNamespace(
+            service_config=SimpleNamespace(
+                id=profile_id,
+                description=profile_id,
+                tier_eligibility=ModelTierEligibility(),
+                allowed_delegation_sources=sources,
+            )
+        )
+
+    service = _make_service()
+    service.processing_services_registry = cast(
+        "Any",
+        {
+            "open_to_all": profile("open_to_all", None),
+            "open_to_me": profile("open_to_me", ["processing_fail_fast_test"]),
+            "closed": profile("closed", []),
+            "someone_else": profile("someone_else", ["council"]),
+        },
+    )
+
+    rendered = service.render_available_service_profiles()
+
+    assert "- ID: open_to_all" in rendered
+    assert "- ID: open_to_me" in rendered
+    assert "closed" not in rendered
+    assert "someone_else" not in rendered
+
+
+@pytest.mark.no_db
 @pytest.mark.asyncio
 async def test_delegation_catalog_addition_empty_when_cannot_delegate() -> None:
     service = _make_service()

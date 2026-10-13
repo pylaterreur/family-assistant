@@ -372,7 +372,9 @@ a capability scale, and the classifier must not route everyday turns to them. Th
 intelligence control for the same reason. A person may still name one through the API, preserving
 the rule that a model cannot reach a tier a person would be refused. Presets reuse the tier
 admission gate, client construction and persisted envelope unchanged; the delegating model sees them
-listed beside the target, separately from its tiers, and delegation status reports each run's tier.
+in its profile catalog, separately from tiers, and delegation status reports each run's tier. The
+shipped presets are admitted for every tiered profile through `default_profile_settings`, so pinning
+a specialist to a model needs no per-profile list; the catalog lists that shared set once.
 
 ## Deliberate simplifications
 

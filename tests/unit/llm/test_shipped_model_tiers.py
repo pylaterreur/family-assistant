@@ -16,6 +16,7 @@ import pytest
 from family_assistant.assistant import Assistant
 from family_assistant.config_models import AppConfig
 from family_assistant.llm.factory import LLMClientFactory
+from family_assistant.llm.model_selection import ModelTierEligibility
 from family_assistant.llm.model_tiers import (
     resolve_profile_llm_model,
     resolve_tier_client_config,
@@ -208,3 +209,51 @@ def test_the_global_map_still_configures_nothing_for_fable(
     assert not any(
         key.startswith("claude-fable-") for key in shipped_config.llm_parameters
     )
+
+
+def test_any_tiered_profile_can_be_pinned_to_a_shipped_preset(
+    shipped_config: AppConfig,
+) -> None:
+    """The presets live in `default_profile_settings`, not on each profile.
+
+    So a specialist such as complex_tasks can be run on a named model without a
+    list of its own, while a profile coupled to one model inline (coder runs
+    Antigravity) inherits none: a preset there would offer to replace it.
+    """
+    complex_tasks = shipped_profile(shipped_config, "complex_tasks")
+    coder = shipped_profile(shipped_config, "coder")
+
+    assert "gemini_4_argon" in (complex_tasks.delegation_model_tiers or [])
+    assert validate_profile_model_tier(complex_tasks, shipped_config.model_tiers)
+    assert coder.delegation_model_tiers is None
+
+
+def test_profiles_share_one_client_per_tier(
+    shipped_config: AppConfig, provider_api_keys: None
+) -> None:
+    """A tier's client is configured from the tier alone, so it is built once.
+
+    The shipped presets reach every tiered profile, so a client per profile per
+    tier would multiply identical clients by the profile count.
+    """
+    assistant = Assistant(shipped_config, llm_client_overrides={})
+
+    def clients_for(profile_id: str) -> dict[str, object]:
+        profile = shipped_profile(shipped_config, profile_id)
+        tier = validate_profile_model_tier(profile, shipped_config.model_tiers)
+        model = resolve_profile_llm_model(
+            profile.processing_config, tier, shipped_config.model
+        )
+        eligibility = ModelTierEligibility.from_profile(
+            profile, shipped_config.model_tiers
+        )
+        _, clients = assistant._create_profile_llm_clients(
+            profile, model, tier, eligibility
+        )
+        return dict(clients)
+
+    assistant_clients = clients_for("default_assistant")
+    complex_clients = clients_for("complex_tasks")
+
+    assert complex_clients["gemini_4_argon"] is assistant_clients["gemini_4_argon"]
+    assert complex_clients["deep"] is assistant_clients["deep"]

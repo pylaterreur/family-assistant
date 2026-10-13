@@ -593,6 +593,10 @@ class Assistant:
         self.weather_service: WeatherService | None = None
         self.embedding_generator: EmbeddingGenerator | None = None
         self.processing_services_registry: dict[str, DelegatableService] = {}
+        # One client per tier, shared by every profile that may run on it: a
+        # tier's client is configured from the tier alone, so per-profile copies
+        # would be identical objects multiplied by the profile count.
+        self._tier_llm_clients: dict[str, LLMInterface] = {}
         self.a2a_cancel_events: dict[str, asyncio.Event] = {}
         self.a2a_background_tasks: dict[str, asyncio.Task[None]] = {}
         self.default_processing_service: ProcessingService | None = None
@@ -1763,7 +1767,8 @@ class Assistant:
 
         Building them at startup means a tier's chain, parameters and provider
         credentials are validated then, and the first request at a tier pays no
-        construction cost. A profile pinned to an inline model has no tiers and
+        construction cost. Each tier's client is shared with every other profile
+        that may run on it, since nothing in its configuration is per-profile. A profile pinned to an inline model has no tiers and
         gets an empty map.
 
         A test may override any tier individually with a
@@ -1806,9 +1811,7 @@ class Assistant:
             if override is not None:
                 clients[option.id] = override
                 continue
-            tier = self.config.model_tiers[option.id]
-            client_config = resolve_tier_client_config(tier, self.config.llm_parameters)
-            clients[option.id] = LLMClientFactory.create_client(config=client_config)
+            clients[option.id] = self._tier_llm_client(option.id)
             logger.info(
                 "Profile '%s' tier '%s' using client: %s",
                 profile_id,
@@ -1816,6 +1819,17 @@ class Assistant:
                 type(clients[option.id]).__name__,
             )
         return clients[default_tier], clients
+
+    def _tier_llm_client(self, tier_id: str) -> LLMInterface:
+        """The shared client for a tier, built on first use."""
+        client = self._tier_llm_clients.get(tier_id)
+        if client is None:
+            client_config = resolve_tier_client_config(
+                self.config.model_tiers[tier_id], self.config.llm_parameters
+            )
+            client = LLMClientFactory.create_client(config=client_config)
+            self._tier_llm_clients[tier_id] = client
+        return client
 
     @staticmethod
     def _validate_computer_use_config(
