@@ -1278,7 +1278,22 @@ class ProcessingService:
         operator's configured profiles (including custom ones). Returns an empty
         string when no registry is available.
         """
-        registry = self.processing_services_registry
+        if not self.processing_services_registry:
+            return ""
+        # A target that refuses this profile as a source is not a target: listing
+        # it only invites a delegation the tool is certain to reject.
+        source_id = self.service_config.id
+        registry = {
+            profile_id: service
+            for profile_id, service in self.processing_services_registry.items()
+            if (
+                allowed := getattr(
+                    service.service_config, "allowed_delegation_sources", None
+                )
+            )
+            is None
+            or source_id in allowed
+        }
         if not registry:
             return ""
         # Presets usually come from default_profile_settings, so most targets
