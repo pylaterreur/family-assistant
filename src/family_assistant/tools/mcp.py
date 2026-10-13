@@ -96,6 +96,12 @@ DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 30 * 60.0
 DEFAULT_RECONNECT_BACKOFF_BASE_SECONDS = 30.0
 DEFAULT_RECONNECT_BACKOFF_MAX_SECONDS = 30 * 60.0
 
+# How long a connection's holder task gets to unwind its transport before it
+# is cancelled outright.
+CONNECTION_CLOSE_TIMEOUT_SECONDS = 5.0
+# A slow server may miss a ping or two, but one that never answers is gone.
+CONSECUTIVE_PING_TIMEOUTS_BEFORE_RECONNECT = 3
+
 # 2**63 seconds already dwarfs any sane cap; clamping the exponent keeps a
 # long-lived process from overflowing the float multiplication below.
 _MAX_BACKOFF_EXPONENT = 63
@@ -164,6 +170,32 @@ class _ReconnectBackoff:
 
     attempts: int = 0
     next_attempt_at: float = 0.0
+
+
+type _DiscoveryResult = tuple[
+    ClientSession | None,
+    list[ToolDefinition],
+    list[ToolDescriptor],
+    dict[str, str],
+]
+
+
+@dataclass
+class _ServerConnection:
+    """A shared server's transport, held open by the task that entered it.
+
+    The SDK's transports run their readers in AnyIO task groups, whose cancel
+    scopes belong to the task that entered them. A reader that dies cancels
+    that task, whatever it is doing by then, and exiting the scope from any
+    other task fails and leaves the transport open. So each connection is
+    entered, held and closed by one dedicated task, and closing it means asking
+    that task to unwind. A transport that dies cancels only its own holder,
+    never the health check loop or a tool call that happened to reconnect it.
+    """
+
+    task: asyncio.Task[None]
+    ready: asyncio.Future[_DiscoveryResult]
+    close_requested: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 def _array_parameter_names(definition: ToolDefinition | None) -> frozenset[str]:
@@ -275,7 +307,8 @@ class MCPToolsProvider:
         self._descriptors: list[ToolDescriptor] = []
         self._descriptors_version = 0
         self._initialized = False
-        self._connection_contexts: dict[str, contextlib.AsyncExitStack] = {}
+        self._connections: dict[str, _ServerConnection] = {}
+        self._consecutive_ping_timeouts: dict[str, int] = {}
         self._server_statuses: dict[str, str] = {
             server_id: MCP_SERVER_STATUS_PENDING
             for server_id in self._mcp_server_configs
@@ -481,20 +514,131 @@ class MCPToolsProvider:
         self,
         server_id: str,
         server_conf: MCPServerConfig,
-    ) -> tuple[
-        ClientSession | None,
-        list[ToolDefinition],
-        list[ToolDescriptor],
-        dict[str, str],
-    ]:
-        """Connects to a single MCP server, discovers tools, and returns results."""
+    ) -> _DiscoveryResult:
+        """Connects to a single MCP server, discovers tools, and returns results.
+
+        The connection is opened and held by its own task (see
+        :class:`_ServerConnection`); this waits, up to the initialization
+        timeout, for that task to report what it discovered.
+        """
         if server_id in self._user_connections:
             await self._user_connections[server_id].initialize()
             return None, [], [], {}
         self._server_statuses[server_id] = MCP_SERVER_STATUS_CONNECTING
+        ready: asyncio.Future[_DiscoveryResult] = (
+            asyncio.get_running_loop().create_future()
+        )
+        close_requested = asyncio.Event()
+        connection = _ServerConnection(
+            task=asyncio.create_task(
+                self._hold_server_connection(
+                    server_id, server_conf, ready, close_requested
+                ),
+                name=f"mcp-connection-{server_id}",
+            ),
+            ready=ready,
+            close_requested=close_requested,
+        )
+        connection.task.add_done_callback(
+            lambda task: self._log_connection_end(server_id, connection, task)
+        )
+        try:
+            await asyncio.wait(
+                {ready, connection.task},
+                timeout=self._initialization_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except BaseException:
+            await self._stop_connection(connection)
+            raise
+        if ready.done():
+            result = ready.result()
+            if result[0] is not None:
+                self._connections[server_id] = connection
+            return result
+        if connection.task.done():
+            logger.warning(
+                f"Connection attempt for MCP server '{server_id}' ended before it reported a result"
+            )
+        else:
+            logger.warning(
+                f"Connection attempt for MCP server '{server_id}' timed out after "
+                f"{self._initialization_timeout_seconds} seconds"
+            )
+        self._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
+        await self._stop_connection(connection)
+        return None, [], [], {}
+
+    async def _hold_server_connection(
+        self,
+        server_id: str,
+        server_conf: MCPServerConfig,
+        ready: asyncio.Future[_DiscoveryResult],
+        close_requested: asyncio.Event,
+    ) -> None:
+        """Open a server's transport, report discovery, and hold it until closed."""
+        async with contextlib.AsyncExitStack() as exit_stack:
+            result = await self._open_server_connection(
+                server_id, server_conf, exit_stack
+            )
+            ready.set_result(result)
+            if result[0] is not None:
+                await close_requested.wait()
+
+    def _log_connection_end(
+        self,
+        server_id: str,
+        connection: _ServerConnection,
+        task: asyncio.Task[None],
+    ) -> None:
+        """Retrieve a holder task's outcome, and say so if nobody asked it to end."""
+        error = None if task.cancelled() else task.exception()
+        if connection.close_requested.is_set():
+            if error is not None:
+                logger.warning(
+                    f"Error closing connection for MCP server '{server_id}': "
+                    f"{type(error).__name__}: {error}"
+                )
+            return
+        if not connection.ready.done() or connection.ready.result()[0] is None:
+            return
+        reason = (
+            "cancelled by its transport"
+            if error is None
+            else f"{type(error).__name__}: {error}"
+        )
+        logger.warning(
+            f"Connection to MCP server '{server_id}' ended unexpectedly ({reason}); "
+            "the next health check will reconnect it"
+        )
+
+    async def _stop_connection(self, connection: _ServerConnection) -> None:
+        """Ask a holder task to close its transport, cancelling it if it won't.
+
+        Waits with :func:`asyncio.wait` so that the holder's own cancellation or
+        error stays in the holder; only the caller's cancellation propagates.
+        """
+        connection.close_requested.set()
+        if not connection.ready.done():
+            connection.task.cancel()
+        done, _ = await asyncio.wait(
+            {connection.task}, timeout=CONNECTION_CLOSE_TIMEOUT_SECONDS
+        )
+        if not done:
+            connection.task.cancel()
+            await asyncio.wait(
+                {connection.task}, timeout=CONNECTION_CLOSE_TIMEOUT_SECONDS
+            )
+
+    async def _open_server_connection(
+        self,
+        server_id: str,
+        server_conf: MCPServerConfig,
+        exit_stack: contextlib.AsyncExitStack,
+    ) -> _DiscoveryResult:
+        """Enter a server's transport on ``exit_stack`` and discover its tools."""
         discovered_tools = []
         tool_map = {}
-        exit_stack = contextlib.AsyncExitStack()
 
         transport_type = server_conf.get("transport", "stdio").lower()
         url = server_conf.get("url")  # Needed for SSE
@@ -559,12 +703,7 @@ class MCPToolsProvider:
             f"Attempting connection and discovery for MCP server '{server_id}' using '{transport_type}' transport..."
         )
 
-        async def connect_and_discover() -> tuple[
-            ClientSession | None,
-            list[ToolDefinition],
-            list[ToolDescriptor],
-            dict[str, str],
-        ]:
+        async def connect_and_discover() -> _DiscoveryResult:
             if self._user_identity is not None:
                 await self._verify_user_identity(url, resolved_token_sse)
             # --- Transport and Session Creation ---
@@ -574,8 +713,6 @@ class MCPToolsProvider:
                         f"MCP server '{server_id}' (stdio): 'command' is missing."
                     )
                     self._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
-                    with contextlib.suppress(Exception):
-                        await exit_stack.aclose()
                     return None, [], [], {}
                 server_params = StdioServerParameters(
                     command=command,
@@ -591,8 +728,6 @@ class MCPToolsProvider:
                     ClientSession(read_stream, write_stream)
                 )
 
-                self._connection_contexts[server_id] = exit_stack
-
             elif (
                 transport_type == "sse"
                 or transport_type in MCP_STREAMABLE_HTTP_TRANSPORTS
@@ -604,8 +739,6 @@ class MCPToolsProvider:
                         f"MCP server '{server_id}' ({transport_label}): 'url' is missing."
                     )
                     self._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
-                    with contextlib.suppress(Exception):
-                        await exit_stack.aclose()
                     return None, [], [], {}
 
                 # Construct headers using the resolved token
@@ -642,15 +775,11 @@ class MCPToolsProvider:
                     ClientSession(read_stream, write_stream)
                 )
 
-                self._connection_contexts[server_id] = exit_stack
-
             else:
                 logger.error(
                     f"Unsupported transport type '{transport_type}' for MCP server '{server_id}'."
                 )
                 self._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
-                with contextlib.suppress(Exception):
-                    await exit_stack.aclose()
                 return None, [], [], {}
 
             # --- Initialize Session and Discover Tools (Common Logic) ---
@@ -700,18 +829,7 @@ class MCPToolsProvider:
                 f"Failed connection/discovery for MCP server '{server_id}': {e}"
             )
             self._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
-            with contextlib.suppress(Exception):
-                await exit_stack.aclose()
-            # Clean up any partially created contexts
-            if server_id in self._connection_contexts:
-                await self._close_server_connections(server_id)
-            return None, [], [], {}  # Return empty on failure
-        except BaseException:
-            with contextlib.suppress(BaseException):
-                await exit_stack.aclose()
-            if server_id in self._connection_contexts:
-                await self._close_server_connections(server_id)
-            raise
+            return None, [], [], {}
 
     async def initialize(self) -> None:
         """Connects to configured MCP servers, fetches and sanitizes tool definitions."""
@@ -1064,46 +1182,63 @@ class MCPToolsProvider:
         return None
 
     async def _health_check_loop(self) -> None:
-        """Periodically checks the health of connected MCP servers and retries failed/cancelled ones."""
+        """Periodically checks the health of connected MCP servers and retries failed/cancelled ones.
+
+        Each pass runs as its own task. Reconnecting enters and exits transport
+        cancel scopes, and a cancellation escaping one of those must cost one
+        pass, not the loop: the loop ends only when :meth:`close` disables it.
+        """
         logger.info(
             f"Starting health check loop with interval {self._health_check_interval_seconds}s"
         )
-
-        async def run_health_check_iteration() -> bool:
-            # Wait for the interval
-            await asyncio.sleep(self._health_check_interval_seconds)
-
-            if not self._health_check_enabled:
-                return False
-
-            # Collect servers needing retry before health checks run,
-            # so servers that fail health check below aren't retried twice
-            servers_to_retry = [
-                server_id
-                for server_id, status in self._server_statuses.items()
-                if status in {MCP_SERVER_STATUS_FAILED, MCP_SERVER_STATUS_CANCELLED}
-                and server_id not in self._user_connections
-            ]
-
-            await self._run_health_checks()
-            await self._retry_disconnected_servers(servers_to_retry)
-            return True
-
-        while self._health_check_enabled:
-            try:
-                should_continue = await run_health_check_iteration()
-            except asyncio.CancelledError:
+        try:
+            while self._health_check_enabled:
+                await self._supervise_health_check_pass()
+        except asyncio.CancelledError:
+            if self._health_check_enabled:
+                logger.error("MCP health check loop cancelled while still enabled")
+            else:
                 logger.info("Health check loop cancelled")
-                break
-            except Exception as e:
-                logger.exception(f"Unexpected error in health check loop: {e}")
-                # Continue the loop despite errors
-                continue
+            raise
+        finally:
+            logger.info("Health check loop stopped")
 
-            if not should_continue:
-                break
+    async def _supervise_health_check_pass(self) -> None:
+        """Wait one interval, then run a pass in its own task and report how it ended."""
+        await asyncio.sleep(self._health_check_interval_seconds)
+        if not self._health_check_enabled:
+            return
+        health_pass = asyncio.create_task(
+            self._run_health_check_pass(), name="mcp-health-check-pass"
+        )
+        try:
+            await asyncio.wait({health_pass})
+        except asyncio.CancelledError:
+            health_pass.cancel()
+            await asyncio.wait({health_pass})
+            raise
+        if health_pass.cancelled():
+            logger.error(
+                "MCP health check pass was cancelled while the loop is still "
+                "enabled; continuing with the next pass"
+            )
+        elif (error := health_pass.exception()) is not None:
+            logger.error(
+                f"Unexpected error in MCP health check pass: {error}", exc_info=error
+            )
 
-        logger.info("Health check loop stopped")
+    async def _run_health_check_pass(self) -> None:
+        """Check every live session, then retry servers that were already down."""
+        # Collect servers needing retry before health checks run,
+        # so servers that fail health check below aren't retried twice
+        servers_to_retry = [
+            server_id
+            for server_id, status in self._server_statuses.items()
+            if status in {MCP_SERVER_STATUS_FAILED, MCP_SERVER_STATUS_CANCELLED}
+            and server_id not in self._user_connections
+        ]
+        await self._run_health_checks()
+        await self._retry_disconnected_servers(servers_to_retry)
 
     async def _ping_session(self, session: ClientSession) -> None:
         """Lightweight connection liveness check for an active MCP session."""
@@ -1198,39 +1333,35 @@ class MCPToolsProvider:
             if not self._health_check_enabled:
                 return
 
+            connection = self._connections.get(server_id)
+            if connection is not None and connection.task.done():
+                await self._drop_dead_session(server_id, session)
+                continue
             try:
                 # Lightweight health check - ping session to verify connection
                 # Using a short timeout to avoid blocking too long
                 await asyncio.wait_for(self._ping_session(session), timeout=5.0)
             except TimeoutError:
-                logger.warning(f"Health check timeout for server '{server_id}'")
-                # Don't reconnect on timeout - server might just be slow
+                timeouts = self._consecutive_ping_timeouts.get(server_id, 0) + 1
+                self._consecutive_ping_timeouts[server_id] = timeouts
+                logger.warning(
+                    f"Health check timeout for server '{server_id}' "
+                    f"({timeouts} in a row)"
+                )
+                # One timeout may just be a slow server; a run of them is not.
+                if timeouts < CONSECUTIVE_PING_TIMEOUTS_BEFORE_RECONNECT:
+                    continue
+                await self._drop_dead_session(server_id, session)
             except Exception as e:
                 logger.warning(f"Health check failed for server '{server_id}': {e}")
                 if not _is_connection_error(e):
                     continue
-
-                if self._sessions.get(server_id) is not session:
-                    logger.info(
-                        f"Server '{server_id}' session changed during failed health check; "
-                        "leaving replacement session intact"
-                    )
-                    continue
-
-                logger.info(
-                    f"Detected connection issue for server '{server_id}', dropping session"
-                )
-                self._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
-                # Drop the dead session even if the backoff window defers the
-                # reconnect, so it isn't pinged again on every later cycle.
-                await self._teardown_server(server_id)
-                await self._attempt_scheduled_reconnect(
-                    server_id, reason="health check"
-                )
+                await self._drop_dead_session(server_id, session)
             else:
                 if self._sessions.get(server_id) is not session:
                     continue
                 logger.debug(f"Health check passed for server '{server_id}'")
+                self._consecutive_ping_timeouts.pop(server_id, None)
                 self._reset_reconnect_backoff(server_id)
 
                 now = time.monotonic()
@@ -1241,6 +1372,23 @@ class MCPToolsProvider:
                 )
                 if should_refresh:
                     await self._refresh_server_tools_from_session(server_id, session)
+
+    async def _drop_dead_session(self, server_id: str, session: ClientSession) -> None:
+        """Tear down a session a health check found dead, and try to reconnect."""
+        if self._sessions.get(server_id) is not session:
+            logger.info(
+                f"Server '{server_id}' session changed during failed health check; "
+                "leaving replacement session intact"
+            )
+            return
+        logger.warning(
+            f"Detected connection issue for server '{server_id}', dropping session"
+        )
+        self._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
+        # Drop the dead session even if the backoff window defers the
+        # reconnect, so it isn't pinged again on every later cycle.
+        await self._teardown_server(server_id)
+        await self._attempt_scheduled_reconnect(server_id, reason="health check")
 
     async def _retry_disconnected_servers(self, server_ids: Sequence[str]) -> None:
         """Reconnect failed/cancelled servers whose backoff window has elapsed."""
@@ -1718,39 +1866,13 @@ class MCPToolsProvider:
         return f"Error: Unexpected execution path for tool '{name}'"
 
     async def _close_server_connections(self, server_id: str) -> None:
-        """Close connections for a specific server."""
-        # First try to close the session if it exists
-        if server_id in self._sessions:
-            try:
-                # Just remove the session, don't try to close it as it may cause cross-task issues
-                del self._sessions[server_id]
-                logger.debug(f"Removed session for server '{server_id}'")
-            except Exception as e:
-                logger.warning(f"Error removing session for server '{server_id}': {e}")
-
-        # Then handle the context managers with proper error handling
-        if server_id in self._connection_contexts:
-            exit_stack = self._connection_contexts.pop(server_id)
-            try:
-                await exit_stack.aclose()
-                logger.debug(f"Closed contexts for server '{server_id}'")
-            except RuntimeError as e:
-                if "cancel scope in a different task" in str(e):
-                    logger.debug(
-                        f"Ignoring expected cancel scope error for server '{server_id}' during shutdown"
-                    )
-                else:
-                    logger.warning(
-                        f"RuntimeError closing context manager for server '{server_id}': {e}"
-                    )
-            except asyncio.CancelledError:
-                logger.debug(
-                    f"Context manager closure cancelled for server '{server_id}'"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Error closing context manager for server '{server_id}': {type(e).__name__}: {e}"
-                )
+        """Drop a server's session and have its holder task close the transport."""
+        self._sessions.pop(server_id, None)
+        self._consecutive_ping_timeouts.pop(server_id, None)
+        connection = self._connections.pop(server_id, None)
+        if connection is not None:
+            await self._stop_connection(connection)
+            logger.debug(f"Closed connection for server '{server_id}'")
 
     def get_tool_to_server_mapping(self) -> dict[str, str]:
         """Returns a mapping of tool names to their server IDs.
@@ -1779,7 +1901,7 @@ class MCPToolsProvider:
             await connections.close()
         self._session_instructions.clear()
         # Close all server connections
-        for server_id in list(self._connection_contexts.keys()):
+        for server_id in list(self._connections.keys()):
             await self._close_server_connections(server_id)
 
         self._sessions.clear()
