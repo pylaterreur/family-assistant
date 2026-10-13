@@ -208,3 +208,20 @@ def test_the_global_map_still_configures_nothing_for_fable(
     assert not any(
         key.startswith("claude-fable-") for key in shipped_config.llm_parameters
     )
+
+
+def test_any_tiered_profile_can_be_pinned_to_a_shipped_preset(
+    shipped_config: AppConfig,
+) -> None:
+    """The presets live in `default_profile_settings`, not on each profile.
+
+    So a specialist such as complex_tasks can be run on a named model without a
+    list of its own, while a profile coupled to one model inline (coder runs
+    Antigravity) inherits none: a preset there would offer to replace it.
+    """
+    complex_tasks = shipped_profile(shipped_config, "complex_tasks")
+    coder = shipped_profile(shipped_config, "coder")
+
+    assert "gemini_4_argon" in (complex_tasks.delegation_model_tiers or [])
+    assert validate_profile_model_tier(complex_tasks, shipped_config.model_tiers)
+    assert coder.delegation_model_tiers is None

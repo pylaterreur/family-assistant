@@ -772,9 +772,9 @@ OpenRouter API key for accessing multiple LLM providers.
 | Example   | `sk-or-v1-...`              |
 
 Used when model names start with `openrouter/`. The shipped `kimi_k3` delegation preset is one, and
-every tier a profile may run on gets its client built at startup, so a deployment running the
-shipped `default_assistant` or `council_member` needs this key or must drop `kimi_k3` from their
-`delegation_model_tiers` (and, for the council, re-seat member C).
+every tier a profile may run on gets its client built at startup, so a deployment with the shipped
+presets needs this key or must drop `kimi_k3` from `default_profile_settings.delegation_model_tiers`
+and from `council_member`'s own list (and re-seat council member C).
 
 ______________________________________________________________________
 
@@ -971,10 +971,15 @@ automatic selection is the weaker authority of the two; and setting any of them 
 The distinction is who authorized the spend. An authenticated person choosing Max on their own
 request *is* the authorization. A model choosing it is not, which is why the shipped
 `default_assistant` allows `standard`, `deep` and `frontier` but admits only `standard` and `deep`
-automatically. The shipped `default_assistant` also lists five presets in `delegation_model_tiers` —
-`gpt_6_astra`, `gpt_6_sol`, `claude_opus_5_5`, `claude_fable_5_1` and `kimi_k3` — which, being
-listed there, a delegating model may name without a confirmation. Adding a preset is a `model_tiers`
-entry plus a name in that list.
+automatically.
+
+The shipped presets — `gpt_6_astra`, `gpt_6_sol`, `claude_opus_5_5`, `claude_fable_5_1`, `kimi_k3`
+and `gemini_4_argon` — are listed once, in `default_profile_settings.delegation_model_tiers`, so a
+delegating model may pin any profile that has a tier to any of them without a confirmation ("run
+complex_tasks on Gemini 4 Argon"). A profile that names an inline model drops the inherited list,
+and a profile that declares its own replaces it, so `delegation_model_tiers: []` keeps a profile off
+presets entirely. Adding a preset is a `model_tiers` entry plus a name in that list. The profile
+catalog lists the presets most profiles share once, rather than under each profile.
 
 #### The council's seats
 
@@ -985,8 +990,8 @@ exact-model preset per seat (see [the user guide](../user/council.md) and
 - **The roster** is in the `council` profile's system prompt: which preset sits in seats A, B, C and
   D, and which preset is the alternative Anthropic seat. The shipped roster is `gpt_6_astra`,
   `claude_fable_5_1`, `kimi_k3` and `gemini_4_argon`, with `claude_opus_5_5` as the alternative.
-- **The admissions** are `council_member`'s `delegation_model_tiers`. A profile admits presets for
-  itself; `default_assistant`'s list does not reach the member profile.
+- **The admissions** are `council_member`'s `delegation_model_tiers`. It declares its own list
+  rather than inheriting the default one, so a change to the shared presets cannot unseat a member.
 
 To change a seat, add the preset to `model_tiers` if it is new (one model, no fallback), list it in
 `council_member.delegation_model_tiers`, and edit the roster. A seat whose preset the member does
@@ -1003,11 +1008,11 @@ not admit fails that member's delegation visibly rather than running on another 
   a profile configured for Auto reads as `explicit` while `model_routing.mode` is `off` or `shadow`,
   because that is what its requests actually do.
 - **Delegation:** `model_tier` on `delegate_to_service`, bound by the *target's* `auto_model_tiers`
-  and `delegation_model_tiers`, which the delegating model sees listed beside the target in its
-  profile catalog. `get_delegation_status` and `list_delegations` report each run's `model_tier`.
-  The resolved tier is persisted with the queued run and re-applied verbatim when a worker executes
-  it, so a restart or a deployment cannot change the models of a run that was already authorized. A
-  parent's tier never propagates: each delegation decides independently.
+  and `delegation_model_tiers`, which the delegating model sees in its profile catalog.
+  `get_delegation_status` and `list_delegations` report each run's `model_tier`. The resolved tier
+  is persisted with the queued run and re-applied verbatim when a worker executes it, so a restart
+  or a deployment cannot change the models of a run that was already authorized. A parent's tier
+  never propagates: each delegation decides independently.
 - **Chat commands:** a tier's `slash_command` runs one message on that tier, on whatever profile the
   conversation is already using.
 

@@ -83,6 +83,9 @@ hands the question to a copy of itself running on each model you name, so every 
 the model named, and reports which answer came from which. If one of those models is unavailable,
 that answer fails rather than quietly coming from a different model.
 
+You can also pin a specialist to a model in the same way: "have the complex tasks profile work on
+this using Gemini 4 Argon" runs that profile, with its usual tools, on the model you named.
+
 The models on offer are the ones your household's setup lists; these are not on the level picker.
 
 A side-by-side is each model answering alone. When you want the models to research the question,

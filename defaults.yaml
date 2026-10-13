@@ -857,6 +857,11 @@ global_tools_policy:
       description: "read_text_attachment and jq_query are available in every profile so the assistant can always read back tool results that exceeded the large-result threshold and were auto-converted to attachments."
 
 default_profile_settings:
+  # Specific models a delegating model may pin any tiered profile to by name
+  # ("run complex_tasks on Gemini 4 Argon"). Auto never routes to these and the
+  # tier picker does not list them. A profile that names an inline model drops
+  # this list, and one that declares its own replaces it.
+  delegation_model_tiers: ["gpt_6_astra", "gpt_6_sol", "claude_opus_5_5", "claude_fable_5_1", "kimi_k3", "gemini_4_argon"]
   processing_config:
     # Inherited by every profile that does not select its own tier or name an
     # inline model.
@@ -1144,10 +1149,6 @@ service_profiles:
     # deliberately absent: it is chosen when somebody decides this request is
     # worth the spend, not inferred.
     auto_model_tiers: ["standard", "deep"]
-    # Specific models another profile may ask for by name -- for comparing
-    # independent answers to one question. Auto never routes to these and the
-    # tier picker does not list them.
-    delegation_model_tiers: ["gpt_6_astra", "gpt_6_sol", "claude_opus_5_5", "claude_fable_5_1", "kimi_k3"]
     auto_routing_guidance: |
       Prefer standard for routine conversation, retrieval and straightforward
       tool use. Choose deep where substantial ambiguity, multi-stage reasoning,
