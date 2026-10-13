@@ -774,9 +774,12 @@ class MCPToolsProvider:
                         "Finished parallel MCP connection attempts (within timeout)."
                     )
         finally:
-            for task in connection_tasks:
-                if not task.done():
-                    task.cancel()
+            # Only reached with tasks still running if initialize() itself was
+            # cancelled; let their transports close before propagating.
+            unfinished = [task for task in connection_tasks if not task.done()]
+            for task in unfinished:
+                task.cancel()
+            await asyncio.gather(*unfinished, return_exceptions=True)
             stop_logging_event.set()
             if not logging_task.done():
                 try:

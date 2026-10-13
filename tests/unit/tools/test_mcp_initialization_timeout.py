@@ -105,3 +105,45 @@ async def test_timeout_keeps_finished_servers_and_retries_the_hung_one() -> None
         assert provider._server_statuses[SLOW] == MCP_SERVER_STATUS_CONNECTED
     finally:
         await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_initialize_waits_for_connection_cleanup() -> None:
+    """Cancelling startup does not leave connection tasks running behind it."""
+    configs: dict[str, MCPServerConfig] = {
+        SLOW: {"transport": "stdio", "command": "echo"},
+    }
+    provider = MCPToolsProvider(configs, initialization_timeout_seconds=60)
+    connecting = asyncio.Event()
+    cleaned_up = False
+
+    async def fake_connect(
+        server_id: str, server_conf: MCPServerConfig
+    ) -> tuple[
+        ClientSession | None, list[ToolDefinition], list[ToolDescriptor], dict[str, str]
+    ]:
+        nonlocal cleaned_up
+        del server_id, server_conf
+        connecting.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # Cleanup that spans several loop iterations, like closing a
+            # transport, so the test sees whether initialize() waited for it.
+            for _ in range(5):
+                # ast-grep-ignore: no-asyncio-sleep-in-tests - yields the loop, no wait
+                await asyncio.sleep(0)
+            cleaned_up = True
+        raise AssertionError("unreachable")
+
+    provider._connect_and_discover_mcp = AsyncMock(  # type: ignore[method-assign]
+        side_effect=fake_connect
+    )
+    init_task = asyncio.create_task(provider.initialize())
+    await connecting.wait()
+
+    init_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await init_task
+
+    assert cleaned_up
