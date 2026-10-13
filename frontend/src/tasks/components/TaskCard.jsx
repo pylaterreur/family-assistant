@@ -146,8 +146,8 @@ const TaskCard = ({ task, onRetry, onCancel }) => {
         </div>
       )}
 
-      {/* Error Message (if failed) */}
-      {task.status?.toLowerCase() === 'failed' && task.error_message && (
+      {/* Error Message (a failure, or problems a finished run reported) */}
+      {task.error_message && (
         <div className={styles.errorSection}>
           <div className={styles.errorLabel}>Error Message:</div>
           <div className={styles.errorMessage}>{task.error_message}</div>

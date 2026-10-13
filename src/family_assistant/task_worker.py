@@ -143,6 +143,10 @@ if TYPE_CHECKING:
     from family_assistant.tools.authenticated_sites import AuthenticatedRunSettlement
     from family_assistant.web.conversation_stream_hub import ConversationStreamHub
 
+    # A handler may return a note recorded on the task when it finishes, for a
+    # run that succeeded but hit problems worth surfacing in its history.
+    type TaskHandler = Callable[[ToolExecutionContext, Any], Awaitable[str | None]]
+
 # handle_index_email is now a method of EmailIndexer and registered in __main__.py
 from family_assistant.indexing.tasks import (
     document_ready_after_task_done,
@@ -1929,9 +1933,7 @@ class TaskWorker:
         )
         # Initialize handlers - specific handlers are registered externally
         # Update handler signature type hint
-        self.task_handlers: dict[
-            str, Callable[[ToolExecutionContext, Any], Awaitable[None]]
-        ] = {}
+        self.task_handlers: dict[str, TaskHandler] = {}
         self.worker_id = f"worker-{uuid.uuid4()}"
         self.last_activity: datetime | None = None  # Track last activity time
         self._update_last_activity()  # Set initial activity
@@ -1953,7 +1955,7 @@ class TaskWorker:
         self,
         task_type: str,
         # Update handler signature type hint
-        handler: Callable[[ToolExecutionContext, Any], Awaitable[None]],
+        handler: TaskHandler,
     ) -> None:
         """Register a task handler function for a specific task type."""
         self.task_handlers[task_type] = handler
@@ -1964,7 +1966,7 @@ class TaskWorker:
     # Update return type hint
     def get_task_handlers(
         self,
-    ) -> dict[str, Callable[[ToolExecutionContext, Any], Awaitable[None]]]:
+    ) -> dict[str, TaskHandler]:
         """Return the current task handlers dictionary for this worker."""
         return self.task_handlers
 
@@ -5217,7 +5219,7 @@ class TaskWorker:
                 effective_timeout = self._timeout_for_task_type(task["task_type"])
                 handler_started = time.monotonic()
                 try:
-                    await asyncio.wait_for(
+                    completion_note = await asyncio.wait_for(
                         handler(exec_context, task["payload"]),
                         timeout=effective_timeout,
                     )
@@ -5258,6 +5260,8 @@ class TaskWorker:
                     await txn.tasks.update_status(
                         task_id=task_id,
                         status="done",
+                        error=completion_note,
+                        replace_error=True,
                         payload=self._payload_with_schedule_automation_advance_outbox(
                             task,
                             advance_request,
@@ -6288,7 +6292,7 @@ def build_script_confirmation_callback(
 async def handle_script_execution(
     exec_context: ToolExecutionContext,
     payload: ScriptExecutionPayload,
-) -> None:
+) -> str | None:
     """
     Task handler for executing scripts triggered by events.
 
@@ -6308,6 +6312,10 @@ async def handle_script_execution(
             - config: Optional configuration (timeout, allowed_tools)
             - listener_id: ID of the event listener that triggered this
             - conversation_id: Conversation context for the script
+
+    Returns:
+        A note listing the tool calls that returned errors, if any did, so a
+        run that finished despite them is distinguishable in its history.
 
     Raises:
         ScriptTimeoutError: If script execution exceeds the timeout
@@ -6543,7 +6551,7 @@ async def handle_script_execution(
         )
 
     # Execute the script
-    async def execute_script() -> None:
+    async def execute_script() -> str | None:
         logger.debug(
             f"Executing script for listener {listener_id} with event data: {event_data}"
         )
@@ -6579,8 +6587,17 @@ async def handle_script_execution(
                     listener_id=listener_id,
                 )
 
+        tool_errors = engine.get_tool_errors()
+        if not tool_errors.count:
+            return None
+        note = tool_errors.summary()
+        logger.warning(
+            f"Script for listener {listener_id} (script {script_name or 'inline'}) {note}"
+        )
+        return note
+
     try:
-        await execute_script()
+        return await execute_script()
     except ScriptTimeoutError as e:
         logger.error(
             f"Script timeout for listener {listener_id} after {e.timeout_seconds} seconds: {e}"

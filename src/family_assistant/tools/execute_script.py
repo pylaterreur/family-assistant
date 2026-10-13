@@ -27,7 +27,10 @@ from family_assistant.scripting.invocation import (
     ScriptPreparationError,
     prepare_script_invocation,
 )
-from family_assistant.scripting.monty_engine import MontyEngine, ScriptOutputBuffer
+from family_assistant.scripting.monty_engine import (
+    MontyEngine,
+    ScriptOutputBuffer,
+)
 from family_assistant.security.taint import TaintSourceType
 from family_assistant.tools.taint_helpers import merge_artifact_taint_into_context
 from family_assistant.tools.types import ToolAttachment, ToolDefinition, ToolResult
@@ -364,6 +367,10 @@ async def execute_script_tool(
             # Convert other types to string
             response_parts.append(f"Script result: {result}")
 
+        tool_errors = engine.get_tool_errors()
+        if tool_errors.count:
+            response_parts.append(f"\n--- Tool Errors ---\n{tool_errors.summary()}")
+
         # Add wake_llm contexts if any
         if wake_contexts:
             response_parts.append("\n--- Wake LLM Contexts ---")
@@ -405,6 +412,11 @@ async def execute_script_tool(
     try:
         return await _execute()
     except ScriptPreparationError as e:
+        logger.warning(
+            f"Script preparation failed for {name or 'inline script'!r} "
+            f"({e.error_type}): {e}",
+            extra={"error_category": "user_script"},
+        )
         return ToolResult(
             text=f"Error: {e}",
             data={"status": "error", "error_type": e.error_type, "error": str(e)},

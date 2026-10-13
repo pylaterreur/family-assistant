@@ -1288,13 +1288,18 @@ async def get_automation_stats_tool(
             for execution in recent[:5]:  # Show top 5
                 status = execution.get("status", "unknown")
                 created = execution.get("created_at")
+                # Only whether a run recorded an error, not its text: a run's
+                # error can quote tool output, and this tool's result is trusted.
+                has_error = bool(execution.get("error"))
                 if created:
+                    detail = " (errors recorded)" if has_error else ""
                     lines.append(
-                        f"  - {format_automation_datetime(created, exec_context.timezone)}: {status}"
+                        f"  - {format_automation_datetime(created, exec_context.timezone)}: {status}{detail}"
                     )
                     recent_list.append({
                         "created_at": _to_isoformat(created, exec_context.timezone),
                         "status": status,
+                        "has_error": has_error,
                     })
             stats_data["recent_executions"] = recent_list
 
