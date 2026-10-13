@@ -555,6 +555,10 @@ class MCPToolsProvider:
             result = ready.result()
             if result[0] is not None:
                 self._connections[server_id] = connection
+            else:
+                # The holder is still unwinding whatever it opened; bound that
+                # here, since nothing else will track it.
+                await self._stop_connection(connection)
             return result
         if connection.task.done():
             logger.warning(

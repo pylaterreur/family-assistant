@@ -40,11 +40,19 @@ type DiscoveryResult = tuple[
 ]
 
 
-def _provider(**kwargs: float) -> MCPToolsProvider:
+def _provider(
+    *,
+    health_check_interval_seconds: int = 30,
+    reconnect_backoff_base_seconds: float = 30.0,
+) -> MCPToolsProvider:
     configs: dict[str, MCPServerConfig] = {
         SERVER_ID: {"transport": "stdio", "command": "echo"}
     }
-    return MCPToolsProvider(configs, **kwargs)  # type: ignore[arg-type]
+    return MCPToolsProvider(
+        configs,
+        health_check_interval_seconds=health_check_interval_seconds,
+        reconnect_backoff_base_seconds=reconnect_backoff_base_seconds,
+    )
 
 
 def _session(*, ping_error: BaseException | None = None) -> ClientSession:
@@ -84,7 +92,10 @@ class _FakeTransport:
 
 
 def _open_with(
-    provider: MCPToolsProvider, transport: _FakeTransport, session: ClientSession
+    monkeypatch: pytest.MonkeyPatch,
+    provider: MCPToolsProvider,
+    transport: _FakeTransport,
+    session: ClientSession,
 ) -> None:
     """Make the provider open ``transport`` instead of a real server."""
 
@@ -98,7 +109,7 @@ def _open_with(
         provider._server_statuses[server_id] = MCP_SERVER_STATUS_CONNECTED
         return session, [], [], {}
 
-    provider._open_server_connection = fake_open  # type: ignore[method-assign]
+    monkeypatch.setattr(provider, "_open_server_connection", fake_open)
 
 
 async def _connect(provider: MCPToolsProvider) -> ClientSession:
@@ -111,11 +122,13 @@ async def _connect(provider: MCPToolsProvider) -> ClientSession:
 
 
 @pytest.mark.asyncio
-async def test_dying_transport_cancels_only_its_holder() -> None:
+async def test_dying_transport_cancels_only_its_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The reader failure that stopped the health loop now ends only the holder."""
     provider = _provider()
     transport = _FakeTransport()
-    _open_with(provider, transport, _session())
+    _open_with(monkeypatch, provider, transport, _session())
     await _connect(provider)
     holder = provider._connections[SERVER_ID].task
 
@@ -130,17 +143,19 @@ async def test_dying_transport_cancels_only_its_holder() -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_check_reconnects_a_server_whose_holder_ended() -> None:
+async def test_health_check_reconnects_a_server_whose_holder_ended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = _provider()
     transport = _FakeTransport()
-    _open_with(provider, transport, _session())
+    _open_with(monkeypatch, provider, transport, _session())
     await _connect(provider)
     holder = provider._connections[SERVER_ID].task
     transport.reader_fails.set()
     await asyncio.wait({holder}, timeout=WAIT_SECONDS)
 
     replacement = _session()
-    _open_with(provider, _FakeTransport(), replacement)
+    _open_with(monkeypatch, provider, _FakeTransport(), replacement)
     await provider._run_health_checks()
 
     assert provider._sessions[SERVER_ID] is replacement
@@ -149,11 +164,13 @@ async def test_health_check_reconnects_a_server_whose_holder_ended() -> None:
 
 
 @pytest.mark.asyncio
-async def test_closing_from_another_task_unwinds_in_the_holder() -> None:
+async def test_closing_from_another_task_unwinds_in_the_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Teardown from the health loop's task no longer exits a foreign cancel scope."""
     provider = _provider()
     transport = _FakeTransport()
-    _open_with(provider, transport, _session())
+    _open_with(monkeypatch, provider, transport, _session())
     await asyncio.create_task(_connect(provider))
     holder = provider._connections[SERVER_ID].task
 
@@ -168,7 +185,9 @@ async def test_closing_from_another_task_unwinds_in_the_holder() -> None:
 
 
 @pytest.mark.asyncio
-async def test_connect_reports_failure_when_server_hangs() -> None:
+async def test_connect_reports_failure_when_server_hangs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = _provider()
     provider._initialization_timeout_seconds = 0
     hung = asyncio.Event()
@@ -182,7 +201,7 @@ async def test_connect_reports_failure_when_server_hangs() -> None:
         await hung.wait()
         raise AssertionError("unreachable")
 
-    provider._open_server_connection = hanging_open  # type: ignore[method-assign]
+    monkeypatch.setattr(provider, "_open_server_connection", hanging_open)
 
     result = await provider._connect_and_discover_mcp(
         SERVER_ID, provider.server_configs[SERVER_ID]
@@ -194,7 +213,38 @@ async def test_connect_reports_failure_when_server_hangs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_loop_survives_a_cancellation_escaping_a_reconnect() -> None:
+async def test_failed_discovery_closes_what_it_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport opened before discovery failed is closed before connect returns."""
+    provider = _provider()
+    transport = _FakeTransport()
+
+    async def open_then_fail(
+        server_id: str,
+        server_conf: MCPServerConfig,
+        exit_stack: contextlib.AsyncExitStack,
+    ) -> DiscoveryResult:
+        del server_conf
+        await exit_stack.enter_async_context(transport.open())
+        provider._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
+        return None, [], [], {}
+
+    monkeypatch.setattr(provider, "_open_server_connection", open_then_fail)
+
+    result = await provider._connect_and_discover_mcp(
+        SERVER_ID, provider.server_configs[SERVER_ID]
+    )
+
+    assert result[0] is None
+    assert transport.exited
+    assert SERVER_ID not in provider._connections
+
+
+@pytest.mark.asyncio
+async def test_health_loop_survives_a_cancellation_escaping_a_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Sunday's incident: a reconnect raised CancelledError and the loop exited."""
     provider = _provider(
         health_check_interval_seconds=0, reconnect_backoff_base_seconds=0.0
@@ -215,7 +265,7 @@ async def test_health_loop_survives_a_cancellation_escaping_a_reconnect() -> Non
         reconnected.set()
         return replacement, [], [], {}
 
-    provider._connect_and_discover_mcp = connect  # type: ignore[method-assign]
+    monkeypatch.setattr(provider, "_connect_and_discover_mcp", connect)
     provider._health_check_task = asyncio.create_task(provider._health_check_loop())
 
     await asyncio.wait_for(reconnected.wait(), timeout=WAIT_SECONDS)
@@ -227,7 +277,9 @@ async def test_health_loop_survives_a_cancellation_escaping_a_reconnect() -> Non
 
 
 @pytest.mark.asyncio
-async def test_health_loop_survives_an_error_in_a_pass() -> None:
+async def test_health_loop_survives_an_error_in_a_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = _provider(health_check_interval_seconds=0)
     second_pass = asyncio.Event()
     passes = 0
@@ -239,7 +291,7 @@ async def test_health_loop_survives_an_error_in_a_pass() -> None:
             raise RuntimeError("boom")
         second_pass.set()
 
-    provider._run_health_check_pass = failing_then_ok  # type: ignore[method-assign]
+    monkeypatch.setattr(provider, "_run_health_check_pass", failing_then_ok)
     provider._health_check_task = asyncio.create_task(provider._health_check_loop())
 
     await asyncio.wait_for(second_pass.wait(), timeout=WAIT_SECONDS)
@@ -249,7 +301,9 @@ async def test_health_loop_survives_an_error_in_a_pass() -> None:
 
 
 @pytest.mark.asyncio
-async def test_repeated_ping_timeouts_reconnect() -> None:
+async def test_repeated_ping_timeouts_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = _provider(reconnect_backoff_base_seconds=0.0)
     provider._initialized = True
     provider._server_statuses[SERVER_ID] = MCP_SERVER_STATUS_CONNECTED
@@ -257,7 +311,7 @@ async def test_repeated_ping_timeouts_reconnect() -> None:
     provider._sessions[SERVER_ID] = unresponsive
     replacement = _session()
     connect = AsyncMock(return_value=(replacement, [], [], {}))
-    provider._connect_and_discover_mcp = connect  # type: ignore[method-assign]
+    monkeypatch.setattr(provider, "_connect_and_discover_mcp", connect)
 
     for _ in range(CONSECUTIVE_PING_TIMEOUTS_BEFORE_RECONNECT - 1):
         await provider._run_health_checks()
@@ -269,12 +323,14 @@ async def test_repeated_ping_timeouts_reconnect() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_passing_ping_resets_the_timeout_count() -> None:
+async def test_a_passing_ping_resets_the_timeout_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     provider = _provider()
     provider._initialized = True
     provider._server_statuses[SERVER_ID] = MCP_SERVER_STATUS_CONNECTED
     connect = AsyncMock(return_value=(_session(), [], [], {}))
-    provider._connect_and_discover_mcp = connect  # type: ignore[method-assign]
+    monkeypatch.setattr(provider, "_connect_and_discover_mcp", connect)
 
     slow = _session(ping_error=TimeoutError())
     provider._sessions[SERVER_ID] = slow
