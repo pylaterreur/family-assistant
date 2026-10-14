@@ -408,6 +408,52 @@ describe('SharedConversationPage', () => {
     expect(screen.queryByTestId('tool-group')).not.toBeInTheDocument();
   });
 
+  it('does not describe a call that did not run as done', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get('/api/v1/shared-conversations/not-run/messages', () =>
+        HttpResponse.json({
+          messages: [
+            {
+              internal_id: '1',
+              role: 'assistant',
+              timestamp: '2026-08-10T12:00:00Z',
+              content: '',
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'delete_note', arguments: '{"title":"Old"}' },
+                  display: {
+                    active: 'Deleting note “Old”',
+                    done: 'Deleted note “Old”',
+                    changes: true,
+                  },
+                },
+              ],
+            },
+            {
+              internal_id: '2',
+              role: 'tool',
+              timestamp: '2026-08-10T12:00:01Z',
+              tool_call_id: 'call_1',
+              content: 'OK. Action cancelled by user.',
+              tool_outcome: 'rejected',
+            },
+          ],
+        })
+      )
+    );
+    renderSharedPage('not-run');
+
+    const headline = await screen.findByTestId('tool-group-headline');
+    expect(headline).toHaveTextContent('Deleting note “Old”');
+    await user.click(screen.getByTestId('tool-group-trigger'));
+    const row = screen.getByTestId('shared-tool-call');
+    expect(row).toHaveTextContent('Deleting note “Old”');
+    expect(screen.queryByText(/Deleted note/)).not.toBeInTheDocument();
+  });
+
   it("headlines a single tool call with the server's phrase", async () => {
     server.use(
       http.get('/api/v1/shared-conversations/summary/messages', () =>

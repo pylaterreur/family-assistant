@@ -166,7 +166,7 @@ const SharedToolGroup: React.FC<{ toolCalls: SharedToolCall[] }> = ({ toolCalls 
           >
             <div className="flex flex-wrap items-center gap-2 break-all text-xs font-medium">
               <Icon className="h-3.5 w-3.5" />
-              {toolCallPhrase(calls[index], 'done')}
+              {toolCallPhrase(calls[index], toolCall.outcome === 'succeeded' ? 'done' : 'active')}
               {toolCall.outcome !== 'succeeded' && (
                 <span
                   className={
