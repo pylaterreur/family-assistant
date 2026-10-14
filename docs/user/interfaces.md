@@ -34,11 +34,12 @@ messages as you would to a person.
 Open the web app at the URL your operator gave you (`{{ SERVER_URL }}`). It opens on the home page,
 works on phones and tablets, and supports dark mode.
 
-Every page, Chat included, shares the same navigation. On a computer or tablet it is the sidebar on
-the left; the arrows at its top shrink it to a strip of icons (hover an icon for its name) and the
-choice is remembered. On a phone, the menu button at the top left of every page opens the same list,
-and choosing a page closes it. The Family Assistant name takes you home. Help, About and the light,
-dark or system theme control sit at the bottom of the navigation.
+Every page, Chat included, shares the same navigation. On a computer it is the sidebar on the left;
+the arrows at its top shrink it to a strip of icons (hover an icon for its name) and the choice is
+remembered. On a tablet the sidebar is always that strip of icons. On a phone, the menu button at
+the top left of every page opens the same list, and choosing a page closes it. The Family Assistant
+name or logo takes you home. Help, About and the light, dark or system theme control sit at the
+bottom of the navigation.
 
 The home page cards can be opened with a tap, click, or keyboard. In **System → Tools**, use
 **Search tools** to find a tool by its name or description before opening its details.

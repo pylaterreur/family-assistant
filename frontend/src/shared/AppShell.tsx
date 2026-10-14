@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/sheet';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
+import logoUrl from '@/assets/logo-64.png';
 import { AppNav, AppNavFooter } from './AppNav';
 import { findActiveNavItem } from './navigation';
 import { ThemeToggle } from './ThemeToggle';
@@ -68,7 +69,7 @@ const Brand: React.FC<BrandProps> = ({ showName, onNavigate }) => (
     aria-label={showName ? undefined : 'Family Assistant home'}
     className="flex min-w-0 items-center gap-2.5 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
   >
-    <img src="/static/images/favicon-32.png" alt="" className="h-7 w-7 shrink-0 rounded-md" />
+    <img src={logoUrl} alt="" className="h-7 w-7 shrink-0 rounded-md" />
     {showName && <span className="truncate text-sm font-semibold">Family Assistant</span>}
   </Link>
 );
