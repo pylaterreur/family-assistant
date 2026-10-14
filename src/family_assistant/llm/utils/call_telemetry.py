@@ -288,6 +288,8 @@ class LLMCallTelemetry:
         finalized["duration_ms"] = round(self.elapsed_ms, 1)
         finalized["provider"] = self.provider
         finalized["request_id"] = self.request_id
+        if self._response_id:
+            finalized["response_id"] = self._response_id
         first_output_ms = self.time_to_first_output_ms
         if first_output_ms is not None:
             finalized["time_to_first_output_ms"] = round(first_output_ms, 1)
@@ -347,8 +349,24 @@ class LLMCallTelemetry:
         """
         if self._metrics_recorded:
             return
+        self._set_completion_attributes()
         self.span.set_attribute("llm.cancelled", True)
         self._record_metrics(outcome="cancelled", error_type=None)
+        # Nothing else survives the call: no message row is written for a reply
+        # that never finished, and a provider that reports usage only at the
+        # end of the stream (OpenRouter) has reported none. The provider's own
+        # id is what lets the spend be found in its billing afterwards.
+        logger.warning(
+            "LLM call abandoned before completion: request_id=%s provider=%s "
+            "model=%s response_id=%s elapsed_ms=%.0f usage=%s",
+            self.request_id,
+            self.provider,
+            self.resolved_model or self.requested_model,
+            self._response_id,
+            self.elapsed_ms,
+            self._reasoning_info,
+        )
+        self._add_record(response=None, error="cancelled before completion")
 
     def _record_metrics(self, *, outcome: str, error_type: str | None) -> None:
         """Fold this call into the Prometheus counters.

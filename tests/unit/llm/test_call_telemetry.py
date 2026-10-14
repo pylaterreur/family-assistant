@@ -363,6 +363,49 @@ class TestErrors:
         assert record.error == "upstream refused"
 
 
+class TestAbandonedCalls:
+    """A call nobody waited for still has to be findable afterwards."""
+
+    def test_an_abandoned_call_leaves_a_record_with_the_provider_id(
+        self, exporter: InMemorySpanExporter, buffer: LLMRequestBuffer
+    ) -> None:
+        telemetry = _telemetry(exporter, streaming=True)
+        telemetry.record_response_metadata(response_id="gen-123")
+
+        telemetry.finish_abandoned()
+
+        record = buffer.get_recent()[0]
+        assert record.request_id == telemetry.request_id
+        assert record.response_id == "gen-123"
+        assert record.error == "cancelled before completion"
+
+    def test_an_abandoned_call_marks_its_span_with_the_provider_id(
+        self, exporter: InMemorySpanExporter, buffer: LLMRequestBuffer
+    ) -> None:
+        del buffer
+        telemetry = _telemetry(exporter, streaming=True)
+        telemetry.record_response_metadata(response_id="gen-123")
+
+        telemetry.finish_abandoned()
+        telemetry.span.end()
+
+        attributes = _finished(exporter).attributes
+        assert attributes is not None
+        assert attributes["llm.cancelled"] is True
+        assert attributes["gen_ai.response.id"] == "gen-123"
+
+    def test_abandoning_a_finished_call_adds_no_second_record(
+        self, exporter: InMemorySpanExporter, buffer: LLMRequestBuffer
+    ) -> None:
+        """The provider's finally runs after its own terminal path."""
+        telemetry = _telemetry(exporter, streaming=True)
+        telemetry.finish_success(None)
+
+        telemetry.finish_abandoned()
+
+        assert [record.error for record in buffer.get_recent()] == [None]
+
+
 class TestUsageFinalization:
     """What rides along with the message, as against what rides on the span."""
 
@@ -372,7 +415,9 @@ class TestUsageFinalization:
         del buffer
         telemetry = _telemetry(exporter, streaming=True)
         telemetry.record_response_metadata(
-            resolved_model="model-2026-08-01", finish_reason="stop"
+            resolved_model="model-2026-08-01",
+            response_id="gen-123",
+            finish_reason="stop",
         )
         telemetry.observe_event(LLMStreamEvent(type="content", content="hi"))
 
@@ -383,6 +428,7 @@ class TestUsageFinalization:
         assert finalized.get("finish_reason") == "stop"
         assert finalized.get("provider") == "testprovider"
         assert finalized.get("request_id") == telemetry.request_id
+        assert finalized.get("response_id") == "gen-123"
         duration_ms = finalized.get("duration_ms")
         first_output_ms = finalized.get("time_to_first_output_ms")
         assert duration_ms is not None
