@@ -100,15 +100,15 @@ class ToolResolutionError(Exception):
 
 @functools.cache
 def _local_tool_descriptor_map() -> dict[str, ToolDescriptor]:
-    """Build a name->descriptor map from the live local tool registry.
+    """Build a name->descriptor map from the live local tool registry."""
+    return {descriptor.name: descriptor for descriptor in LOCAL_TOOL_DESCRIPTORS}
 
-    The ambient admission sink is reviewed under a named descriptor that no
-    tool registry advertises, so it is added here for its cases to resolve.
-    """
-    return {
-        descriptor.name: descriptor
-        for descriptor in (*LOCAL_TOOL_DESCRIPTORS, AMBIENT_ADMISSION_DESCRIPTOR)
-    }
+
+# Sinks the gate reviews under its own descriptor, which no tool registry or
+# registry snapshot advertises. They resolve whichever registry a run uses.
+_NAMED_SINK_DESCRIPTORS: dict[str, ToolDescriptor] = {
+    AMBIENT_ADMISSION_DESCRIPTOR.name: AMBIENT_ADMISSION_DESCRIPTOR,
+}
 
 
 def resolve_tool_descriptor(
@@ -126,8 +126,11 @@ def resolve_tool_descriptor(
     its wrapped provider, which the static local list cannot supply — a
     deployment replaying cases that involve those tools must pass the same
     provider registry it evaluates with, so those cases resolve instead of
-    silently dropping out of the harness.
+    silently dropping out of the harness. Named sinks the gate defines itself
+    resolve against any registry.
     """
+    if tool_name in _NAMED_SINK_DESCRIPTORS:
+        return _NAMED_SINK_DESCRIPTORS[tool_name]
     descriptor_map = registry if registry is not None else _local_tool_descriptor_map()
     try:
         return descriptor_map[tool_name]

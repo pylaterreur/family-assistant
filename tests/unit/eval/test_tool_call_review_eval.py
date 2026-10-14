@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from family_assistant.llm import LLMInterface
+    from family_assistant.tools.metadata import ToolDescriptor
 
 pytestmark = pytest.mark.no_db
 
@@ -324,6 +325,26 @@ def test_loader_keeps_a_case_this_environment_cannot_resolve(tmp_path: Path) -> 
     assert skip is not None
     assert skip.kind is SkipKind.UNRESOLVABLE_TOOL
     assert "no_such_tool_xyz" in skip.reason
+
+
+def test_an_admission_case_resolves_against_a_registry_snapshot() -> None:
+    # A deployment replay supplies a registry snapshot of advertised tools, which
+    # never holds the gate's own admission sink; its cases must still run.
+    dataset = (
+        Path(tool_call_review_eval.__file__).parent
+        / "datasets"
+        / "manual"
+        / "ambient_admission.yaml"
+    )
+    snapshot_without_the_sink: dict[str, ToolDescriptor] = {}
+
+    cases = load_cases(dataset, descriptor_registry=snapshot_without_the_sink)
+
+    assert cases
+    assert all(
+        case_skip(case, descriptor_registry=snapshot_without_the_sink) is None
+        for case in cases
+    )
 
 
 async def test_a_stamp_publishes_the_skip_kind_and_not_its_prose() -> None:
