@@ -1,6 +1,6 @@
 interactions:
   - request:
-      body: '{"max_tokens":8192,"messages":[{"role":"user","content":"Generate a simple image for me"},{"role":"assistant","content":[{"type":"text","text":"I''ll generate a simple image for you."},{"type":"tool_use","id":"call_123","name":"generate_image","input":{"prompt":"simple"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_123","content":[{"type":"text","text":"Generated a simple red pixel image"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}}]},{"type":"text","text":"What do you see in the image?"}]}],"model":"claude-haiku-4-5-20251001"}'
+      body: '{"max_tokens":16000,"messages":[{"role":"user","content":[{"type":"text","text":"Generate a simple image for me"}]},{"role":"assistant","content":[{"type":"text","text":"I''ll generate a simple image for you."},{"type":"tool_use","id":"call_123","name":"generate_image","input":{"prompt":"simple"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_123","content":[{"type":"text","text":"Generated a simple red pixel image"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}}]},{"type":"text","text":"What do you see in the image?","cache_control":{"type":"ephemeral"}}]}],"model":"claude-haiku-4-5-20251001"}'
       headers:
         accept:
           - application/json
@@ -11,7 +11,7 @@ interactions:
         connection:
           - keep-alive
         content-length:
-          - '689'
+          - '752'
         content-type:
           - application/json
         host:
@@ -43,18 +43,18 @@ interactions:
     response:
       body:
         string: !!binary |
-          H4sIAAAAAAAA/3VSy44TMRD8lcaXvSRLkt1oYS4c2UhwQoAEi0becWXGxGMPdjvsEOXfaU8S8RIn
-          W1XVVd1uH1QfDJyqVON0Nph32u7y/Ha+nq8Wq/VysViqmbJGBH1q68Xy9n5s9+/evA367sNrY2/w
-          6cWP9/ei4XFAUSEl3UKAGFwBdEo2sfYsUBM8Q27V58NFz3gqzHRUakMJIE17xJGS7QcHsr34kZQW
-          H+tbCltRJLkJGWFosE9wFLyg3zvLeO5s2zE96mbXxpC9uaYNXyXSniQloocbqbdejN3ZfU5fc2Lx
-          ACVBncS5ULxN4Gt68A/+Y8jO0BgyObsD9SAO1MIjai4d9yInA9bWSVmIZGXUiFPHpxDrE0ObV7Sh
-          RnppIkppCj24K6rJYm9TlgZG0sMA7abqbcm9MqdkiU0DGrsdZVrNZ2qI2CJOJPBMHb/MVOIw1JKR
-          gpeXhTc15+jVmUj4luEbWYHPzs1UnrZWHZT1Q+aaww4+qWq5eilr002HeurXBl//qVhceKHN/7hL
-          bQnA0MkKonb1uv9X/4tddn+zx5kKmX+H7m5kHMS9bVCzRZRBy18zOprybb28SRmybhGE8oFrvZcN
-          6Uf5msfjT4688Sj9AgAA
+          H4sIAAAAAAAA/3VSwW4TMRD9lcGXXpKSjYiq5oIQEiLXIMSBotXEnu5O47UXe5wmivLvjJNGUBAn
+          W/PevPdm7KMZoiNvlsZ6LI6mPfK2TN9NF9P5bL5oZrPGTAw7JQy5a2dN87Fr1gv8sr77HD/dD4sP
+          9mtZb5Ujh5Eqi3LGjrSQoq8FzJmzYBAt2RiE9Lb8frzyhfYVOR9Ls4JMBAg7SgfIPIyegAfVgymw
+          AI4jYcogETaVlgf0HhI5GHlPHmICFwViUOy5Z6G3nrteYIN226VYgruFldxkwABqmGggf4CBg3p4
+          TXnxmsBT0bvKc+g0gI0+nj0iB7mFh/AQvsXiHRxiAc9bgoFqpI4CJZQabNAG7av59+dUJMheNS7D
+          cMhC6N7DSklVySaqjTkOJL26wjNLf1HZcS7otUUoUZbJxRHBY3DZ4qhx4+aJrCJqlK2GAH6s2W40
+          cqJHSm/M6cdl+cga0SxD8X5issSxVeMcg66egmulpGBegEw/CwVLr9iXOfK1Vs5PvTwaDmORVuKW
+          goLN/F7t0PbUngfjGNrXjNkVV9j9D7v2VgMae32shL5dDP/yf6NN/zd6mphY5M/SnabLlHZsqRWu
+          +zD1gzpMrv71oBurg7cdRYVClBZ3OjVu9D+rmmPsQszC9mUPp18gi7ZURQMAAA==
       headers:
         CF-RAY:
-          - 9ce27bef1df25c56-FRA
+          - a4a37a5ce8df4f70-FRA
         Connection:
           - keep-alive
         Content-Encoding:
@@ -64,7 +64,7 @@ interactions:
         Content-Type:
           - application/json
         Date:
-          - Sun, 15 Feb 2026 05:42:50 GMT
+          - Wed, 14 Oct 2026 03:25:40 GMT
         Server:
           - cloudflare
         Transfer-Encoding:
@@ -74,37 +74,41 @@ interactions:
         anthropic-organization-id:
           - 47b93e1d-acf2-4be5-b32d-1716b0cff224
         anthropic-ratelimit-input-tokens-limit:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-remaining:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-reset:
-          - '2026-02-15T05:42:49Z'
+          - '2026-10-14T03:25:39Z'
         anthropic-ratelimit-output-tokens-limit:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-remaining:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-reset:
-          - '2026-02-15T05:42:51Z'
+          - '2026-10-14T03:25:39Z'
         anthropic-ratelimit-requests-limit:
-          - '50'
+          - '10000'
         anthropic-ratelimit-requests-remaining:
-          - '48'
+          - '9999'
         anthropic-ratelimit-requests-reset:
-          - '2026-02-15T05:42:51Z'
+          - '2026-10-14T03:25:38Z'
         anthropic-ratelimit-tokens-limit:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-remaining:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-reset:
-          - '2026-02-15T05:42:49Z'
+          - '2026-10-14T03:25:39Z'
+        anthropic-workspace-id:
+          - wrkspc_01TyX2k3iWProyRBoEVYPNGB
         cf-cache-status:
           - DYNAMIC
         request-id:
-          - req_011CY9KbcrAvBxNXSAGMFdrB
+          - req_011Cg1R5aE1qY2LUM4kR8C95
         strict-transport-security:
           - max-age=31536000; includeSubDomains; preload
-        x-envoy-upstream-service-time:
-          - '1327'
+        traceresponse:
+          - 00-c1b4501e30553be4dd460ee451138475-0fe73deda7e23bae-01
+        vary:
+          - Accept-Encoding
       status:
         code: 200
         message: OK

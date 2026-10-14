@@ -1,6 +1,6 @@
 interactions:
   - request:
-      body: '{"max_tokens":8192,"messages":[{"role":"user","content":"What is 2+2? Reply with a JSON object with a key ''answer''."}],"model":"claude-haiku-4-5-20251001","system":"You are a helpful assistant that always responds in JSON format."}'
+      body: '{"max_tokens":16000,"messages":[{"role":"user","content":[{"type":"text","text":"What is 2+2? Reply with a JSON object with a key ''answer''.","cache_control":{"type":"ephemeral"}}]}],"model":"claude-haiku-4-5-20251001","system":"You are a helpful assistant that always responds in JSON format."}'
       headers:
         accept:
           - application/json
@@ -11,7 +11,7 @@ interactions:
         connection:
           - keep-alive
         content-length:
-          - '231'
+          - '294'
         content-type:
           - application/json
         host:
@@ -43,15 +43,15 @@ interactions:
     response:
       body:
         string: !!binary |
-          H4sIAAAAAAAA/3WRS0/DMAyA/0rlcyu1YxWoRw7AAQ4gOFGUhca02Vqn5DHYqv53nImJlzgl8vfZ
-          8mOCwSjsoYKml0Fh1km9CdkyK7NFviiLPC8gBa1YGFwr8uJ6v788vWofbi7Ow7rY323vd7elZ8fv
-          RowWOidb5IA1fQxI57TzkqLTGPLIv+pxOvoe3w/Z8algtVqtnaGappqSpAZJ7g1tDVWyrGmuiTnM
-          Tyk4b0ZhUbLLWUhK+GAJPoHD14DUcHkKfZ9COHRUTaBpDF54s0FyUJ2ccUey6VA0XMprQ+KnkB85
-          Y/UfO+bG+jh2OKCVvSiHv/4XLbrfdE7BBP89VHB3Du1WNyi8RstzxjUqaVW8CL2gjTOKFg0jMl7I
-          rdS9fOatz/MHAlX8JtgBAAA=
+          H4sIAAAAAAAA/3WRy27CMBBFfwXNmkgJJRLNFnXVTdUum8oYe0gMyTj1g1Kh/HvHlKgvdWXrnuvr
+          eZyhtxo7qEB1MmrMWmkOMVtmZbbIF2WR5wXMwWg29L4ReVGsm+KxfHq4U7vdciXvbxfr/WnLnvA+
+          YHKh97JBFpztkiC9Nz5ICiwpSwH5Vj2fJ3/AUyKXo4LNZrP3lmo61zSb1SDJv6GroZotaxprYg7j
+          y2eQNIQOKopdNwcf7CAcSn7MMUhahOgIrsDja0RS+MOtkSM6P2nxUnZ1BkNDDCLYAxLDmxX/JlWL
+          QnF8MJbET0M+ccb6Pza9Tfk4tNijk50o+7/+L1q0v+k4BxvDd6ng6jy6o1EogknjgDRrLZ1Oa6Md
+          utS3aNAyIhuEPHLTcsur4TRtZEPWB6OuYxg/AEdKUrkQAgAA
       headers:
         CF-RAY:
-          - 9ce27bd47f0adbad-FRA
+          - a4a37a50fe3c4d7c-FRA
         Connection:
           - keep-alive
         Content-Encoding:
@@ -61,7 +61,7 @@ interactions:
         Content-Type:
           - application/json
         Date:
-          - Sun, 15 Feb 2026 05:42:45 GMT
+          - Wed, 14 Oct 2026 03:25:37 GMT
         Server:
           - cloudflare
         Transfer-Encoding:
@@ -71,37 +71,41 @@ interactions:
         anthropic-organization-id:
           - 47b93e1d-acf2-4be5-b32d-1716b0cff224
         anthropic-ratelimit-input-tokens-limit:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-remaining:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-reset:
-          - '2026-02-15T05:42:45Z'
+          - '2026-10-14T03:25:37Z'
         anthropic-ratelimit-output-tokens-limit:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-remaining:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-reset:
-          - '2026-02-15T05:42:45Z'
+          - '2026-10-14T03:25:37Z'
         anthropic-ratelimit-requests-limit:
-          - '50'
+          - '10000'
         anthropic-ratelimit-requests-remaining:
-          - '48'
+          - '9999'
         anthropic-ratelimit-requests-reset:
-          - '2026-02-15T05:42:47Z'
+          - '2026-10-14T03:25:36Z'
         anthropic-ratelimit-tokens-limit:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-remaining:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-reset:
-          - '2026-02-15T05:42:45Z'
+          - '2026-10-14T03:25:37Z'
+        anthropic-workspace-id:
+          - wrkspc_01TyX2k3iWProyRBoEVYPNGB
         cf-cache-status:
           - DYNAMIC
         request-id:
-          - req_011CY9KbJb5TG2m4JhQMtdi7
+          - req_011Cg1R5S8ME8hN1CEjvZG3i
         strict-transport-security:
           - max-age=31536000; includeSubDomains; preload
-        x-envoy-upstream-service-time:
-          - '361'
+        traceresponse:
+          - 00-270d29c972e4846907cb5c666e03cb86-4b11be52805d20b6-01
+        vary:
+          - Accept-Encoding
       status:
         code: 200
         message: OK

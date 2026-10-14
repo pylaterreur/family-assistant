@@ -1,6 +1,6 @@
 interactions:
   - request:
-      body: '{"max_tokens":8192,"messages":[{"role":"user","content":"What''s the weather like in San Francisco?"}],"model":"claude-haiku-4-5-20251001","tool_choice":{"type":"auto"},"tools":[{"name":"get_weather","description":"Get the current weather in a given location","input_schema":{"type":"object","properties":{"location":{"type":"string","description":"The city and state, e.g. San Francisco, CA"},"unit":{"type":"string","enum":["celsius","fahrenheit"],"description":"The temperature unit"}},"required":["location"]}}]}'
+      body: '{"max_tokens":16000,"messages":[{"role":"user","content":[{"type":"text","text":"What''s the weather like in San Francisco?","cache_control":{"type":"ephemeral"}}]}],"model":"claude-haiku-4-5-20251001","tool_choice":{"type":"auto"},"tools":[{"name":"get_weather","description":"Get the current weather in a given location","input_schema":{"type":"object","properties":{"location":{"type":"string","description":"The city and state, e.g. San Francisco, CA"},"unit":{"type":"string","enum":["celsius","fahrenheit"],"description":"The temperature unit"}},"required":["location"]}}]}'
       headers:
         accept:
           - application/json
@@ -11,7 +11,7 @@ interactions:
         connection:
           - keep-alive
         content-length:
-          - '515'
+          - '578'
         content-type:
           - application/json
         host:
@@ -43,16 +43,16 @@ interactions:
     response:
       body:
         string: !!binary |
-          H4sIAAAAAAAA/3VRXUvDQBD8K+WeW0hq0kLepNCHVkWIoFTkWC/b5ujlLt5Hipb8d/cC0ar4drcz
-          s7Oze2aNqVCxggkFocJZDfIYZtksn82TeZ4mScqmTFZEaNyBJ+nD3Qfs7k+7LJSbZZ4fb3el3GfE
-          8e8tRhY6BwekgjUqFsA56TxoTyVhtEd6Fc/nke+NUTw4HF3iP5DP49bKJ7HtbtLNwpfpanPqrtaG
-          WBqaqDug5ycEX6ONUt0Gantmygjw0mhilKAnawtaSCfMdLK6Zj1NAEqRovjyr6RF4Vnfv0yZ86bl
-          FsEN+ovJBsDhW0AtSKSDUlMWhpzUaTDn3hxRO1Ys0izaiBq5oF5xGP6TkYw4wdV/2KiNBtjW2KAF
-          xfPmL/8bTevfKCU2wV+W8iXFQdtJgdzLuAoWr1OBrYY97tHGkPyAhiBtPIcOpIJXOmbffwLw3MWQ
-          LwIAAA==
+          H4sIAAAAAAAA/3VRXU8CMRD8K6TPkNwhX+HtAtEHkQQNPmBMs7brXUOvhX5gDOG/uz09BY1vdzOz
+          O7PTI6utRM2mTGiIEnsVqG3sDXrDXj/rD/Msy1mXKUmC2pc8y/NZmd+P3Gx+WMfy6i4uN7eryYo0
+          4X2HSYXeQ4kEOKsTAN4rH8AEgoQ1Aelr+nRs9cFazaPH1iX9R/KZ75ebwhZyMouLeDNe16UoHhek
+          MlCnuRIDf0MIFbo0anaR1h6ZtgKCsoYUD2A61w6MUF7YbmdWsBMlAK1pYvrtL5VDEdjp9PwZD5RJ
+          vIlad5kPdscdgm8WnkVtCI/7iEbghVoirdC+xWJTBtk1CXmwWzREjvJByiIq5IL2p8T8UpG1PNHy
+          P66dTQa4q7BGB5oP67/6HzavfrNUi43hHBqO6Rp0ByWQB5X6YOkJJTjZlP2KLh3OS7REGRs4HOhq
+          eKEXp21SQWmsD0p89XD6AAaPSeJnAgAA
       headers:
         CF-RAY:
-          - 9ce27ae369dfdbb1-FRA
+          - a4a37ac8a98bd9da-FRA
         Connection:
           - keep-alive
         Content-Encoding:
@@ -62,7 +62,7 @@ interactions:
         Content-Type:
           - application/json
         Date:
-          - Sun, 15 Feb 2026 05:42:07 GMT
+          - Wed, 14 Oct 2026 03:25:56 GMT
         Server:
           - cloudflare
         Transfer-Encoding:
@@ -72,37 +72,41 @@ interactions:
         anthropic-organization-id:
           - 47b93e1d-acf2-4be5-b32d-1716b0cff224
         anthropic-ratelimit-input-tokens-limit:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-remaining:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-reset:
-          - '2026-02-15T05:42:07Z'
+          - '2026-10-14T03:25:56Z'
         anthropic-ratelimit-output-tokens-limit:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-remaining:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-reset:
-          - '2026-02-15T05:42:07Z'
+          - '2026-10-14T03:25:56Z'
         anthropic-ratelimit-requests-limit:
-          - '50'
+          - '10000'
         anthropic-ratelimit-requests-remaining:
-          - '49'
+          - '9999'
         anthropic-ratelimit-requests-reset:
-          - '2026-02-15T05:42:07Z'
+          - '2026-10-14T03:25:56Z'
         anthropic-ratelimit-tokens-limit:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-remaining:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-reset:
-          - '2026-02-15T05:42:07Z'
+          - '2026-10-14T03:25:56Z'
+        anthropic-workspace-id:
+          - wrkspc_01TyX2k3iWProyRBoEVYPNGB
         cf-cache-status:
           - DYNAMIC
         request-id:
-          - req_011CY9KYTiumSXZLwh2Kn58Q
+          - req_011Cg1R6r1Ka7iZjv4m83kvJ
         strict-transport-security:
           - max-age=31536000; includeSubDomains; preload
-        x-envoy-upstream-service-time:
-          - '691'
+        traceresponse:
+          - 00-4a3836437a51412312e6a31e40bbf327-96291cb28c4b5616-01
+        vary:
+          - Accept-Encoding
       status:
         code: 200
         message: OK
