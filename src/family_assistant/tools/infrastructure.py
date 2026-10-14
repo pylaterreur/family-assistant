@@ -3082,6 +3082,19 @@ class TaintTrackingToolsProvider(ToolsProvider):
             floors.append(ToolCallReviewVerdict.CONFIRM)
             fallbacks.append(ToolCallReviewVerdict.CONFIRM)
         floor = _strictest_review_verdict(floors)
+        if (
+            taint_evaluation is not None
+            and taint_evaluation.sink_class is SinkClass.AMBIENT_PROMPT_WRITE
+            and taint_evaluation.mode is TaintPolicyMode.OBSERVE
+        ):
+            # Observe mode never asks a human, so an admission confirm could
+            # only ever mean "not admitted". Offer the judge the verdicts that
+            # have distinct effects.
+            return ToolCallReviewConstraints(
+                available_verdicts=_review_verdict_space(floor)
+                - {ToolCallReviewVerdict.CONFIRM},
+                fallback_verdict=ToolCallReviewVerdict.DENY,
+            )
         fallback = _strictest_review_verdict([
             *fallbacks,
             ToolCallReviewVerdict.CONFIRM,
