@@ -1606,7 +1606,10 @@ class TaintPolicyEvaluator:
             f"Runtime taint max tier {state.max_tier.config_value} maps "
             f"{sink_class.value} to {requested.value}."
         )
-        if requested is TaintPolicyOutcome.ADJUDICATE:
+        observed_admission = (
+            effective != requested and sink_class is SinkClass.AMBIENT_PROMPT_WRITE
+        )
+        if requested is TaintPolicyOutcome.ADJUDICATE and not observed_admission:
             if fallback_outcome is None:
                 raise AssertionError("Adjudicate evaluation lost its fallback")
             floor_text = verdict_floor.value if verdict_floor is not None else "allow"
@@ -1614,7 +1617,16 @@ class TaintPolicyEvaluator:
                 f" Reviewer verdict floor is {floor_text}; fallback is "
                 f"{fallback_outcome.value}."
             )
-        if effective != requested:
+        if observed_admission:
+            # Admission is awaited in observe mode too, and nobody is asked to
+            # confirm it: anything but an admitting verdict leaves the note as
+            # reference material.
+            reason += (
+                " Observe mode asks no one to confirm: a verdict other than "
+                "allow keeps the note as reference material that no prompt "
+                "includes."
+            )
+        elif effective != requested:
             reason += f" Observe mode records this as {effective.value}."
         return TaintPolicyEvaluation(
             sink_class=sink_class,

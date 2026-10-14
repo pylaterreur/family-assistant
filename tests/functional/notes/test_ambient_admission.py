@@ -29,6 +29,7 @@ from family_assistant.security.taint import (
 )
 from family_assistant.services.attachment_registry import AttachmentRegistry
 from family_assistant.services.tool_call_review import (
+    ToolCallReviewConstraints,
     ToolCallReviewResult,
     ToolCallReviewStatus,
     ToolCallReviewVerdict,
@@ -60,7 +61,6 @@ if TYPE_CHECKING:
     from family_assistant.processing import ProcessingService
     from family_assistant.security.taint import InMemoryTurnTaintTracker
     from family_assistant.services.tool_call_review import (
-        ToolCallReviewConstraints,
         ToolCallReviewer,
         ToolCallReviewInput,
     )
@@ -83,6 +83,7 @@ class _Reviewer:
         self._fallback = fallback
         self._gate = gate
         self.inputs: list[ToolCallReviewInput] = []
+        self.constraints: list[ToolCallReviewConstraints] = []
         self.entered = asyncio.Event()
 
     async def review_tool_call(
@@ -94,6 +95,7 @@ class _Reviewer:
     ) -> ToolCallReviewResult:
         del budget_exhausted
         self.inputs.append(review_input)
+        self.constraints.append(constraints)
         self.entered.set()
         if self._gate is not None and len(self.inputs) == 1:
             await self._gate.wait()
@@ -443,6 +445,54 @@ async def test_a_failed_reviewer_in_observe_mode_persists_without_prompting(
 
     assert confirmations.prompts == []
     assert await stored_tier(db, "Packing procedure") is EXTERNAL
+
+
+@pytest.mark.asyncio
+async def test_observe_mode_offers_the_judge_no_confirm_it_could_not_honour(
+    db_engine: AsyncEngine,
+) -> None:
+    db = Database(db_engine)
+    reviewer = _Reviewer(ToolCallReviewVerdict.DENY)
+
+    await _save(_context(db, tracker_at(EXTERNAL), _gate(OBSERVE, reviewer)))
+
+    assert reviewer.constraints == [
+        ToolCallReviewConstraints(
+            available_verdicts=frozenset({
+                ToolCallReviewVerdict.ALLOW,
+                ToolCallReviewVerdict.DENY,
+            }),
+            fallback_verdict=ToolCallReviewVerdict.DENY,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_observe_mode_tells_the_judge_what_a_non_admitting_verdict_does(
+    db_engine: AsyncEngine,
+) -> None:
+    db = Database(db_engine)
+    reviewer = _Reviewer(ToolCallReviewVerdict.DENY)
+
+    await _save(_context(db, tracker_at(EXTERNAL), _gate(OBSERVE, reviewer)))
+
+    descriptions = " ".join(
+        context.description for context in reviewer.inputs[0].policy_contexts
+    )
+    assert "keeps the note as reference material" in descriptions
+    assert "records this as audit" not in descriptions
+
+
+@pytest.mark.asyncio
+async def test_enforce_mode_still_offers_the_judge_a_confirm(
+    db_engine: AsyncEngine,
+) -> None:
+    db = Database(db_engine)
+    reviewer = _Reviewer(ToolCallReviewVerdict.ALLOW)
+
+    await _save(_context(db, tracker_at(EXTERNAL), _gate(ENFORCE, reviewer)))
+
+    assert ToolCallReviewVerdict.CONFIRM in reviewer.constraints[0].available_verdicts
 
 
 @pytest.mark.asyncio

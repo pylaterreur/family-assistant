@@ -230,7 +230,10 @@ What the verdict does:
   or an import path says nothing about the material being promoted. The fallback is reached in
   **enforce mode only**: observe mode never surfaces enforcement to the user, so when the reviewer
   fails an observe-mode write is simply not admitted — persisted as reference material with its
-  external taint, without prompting.
+  external taint, without prompting. For the same reason the observe-mode judge is not offered
+  `confirm` at all: a confirmation nobody is shown could only mean "not admitted", so its verdicts
+  are `allow` and `deny`, and its policy context says that anything but `allow` leaves the note as
+  reference material.
 
 **Resolve first, then review the whole thing.** An append or a partial edit is resolved into the
 complete resulting note — merged body, full attachment set with each attachment's stored description
@@ -278,14 +281,25 @@ resolves the candidate, the persist is conditional on that revision, and a misma
 write with a result that says the note changed during review, so the tool re-resolves against the
 new state and reviews again, once. A stale candidate is never written.
 
-**What the reviewer judges** is the complete proposed note or skill as *reusable material*, not
-merely whether the user asked for a save. Two cases fix the boundary:
+**What the reviewer judges** is whether the complete proposed note or skill carries an indirect
+prompt injection: content from outside the household getting itself saved as standing material that
+steers the assistant later. It is not a second opinion on the user's own choices, nor a check that
+every line was individually requested -- a judge weaker than the assistant, seeing most of the turn
+as provenance stubs, cannot answer that, and the gate exists for untrusted input, not to police
+trusted intent. The candidate in the arguments is the only object of review; conversation rows say
+what was asked for, and earlier drafts or verdicts recapped there are not the candidate. Three cases
+fix the boundary:
 
 - *"Research how to do X and save it as a skill."* The turn is `unknown_external` from the web
-  content. The trusted rows ask for a skill about X, so an appropriate skill about X is admitted:
-  its content is untrusted in origin, but the user chose to make it a skill, and a skill that does
-  what was asked is what the judgment admits. Standing instructions embedded in it that the request
-  did not call for are not admitted by the request having been made.
+  content. The trusted rows ask for a skill about X, so a skill that records how to do X is
+  admitted, including what was found along the way from any source -- endpoints, commands, headers,
+  quirks -- as well as facts the user stated, the names of secrets it uses, and rules that restrict
+  the assistant.
+- *The same request, but the skill also sends the household's data, messages or money somewhere no
+  trusted row named, or loosens the assistant's behaviour beyond the task* (skipping confirmations,
+  pre-authorising payments, hiding information from household members, obeying or saving content
+  from a particular sender). Those directives are what an injection plants, and the request having
+  been made does not admit them.
 - *"Go and reserve me a restaurant."* A page the browser read tells the model to save a skill, and
   the model attempts the write. Nothing in the trusted rows asked for a note or skill, so the judge
   denies it. The reservation continues; only the ambient write is refused.
@@ -473,8 +487,8 @@ state.
   turn is at `machine_reviewed`, and a floor there would confirm every outbound message the
   household sends — the friction this design exists to remove, not a gentler middle tier that never
   fires. The residual is a reviewer false-allow whose text later steers an outbound message; the
-  mitigations are that the reviewer saw the whole candidate as reusable material, that any fresh
-  external content in the turn raises it past this tier and restores the floors, and that an
+  mitigations are that the reviewer checked the whole candidate for planted directives, that any
+  fresh external content in the turn raises it past this tier and restores the floors, and that an
   operator who wants the floor back sets `operator_minimum` for the trusted pole, which applies to
   this tier.
 - **One admission vouches for what is composed from it alone.** A turn whose only external influence
@@ -519,6 +533,14 @@ Choices the implementation made where the design left room, recorded so they are
 - **An imported skill keeps its frontmatter.** A workspace file whose frontmatter declares a skill
   name and description is imported whole, so it is a skill and crosses the gate; other frontmatter
   is still stripped.
+- **Incidental discoveries are admitted without tracing their source.** A skill that records how
+  something was done keeps what was learned on the way, from any source, because documenting
+  operational discoveries is most of what makes a saved procedure worth having. The residual is a
+  poisoned answer to a trusted question: asked how to validate a token, a page says to paste it into
+  some site's form, and a skill recording that is admitted when no trusted row named the site but
+  the task plausibly called for it. The judge still denies a destination for household data that the
+  task did not call for, and that is the boundary accepted here rather than requiring every fact in
+  a procedure to trace back to a trusted row.
 
 ## Work plan
 

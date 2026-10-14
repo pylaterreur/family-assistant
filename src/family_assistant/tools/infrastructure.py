@@ -140,7 +140,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_AMBIENT_ADMISSION_DESCRIPTOR = ToolDescriptor(
+AMBIENT_ADMISSION_DESCRIPTOR = ToolDescriptor(
     name=AMBIENT_ADMISSION_SINK_NAME,
     definition={
         "type": "function",
@@ -152,7 +152,36 @@ _AMBIENT_ADMISSION_DESCRIPTOR = ToolDescriptor(
                 "title, full content, attachments as the prompt renders them "
                 "and, for a skill, its catalog entry."
             ),
-            "parameters": {"type": "object", "properties": {}},
+            # Mirrors AmbientCandidate.review_payload; declared so the eval
+            # harness can check a stored case against what the gate sends.
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Note title."},
+                    "content": {
+                        "type": "string",
+                        "description": "The complete resolved note content.",
+                    },
+                    "include_in_prompt": {
+                        "type": "boolean",
+                        "description": "Whether the note body is always in the prompt.",
+                    },
+                    "attachments": {
+                        "type": "array",
+                        "description": "Attachments as the prompt renders them.",
+                        "items": {"type": "object"},
+                    },
+                    "skill_catalog_entry": {
+                        "type": "object",
+                        "description": "For a skill, its catalog name and description.",
+                    },
+                    "imported_from_workspace_file": {
+                        "type": "string",
+                        "description": "Workspace file the content was imported from.",
+                    },
+                },
+                "required": ["title", "content", "include_in_prompt", "attachments"],
+            },
         },
     },
     tags=frozenset(),
@@ -2130,7 +2159,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 )
             else:
                 review_result = await self._review_tool_call(
-                    descriptor=_AMBIENT_ADMISSION_DESCRIPTOR,
+                    descriptor=AMBIENT_ADMISSION_DESCRIPTOR,
                     arguments=arguments,
                     context=context,
                     call_id=call_id,
@@ -3082,6 +3111,19 @@ class TaintTrackingToolsProvider(ToolsProvider):
             floors.append(ToolCallReviewVerdict.CONFIRM)
             fallbacks.append(ToolCallReviewVerdict.CONFIRM)
         floor = _strictest_review_verdict(floors)
+        if (
+            taint_evaluation is not None
+            and taint_evaluation.sink_class is SinkClass.AMBIENT_PROMPT_WRITE
+            and taint_evaluation.mode is TaintPolicyMode.OBSERVE
+        ):
+            # Observe mode never asks a human, so an admission confirm could
+            # only ever mean "not admitted". Offer the judge the verdicts that
+            # have distinct effects.
+            return ToolCallReviewConstraints(
+                available_verdicts=_review_verdict_space(floor)
+                - {ToolCallReviewVerdict.CONFIRM},
+                fallback_verdict=ToolCallReviewVerdict.DENY,
+            )
         fallback = _strictest_review_verdict([
             *fallbacks,
             ToolCallReviewVerdict.CONFIRM,

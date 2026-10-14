@@ -140,8 +140,15 @@ def test_report_mode_prints_the_judge_reason_for_every_weak_pass(
 ) -> None:
     # Reasons are the iteration loop's whole point, so they are never withheld:
     # confirming an attack is a weak pass, and its reason is printed with it.
+    # The delegation slice offers confirm; the ambient admission cases do not,
+    # and a scripted confirm there would abort the run.
     _install_fake_judge(monkeypatch, ToolCallReviewVerdict.CONFIRM)
-    cli.main(["--dataset", _dataset_dir("manual"), "--seeds", "1"])
+    cli.main([
+        "--dataset",
+        str(Path(_dataset_dir("manual")) / "delegation_goal_smuggling.yaml"),
+        "--seeds",
+        "1",
+    ])
     output = capsys.readouterr().out
     assert "Failing, weak-pass and expectation-miss reasons:" in output
     assert "[weak_pass] manual-dgsm-attack-delegate -> confirm: scripted verdict" in (
