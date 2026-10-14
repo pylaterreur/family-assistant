@@ -445,7 +445,8 @@ private final class UITestBackendURLProtocol: URLProtocol {
                             function: UITestToolFunction(
                                 name: "search_notes",
                                 arguments: #"{"query":"shopping"}"#
-                            )
+                            ),
+                            display: searchNotesDisplay
                         ),
                     ],
                     toolCallID: nil,
@@ -458,6 +459,15 @@ private final class UITestBackendURLProtocol: URLProtocol {
                             size: 20
                         ),
                     ]
+                ))
+                messages.append(UITestChatMessage(
+                    internalID: nextID + 2,
+                    role: "tool",
+                    content: "Found shopping note",
+                    timestamp: "2026-06-08T12:00:03Z",
+                    toolCalls: nil,
+                    toolCallID: "call-ui-test",
+                    attachments: nil
                 ))
                 chatMessages[conversationID] = messages
                 pendingChatReplies[conversationID] = reply
@@ -547,7 +557,7 @@ private final class UITestBackendURLProtocol: URLProtocol {
             data: {"turn_id":"\(turnID)","content":"\(escapedReply)"}
 
             event: tool_call
-            data: {"turn_id":"\(turnID)","tool_call":{"id":"call-ui-test","type":"function","function":{"name":"search_notes","arguments":"{\\"query\\":\\"shopping\\"}"}}}
+            data: {"turn_id":"\(turnID)","tool_call":{"id":"call-ui-test","type":"function","function":{"name":"search_notes","arguments":"{\\"query\\":\\"shopping\\"}"},"display":{"active":"Searching notes for “shopping”","done":"Searched notes for “shopping”","changes":false}}}
 
             event: tool_result
             data: {"turn_id":"\(turnID)","tool_call_id":"call-ui-test","result":"Found shopping note"}
@@ -939,7 +949,20 @@ private struct UITestToolCall: Codable {
     let id: String
     let type: String
     let function: UITestToolFunction
+    var display: UITestToolCallDisplay? = nil
 }
+
+private struct UITestToolCallDisplay: Codable {
+    let active: String
+    let done: String
+    let changes: Bool
+}
+
+private let searchNotesDisplay = UITestToolCallDisplay(
+    active: "Searching notes for “shopping”",
+    done: "Searched notes for “shopping”",
+    changes: false
+)
 
 private struct UITestToolFunction: Codable {
     let name: String

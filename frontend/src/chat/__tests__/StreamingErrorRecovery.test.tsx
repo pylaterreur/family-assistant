@@ -275,14 +275,25 @@ describe.sequential('Streaming Error Recovery', () => {
       await user.type(messageInput, 'Search for test notes');
       await user.keyboard('{Enter}');
 
-      // Text content should be preserved (accumulated from both chunks)
+      // Both chunks of text survive, on either side of the tool call they
+      // were written around.
       await waitFor(
         () => {
-          expect(screen.getByText('Let me look that up. Found some results.')).toBeInTheDocument();
+          expect(screen.getByText('Let me look that up.')).toBeInTheDocument();
+          expect(screen.getByText('Found some results.')).toBeInTheDocument();
           expect(screen.getByTestId('send-button')).toBeInTheDocument();
         },
         { timeout: 5000 }
       );
+      const toolGroup = screen.getByTestId('tool-group');
+      expect(
+        screen.getByText('Let me look that up.').compareDocumentPosition(toolGroup) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      expect(
+        toolGroup.compareDocumentPosition(screen.getByText('Found some results.')) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
 
       // Error should NOT be shown since content was delivered successfully
       expect(screen.queryByText(/encountered an error/)).not.toBeInTheDocument();

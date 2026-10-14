@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import userEvent from '@testing-library/user-event';
@@ -72,6 +72,11 @@ describe('SharedConversationPage', () => {
                   id: 'call_1',
                   type: 'function',
                   function: { name: 'get_note', arguments: '{"title":"Gifts"}' },
+                  display: {
+                    active: 'Reading note “Gifts”',
+                    done: 'Read note “Gifts”',
+                    changes: false,
+                  },
                 },
               ],
             },
@@ -106,7 +111,7 @@ describe('SharedConversationPage', () => {
     await user.click(screen.getByTestId('tool-group-trigger'));
 
     expect(content).toHaveAttribute('data-state', 'open');
-    expect(screen.getByText('get_note')).toBeInTheDocument();
+    expect(within(content).getByText('Read note “Gifts”')).toBeInTheDocument();
     expect(screen.getByText('{"title":"Gifts"}')).toBeInTheDocument();
     expect(screen.getByText('Raw tool output')).toBeInTheDocument();
   });
@@ -242,12 +247,11 @@ describe('SharedConversationPage', () => {
 
     // One turn reads as one box, not one per LLM iteration.
     expect(screen.getAllByTestId('tool-group')).toHaveLength(1);
-    expect(screen.getByText('2 notes')).toBeInTheDocument();
+    expect(screen.getByTestId('tool-group-headline')).toHaveTextContent(/and 1 more$/);
 
     await user.click(screen.getByTestId('tool-group-trigger'));
 
-    expect(screen.getByText('get_note')).toBeInTheDocument();
-    expect(screen.getByText('list_notes')).toBeInTheDocument();
+    expect(screen.getAllByTestId('shared-tool-call')).toHaveLength(2);
   });
 
   it('keeps assistant text as a boundary between tool groups', async () => {
@@ -404,7 +408,53 @@ describe('SharedConversationPage', () => {
     expect(screen.queryByTestId('tool-group')).not.toBeInTheDocument();
   });
 
-  it('summarises a single tool call without mangling the category name', async () => {
+  it('does not describe a call that did not run as done', async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get('/api/v1/shared-conversations/not-run/messages', () =>
+        HttpResponse.json({
+          messages: [
+            {
+              internal_id: '1',
+              role: 'assistant',
+              timestamp: '2026-08-10T12:00:00Z',
+              content: '',
+              tool_calls: [
+                {
+                  id: 'call_1',
+                  type: 'function',
+                  function: { name: 'delete_note', arguments: '{"title":"Old"}' },
+                  display: {
+                    active: 'Deleting note “Old”',
+                    done: 'Deleted note “Old”',
+                    changes: true,
+                  },
+                },
+              ],
+            },
+            {
+              internal_id: '2',
+              role: 'tool',
+              timestamp: '2026-08-10T12:00:01Z',
+              tool_call_id: 'call_1',
+              content: 'OK. Action cancelled by user.',
+              tool_outcome: 'rejected',
+            },
+          ],
+        })
+      )
+    );
+    renderSharedPage('not-run');
+
+    const headline = await screen.findByTestId('tool-group-headline');
+    expect(headline).toHaveTextContent('Deleting note “Old”');
+    await user.click(screen.getByTestId('tool-group-trigger'));
+    const row = screen.getByTestId('shared-tool-call');
+    expect(row).toHaveTextContent('Deleting note “Old”');
+    expect(screen.queryByText(/Deleted note/)).not.toBeInTheDocument();
+  });
+
+  it("headlines a single tool call with the server's phrase", async () => {
     server.use(
       http.get('/api/v1/shared-conversations/summary/messages', () =>
         HttpResponse.json({
@@ -419,6 +469,11 @@ describe('SharedConversationPage', () => {
                   id: 'call_1',
                   type: 'function',
                   function: { name: 'search_calendar_events', arguments: '{}' },
+                  display: {
+                    active: 'Checking calendar',
+                    done: 'Checked calendar',
+                    changes: false,
+                  },
                 },
               ],
             },
@@ -436,7 +491,9 @@ describe('SharedConversationPage', () => {
     );
     renderSharedPage('summary');
 
-    expect(await screen.findByText('1 calendar')).toBeInTheDocument();
+    expect(await screen.findByTestId('tool-group-headline')).toHaveTextContent(
+      /^Checked calendar$/
+    );
   });
 
   it('collapses a tool result whose call is missing from the transcript', async () => {

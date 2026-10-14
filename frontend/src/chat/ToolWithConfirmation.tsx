@@ -9,6 +9,7 @@ import {
   type ToolOutcome,
   type ToolPartStatus,
 } from './toolOutcome';
+import type { ToolCallDisplay } from './types';
 
 interface ToolWithConfirmationProps {
   toolName: string;
@@ -20,6 +21,7 @@ interface ToolWithConfirmationProps {
   isError?: boolean;
   awaitingResult?: boolean;
   attachments?: Array<Record<string, unknown>>;
+  display?: ToolCallDisplay;
   ToolComponent: React.ComponentType<{
     toolName: string;
     args: Record<string, unknown>;
@@ -27,6 +29,7 @@ interface ToolWithConfirmationProps {
     status?: ToolPartStatus;
     outcome?: ToolOutcome;
     attachments?: Array<Record<string, unknown>>;
+    display?: ToolCallDisplay;
   }>;
 }
 
@@ -48,6 +51,7 @@ export const ToolWithConfirmation: React.FC<ToolWithConfirmationProps> = ({
   isError,
   awaitingResult,
   attachments,
+  display,
   ToolComponent,
 }) => {
   const context = useContext(ToolConfirmationContext);
@@ -76,6 +80,7 @@ export const ToolWithConfirmation: React.FC<ToolWithConfirmationProps> = ({
           status={rendererStatusForOutcome(outcome)}
           outcome={outcome}
           attachments={attachments}
+          display={display}
         />
         {outcomeNote && (
           <div

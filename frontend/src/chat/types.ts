@@ -77,6 +77,17 @@ export interface MessageContent {
   artifact?: {
     attachments?: Array<Record<string, unknown>>;
   };
+  // How the server describes the call to the person watching.
+  display?: ToolCallDisplay;
+  // A streamed call: how much of the turn's text had arrived when it started.
+  textOffset?: number;
+}
+
+/** The server's description of a tool call (`display` on every tool call it sends). */
+export interface ToolCallDisplay {
+  active: string;
+  done: string;
+  changes: boolean;
 }
 
 export interface BackendAttachment extends Record<string, unknown> {
@@ -98,6 +109,7 @@ export interface BackendToolCall extends Record<string, unknown> {
   arguments?: string | Record<string, unknown>;
   function?: BackendToolCallFunction;
   attachments?: BackendAttachment[];
+  display?: ToolCallDisplay;
 }
 
 export type BackendContentPart =

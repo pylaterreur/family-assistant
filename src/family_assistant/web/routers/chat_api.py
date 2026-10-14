@@ -103,6 +103,7 @@ from family_assistant.web.models import (
     VoiceSessionRequest,
     VoiceSessionResponse,
 )
+from family_assistant.web.tool_call_serialization import serialize_tool_call
 from family_assistant.web.turn_producer import (
     confirmation_result_waiters_for_state,
     confirmation_service_for_state,
@@ -517,7 +518,9 @@ class ConversationMessage(BaseModel):
         None, description="Message content (string or list for multimodal)"
     )
     timestamp: datetime = Field(..., description="Message timestamp")
-    tool_calls: list[dict] | None = Field(None, description="Tool calls if any")
+    tool_calls: list[ToolCallResponseItem] | None = Field(
+        None, description="Tool calls if any"
+    )
     tool_call_id: str | None = Field(None, description="Tool call ID for tool messages")
     error_traceback: str | None = Field(None, description="Error traceback if any")
     tool_outcome: ToolOutcome | None = Field(
@@ -1027,18 +1030,11 @@ async def _existing_send_message_response(
     if assistant_message is None or not isinstance(assistant_message.content, str):
         return None
 
-    tool_calls_response: list[ToolCallResponseItem] | None = None
-    if assistant_message.tool_calls:
-        tool_calls_response = []
-        for tc in assistant_message.tool_calls:
-            arguments = tc.function.arguments
-            if not isinstance(arguments, str):
-                arguments = json.dumps(arguments)
-            tool_calls_response.append({
-                "id": tc.id,
-                "type": tc.type,
-                "function": {"name": tc.function.name, "arguments": arguments},
-            })
+    tool_calls_response: list[ToolCallResponseItem] | None = (
+        [serialize_tool_call(tc) for tc in assistant_message.tool_calls]
+        if assistant_message.tool_calls
+        else None
+    )
 
     return ChatMessageResponse(
         reply=assistant_message.content,
@@ -2405,23 +2401,7 @@ async def _tool_calls_for_response(
     )
     if assistant_msg is None or not assistant_msg.tool_calls:
         return None
-    tool_calls_response: list[ToolCallResponseItem] = []
-    for tc in assistant_msg.tool_calls:
-        if isinstance(tc, ToolCallItem):
-            args = tc.function.arguments
-            if not isinstance(args, str):
-                args = json.dumps(args)
-            tool_calls_response.append({
-                "id": tc.id,
-                "type": tc.type,
-                "function": {
-                    "name": tc.function.name,
-                    "arguments": args,
-                },
-            })
-        elif isinstance(tc, dict):
-            tool_calls_response.append(tc)
-    return tool_calls_response
+    return [serialize_tool_call(tc) for tc in assistant_msg.tool_calls]
 
 
 async def latest_reply(
@@ -2893,25 +2873,12 @@ def _serialize_conversation_messages(
         if not all(key in msg for key in ["internal_id", "role", "timestamp"]):
             continue
 
-        tool_calls_dicts = None
         msg_tool_calls = msg.get("tool_calls")
-        if msg_tool_calls:
-            tool_calls_dicts = []
-            for tool_call in msg_tool_calls:
-                if isinstance(tool_call, ToolCallItem):
-                    arguments = tool_call.function.arguments
-                    if not isinstance(arguments, str):
-                        arguments = json.dumps(arguments)
-                    tool_calls_dicts.append({
-                        "id": tool_call.id,
-                        "type": tool_call.type,
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": arguments,
-                        },
-                    })
-                elif isinstance(tool_call, dict):
-                    tool_calls_dicts.append(tool_call)
+        tool_calls_dicts = (
+            [serialize_tool_call(tool_call) for tool_call in msg_tool_calls]
+            if msg_tool_calls
+            else None
+        )
 
         response_messages.append(
             ConversationMessage(

@@ -1,8 +1,11 @@
 import { useAuiState } from '@assistant-ui/react';
 import React, { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { ToolConfirmationContext } from './ToolConfirmationContext';
+import { isToolCallDisplay } from './orderedParts';
+import type { ToolGroupCall } from './toolGroupSummary';
 import { ToolGroupShell } from './ToolGroupShell';
 import { isTerminalToolOutcome, resolveToolOutcome } from './toolOutcome';
+import type { ToolCallDisplay } from './types';
 
 interface ToolGroupProps {
   startIndex: number;
@@ -10,12 +13,12 @@ interface ToolGroupProps {
   children: React.ReactNode;
 }
 
-interface ToolGroupState {
-  toolNames: string[];
-  toolCallIds: string[];
-  hasUnfinishedTool: boolean;
-  /** Calls that ended without succeeding: failed, not run, or no result. */
-  unsuccessfulCount: number;
+interface ToolGroupCallSnapshot {
+  toolName: string;
+  toolCallId?: string;
+  display?: ToolCallDisplay;
+  args?: Record<string, unknown>;
+  state: 'running' | 'succeeded' | 'unsuccessful';
 }
 
 interface MessagePartLike {
@@ -29,18 +32,12 @@ interface MessagePartLike {
   outcome?: unknown;
   isError?: boolean;
   awaitingResult?: boolean;
+  display?: unknown;
   status?: {
     type?: string;
     reason?: string;
   };
 }
-
-const DEFAULT_TOOL_GROUP_STATE: ToolGroupState = {
-  toolNames: [],
-  toolCallIds: [],
-  hasUnfinishedTool: false,
-  unsuccessfulCount: 0,
-};
 
 // `status` is the runtime's part status (from `message.parts`), which it derives
 // from the message status for a tool call without a result: so a historical
@@ -68,67 +65,72 @@ function isUnsuccessfulToolPart(part: MessagePartLike): boolean {
   return outcome === 'failed' || outcome === 'rejected' || outcome === 'unknown';
 }
 
-function getToolGroupState(
+function getToolGroupCalls(
   parts: readonly MessagePartLike[],
   startIndex: number,
   endIndex: number
-): ToolGroupState {
-  const toolNames: string[] = [];
-  const toolCallIds: string[] = [];
-  let hasUnfinishedTool = false;
-  let unsuccessfulCount = 0;
-
+): ToolGroupCallSnapshot[] {
+  const calls: ToolGroupCallSnapshot[] = [];
   for (let i = startIndex; i <= endIndex && i < parts.length; i++) {
     const part = parts[i];
-    if (part.type === 'tool-call') {
-      if (part.toolName) {
-        toolNames.push(part.toolName);
-      }
-      if (part.toolCallId) {
-        toolCallIds.push(part.toolCallId);
-      }
-
-      if (!isTerminalToolPart(part)) {
-        hasUnfinishedTool = true;
-      } else if (isUnsuccessfulToolPart(part)) {
-        unsuccessfulCount += 1;
-      }
+    if (part.type !== 'tool-call') {
+      continue;
     }
+    let state: ToolGroupCallSnapshot['state'] = 'succeeded';
+    if (!isTerminalToolPart(part)) {
+      state = 'running';
+    } else if (isUnsuccessfulToolPart(part)) {
+      state = 'unsuccessful';
+    }
+    calls.push({
+      toolName: part.toolName ?? 'tool',
+      toolCallId: part.toolCallId,
+      display: isToolCallDisplay(part.display) ? part.display : undefined,
+      args: part.args,
+      state,
+    });
   }
-
-  return { toolNames, toolCallIds, hasUnfinishedTool, unsuccessfulCount };
+  return calls;
 }
 
-// Hook to safely access message state with fallback
-function useSafeToolGroupState(startIndex: number, endIndex: number): ToolGroupState {
-  const serializedState = useAuiState((s) => {
+// Serialized so the selector returns a stable value: the runtime hands out a
+// new parts array on every streamed token.
+function useToolGroupCalls(startIndex: number, endIndex: number): ToolGroupCallSnapshot[] {
+  const serialized = useAuiState((s) => {
     const message = s.optional.message;
     if (!message) {
       return undefined;
     }
     return JSON.stringify(
-      getToolGroupState(message.parts as readonly MessagePartLike[], startIndex, endIndex)
+      getToolGroupCalls(message.parts as readonly MessagePartLike[], startIndex, endIndex)
     );
   });
 
   return useMemo(
-    () =>
-      serializedState ? (JSON.parse(serializedState) as ToolGroupState) : DEFAULT_TOOL_GROUP_STATE,
-    [serializedState]
+    () => (serialized ? (JSON.parse(serialized) as ToolGroupCallSnapshot[]) : []),
+    [serialized]
   );
 }
 
 const ToolGroup: React.FC<ToolGroupProps> = ({ startIndex, endIndex, children }) => {
   const context = useContext(ToolConfirmationContext);
+  const snapshots = useToolGroupCalls(startIndex, endIndex);
+  const pendingConfirmations = context?.pendingConfirmations;
 
-  const { toolNames, toolCallIds, hasUnfinishedTool, unsuccessfulCount } = useSafeToolGroupState(
-    startIndex,
-    endIndex
+  const calls: ToolGroupCall[] = useMemo(
+    () =>
+      snapshots.map(({ toolCallId, ...call }) =>
+        toolCallId && pendingConfirmations?.has(toolCallId)
+          ? { ...call, state: 'awaiting-approval' as const }
+          : call
+      ),
+    [snapshots, pendingConfirmations]
   );
-  const hasPendingConfirmation = toolCallIds.some((toolCallId) =>
-    context?.pendingConfirmations?.has(toolCallId)
-  );
-  const shouldAutoExpand = hasUnfinishedTool || hasPendingConfirmation;
+
+  // A group opens only for an approval the user has to give. Otherwise it
+  // stays one line — the header names what is running, and counts what did
+  // not finish. Once the user toggles it, their choice holds.
+  const shouldAutoExpand = calls.some((call) => call.state === 'awaiting-approval');
   const [isExpanded, setIsExpanded] = useState(shouldAutoExpand);
   const hasUserToggled = useRef(false);
 
@@ -144,13 +146,7 @@ const ToolGroup: React.FC<ToolGroupProps> = ({ startIndex, endIndex, children })
   };
 
   return (
-    <ToolGroupShell
-      toolNames={toolNames}
-      toolCount={endIndex - startIndex + 1}
-      unsuccessfulCount={unsuccessfulCount}
-      isExpanded={isExpanded}
-      onOpenChange={handleOpenChange}
-    >
+    <ToolGroupShell calls={calls} isExpanded={isExpanded} onOpenChange={handleOpenChange}>
       {children}
     </ToolGroupShell>
   );

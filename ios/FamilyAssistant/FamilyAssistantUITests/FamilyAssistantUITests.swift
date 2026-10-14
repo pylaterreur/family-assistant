@@ -145,12 +145,16 @@ final class FamilyAssistantUITests: XCTestCase {
         app.buttons["chat-send-button"].tap()
 
         XCTAssertTrue(app.staticTexts["Native reply to Hello"].waitForExistence(timeout: 20))
-        // The tool shows under its readable name, on its card or in the group's summary.
-        let toolCall = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@", "Search notes"))
+        // The group's collapsed line says what the call did, in the server's words.
+        let toolGroup = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Searched notes for “shopping”"))
             .firstMatch
-        XCTAssertTrue(toolCall.waitForExistence(timeout: 20))
+        XCTAssertTrue(toolGroup.waitForExistence(timeout: 20))
         attachScreenshot(named: "native-chat-streamed-tool-call")
+
+        toolGroup.tap()
+        XCTAssertTrue(app.staticTexts["Found shopping note"].waitForExistence(timeout: 10))
+        attachScreenshot(named: "native-chat-tool-group-expanded")
     }
 
     /// Regression test for the scene-update watchdog hang (0x8BADF00D) that

@@ -644,3 +644,48 @@ async def test_conversation_list_carries_the_generated_summary(
     [listed] = response.json()["conversations"]
     assert listed["summary"] == "Paella recipe scaled for 8"
     assert listed["last_message"] == "Can you scale this paella for 8?"
+
+
+@pytest.mark.asyncio
+async def test_history_tool_calls_carry_display_phrases(
+    test_client: AsyncClient,
+    app_fixture: FastAPI,
+    db_context: Database,
+    tmp_path: Path,
+) -> None:
+    """Clients show the server's phrase for a call rather than building their own."""
+    app_fixture.state.attachment_registry = AttachmentRegistry(
+        str(tmp_path), db_context.engine
+    )
+    conversation_id = str(uuid.uuid4())
+    await db_context.message_history.add_message(
+        AssistantMessage(
+            content=None,
+            tool_calls=[
+                ToolCallItem(
+                    id="call_note",
+                    type="function",
+                    function=ToolCallFunction(
+                        name="add_or_update_note",
+                        arguments='{"title": "Groceries", "content": "milk"}',
+                    ),
+                )
+            ],
+        ),
+        interface_type="web",
+        conversation_id=conversation_id,
+        timestamp=datetime.now(UTC),
+        user_id="test_user",
+    )
+
+    response = await test_client.get(
+        f"/api/v1/chat/conversations/{conversation_id}/messages"
+    )
+
+    assert response.status_code == 200, response.text
+    (assistant,) = [m for m in response.json()["messages"] if m["role"] == "assistant"]
+    assert assistant["tool_calls"][0]["display"] == {
+        "active": "Saving note “Groceries”",
+        "done": "Saved note “Groceries”",
+        "changes": True,
+    }

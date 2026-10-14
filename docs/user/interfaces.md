@@ -47,12 +47,20 @@ every section*
 
 ### Chat
 
-Replies stream in as they're generated, completed tool calls collapse into a compact summary, and
-conversations are easy to switch between. Common tools such as notes, calendar and documents have
-their own views. Any other tool call (and every tool call in the iOS app) shows a readable name, a
-one-line summary of what it was asked and a short preview of what came back; tap **Details** to see
-the raw arguments and result in full, with buttons to copy them. You can open or close a group of
-tool calls at any time, and it stays the way you left it.
+Replies stream in as they're generated, and conversations are easy to switch between.
+
+The assistant's work shows up in the reply where it happened: a group of tool calls sits between the
+text written before it and the text written after it. Each group is a single line. While it runs,
+the line says what the assistant is doing right now, such as *Searching documents for “dentist”*,
+along with how many steps have finished. When the group is done, the line names the step that
+mattered most, such as *Added event “Swimming” and 2 more*. A step that changed something (saving a
+note, adding an event, sending a message) is named ahead of a lookup. A group opens on its own only
+when a step needs your approval.
+
+Open a group to see every step. Common tools such as notes, calendar and documents have their own
+views. Any other step says what it did and shows a short preview of what came back. Tap **Details**
+to see the raw arguments and result in full, with buttons to copy them. You can open or close a
+group at any time, and it stays the way you left it.
 
 ![Chat Interface](../../screenshots/desktop/chat-empty.png) *The web chat interface*
 

@@ -193,12 +193,15 @@ class ChatPage(BasePage):
                     }}
                     
                     // Try multiple ways to get the text content
-                    const markdownEl = lastMessage.querySelector('.markdown-text');
+                    const markdownEls = lastMessage.querySelectorAll('.markdown-text');
                     let newText = '';
                     
-                    // First try the markdown element
-                    if (markdownEl) {{
-                        newText = markdownEl.innerText || markdownEl.textContent || '';
+                    // First try the markdown elements: a reply's text can sit
+                    // on either side of its tool calls.
+                    if (markdownEls.length > 0) {{
+                        newText = Array.from(markdownEls)
+                            .map((el) => el.innerText || el.textContent || '')
+                            .join(' ');
                     }}
                     
                     // If no markdown element or empty, try the parent
@@ -281,34 +284,19 @@ class ChatPage(BasePage):
                         content = "..."  # Represent loading state as dots
                     else:
                         # Check if there's a markdown element inside
-                        markdown_elem = await content_elem.query_selector(
+                        # A reply's text can sit on either side of its tool
+                        # calls, so read every text block in it.
+                        markdown_elems = await content_elem.query_selector_all(
                             ".markdown-text"
                         )
-                        if markdown_elem:
-                            # For markdown elements, we need to get all text including from nested elements
-                            # ReactMarkdown can create multiple paragraph/element children
-
-                            # Try multiple methods to get complete text
-                            # Method 1: Get all text nodes directly
-                            all_text = await markdown_elem.evaluate(
-                                "el => el.textContent || el.innerText || ''"
-                            )
-
-                            if all_text:
-                                content = all_text
-                            else:
-                                # Method 2: Try getting paragraph text
-                                paragraphs = await markdown_elem.query_selector_all("p")
-                                if paragraphs:
-                                    content_parts = []
-                                    for p in paragraphs:
-                                        p_text = await p.text_content() or ""
-                                        if p_text:
-                                            content_parts.append(p_text)
-                                    content = " ".join(content_parts)
-                                else:
-                                    # Method 3: Fallback to text_content
-                                    content = await markdown_elem.text_content() or ""
+                        if markdown_elems:
+                            texts = [
+                                await elem.evaluate(
+                                    "el => el.textContent || el.innerText || ''"
+                                )
+                                for elem in markdown_elems
+                            ]
+                            content = "\n".join(text for text in texts if text)
                         else:
                             content = await content_elem.text_content() or ""
 
@@ -749,8 +737,10 @@ class ChatPage(BasePage):
                     let content = '';
                     const contentElem = lastMsg.querySelector(contentSelector);
                     if (contentElem) {
-                        const md = contentElem.querySelector('.markdown-text');
-                        content = md ? (md.innerText || md.textContent) : (contentElem.innerText || contentElem.textContent);
+                        const mds = contentElem.querySelectorAll('.markdown-text');
+                        content = mds.length > 0
+                            ? Array.from(mds).map((md) => md.innerText || md.textContent || '').join(' ')
+                            : (contentElem.innerText || contentElem.textContent);
                     } else {
                         content = lastMsg.innerText || lastMsg.textContent;
                     }
@@ -922,11 +912,14 @@ class ChatPage(BasePage):
                         const typingIndicator = contentElem.querySelector('.typing-indicator');
                         if (typingIndicator) continue;
                         
-                        // Get text content
+                        // A reply's text can sit on either side of its tool
+                        // calls, so read every text block in it.
                         let text = '';
-                        const markdownElem = contentElem.querySelector('.markdown-text');
-                        if (markdownElem) {
-                            text = markdownElem.innerText || markdownElem.textContent || '';
+                        const markdownElems = contentElem.querySelectorAll('.markdown-text');
+                        if (markdownElems.length > 0) {
+                            text = Array.from(markdownElems)
+                                .map((elem) => elem.innerText || elem.textContent || '')
+                                .join(' ');
                         } else {
                             text = contentElem.innerText || contentElem.textContent || '';
                         }

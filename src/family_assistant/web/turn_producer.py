@@ -66,6 +66,7 @@ from family_assistant.web.conversation_stream_hub import (
     StreamEvent,
     TurnStatus,
 )
+from family_assistant.web.tool_call_serialization import serialize_tool_call
 from family_assistant.web.web_confirmation_ui_manager import WebConfirmationUIManager
 from family_assistant.web.web_mid_turn_controller import WebMidTurnController
 
@@ -758,23 +759,11 @@ async def _publish_llm_event(
         # disconnect push only carries the final answer.
         final_reply_parts.clear()
         if event.tool_call:
-            arguments = event.tool_call.function.arguments
-            if not isinstance(arguments, str):
-                arguments = json.dumps(arguments)
             await hub.publish(
                 conversation_id,
                 "tool_call",
                 turn_id=turn_id,
-                payload={
-                    "tool_call": {
-                        "id": event.tool_call.id,
-                        "type": event.tool_call.type,
-                        "function": {
-                            "name": event.tool_call.function.name,
-                            "arguments": arguments,
-                        },
-                    }
-                },
+                payload={"tool_call": serialize_tool_call(event.tool_call)},
             )
     elif event.type == "tool_result":
         # ast-grep-ignore: no-dict-any - tool_result payload aggregates the tool's heterogeneous result string with optional attachment metadata; serialized verbatim to clients
