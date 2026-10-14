@@ -215,7 +215,7 @@ describe('ToolWithConfirmation', () => {
 
     const controller = await ready;
     controller.enqueue(toolCallEvent(turnIdRef.current, 'call-1'));
-    await screen.findByTestId('tool-call', undefined, WAIT);
+    await screen.findByTestId('tool-group', undefined, WAIT);
 
     vi.useFakeTimers({ toFake: ['Date'] });
     controller.enqueue(confirmationRequestEvent(turnIdRef.current, 'call-1'));
@@ -278,7 +278,7 @@ describe('ToolWithConfirmation', () => {
     controller.close();
   }, 30000);
 
-  it('expands the tool group while the tool runs and collapses it once the result arrives', async () => {
+  it('names the running call in the collapsed header, then the finished one', async () => {
     const { ready, turnIdRef } = installOpenStream();
 
     const user = userEvent.setup();
@@ -288,10 +288,9 @@ describe('ToolWithConfirmation', () => {
     const controller = await ready;
     controller.enqueue(toolCallEvent(turnIdRef.current, 'call-status-test'));
 
-    const toolCall = await screen.findByTestId('tool-call', undefined, WAIT);
-    expect(within(toolCall).getByText('Groceries')).toBeInTheDocument();
-    expect(screen.getByTestId('tool-group-content')).toHaveAttribute('data-state', 'open');
-    expect(screen.queryByText('Note added successfully')).not.toBeInTheDocument();
+    await screen.findByTestId('tool-group-spinner', undefined, WAIT);
+    expect(screen.getByTestId('tool-group-headline')).toHaveTextContent('Groceries');
+    expect(screen.getByTestId('tool-group-content')).toHaveAttribute('data-state', 'closed');
 
     controller.enqueue(
       sse('tool_result', {
@@ -306,8 +305,10 @@ describe('ToolWithConfirmation', () => {
 
     expect(await screen.findByText('Done!', undefined, WAIT)).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByTestId('tool-group-content')).toHaveAttribute('data-state', 'closed');
+      expect(screen.queryByTestId('tool-group-spinner')).not.toBeInTheDocument();
     }, WAIT);
+    expect(screen.getByTestId('tool-group-headline')).toHaveTextContent('Groceries');
+    expect(screen.getByTestId('tool-group-content')).toHaveAttribute('data-state', 'closed');
     expect(screen.queryByText('Note added successfully')).not.toBeInTheDocument();
 
     await user.click(screen.getByTestId('tool-group-trigger'));

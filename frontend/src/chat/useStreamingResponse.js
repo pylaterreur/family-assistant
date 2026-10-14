@@ -31,7 +31,7 @@ export const streamResumeTuning = {
  * Hook for handling streaming responses from the chat API
  * @param {Object} options - Hook options
  * @param {Function} [options.onMessage] - Callback when content is streamed (receives accumulated content)
- * @param {Function} [options.onToolCall] - Callback when tool calls are updated (receives array of all tool calls)
+ * @param {Function} [options.onToolCall] - Callback when tool calls are updated (receives array of all tool calls and the turn's text so far, which each call's `textOffset` indexes)
  * @param {Function} [options.onToolConfirmationRequest] - Callback when tool confirmation is requested
  * @param {Function} [options.onToolConfirmationResult] - Callback when tool confirmation result is received
  * @param {Function} [options.onError] - Callback when an error occurs (receives Error object)
@@ -615,9 +615,10 @@ export const useStreamingResponse = ({
                       attachments: autoAttachments,
                     }),
                     attachments: [...autoAttachments],
+                    textOffset: currentMessage.length,
                     _synthetic: true,
                   });
-                  onToolCall([...toolCalls]);
+                  onToolCall([...toolCalls], currentMessage);
                 }
                 // A user-requested stop ends the turn as 'cancelled'. That's not
                 // an error — surface it via onCancelled so the UI marks the
@@ -718,9 +719,11 @@ export const useStreamingResponse = ({
                   id: payload.tool_call.id,
                   name: payload.tool_call.function.name,
                   arguments: payload.tool_call.function.arguments || '{}',
+                  display: payload.tool_call.display,
+                  textOffset: currentMessage.length,
                 };
                 toolCalls.push(newToolCall);
-                onToolCall([...toolCalls]);
+                onToolCall([...toolCalls], currentMessage);
               }
 
               // Handle tool result
@@ -742,7 +745,7 @@ export const useStreamingResponse = ({
                   toolCalls.length = 0;
                   toolCalls.push(...newToolCalls);
 
-                  onToolCall(newToolCalls);
+                  onToolCall(newToolCalls, currentMessage);
                 }
               }
 

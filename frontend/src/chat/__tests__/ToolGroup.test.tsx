@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { ToolGroup } from '../ToolGroup';
+import type { ToolGroupCall } from '../toolGroupSummary';
 import { ToolGroupShell } from '../ToolGroupShell';
 
 describe('ToolGroup', () => {
@@ -11,26 +12,6 @@ describe('ToolGroup', () => {
       <div>Tool 2</div>
     </div>
   );
-
-  it('displays tool count correctly for single tool', () => {
-    render(
-      <ToolGroup startIndex={0} endIndex={0}>
-        {mockChildren}
-      </ToolGroup>
-    );
-
-    expect(screen.getByText('1 tool call')).toBeInTheDocument();
-  });
-
-  it('displays tool count correctly for multiple tools', () => {
-    render(
-      <ToolGroup startIndex={0} endIndex={2}>
-        {mockChildren}
-      </ToolGroup>
-    );
-
-    expect(screen.getByText('3 tool calls')).toBeInTheDocument();
-  });
 
   it('expands when clicked', async () => {
     const user = userEvent.setup();
@@ -158,70 +139,59 @@ describe('ToolGroup', () => {
     expect(trigger).toHaveAttribute('aria-expanded', 'false');
   });
 
-  describe('category summary and icons', () => {
-    function renderShell(toolNames: string[], toolCount: number = toolNames.length): HTMLElement {
+  describe('collapsed header', () => {
+    function renderShell(calls: ToolGroupCall[]): HTMLElement {
       render(
-        <ToolGroupShell
-          toolNames={toolNames}
-          toolCount={toolCount}
-          unsuccessfulCount={0}
-          isExpanded={false}
-          onOpenChange={() => {}}
-        >
+        <ToolGroupShell calls={calls} isExpanded={false} onOpenChange={() => {}}>
           {mockChildren}
         </ToolGroupShell>
       );
       return screen.getByTestId('tool-group-trigger');
     }
 
-    function categoryIconCount(trigger: HTMLElement): number {
-      return trigger.querySelectorAll('svg:not(.lucide-chevron-down)').length;
-    }
-
-    it('summarises by category and shows one icon per distinct category', () => {
-      const trigger = renderShell(['add_or_update_note', 'get_note', 'search_documents']);
-
-      expect(trigger).toHaveTextContent('2 notes and 1 document');
-      expect(categoryIconCount(trigger)).toBe(2);
-      expect(trigger.querySelector('.lucide-chevron-down')).toBeInTheDocument();
+    const note = (state: ToolGroupCall['state']): ToolGroupCall => ({
+      toolName: 'add_or_update_note',
+      display: { active: 'Saving note “Groceries”', done: 'Saved note “Groceries”', changes: true },
+      state,
+    });
+    const search = (state: ToolGroupCall['state']): ToolGroupCall => ({
+      toolName: 'search_documents',
+      display: {
+        active: 'Searching documents for “milk”',
+        done: 'Searched documents for “milk”',
+        changes: false,
+      },
+      state,
     });
 
-    it('caps category icons at four when tools span more categories', () => {
-      const trigger = renderShell([
-        'add_or_update_note',
-        'add_calendar_event',
-        'search_documents',
-        'schedule_reminder',
-        'execute_script',
-      ]);
+    it('names the call in progress with a spinner while the group runs', () => {
+      const trigger = renderShell([search('succeeded'), note('running')]);
 
-      expect(trigger).toHaveTextContent('5 tools from 5 categories');
-      expect(categoryIconCount(trigger)).toBe(4);
+      expect(trigger).toHaveTextContent('Saving note “Groceries”');
+      expect(trigger).toHaveTextContent('1 done');
+      expect(screen.getByTestId('tool-group-spinner')).toBeInTheDocument();
     });
 
-    it('falls back to a plain count without icons when tool names are unavailable', () => {
-      const trigger = renderShell([], 2);
+    it('names the call that changed something once the group finishes', () => {
+      const trigger = renderShell([note('succeeded'), search('succeeded')]);
 
-      expect(trigger).toHaveTextContent('2 tool calls');
-      expect(categoryIconCount(trigger)).toBe(0);
+      expect(trigger).toHaveTextContent('Saved note “Groceries” and 1 more');
+      expect(screen.queryByTestId('tool-group-spinner')).not.toBeInTheDocument();
     });
-  });
 
-  it('counts calls that did not succeed in the collapsed header', () => {
-    render(
-      <ToolGroupShell
-        toolNames={[]}
-        toolCount={3}
-        unsuccessfulCount={1}
-        isExpanded={false}
-        onOpenChange={() => {}}
-      >
-        {mockChildren}
-      </ToolGroupShell>
-    );
+    it('counts calls that did not succeed', () => {
+      const trigger = renderShell([search('succeeded'), note('unsuccessful')]);
 
-    expect(screen.getByTestId('tool-group-trigger')).toHaveTextContent(
-      "3 tool calls · 1 didn't finish"
-    );
+      expect(screen.getByTestId('tool-group-headline')).toHaveTextContent(
+        'Searched documents for “milk” and 1 more'
+      );
+      expect(trigger).toHaveTextContent("1 didn't finish");
+    });
+
+    it('asks for approval ahead of anything else', () => {
+      const trigger = renderShell([search('succeeded'), note('awaiting-approval')]);
+
+      expect(trigger).toHaveTextContent('Needs your approval: Saving note “Groceries”');
+    });
   });
 });

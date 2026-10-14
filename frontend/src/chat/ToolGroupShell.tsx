@@ -1,82 +1,57 @@
-import { ChevronDownIcon } from 'lucide-react';
+import { AlertTriangleIcon, ChevronDownIcon, HandIcon, Loader2Icon } from 'lucide-react';
 import React, { useMemo } from 'react';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { cn } from '@/lib/utils';
-import {
-  categoryInfo,
-  generateToolGroupSummary,
-  getToolIconInfo,
-  type ToolCategory,
-} from './toolIconMapping';
+import { categoryInfo, getToolIconInfo } from './toolIconMapping';
+import { summarizeToolGroup, type ToolGroupCall } from './toolGroupSummary';
 
 interface ToolGroupShellProps {
-  toolNames: string[];
-  toolCount: number;
-  /** Calls in the group that finished without succeeding. */
-  unsuccessfulCount: number;
+  calls: readonly ToolGroupCall[];
   isExpanded: boolean;
   onOpenChange: (open: boolean) => void;
   children: React.ReactNode;
 }
 
 /**
- * Presentation-only chrome for a collapsed group of tool calls. Kept free of
+ * Presentation-only chrome for a group of consecutive tool calls. Kept free of
  * assistant-ui runtime state so the read-only shared transcript can render the
  * same treatment as the live thread.
+ *
+ * Collapsed, it is one line: what is happening now while the group runs, and
+ * the call that mattered most once it has finished.
  */
 const ToolGroupShell: React.FC<ToolGroupShellProps> = ({
-  toolNames,
-  toolCount,
-  unsuccessfulCount,
+  calls,
   isExpanded,
   onOpenChange,
   children,
 }) => {
-  const summaryText = useMemo(() => {
-    // Fallback to generic count when tool names unavailable
-    const names =
-      toolNames.length === 0
-        ? `${toolCount} tool ${toolCount === 1 ? 'call' : 'calls'}`
-        : generateToolGroupSummary(toolNames);
-    return unsuccessfulCount > 0 ? `${names} · ${unsuccessfulCount} didn't finish` : names;
-  }, [toolNames, toolCount, unsuccessfulCount]);
+  const summary = useMemo(() => summarizeToolGroup(calls), [calls]);
+  const hasFailures = calls.some((call) => call.state === 'unsuccessful');
+  const leadInfo = summary.subject ? getToolIconInfo(summary.subject.toolName) : null;
 
-  // Get icons for the first few unique categories (max 4)
-  const categoryIcons = useMemo(() => {
-    const icons: Array<{
-      Icon: React.ComponentType<{ className?: string }>;
-      category: ToolCategory;
-    }> = [];
-    const seenCategories = new Set<ToolCategory>();
-
-    for (const toolName of toolNames) {
-      if (icons.length >= 4) {
-        break;
-      }
-
-      const iconInfo = getToolIconInfo(toolName);
-      if (!seenCategories.has(iconInfo.category)) {
-        icons.push({ Icon: iconInfo.icon, category: iconInfo.category });
-        seenCategories.add(iconInfo.category);
-      }
-    }
-
-    return icons;
-  }, [toolNames]);
+  let icon: React.ReactNode;
+  if (summary.needsApproval) {
+    icon = <HandIcon className="h-4 w-4 text-amber-600 dark:text-amber-400" />;
+  } else if (summary.isRunning) {
+    icon = <Loader2Icon className="h-4 w-4 animate-spin" data-testid="tool-group-spinner" />;
+  } else if (hasFailures) {
+    icon = <AlertTriangleIcon className="h-4 w-4 text-destructive" />;
+  } else if (leadInfo) {
+    const LeadIcon = leadInfo.icon;
+    icon = <LeadIcon className={cn('h-4 w-4', categoryInfo[leadInfo.category].color)} />;
+  }
 
   return (
     <div
-      className={cn(
-        'my-4 rounded-lg border border-border',
-        'bg-gradient-to-br from-card/80 to-card/40',
-        'shadow-sm hover:shadow-md transition-shadow duration-200'
-      )}
+      className={cn('my-2 rounded-lg border border-border/60 bg-card/40')}
       data-testid="tool-group"
+      data-running={summary.isRunning ? 'true' : 'false'}
     >
       <Collapsible open={isExpanded} onOpenChange={onOpenChange}>
         <CollapsibleTrigger
           className={cn(
-            'flex w-full items-center justify-between gap-3 py-3 px-4 text-sm font-medium',
+            'flex w-full items-center gap-2 py-2 px-3 text-sm',
             'text-muted-foreground hover:text-foreground',
             'transition-colors duration-150',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
@@ -84,33 +59,32 @@ const ToolGroupShell: React.FC<ToolGroupShellProps> = ({
           )}
           data-testid="tool-group-trigger"
         >
-          <div className="flex items-center gap-3 flex-1 min-w-0">
-            {/* Category icons */}
-            <div className="flex items-center -space-x-1">
-              {categoryIcons.map(({ Icon, category }, index) => (
-                <div
-                  key={category}
-                  className={cn(
-                    'flex items-center justify-center w-7 h-7 rounded-full',
-                    'bg-background border-2 border-border',
-                    'transition-transform duration-150',
-                    isExpanded ? 'scale-100' : 'scale-90'
-                  )}
-                  style={{ zIndex: categoryIcons.length - index }}
-                >
-                  <Icon className={cn('h-3.5 w-3.5', categoryInfo[category].color)} />
-                </div>
-              ))}
-            </div>
-
-            {/* Summary text */}
-            <span className="truncate">{summaryText}</span>
-          </div>
-
-          {/* Chevron indicator */}
-          <ChevronDownIcon className="h-4 w-4 flex-shrink-0 transition-transform duration-200" />
+          <span className="flex h-4 w-4 shrink-0 items-center justify-center">{icon}</span>
+          <span
+            className={cn(
+              'min-w-0 flex-1 truncate text-left',
+              summary.isRunning && !summary.needsApproval && 'animate-pulse text-foreground'
+            )}
+            data-testid="tool-group-headline"
+          >
+            {summary.headline}
+          </span>
+          {summary.detail && (
+            <span
+              className={cn('shrink-0 text-xs', hasFailures && 'text-destructive')}
+              data-testid="tool-group-detail"
+            >
+              {summary.detail}
+            </span>
+          )}
+          <ChevronDownIcon
+            className={cn(
+              'h-4 w-4 flex-shrink-0 transition-transform duration-200',
+              isExpanded && 'rotate-180'
+            )}
+          />
         </CollapsibleTrigger>
-        <CollapsibleContent className="px-4 pb-3" data-testid="tool-group-content">
+        <CollapsibleContent className="px-3 pb-3" data-testid="tool-group-content">
           <div className="space-y-2 pt-2 border-t border-border/50">{children}</div>
         </CollapsibleContent>
       </Collapsible>

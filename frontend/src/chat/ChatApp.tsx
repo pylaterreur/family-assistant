@@ -32,6 +32,7 @@ import {
   type OlderMessagesStatus,
   type SteerResult,
 } from './chatControls';
+import { interleaveTextAndToolCalls, isToolCallDisplay, toolCallParts } from './orderedParts';
 import { Thread } from './Thread';
 import { ToolConfirmationProvider } from './ToolConfirmationContext';
 import type { PendingToolConfirmation } from './ToolConfirmationContext';
@@ -928,22 +929,9 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
         // Update the loading message with actual content
         return prev.map((msg) => {
           if (msg.id === streamingMessageIdRef.current) {
-            // Preserve existing tool calls when updating text
-            const existingContent = msg.content || [];
-            const toolCalls = existingContent.filter((part) => part.type === 'tool-call');
-
-            // Create new content array with updated text and preserved tool calls
-            const newContent: MessageContent[] = [
-              {
-                type: 'text',
-                text: content, // Use the accumulated content directly from the hook
-              },
-              ...toolCalls, // Preserve any existing tool calls with their status and results
-            ];
-
             return {
               ...msg,
-              content: newContent,
+              content: interleaveTextAndToolCalls(content, toolCallParts(msg.content)),
               isLoading: false, // Remove loading flag when content arrives
             };
           }
@@ -1032,11 +1020,12 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
           setMessages((prev) =>
             prev.map((msg) => {
               if (msg.id === messageId) {
-                const existingToolCalls =
-                  msg.content?.filter((part) => part.type === 'tool-call') || [];
                 return {
                   ...msg,
-                  content: [{ type: 'text', text: content + errorSuffix }, ...existingToolCalls],
+                  content: interleaveTextAndToolCalls(
+                    content + errorSuffix,
+                    toolCallParts(msg.content)
+                  ),
                   status: { type: 'complete' as const },
                   isLoading: false,
                 };
@@ -1054,16 +1043,15 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
           setMessages((prev) =>
             prev.map((msg) => {
               if (msg.id === messageId) {
-                const existingToolCalls =
-                  msg.content?.filter((part) => part.type === 'tool-call') || [];
+                // The apology follows the tools that ran before the failure.
                 return {
                   ...msg,
                   content: [
+                    ...toolCallParts(msg.content),
                     {
                       type: 'text',
                       text: `Sorry, I encountered an error after running tools. [View diagnostics](${diagnosticsUrl}) for debugging details.`,
                     },
-                    ...existingToolCalls,
                   ],
                   status: { type: 'complete' as const },
                   isLoading: false,
@@ -1382,70 +1370,73 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   }, []);
 
   // Handle tool calls during streaming
-  const handleStreamingToolCall = useCallback((toolCalls: Array<Record<string, unknown>>) => {
-    // CRITICAL FIX: Capture the ref value immediately to avoid closure issues
-    // This prevents race conditions where the ref gets cleared before setState callback executes
-    const targetMessageId = streamingMessageIdRef.current;
+  const handleStreamingToolCall = useCallback(
+    (toolCalls: Array<Record<string, unknown>>, streamedText = '') => {
+      // CRITICAL FIX: Capture the ref value immediately to avoid closure issues
+      // This prevents race conditions where the ref gets cleared before setState callback executes
+      const targetMessageId = streamingMessageIdRef.current;
 
-    // Check for attach_to_response specifically (removed debug logging)
+      // Check for attach_to_response specifically (removed debug logging)
 
-    if (toolCalls && toolCalls.length > 0 && targetMessageId) {
-      // Record the tool-call message id synchronously, NOT inside the
-      // setMessages updater below: updater functions only run when React
-      // flushes a render. When a turn's SSE events arrive in a single network
-      // chunk (e.g. the hub replays an already-finished turn in one burst),
-      // onComplete fires in the same task as onToolCall — before any render —
-      // and a ref assigned inside the updater would still be null, sending
-      // handleStreamingComplete down the wrong (no-tool-calls) branch.
-      toolCallMessageIdRef.current = targetMessageId;
-      setMessages((prev) => {
-        const updatedMessages = prev.map((msg) => {
-          if (msg.id === targetMessageId) {
-            // This is the message to update.
-            // It might be a 'loading' message, or it might already have text.
-            const existingTextContent =
-              msg.content?.filter((part) => part.type === 'text' && part.text !== LOADING_MARKER) ||
-              [];
+      if (toolCalls && toolCalls.length > 0 && targetMessageId) {
+        // Record the tool-call message id synchronously, NOT inside the
+        // setMessages updater below: updater functions only run when React
+        // flushes a render. When a turn's SSE events arrive in a single network
+        // chunk (e.g. the hub replays an already-finished turn in one burst),
+        // onComplete fires in the same task as onToolCall — before any render —
+        // and a ref assigned inside the updater would still be null, sending
+        // handleStreamingComplete down the wrong (no-tool-calls) branch.
+        toolCallMessageIdRef.current = targetMessageId;
+        setMessages((prev) => {
+          const updatedMessages = prev.map((msg) => {
+            if (msg.id === targetMessageId) {
+              // Create new tool parts with new object references
+              const toolParts: MessageContent[] = toolCalls.map((tc) => {
+                const args = parseToolArguments(tc.arguments);
+                const result: MessageContent = {
+                  type: 'tool-call' as const,
+                  toolCallId: tc.id as string,
+                  toolName: tc.name as string,
+                  args: args as Record<string, unknown> | undefined,
+                  argsText:
+                    typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments),
+                };
+                // Add result if present
+                if (tc.result !== undefined) {
+                  result.result = tc.result as string;
+                }
+                if (isTerminalToolOutcome(tc.outcome)) {
+                  result.outcome = tc.outcome;
+                }
+                // Add attachments if present
+                if (tc.attachments !== undefined && Array.isArray(tc.attachments)) {
+                  result.attachments = [...tc.attachments];
+                }
+                if (isToolCallDisplay(tc.display)) {
+                  result.display = tc.display;
+                }
+                if (typeof tc.textOffset === 'number') {
+                  result.textOffset = tc.textOffset;
+                }
+                return result;
+              });
 
-            // Create new tool parts with new object references
-            const toolParts: MessageContent[] = toolCalls.map((tc) => {
-              const args = parseToolArguments(tc.arguments);
-              const result: MessageContent = {
-                type: 'tool-call' as const,
-                toolCallId: tc.id as string,
-                toolName: tc.name as string,
-                args: args as Record<string, unknown> | undefined,
-                argsText:
-                  typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments),
+              return {
+                ...msg,
+                content: interleaveTextAndToolCalls(streamedText, toolParts),
+                isLoading: false,
+                status: { type: 'running' as const },
               };
-              // Add result if present
-              if (tc.result !== undefined) {
-                result.result = tc.result as string;
-              }
-              if (isTerminalToolOutcome(tc.outcome)) {
-                result.outcome = tc.outcome;
-              }
-              // Add attachments if present
-              if (tc.attachments !== undefined && Array.isArray(tc.attachments)) {
-                result.attachments = [...tc.attachments];
-              }
-              return result;
-            });
+            }
+            return msg;
+          });
 
-            return {
-              ...msg,
-              content: [...existingTextContent, ...toolParts],
-              isLoading: false,
-              status: { type: 'running' as const },
-            };
-          }
-          return msg;
+          return updatedMessages;
         });
-
-        return updatedMessages;
-      });
-    }
-  }, []);
+      }
+    },
+    []
+  );
 
   // Reload persisted history when the live stream can't show the reply itself:
   // a durably-complete turn (already_complete — never opened /stream) or a
@@ -1827,6 +1818,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                   awaitingResult:
                     toolResponse === undefined &&
                     Boolean(msg.turn_id && runningTurnIds.has(msg.turn_id)),
+                  display: isToolCallDisplay(toolCall.display) ? toolCall.display : undefined,
                 });
               });
             }

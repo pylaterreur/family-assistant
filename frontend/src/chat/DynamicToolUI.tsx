@@ -1,6 +1,7 @@
 import React from 'react';
 import { Attachment, isAttachment } from '../types/attachments';
 import type { TerminalToolOutcome } from './toolOutcome';
+import type { ToolCallDisplay } from './types';
 import { ToolFallback, toolUIsByName } from './ToolUI';
 import { ToolWithConfirmation } from './ToolWithConfirmation';
 
@@ -23,6 +24,7 @@ interface AssistantUIToolProps {
   addResult?: (result: unknown) => void;
   artifact?: Record<string, unknown>;
   attachments?: Array<Record<string, unknown>>;
+  display?: ToolCallDisplay;
 }
 
 export const DynamicToolUI: React.FC<AssistantUIToolProps> = (props) => {
@@ -37,6 +39,7 @@ export const DynamicToolUI: React.FC<AssistantUIToolProps> = (props) => {
     status,
     artifact,
     attachments: directAttachments,
+    display,
   } = props;
 
   // Extract and validate attachments from artifact if present, otherwise use direct attachments prop
@@ -72,6 +75,7 @@ export const DynamicToolUI: React.FC<AssistantUIToolProps> = (props) => {
       outcome={outcome}
       isError={isError}
       awaitingResult={awaitingResult}
+      display={display}
       attachments={attachments as unknown as Array<Record<string, unknown>>}
       // @ts-expect-error - ToolComponent type mismatch with dynamic lookup
       ToolComponent={ToolComponent}

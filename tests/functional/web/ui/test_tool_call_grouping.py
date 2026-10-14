@@ -111,8 +111,8 @@ async def test_multiple_tool_calls_are_grouped(
     await tool_group.wait_for(state="visible", timeout=10000)
 
     trigger = page.locator('[data-testid="tool-group-trigger"]')
-    await expect(trigger).to_contain_text("2 notes")
-    await expect(trigger).to_contain_text("1 document")
+    # One line naming the call that mattered, and how many others ran.
+    await expect(trigger).to_contain_text("and 2 more")
 
     # Test that completed groups are initially collapsed so intermediate work stays compact
     content = page.locator('[data-testid="tool-group-content"]')
@@ -199,8 +199,7 @@ async def test_tool_group_expand_collapse_interaction(
     trigger = page.locator('[data-testid="tool-group-trigger"]')
     content = page.locator('[data-testid="tool-group-content"]')
 
-    await expect(trigger).to_contain_text("1 document")
-    await expect(trigger).to_contain_text("1 note")
+    await expect(trigger).to_contain_text("and 1 more")
 
     # Verify initially collapsed
     await content.wait_for(state="attached", timeout=5000)
@@ -273,8 +272,13 @@ async def test_single_tool_call_uses_toolgroup(
 
     trigger = page.locator('[data-testid="tool-group-trigger"]')
     # add_or_update_note asks for confirmation, which no one answers here, so
-    # the call ends not run and the collapsed header says so.
-    await expect(trigger).to_have_text("1 note · 1 didn't finish")
+    # the call ends not run: the header names it unfinished and says so.
+    await expect(page.locator('[data-testid="tool-group-headline"]')).to_have_text(
+        "Saving note “Single Test”"
+    )
+    await expect(page.locator('[data-testid="tool-group-detail"]')).to_have_text(
+        "1 didn't finish"
+    )
 
     # Verify the group is still functional (can be expanded)
     content = page.locator('[data-testid="tool-group-content"]')

@@ -179,11 +179,18 @@ function describeFallbackStatus(status, result) {
 // Generic fallback tool UI that handles any tool call. It leads with a compact,
 // readable line (what the tool is, what it was asked, what came back) and keeps
 // the raw name, arguments and result behind Details, with copy buttons.
-const ToolFallback = ({ toolName, args, result, status, attachments }) => {
+const ToolFallback = ({ toolName, args, result, status, attachments, display = null }) => {
   const statusInfo = describeFallbackStatus(status, result);
   const hasArgs = args && typeof args === 'object' && Object.keys(args).length > 0;
   const hasResult = result !== undefined && result !== null && result !== '';
-  const argSummary = summarizeToolArgs(args);
+  // The server's phrase already names the telling argument. Only a call that
+  // succeeded reads in the past tense.
+  const title = display
+    ? status?.type === 'complete'
+      ? display.done
+      : display.active
+    : humanizeToolName(toolName);
+  const argSummary = display ? null : summarizeToolArgs(args);
   const resultPreview = summarizeToolResult(result);
   const isError = statusInfo.className === 'tool-error';
 
@@ -193,7 +200,9 @@ const ToolFallback = ({ toolName, args, result, status, attachments }) => {
       data-ui="tool-call-content"
     >
       <div className="tool-call-header flex min-w-0 items-center gap-2">
-        <span className="tool-name shrink-0 font-medium">{humanizeToolName(toolName)}</span>
+        <span className="tool-name min-w-0 truncate font-medium" data-testid="tool-call-title">
+          {title}
+        </span>
         {argSummary && (
           <span className="min-w-0 truncate text-muted-foreground" data-testid="tool-args-summary">
             {argSummary}

@@ -3,8 +3,15 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import type { BackendAttachment, BackendConversationMessage, BackendToolCall } from './types';
+import type {
+  BackendAttachment,
+  BackendConversationMessage,
+  BackendToolCall,
+  ToolCallDisplay,
+} from './types';
 import { MarkdownText } from './MarkdownText';
+import { isToolCallDisplay } from './orderedParts';
+import { type ToolGroupCall, toolCallPhrase } from './toolGroupSummary';
 import { ToolGroupShell } from './ToolGroupShell';
 import { getToolIconInfo } from './toolIconMapping';
 import { isTerminalToolOutcome, TOOL_OUTCOME_LABELS, type ToolOutcome } from './toolOutcome';
@@ -28,6 +35,7 @@ interface SharedToolCall {
   argsText: string;
   resultText: string;
   outcome: ToolOutcome;
+  display?: ToolCallDisplay;
 }
 
 interface ToolResult {
@@ -125,6 +133,7 @@ function buildSharedToolCalls(
       name: toolCallName(toolCall),
       argsText: toolCallArgsText(toolCall),
       resultText: result?.text ?? '',
+      display: isToolCallDisplay(toolCall.display) ? toolCall.display : undefined,
       // A shared transcript is a snapshot: a call with no result is not shown
       // as running, and one whose row predates outcomes is taken as succeeded.
       outcome: result ? (result.outcome ?? 'succeeded') : 'unknown',
@@ -134,16 +143,19 @@ function buildSharedToolCalls(
 
 const SharedToolGroup: React.FC<{ toolCalls: SharedToolCall[] }> = ({ toolCalls }) => {
   const [isExpanded, setIsExpanded] = useState(false);
+  const calls: ToolGroupCall[] = useMemo(
+    () =>
+      toolCalls.map((toolCall) => ({
+        toolName: toolCall.name,
+        display: toolCall.display,
+        state: toolCall.outcome === 'succeeded' ? 'succeeded' : 'unsuccessful',
+      })),
+    [toolCalls]
+  );
 
   return (
-    <ToolGroupShell
-      toolNames={toolCalls.map((toolCall) => toolCall.name)}
-      toolCount={toolCalls.length}
-      unsuccessfulCount={toolCalls.filter((toolCall) => toolCall.outcome !== 'succeeded').length}
-      isExpanded={isExpanded}
-      onOpenChange={setIsExpanded}
-    >
-      {toolCalls.map((toolCall) => {
+    <ToolGroupShell calls={calls} isExpanded={isExpanded} onOpenChange={setIsExpanded}>
+      {toolCalls.map((toolCall, index) => {
         const { icon: Icon } = getToolIconInfo(toolCall.name);
         return (
           <div
@@ -154,7 +166,7 @@ const SharedToolGroup: React.FC<{ toolCalls: SharedToolCall[] }> = ({ toolCalls 
           >
             <div className="flex flex-wrap items-center gap-2 break-all text-xs font-medium">
               <Icon className="h-3.5 w-3.5" />
-              {toolCall.name}
+              {toolCallPhrase(calls[index], 'done')}
               {toolCall.outcome !== 'succeeded' && (
                 <span
                   className={
