@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict
 from pydantic import BaseModel, ConfigDict, Field
 
 from family_assistant.llm.messages import MessageAttachmentMetadata
+from family_assistant.tools.display import ToolCallDisplay
 
 if TYPE_CHECKING:
     from starlette.datastructures import State
@@ -20,19 +21,20 @@ class ChatAttachmentRequest(TypedDict, total=False):
     filename: str
 
 
-class ToolCallFunctionResponse(TypedDict, total=False):
+class ToolCallFunctionResponse(TypedDict):
     """Function details within a tool call response (OpenAI format)."""
 
     name: str
     arguments: str
 
 
-class ToolCallResponseItem(TypedDict, total=False):
+class ToolCallResponseItem(TypedDict):
     """Tool call data included in chat API responses (OpenAI format)."""
 
     id: str
     type: str
     function: ToolCallFunctionResponse
+    display: ToolCallDisplay
 
 
 # --- Gemini Live Voice API Configuration Models ---
