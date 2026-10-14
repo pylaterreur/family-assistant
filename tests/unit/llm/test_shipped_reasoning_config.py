@@ -87,12 +87,13 @@ def test_shipped_opus_5_request_carries_thinking_and_survives_validation(
         system_blocks=system_blocks,
         tools=None,
         tool_choice=None,
+        streaming=True,
     )
 
     assert params["thinking"]["type"] == "adaptive"
-    # Thinking shares this budget with the response, so it has to be above the
-    # client's own 8192 default for the pairing to be deliberate.
-    assert params["max_tokens"] > 8192
+    # Thinking shares this budget with the response; the shipped config leaves
+    # it to the client, which gives a streamed turn the recommended 64k.
+    assert params["max_tokens"] == 64_000
 
 
 def test_shipped_defaults_leave_thinking_off_for_unconfigured_anthropic_models(

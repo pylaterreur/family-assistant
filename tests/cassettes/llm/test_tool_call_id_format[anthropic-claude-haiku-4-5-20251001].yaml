@@ -1,6 +1,6 @@
 interactions:
   - request:
-      body: '{"max_tokens":8192,"messages":[{"role":"user","content":"Calculate 42 divided by 7"}],"model":"claude-haiku-4-5-20251001","tool_choice":{"type":"auto"},"tools":[{"name":"calculate","description":"Perform basic mathematical calculations","input_schema":{"type":"object","properties":{"expression":{"type":"string","description":"The mathematical expression to evaluate"}},"required":["expression"]}}]}'
+      body: '{"max_tokens":16000,"messages":[{"role":"user","content":[{"type":"text","text":"Calculate 42 divided by 7","cache_control":{"type":"ephemeral"}}]}],"model":"claude-haiku-4-5-20251001","tool_choice":{"type":"auto"},"tools":[{"name":"calculate","description":"Perform basic mathematical calculations","input_schema":{"type":"object","properties":{"expression":{"type":"string","description":"The mathematical expression to evaluate"}},"required":["expression"]}}]}'
       headers:
         accept:
           - application/json
@@ -11,7 +11,7 @@ interactions:
         connection:
           - keep-alive
         content-length:
-          - '400'
+          - '463'
         content-type:
           - application/json
         host:
@@ -43,15 +43,16 @@ interactions:
     response:
       body:
         string: !!binary |
-          H4sIAAAAAAAA/3WRy07DMBBFf6XyOhF5NG3pDhZs2IBUiZeQZexpYsWxUz9KS5V/ZxwRQUHs7Lnn
-          zp2xT6QzAhRZE65YEJA2TLYhnadVWmRFlWdZThIiBQKdq2mWr4qPRoTn1eFxsTsebwQvZfnwhIw/
-          9hApcI7VgAVrVCww56TzTHsscaM94Gn9cpp4b4yiwcGUEu8Bc+437eaqsO8lu77d9XW7nReLyzuk
-          NOuijzPFg2J+NOo+YNMTgUNvMV8ajcS8mF3MlmRIIqvARuArVEgL3JNheE2I86anFpgbTT/GGQUH
-          uwCao0kHpRISxuWw05hJvWlBO7KulkWM4Q1Qjr08TkDPiWzSURb/aZN33KVvoAPLFK26v/y3mje/
-          VdzYBH823gLXAbuXHKiX8SlI/BLBrBifbws2LklrMChp4ynbM6nYG/7gMHwCtKtYciQCAAA=
+          H4sIAAAAAAAA/3WRX0vDMBTFv8rI84pNWTfY21R8GFjQyUBEQpZc22xpUvNnTMa+uzd1Raf41t7z
+          u/ece3MkrZWgyZwIzaOErOFqF7NJVmZFXpQ0zykZEyURaH3Nckpvavo4W24Xd5vFqqKHVVsVzw0y
+          4aODRIH3vAYsOKtTgXuvfOAmYElYEwC/5i/HgQ/WahY9DC7pP6LPw+21bJeCVlsXp93amsX9unpC
+          yvA29QmuRdQ89I2mizj0SODQOfRX1iAxKUZXoxk5jROrwSXgbCqVAxHI6fT6lYkrk3QTtR4TH2zH
+          HHDfT/mRrxc8vEcwAi5oCThC+6EW+wugXR+MBbsDg2I5K1IW0QATOD9gTHZJ5IOOsvxPG3r7hbsG
+          WnBcs7L9y3+rtPmt4llsDBfxprgNuL0SwIJK9yDp3SR3sr/xG7i0OKvBomRsYHyPW/MNPjNOk4rX
+          xvqgxPkOp09mOlaVXAIAAA==
       headers:
         CF-RAY:
-          - 9ce27b0508c09b8e-FRA
+          - a4a37aef79641d0c-FRA
         Connection:
           - keep-alive
         Content-Encoding:
@@ -61,7 +62,7 @@ interactions:
         Content-Type:
           - application/json
         Date:
-          - Sun, 15 Feb 2026 05:42:12 GMT
+          - Wed, 14 Oct 2026 03:26:03 GMT
         Server:
           - cloudflare
         Transfer-Encoding:
@@ -71,37 +72,41 @@ interactions:
         anthropic-organization-id:
           - 47b93e1d-acf2-4be5-b32d-1716b0cff224
         anthropic-ratelimit-input-tokens-limit:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-remaining:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-reset:
-          - '2026-02-15T05:42:12Z'
+          - '2026-10-14T03:26:02Z'
         anthropic-ratelimit-output-tokens-limit:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-remaining:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-reset:
-          - '2026-02-15T05:42:12Z'
+          - '2026-10-14T03:26:02Z'
         anthropic-ratelimit-requests-limit:
-          - '50'
+          - '10000'
         anthropic-ratelimit-requests-remaining:
-          - '47'
+          - '9999'
         anthropic-ratelimit-requests-reset:
-          - '2026-02-15T05:42:15Z'
+          - '2026-10-14T03:26:02Z'
         anthropic-ratelimit-tokens-limit:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-remaining:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-reset:
-          - '2026-02-15T05:42:12Z'
+          - '2026-10-14T03:26:02Z'
+        anthropic-workspace-id:
+          - wrkspc_01TyX2k3iWProyRBoEVYPNGB
         cf-cache-status:
           - DYNAMIC
         request-id:
-          - req_011CY9KYrjmGeQoLHeYdxTzw
+          - req_011Cg1R7JXzvr4uFjrcpM2mW
         strict-transport-security:
           - max-age=31536000; includeSubDomains; preload
-        x-envoy-upstream-service-time:
-          - '514'
+        traceresponse:
+          - 00-b5a24248a130b979b122af0bcd49f61f-3612ac343662d947-01
+        vary:
+          - Accept-Encoding
       status:
         code: 200
         message: OK

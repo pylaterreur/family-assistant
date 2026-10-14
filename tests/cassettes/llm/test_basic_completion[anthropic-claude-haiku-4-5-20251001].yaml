@@ -1,6 +1,6 @@
 interactions:
   - request:
-      body: '{"max_tokens":8192,"messages":[{"role":"user","content":"Reply with exactly this text: ''Hello from the test suite!''"}],"model":"claude-haiku-4-5-20251001"}'
+      body: '{"max_tokens":16000,"messages":[{"role":"user","content":[{"type":"text","text":"Reply with exactly this text: ''Hello from the test suite!''","cache_control":{"type":"ephemeral"}}]}],"model":"claude-haiku-4-5-20251001"}'
       headers:
         accept:
           - application/json
@@ -11,7 +11,7 @@ interactions:
         connection:
           - keep-alive
         content-length:
-          - '155'
+          - '218'
         content-type:
           - application/json
         host:
@@ -43,15 +43,15 @@ interactions:
     response:
       body:
         string: !!binary |
-          H4sIAAAAAAAA/3WR3UrEMBBGX6XmuoW2WMQ+gch6IyiCSIjNbBs2nanJZFlZ+u5OFhf/8CrhOyfD
-          zOSoZrLgVa8Gb5KFajJul6rLqqvauu2aum5UqZwVYY6jrpsHPFiidvtkr267MeLd/fi4WcTh9wWy
-          BTGaESQI5HNgYnSRDbJEAyGD3Prn49lnOGRyOnp1A95TsQ00FzxBwRC5iMkxXKj1pVSRadEBTCQU
-          GdBqTgHVJ4jwlgAHqYrJ+1KlUyP9UTlcEmumHWBUfdtII2aYQA9Sih2h/inUZy7Y/sfOb3N9WCaY
-          IRivu/mv/0Wb6TddS0WJv0fXMgyEvRtAs4MgY+blWRNs/gfcQsgj6hFIEBJrszfOm1fZ9bp+AATh
-          a7XOAQAA
+          H4sIAAAAAAAA/3WRT2vDMAzFv0rmcwNJWQ7LbYzBLoOx6xjGtdXE1JEyWy4tpd99crewf+xk835P
+          z5J8UhM5CKpXNpjsoB6N3+X6uu7qdbPu2qZp1Up5J4YpDbpp27uhfe6e4vZIt4iH+41/HBKKh48z
+          FBekZAYQIVIogknJJzbIIllCBrn1L6fFz3Ao5HL06gFCoGobaap4hIohcZWyZ7hS59ePeuMRouox
+          h7BSiWnWEUwilGpApznH0s0FJHjLgBZ+uB1IREiLli/d9iflcc6smXaAAtetvGbsCNpKPHtC/dPQ
+          LFyw+48ttSUf5hEmiCbobvrr/6Lt+JueV4oyf5duZBaIe29Bsy/bUGXDzkRXPgu3EMvYegAShMTa
+          7GVms5EPkTDnzYCU2NvPLZzfAYsIzt8GAgAA
       headers:
         CF-RAY:
-          - 9ce27bcf6aee4dcc-FRA
+          - a4a37a4d5e803618-FRA
         Connection:
           - keep-alive
         Content-Encoding:
@@ -61,7 +61,7 @@ interactions:
         Content-Type:
           - application/json
         Date:
-          - Sun, 15 Feb 2026 05:42:45 GMT
+          - Wed, 14 Oct 2026 03:25:36 GMT
         Server:
           - cloudflare
         Transfer-Encoding:
@@ -71,37 +71,41 @@ interactions:
         anthropic-organization-id:
           - 47b93e1d-acf2-4be5-b32d-1716b0cff224
         anthropic-ratelimit-input-tokens-limit:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-remaining:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-reset:
-          - '2026-02-15T05:42:45Z'
+          - '2026-10-14T03:25:36Z'
         anthropic-ratelimit-output-tokens-limit:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-remaining:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-reset:
-          - '2026-02-15T05:42:45Z'
+          - '2026-10-14T03:25:36Z'
         anthropic-ratelimit-requests-limit:
-          - '50'
+          - '10000'
         anthropic-ratelimit-requests-remaining:
-          - '49'
+          - '9999'
         anthropic-ratelimit-requests-reset:
-          - '2026-02-15T05:42:45Z'
+          - '2026-10-14T03:25:36Z'
         anthropic-ratelimit-tokens-limit:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-remaining:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-reset:
-          - '2026-02-15T05:42:45Z'
+          - '2026-10-14T03:25:36Z'
+        anthropic-workspace-id:
+          - wrkspc_01TyX2k3iWProyRBoEVYPNGB
         cf-cache-status:
           - DYNAMIC
         request-id:
-          - req_011CY9KbFBvwXFkzfEmHFnAx
+          - req_011Cg1R5PemL8XUYRpfind1p
         strict-transport-security:
           - max-age=31536000; includeSubDomains; preload
-        x-envoy-upstream-service-time:
-          - '631'
+        traceresponse:
+          - 00-87789d7382e6e6740667b5284a8fbaf7-da7e1d111104eb74-01
+        vary:
+          - Accept-Encoding
       status:
         code: 200
         message: OK

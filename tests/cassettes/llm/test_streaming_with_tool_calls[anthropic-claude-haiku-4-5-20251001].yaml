@@ -1,6 +1,6 @@
 interactions:
   - request:
-      body: '{"max_tokens":8192,"messages":[{"role":"user","content":"What''s the weather in Paris, France? Also calculate 42 * 17."}],"model":"claude-haiku-4-5-20251001","tool_choice":{"type":"auto"},"tools":[{"name":"get_weather","description":"Get current weather for a location","input_schema":{"type":"object","properties":{"location":{"type":"string","description":"The city and country"},"unit":{"type":"string","enum":["celsius","fahrenheit"],"description":"Temperature unit"}},"required":["location"]}},{"name":"calculate","description":"Perform mathematical calculations","input_schema":{"type":"object","properties":{"expression":{"type":"string","description":"Mathematical expression to evaluate"}},"required":["expression"]}}]}'
+      body: '{"max_tokens":64000,"messages":[{"role":"user","content":[{"type":"text","text":"What''s the weather in Paris, France? Also calculate 42 * 17.","cache_control":{"type":"ephemeral"}}]}],"model":"claude-haiku-4-5-20251001","tool_choice":{"type":"auto"},"tools":[{"name":"get_weather","description":"Get current weather for a location","input_schema":{"type":"object","properties":{"location":{"type":"string","description":"The city and country"},"unit":{"type":"string","enum":["celsius","fahrenheit"],"description":"Temperature unit"}},"required":["location"]}},{"name":"calculate","description":"Perform mathematical calculations","input_schema":{"type":"object","properties":{"expression":{"type":"string","description":"Mathematical expression to evaluate"}},"required":["expression"]}}]}'
       headers:
         accept:
           - application/json
@@ -11,7 +11,7 @@ interactions:
         connection:
           - keep-alive
         content-length:
-          - '727'
+          - '790'
         content-type:
           - application/json
         host:
@@ -43,16 +43,17 @@ interactions:
     response:
       body:
         string: !!binary |
-          H4sIAAAAAAAA/4VS22rbQBD9FbOPRQZJtWqix4pcCDYYAm7SUJbpaiqtvdpV9+I0Nvr3zCrYcVva
-          vElzzsy5sAfWmRoVK5lQEGqctiC3YTqbFtM8zYssTTOWMFkToXMNT7NFvr3MF7dV3+vm826xxvrj
-          eiOJ4597jCx0DhqkgTUqDsA56TxoTyNhtEf6Kh8PR743RvHg8KgS/wPp5EVR5E9fZtvlxfouu2z3
-          Ia/2FbE0dHGvQc+fEHyLNq7qPtDZA1NGgJdGE2MFVrpkcmVBC2QDqYNSxC5P2rW0KDwbhuRdO1Wx
-          2tw+LDdhf5Pdz++crzb7669vdui2CAo8npvBX72lOl7tzPLJh0k2/7+Rbwlz3vTcIrhx68zPCDj8
-          GTDmKXVQKmFhLJsujaLcmy1qx8pP8zTKiBa5oFuxEf4744QTXP8LO+6OYfoWO7SgeNH9zX9Ds/ZP
-          lBKb4M9HFzOKg3YnBXIvYxUsPpEabD329wNtDMkbNARp4znsQCr4Ti9qGF4AHQ0MErQCAAA=
+          H4sIAAAAAAAA/4VS0W4aMRD8FeTHCqQ74JKG17aJ1BAp0IQiVZW18W3urPPZh70OVIh/z/pSEtqq
+          7Zu9M7szO/ZetK5EI2ZCGYgljmrQTRxNR8VonI2LPMtyMRS6ZEIbKpnl+YcqX54Viy/qY6M2y/Xj
+          ZLN6+Moc+tFhYmEIUCEXvDOpACHoQGCJS8pZQj7Nvu2PfHLOyBjwqJLukXXuJ1uYL66XBVx5umg2
+          u7ldTD4xy0Kb+iokuUWgGn1qtV3ksXthnALSzjLjFrwOw8GlB6tQHFgdjGH27FW71B4VicNh+F87
+          d9cL/NzQzRbWa9+sVvfz93d692aHZ6togPDUDO46z3G82JmOB+8G+fm/jXx/yQi0TbiNxgxFINdJ
+          jxD6MScGeyDgJmJa8JRdIo8w4ViL/YuwXO9MkmvQMnh2niUvqkapeH6KTf7KeMUZLv+GHXv7jbsa
+          W/RgZNH+yX9D8/p3lGNxkU5LF1PeBv2TVihJpzxE+kcl+LIP+RF9WlxW6BiyjiQ88dbwYPrXLjVU
+          1gXS6mcOh2dD/xpd7AIAAA==
       headers:
         CF-RAY:
-          - 9ce27ce18f5071af-FRA
+          - a4a37a873b00bbaf-FRA
         Connection:
           - keep-alive
         Content-Encoding:
@@ -62,7 +63,7 @@ interactions:
         Content-Type:
           - application/json
         Date:
-          - Sun, 15 Feb 2026 05:43:29 GMT
+          - Wed, 14 Oct 2026 03:25:46 GMT
         Server:
           - cloudflare
         Transfer-Encoding:
@@ -72,37 +73,41 @@ interactions:
         anthropic-organization-id:
           - 47b93e1d-acf2-4be5-b32d-1716b0cff224
         anthropic-ratelimit-input-tokens-limit:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-remaining:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-reset:
-          - '2026-02-15T05:43:29Z'
+          - '2026-10-14T03:25:46Z'
         anthropic-ratelimit-output-tokens-limit:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-remaining:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-reset:
-          - '2026-02-15T05:43:29Z'
+          - '2026-10-14T03:25:46Z'
         anthropic-ratelimit-requests-limit:
-          - '50'
+          - '10000'
         anthropic-ratelimit-requests-remaining:
-          - '48'
+          - '9999'
         anthropic-ratelimit-requests-reset:
-          - '2026-02-15T05:43:30Z'
+          - '2026-10-14T03:25:45Z'
         anthropic-ratelimit-tokens-limit:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-remaining:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-reset:
-          - '2026-02-15T05:43:29Z'
+          - '2026-10-14T03:25:46Z'
+        anthropic-workspace-id:
+          - wrkspc_01TyX2k3iWProyRBoEVYPNGB
         cf-cache-status:
           - DYNAMIC
         request-id:
-          - req_011CY9KeUftFFCknFFrLgFZ8
+          - req_011Cg1R65Dn3EJCezJ88etGy
         strict-transport-security:
           - max-age=31536000; includeSubDomains; preload
-        x-envoy-upstream-service-time:
-          - '778'
+        traceresponse:
+          - 00-2a0e748dcab80e919de49b6f295c3b16-b18b843a743e3465-01
+        vary:
+          - Accept-Encoding
       status:
         code: 200
         message: OK

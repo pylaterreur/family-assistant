@@ -1,6 +1,6 @@
 interactions:
   - request:
-      body: '{"max_tokens":8192,"messages":[{"role":"user","content":[{"type":"text","text":"Create a person profile for John who is 25 years old and works as a software developer."},{"type":"text","text":"Respond by calling the `return_structured_response` tool."}]}],"model":"claude-haiku-4-5-20251001","system":"You are a helpful assistant that provides accurate information.","tool_choice":{"type":"auto"},"tools":[{"name":"return_structured_response","description":"Return the final response as a structured JSON object.","input_schema":{"description":"Person information model.","properties":{"name":{"title":"Name","type":"string"},"age":{"maximum":150,"minimum":0,"title":"Age","type":"integer"},"occupation":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Occupation"}},"required":["name","age"],"title":"PersonInfo","type":"object"}}]}'
+      body: '{"max_tokens":16000,"messages":[{"role":"user","content":[{"type":"text","text":"Create a person profile for John who is 25 years old and works as a software developer.","cache_control":{"type":"ephemeral"}}]}],"model":"claude-haiku-4-5-20251001","output_config":{"format":{"type":"json_schema","schema":{"type":"object","description":"Person information model.","title":"PersonInfo","properties":{"name":{"type":"string","title":"Name"},"age":{"type":"integer","title":"Age","description":"{maximum: 150, minimum: 0}"},"occupation":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Occupation","description":"{default: None}"}},"additionalProperties":false,"required":["name","age"]}}},"system":"You are a helpful assistant that provides accurate information."}'
       headers:
         accept:
           - application/json
@@ -11,7 +11,7 @@ interactions:
         connection:
           - keep-alive
         content-length:
-          - '853'
+          - '766'
         content-type:
           - application/json
         host:
@@ -43,16 +43,16 @@ interactions:
     response:
       body:
         string: !!binary |
-          H4sIAAAAAAAA/3VS2U7DMBD8FeTnVkraBkRfOYS4pFZISCBkGXubmDje4CMIqv4765RAC+JtPTPe
-          mV17zRpUYNicSSOignEldB3Hs3ExnmSTIs+ynI2YViRofMmzPD9Z3b1cfZzmL0f19cPtbbeU5/WU
-          NOG9haQC70UJBDg0CRDeax+EDQRJtAGomj+uB31ANDx6GFzSOZLPYrKcXtU4XVzMrm+KrrPt2f2y
-          IpUVTbrnIERnuQ8uSqpAcQe+RbvtZNtILutBfImVJTjlmk+KEUMpYyuCRkukx1V4Ew4OFHRgsAXH
-          NhRVGEPV/Duo0g5kYJvN03YOoW3ibTRmxHzAlgII33fcmaknPLxGsBL21AqohfEDFvutkV2fnQes
-          wRJ5eDxLWWQFXFL/FJnvK7KBJ1r9xw13kwG0FTTghOFF81f/w+bVb5bWgjHsQsc5TQOu0xJ40Gkf
-          LL21Ek71z7AClwbnJSBRFgMXHU0tnulrUDelRWnRBy2/9rD5BO9EtqSQAgAA
+          H4sIAAAAAAAA/3WRTU/DMAyG/wryeZXaQgH1isSBA0JFcKEoConXRkuTko8xVPW/42yrYCBOcd7n
+          jR3bEwxWooYahOZRYtZztYnZRVZlZV5WRZ4XsAIlyTD4juVFcdMVzWXTqCux6x7uH293z7F5Ik/4
+          HDG50HveIQnO6iRw75UP3ASShDUBKapfpsUfcJfI/qhhasHwAVuoz1q4s71pYUURJUxSWaWLFSKO
+          PChrDjZv1+GDOzyTuEVtR3QtzDC/HspxZdBBbaLWK/DBjswh99ZQMTSShegMHIHH94hG4IlbIqXQ
+          ftHivrl6AmXGGFiwGzQEz4trKsdFj0xQ/vQ5durIF05Y/seWt6kAjj0O6Lhm1fDX/02L/jedV2Bj
+          +CmVJXWDbqsEsqDSPCCtRHIn03bNGl1qnHVoCRkbGN9S1/yNNkjZpOKdsT4ocZzD/AW0V3M8NwIA
+          AA==
       headers:
         CF-RAY:
-          - a419940deeb7d3a1-FRA
+          - a4a37aa48a2e7188-FRA
         Connection:
           - keep-alive
         Content-Encoding:
@@ -62,7 +62,7 @@ interactions:
         Content-Type:
           - application/json
         Date:
-          - Sun, 27 Sep 2026 09:45:57 GMT
+          - Wed, 14 Oct 2026 03:25:51 GMT
         Server:
           - cloudflare
         Transfer-Encoding:
@@ -76,145 +76,35 @@ interactions:
         anthropic-ratelimit-input-tokens-remaining:
           - '10000000'
         anthropic-ratelimit-input-tokens-reset:
-          - '2026-09-27T09:45:56Z'
+          - '2026-10-14T03:25:51Z'
         anthropic-ratelimit-output-tokens-limit:
           - '2000000'
         anthropic-ratelimit-output-tokens-remaining:
           - '2000000'
         anthropic-ratelimit-output-tokens-reset:
-          - '2026-09-27T09:45:57Z'
-        anthropic-ratelimit-requests-limit:
-          - '10000'
-        anthropic-ratelimit-requests-remaining:
-          - '9998'
-        anthropic-ratelimit-requests-reset:
-          - '2026-09-27T09:45:56Z'
-        anthropic-ratelimit-tokens-limit:
-          - '12000000'
-        anthropic-ratelimit-tokens-remaining:
-          - '12000000'
-        anthropic-ratelimit-tokens-reset:
-          - '2026-09-27T09:45:56Z'
-        anthropic-workspace-id:
-          - wrkspc_01TyX2k3iWProyRBoEVYPNGB
-        cf-cache-status:
-          - DYNAMIC
-        request-id:
-          - req_011CfTjKymDyAyhSXZKUYg1Y
-        strict-transport-security:
-          - max-age=31536000; includeSubDomains; preload
-        traceresponse:
-          - 00-03c983002a15997d236e6b30b9be4ddf-7d800e7d525e8dfb-01
-        vary:
-          - Accept-Encoding
-      status:
-        code: 200
-        message: OK
-  - request:
-      body: '{"max_tokens":8192,"messages":[{"role":"user","content":[{"type":"text","text":"Create a person profile for John who is 25 years old and works as a software developer.","cache_control":{"type":"ephemeral"}}]}],"model":"claude-haiku-4-5-20251001","output_config":{"format":{"type":"json_schema","schema":{"type":"object","description":"Person information model.","title":"PersonInfo","properties":{"name":{"type":"string","title":"Name"},"age":{"type":"integer","title":"Age","description":"{maximum: 150, minimum: 0}"},"occupation":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Occupation","description":"{default: None}"}},"additionalProperties":false,"required":["name","age"]}}},"system":"You are a helpful assistant that provides accurate information."}'
-      headers:
-        accept:
-          - application/json
-        accept-encoding:
-          - gzip, deflate
-        anthropic-version:
-          - '2023-06-01'
-        connection:
-          - keep-alive
-        content-length:
-          - '765'
-        content-type:
-          - application/json
-        host:
-          - api.anthropic.com
-        user-agent:
-          - AsyncAnthropic/Python 0.79.0
-        x-stainless-arch:
-          - arm64
-        x-stainless-async:
-          - async:asyncio
-        x-stainless-lang:
-          - python
-        x-stainless-os:
-          - MacOS
-        x-stainless-package-version:
-          - 0.79.0
-        x-stainless-read-timeout:
-          - '600'
-        x-stainless-retry-count:
-          - '0'
-        x-stainless-runtime:
-          - CPython
-        x-stainless-runtime-version:
-          - 3.13.13
-        x-stainless-timeout:
-          - '600'
-      method: POST
-      uri: https://api.anthropic.com/v1/messages
-    response:
-      body:
-        string: !!binary |
-          H4sIAAAAAAAA/3WRTU/DMAyG/8rk8yq1HZNYr2hCGke4URSFxGujpU6Xjw007b/j7EMwEKc47/PG
-          ju0DDE6jhQaUlUlj0UuzScVdMS/qsp5XZVnBFIxmwxA6UVbVw3pcbcPjU4Uvw14vlrPFMy3ZEz9H
-          zC4MQXbIgnc2CzIEE6KkyJJyFJGj5vVw9Uf8yOR0NHBogeSALTSTFlaupxamHHHCLNXzfHFKpVFG
-          4+hsC24d99LjROMOrRvRt3CE49u5nDSEHhpK1k4hRDcKjzI44mJIWsTkCS4g4DYhKbxxa+QUNly1
-          dGquOYChMUUR3QaJ4ay653JS9SgU58+fE7eO8soZ6//Y9W0ugGOPA3ppxXz46/+mVf+bHqfgUvwp
-          1TV3g35nFIpo8jwgr0RLr/N2aY0+Ny46dIzIRSF33LV85w1yNm1kRy5Eoy5zOH4BK0d1BDcCAAA=
-      headers:
-        CF-RAY:
-          - a47322e54b955e4f-SYD
-        Connection:
-          - keep-alive
-        Content-Encoding:
-          - gzip
-        Content-Security-Policy:
-          - default-src 'none'; frame-ancestors 'none'
-        Content-Type:
-          - application/json
-        Date:
-          - Thu, 08 Oct 2026 06:37:22 GMT
-        Server:
-          - cloudflare
-        Transfer-Encoding:
-          - chunked
-        X-Robots-Tag:
-          - none
-        anthropic-organization-id:
-          - 47b93e1d-acf2-4be5-b32d-1716b0cff224
-        anthropic-ratelimit-input-tokens-limit:
-          - '10000000'
-        anthropic-ratelimit-input-tokens-remaining:
-          - '10000000'
-        anthropic-ratelimit-input-tokens-reset:
-          - '2026-10-08T06:37:22Z'
-        anthropic-ratelimit-output-tokens-limit:
-          - '2000000'
-        anthropic-ratelimit-output-tokens-remaining:
-          - '2000000'
-        anthropic-ratelimit-output-tokens-reset:
-          - '2026-10-08T06:37:22Z'
+          - '2026-10-14T03:25:51Z'
         anthropic-ratelimit-requests-limit:
           - '10000'
         anthropic-ratelimit-requests-remaining:
           - '9999'
         anthropic-ratelimit-requests-reset:
-          - '2026-10-08T06:37:19Z'
+          - '2026-10-14T03:25:50Z'
         anthropic-ratelimit-tokens-limit:
           - '12000000'
         anthropic-ratelimit-tokens-remaining:
           - '12000000'
         anthropic-ratelimit-tokens-reset:
-          - '2026-10-08T06:37:22Z'
+          - '2026-10-14T03:25:51Z'
         anthropic-workspace-id:
           - wrkspc_01TyX2k3iWProyRBoEVYPNGB
         cf-cache-status:
           - DYNAMIC
         request-id:
-          - req_011CfpJqrvyRvDjhvfT5Y76i
+          - req_011Cg1R6REoLzg9YPZj5D8wX
         strict-transport-security:
           - max-age=31536000; includeSubDomains; preload
         traceresponse:
-          - 00-ea2cc6f7ca2b5ba907d1ff29a1a6dfd0-04d66e449098a1bd-01
+          - 00-fc02819bc7de71f3a62bde9298cc878b-092ccc954b092a58-01
         vary:
           - Accept-Encoding
       status:

@@ -1,6 +1,6 @@
 interactions:
   - request:
-      body: '{"max_tokens":8192,"messages":[{"role":"user","content":"What is 25 times 4?"}],"model":"claude-haiku-4-5-20251001","tool_choice":{"type":"auto"},"tools":[{"name":"get_weather","description":"Get the current weather in a given location","input_schema":{"type":"object","properties":{"location":{"type":"string","description":"The city and state, e.g. San Francisco, CA"},"unit":{"type":"string","enum":["celsius","fahrenheit"],"description":"The temperature unit"}},"required":["location"]}},{"name":"calculate","description":"Perform basic mathematical calculations","input_schema":{"type":"object","properties":{"expression":{"type":"string","description":"The mathematical expression to evaluate"}},"required":["expression"]}}]}'
+      body: '{"max_tokens":16000,"messages":[{"role":"user","content":[{"type":"text","text":"What is 25 times 4?","cache_control":{"type":"ephemeral"}}]}],"model":"claude-haiku-4-5-20251001","tool_choice":{"type":"auto"},"tools":[{"name":"get_weather","description":"Get the current weather in a given location","input_schema":{"type":"object","properties":{"location":{"type":"string","description":"The city and state, e.g. San Francisco, CA"},"unit":{"type":"string","enum":["celsius","fahrenheit"],"description":"The temperature unit"}},"required":["location"]}},{"name":"calculate","description":"Perform basic mathematical calculations","input_schema":{"type":"object","properties":{"expression":{"type":"string","description":"The mathematical expression to evaluate"}},"required":["expression"]}}]}'
       headers:
         accept:
           - application/json
@@ -11,7 +11,7 @@ interactions:
         connection:
           - keep-alive
         content-length:
-          - '731'
+          - '794'
         content-type:
           - application/json
         host:
@@ -43,15 +43,16 @@ interactions:
     response:
       body:
         string: !!binary |
-          H4sIAAAAAAAA/3WRX0vDMBTFv8rIo7TQlnbi3iYigm4oQ0FFQpZc22xp0uXPmIx+d2+Kxan41t7z
-          O/fkJEfSGgGKzAhXLAhIGya3IS3TKi2yosqzLCcJkQKB1tU0y/OiWa2X/G4zv3q6vm8bsIvL+RIZ
-          /9FBpMA5VgMOrFFxwJyTzjPtccSN9oBfs9fjyHtjFA0OxpT4HzBnYVbr+qIUO/m8Wty+NIfHh83N
-          DinN2ujjTPGgmB+Mugu49Ejg0FnMl0YjUVSTs0lJ+iSyCmwEvkKFtMA96fu3hDhvOmqBucF0cpxB
-          cLALoDmadFAqIWEoh5uGTOrNFrQjs+l5FWN4A5TjLo8noD+JbNRRFv9po3fo0jXQgmWKVu1f/lvN
-          m98qNjbBn46qKdYBu5ccqJfxKkh8EsGsGK7vHWwsSWswKGnjKdszqdgaX7DvPwF4d26EJAIAAA==
+          H4sIAAAAAAAA/3WRb0vDMBDGv8rIS2mhnWuHeycKCsLAMWEgEmJya8PSpObPOhn97l7qipviu/ae
+          391z9+RIGiNAkQXhigUBac3kLqSztEin2bTIsywnCZECgcZVNMvzuypflaFbvzzunx+uu/Xt0m7m
+          yPjPFiIFzrEKsGCNigXmnHSeaY8lbrQH/Fq8HkfeG6NocDC6xP+APvfBPm3Lw03XOWmW4HW+2uwC
+          Upo1sY8zxYNifmjUbcChRwKH1qK/NBqJaTG5msxIn0RWgY3AyVRIC9yTvn/73olJHXUdlEqI86al
+          FpgbppztNwgOPgJoDhe0AByh3FgLQwJoNyxGvdmBRrGcF3EXXgPlON/jmvSSyEYdZfGfNvYOB7c1
+          NGCZokXzl/9R8/q3irGY4M9LRYnXgN1LDtTLmAeJ7yaYFUPGW7DxcFqBQUkbT9ker2bv+Mw4TUhW
+          aeO85Kcc+i86bik1XAIAAA==
       headers:
         CF-RAY:
-          - 9ce27ae8dc52240d-FRA
+          - a4a37ace2e002272-FRA
         Connection:
           - keep-alive
         Content-Encoding:
@@ -61,7 +62,7 @@ interactions:
         Content-Type:
           - application/json
         Date:
-          - Sun, 15 Feb 2026 05:42:08 GMT
+          - Wed, 14 Oct 2026 03:25:57 GMT
         Server:
           - cloudflare
         Transfer-Encoding:
@@ -71,37 +72,41 @@ interactions:
         anthropic-organization-id:
           - 47b93e1d-acf2-4be5-b32d-1716b0cff224
         anthropic-ratelimit-input-tokens-limit:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-remaining:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-reset:
-          - '2026-02-15T05:42:08Z'
+          - '2026-10-14T03:25:57Z'
         anthropic-ratelimit-output-tokens-limit:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-remaining:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-reset:
-          - '2026-02-15T05:42:08Z'
+          - '2026-10-14T03:25:57Z'
         anthropic-ratelimit-requests-limit:
-          - '50'
+          - '10000'
         anthropic-ratelimit-requests-remaining:
-          - '48'
+          - '9999'
         anthropic-ratelimit-requests-reset:
-          - '2026-02-15T05:42:09Z'
+          - '2026-10-14T03:25:56Z'
         anthropic-ratelimit-tokens-limit:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-remaining:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-reset:
-          - '2026-02-15T05:42:08Z'
+          - '2026-10-14T03:25:57Z'
+        anthropic-workspace-id:
+          - wrkspc_01TyX2k3iWProyRBoEVYPNGB
         cf-cache-status:
           - DYNAMIC
         request-id:
-          - req_011CY9KYXTtsrRoyeeeVRMjh
+          - req_011Cg1R6ukYd2itX9U78R1Kr
         strict-transport-security:
           - max-age=31536000; includeSubDomains; preload
-        x-envoy-upstream-service-time:
-          - '1216'
+        traceresponse:
+          - 00-9b51d273b1337c43c87fb158bef13e6a-e57d83beec5c6179-01
+        vary:
+          - Accept-Encoding
       status:
         code: 200
         message: OK

@@ -170,7 +170,8 @@ def test_deep_primary_thinking_config_reaches_the_anthropic_client(
     params = client._get_model_specific_params("claude-opus-5-5")
     assert params["thinking"] == {"type": "adaptive"}
     assert params["output_config"] == {"effort": "high"}
-    assert params["max_tokens"] == 16000
+    # Left to the client, which sizes it by call path.
+    assert "max_tokens" not in params
 
 
 def test_frontier_thinking_config_reaches_the_anthropic_client(
@@ -192,7 +193,6 @@ def test_frontier_thinking_config_reaches_the_anthropic_client(
     assert client._get_model_specific_params(client.model) == {
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": "xhigh"},
-        "max_tokens": 16000,
     }
 
 

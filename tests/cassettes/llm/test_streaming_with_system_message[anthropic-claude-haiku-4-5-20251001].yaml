@@ -1,6 +1,6 @@
 interactions:
   - request:
-      body: '{"max_tokens":8192,"messages":[{"role":"user","content":"What is the capital of France? Reply in exactly one word."}],"model":"claude-haiku-4-5-20251001","system":"You are a helpful assistant that responds in a very concise manner."}'
+      body: '{"max_tokens":64000,"messages":[{"role":"user","content":[{"type":"text","text":"What is the capital of France? Reply in exactly one word.","cache_control":{"type":"ephemeral"}}]}],"model":"claude-haiku-4-5-20251001","system":"You are a helpful assistant that responds in a very concise manner."}'
       headers:
         accept:
           - application/json
@@ -11,7 +11,7 @@ interactions:
         connection:
           - keep-alive
         content-length:
-          - '233'
+          - '296'
         content-type:
           - application/json
         host:
@@ -43,14 +43,15 @@ interactions:
     response:
       body:
         string: !!binary |
-          H4sIAAAAAAAA/3WQzUvEMBDF/5c5t9Cuu5fexI+LCooHWUTCbDO2YdOkJpNFLf3fnSwWv/CU8H4v
-          bzJvgsFrstBAazFpKns0+1Suy025qlabuqpqKMBoMQyxU1V9bbqHs/WNuzjd7u7u66vzbbzkd/Hw
-          20jZRTFiRyIEb7OAMZrI6Fik1jsmuTWP0+Jnes3keDRwi8FEmJ8KiOxHFQijd6KT04pTcPAJIr0k
-          cq0EuGRtAek4s5nAuDGxYr8nF6E5WctMbHtSrUSx8U79NFQLF6z/Y8vbnE9jTwMFtGoz/PV/0br/
-          TecCfOLvknwuUjiYlhQbCrJm7klj0Lly90whr6g68oKcZ4UHNBZ3Uus8fwBVhWHXuQEAAA==
+          H4sIAAAAAAAA/3WRTU/DMAyG/0vOq9TuA1ivO+yEhODAAaHIJKaNljolcSbQtP+OM1bBQJwSvc8T
+          x3EOaggWvWqV8ZAtVj24Xa6W1aqa1/NVU9eNmilnRRhSp+um2XTN/dVivb1+oLBe3t509nEzF4c/
+          RiwWpgQdShCDLwGk5BIDsUQmEKPs2qfD5DO+F3JaWnUH0SV1fP5SwRFG1VL2fqYSh1FHhBRIRCSr
+          OUdSZ5DwLSMZvLAtSgmfpiyfGmsPytGYWXPYIQlcLOU2MD1qI+XZBdKXQj1xwfY/Np0t9XHsccAI
+          Xq+Gv/43bfrf9DhTIfPPSJpLGPfOoGZXpqHKMC1EW/6FXjGWZ+sOgyAKrGEvb4YXmb0Usw46Comd
+          OU/h+Ak41EiW8QEAAA==
       headers:
         CF-RAY:
-          - 9ce27cddef309b76-FRA
+          - a4a37a83ebb5d2e2-FRA
         Connection:
           - keep-alive
         Content-Encoding:
@@ -60,7 +61,7 @@ interactions:
         Content-Type:
           - application/json
         Date:
-          - Sun, 15 Feb 2026 05:43:28 GMT
+          - Wed, 14 Oct 2026 03:25:45 GMT
         Server:
           - cloudflare
         Transfer-Encoding:
@@ -70,37 +71,41 @@ interactions:
         anthropic-organization-id:
           - 47b93e1d-acf2-4be5-b32d-1716b0cff224
         anthropic-ratelimit-input-tokens-limit:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-remaining:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-reset:
-          - '2026-02-15T05:43:28Z'
+          - '2026-10-14T03:25:45Z'
         anthropic-ratelimit-output-tokens-limit:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-remaining:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-reset:
-          - '2026-02-15T05:43:28Z'
+          - '2026-10-14T03:25:45Z'
         anthropic-ratelimit-requests-limit:
-          - '50'
+          - '10000'
         anthropic-ratelimit-requests-remaining:
-          - '49'
+          - '9999'
         anthropic-ratelimit-requests-reset:
-          - '2026-02-15T05:43:28Z'
+          - '2026-10-14T03:25:45Z'
         anthropic-ratelimit-tokens-limit:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-remaining:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-reset:
-          - '2026-02-15T05:43:28Z'
+          - '2026-10-14T03:25:45Z'
+        anthropic-workspace-id:
+          - wrkspc_01TyX2k3iWProyRBoEVYPNGB
         cf-cache-status:
           - DYNAMIC
         request-id:
-          - req_011CY9KeSCoQxBMY6D9CBR7m
+          - req_011Cg1R62x781ht1bbyhF3N1
         strict-transport-security:
           - max-age=31536000; includeSubDomains; preload
-        x-envoy-upstream-service-time:
-          - '413'
+        traceresponse:
+          - 00-905c956f6315fb8dc4e0d1ef4a375200-2d4a00cd4821a4d7-01
+        vary:
+          - Accept-Encoding
       status:
         code: 200
         message: OK

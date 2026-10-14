@@ -608,7 +608,9 @@ class TestDeferredTools:
         client = AnthropicClient(api_key="test", model="claude-opus-5-5")
         tools = [_tool("weather"), _tool("lights", deferred=True)]
 
-        params = client._assemble_request(_activation_turn(), tools, "auto")
+        params = client._assemble_request(
+            _activation_turn(), tools, "auto", streaming=True
+        )
 
         assert [
             (tool["name"], tool.get("defer_loading")) for tool in params["tools"]
@@ -631,8 +633,12 @@ class TestDeferredTools:
         """The request after an activation extends the one before it."""
         client = AnthropicClient(api_key="test", model="claude-opus-5-5")
         tools = [_tool("weather"), _tool("lights", deferred=True)]
-        before = client._assemble_request(_activation_turn()[:3], tools, "auto")
-        after = client._assemble_request(_activation_turn(), tools, "auto")
+        before = client._assemble_request(
+            _activation_turn()[:3], tools, "auto", streaming=True
+        )
+        after = client._assemble_request(
+            _activation_turn(), tools, "auto", streaming=True
+        )
 
         assert after["tools"] == before["tools"]
         assert after["system"] == before["system"]
@@ -644,7 +650,9 @@ class TestDeferredTools:
         client = AnthropicClient(api_key="test", model="claude-opus-5-5")
         tools = [_tool("lights", deferred=True)]
 
-        params = client._assemble_request(_activation_turn(), tools, "auto")
+        params = client._assemble_request(
+            _activation_turn(), tools, "auto", streaming=True
+        )
 
         assert _breakpoint_positions(params["messages"]) == [
             (len(params["messages"]) - 2, 0)
@@ -658,7 +666,9 @@ class TestDeferredTools:
             _tool("dim", deferred=True),
         ]
 
-        params = client._assemble_request(_activation_turn(), tools, "auto")
+        params = client._assemble_request(
+            _activation_turn(), tools, "auto", streaming=True
+        )
 
         assert [tool["name"] for tool in params["tools"]] == ["weather", "lights"]
         assert all("defer_loading" not in tool for tool in params["tools"])

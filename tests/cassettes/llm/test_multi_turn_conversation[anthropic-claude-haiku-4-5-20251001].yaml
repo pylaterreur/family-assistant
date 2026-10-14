@@ -1,6 +1,6 @@
 interactions:
   - request:
-      body: '{"max_tokens":8192,"messages":[{"role":"user","content":"My name is TestBot. What''s my name?"},{"role":"assistant","content":[{"type":"text","text":"Your name is TestBot."}]},{"role":"user","content":"What did I just tell you my name was?"}],"model":"claude-haiku-4-5-20251001"}'
+      body: '{"max_tokens":16000,"messages":[{"role":"user","content":[{"type":"text","text":"My name is TestBot. What''s my name?"}]},{"role":"assistant","content":[{"type":"text","text":"Your name is TestBot."}]},{"role":"user","content":[{"type":"text","text":"What did I just tell you my name was?","cache_control":{"type":"ephemeral"}}]}],"model":"claude-haiku-4-5-20251001"}'
       headers:
         accept:
           - application/json
@@ -11,7 +11,7 @@ interactions:
         connection:
           - keep-alive
         content-length:
-          - '278'
+          - '366'
         content-type:
           - application/json
         host:
@@ -43,15 +43,15 @@ interactions:
     response:
       body:
         string: !!binary |
-          H4sIAAAAAAAA/3WRTWvDMAyG/0rwORlJaQ7LcYftNhiMsTGGUW2tMfVHastdS8l/n1zWfbKTxfu8
-          Enrlo3BBoxWDUBayxmYEs8nNsumbRbvou7btRC2MZoNLa9l2j9f719Xt9gaUm/ZuutRxedc/sIcO
-          ExYXpgRrZCEGWwRIySQCTyyp4Am5Gp6PZz/hvpDTM4inkCsKVlcOq0PIsfLA1Ruk6h4TXQW6EPNL
-          LRKFSUaEFDw3odeScvTiAyTcZvSKp/tsbS3yaaHhKIyfMkkKG/RJDMuWFwI1olQ8ikzw8qfhkzPW
-          /7Fzb5mP04gOI1jZu7/+L9qNv+lci5Dpu9QtOA3GnVEoyWDknOWKGqIuH+JfMZaMco2BkQ8kYQfG
-          woqPPs/v16Hir9cBAAA=
+          H4sIAAAAAAAA/3WRy07DMBBFfyXyukFJ1Gyyg25Z8aiEELJce5pYdcbBHhdK1X9nXFqeYuXRPdfX
+          npm9GL0BJzqhnUoGykHZTSrnZVs2VdPWVVWLmbCGDWPsZVXXi76+aZfX03LRrG5hDvfry7eJPbSb
+          ILsgRtUDC8G7LKgYbSSFxJL2SMBV97g/+wleMzkenXjwqSDvTDFCsfMpFKi4elGxuINIV54uxOHp
+          I0dZhCA6TM7NRCQ/yQAqeuQUQCMpBRQnEOE5AWr44TbAES6etXT8dbcXFqdEkvwGkOG84teUHkBq
+          jifrUf40fHLG5j92vpvzYRpghKCcbMe//i9aD7/pYSZ8ou9S3XAzELZWgySbxyHyqI0KJm8N1xBy
+          37IHzwg9SbXlptWKN8NpxqoefSSrT2M4vAOH5EnEDwIAAA==
       headers:
         CF-RAY:
-          - 9ce27bd7cc11e98a-FRA
+          - a4a37a554a6735e6-FRA
         Connection:
           - keep-alive
         Content-Encoding:
@@ -61,7 +61,7 @@ interactions:
         Content-Type:
           - application/json
         Date:
-          - Sun, 15 Feb 2026 05:42:47 GMT
+          - Wed, 14 Oct 2026 03:25:38 GMT
         Server:
           - cloudflare
         Transfer-Encoding:
@@ -71,37 +71,41 @@ interactions:
         anthropic-organization-id:
           - 47b93e1d-acf2-4be5-b32d-1716b0cff224
         anthropic-ratelimit-input-tokens-limit:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-remaining:
-          - '50000'
+          - '10000000'
         anthropic-ratelimit-input-tokens-reset:
-          - '2026-02-15T05:42:47Z'
+          - '2026-10-14T03:25:37Z'
         anthropic-ratelimit-output-tokens-limit:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-remaining:
-          - '10000'
+          - '2000000'
         anthropic-ratelimit-output-tokens-reset:
-          - '2026-02-15T05:42:47Z'
+          - '2026-10-14T03:25:37Z'
         anthropic-ratelimit-requests-limit:
-          - '50'
+          - '10000'
         anthropic-ratelimit-requests-remaining:
-          - '48'
+          - '9999'
         anthropic-ratelimit-requests-reset:
-          - '2026-02-15T05:42:48Z'
+          - '2026-10-14T03:25:37Z'
         anthropic-ratelimit-tokens-limit:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-remaining:
-          - '60000'
+          - '12000000'
         anthropic-ratelimit-tokens-reset:
-          - '2026-02-15T05:42:47Z'
+          - '2026-10-14T03:25:37Z'
+        anthropic-workspace-id:
+          - wrkspc_01TyX2k3iWProyRBoEVYPNGB
         cf-cache-status:
           - DYNAMIC
         request-id:
-          - req_011CY9KbM78eDoqGQxSpWdAD
+          - req_011Cg1R5V5wkLst7SUPMAnCi
         strict-transport-security:
           - max-age=31536000; includeSubDomains; preload
-        x-envoy-upstream-service-time:
-          - '1405'
+        traceresponse:
+          - 00-e8230465fa2f3c2d9c0edbc415c05465-ca7496e123156ccb-01
+        vary:
+          - Accept-Encoding
       status:
         code: 200
         message: OK

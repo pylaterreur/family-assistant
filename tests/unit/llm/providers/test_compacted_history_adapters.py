@@ -144,7 +144,9 @@ class TestAnthropic:
     def test_compacted_assistant_messages_carry_no_thinking(
         self, client: AnthropicClient
     ) -> None:
-        params = client._assemble_request(_compacted_history(), TOOLS, "auto")
+        params = client._assemble_request(
+            _compacted_history(), TOOLS, "auto", streaming=True
+        )
 
         for message in params["messages"]:
             if message["role"] == "assistant":
@@ -156,7 +158,9 @@ class TestAnthropic:
     def test_the_stub_and_answer_are_an_assistant_text_block(
         self, client: AnthropicClient
     ) -> None:
-        params = client._assemble_request(_compacted_history(), TOOLS, "auto")
+        params = client._assemble_request(
+            _compacted_history(), TOOLS, "auto", streaming=True
+        )
 
         texts = [b["text"] for b in _anthropic_blocks(params, "assistant", "text")]
         assert any(STUB in text and text.endswith(ANSWER) for text in texts)
@@ -164,7 +168,9 @@ class TestAnthropic:
     def test_the_activation_call_and_result_are_paired(
         self, client: AnthropicClient
     ) -> None:
-        params = client._assemble_request(_compacted_history(), TOOLS, "auto")
+        params = client._assemble_request(
+            _compacted_history(), TOOLS, "auto", streaming=True
+        )
 
         uses = _anthropic_blocks(params, "assistant", "tool_use")
         results = _anthropic_blocks(params, "user", "tool_result")
@@ -174,7 +180,9 @@ class TestAnthropic:
     def test_the_activated_tool_is_added_after_its_result(
         self, client: AnthropicClient
     ) -> None:
-        params = client._assemble_request(_compacted_history(), TOOLS, "auto")
+        params = client._assemble_request(
+            _compacted_history(), TOOLS, "auto", streaming=True
+        )
 
         messages = params["messages"]
         result_index = next(
@@ -197,7 +205,9 @@ class TestAnthropic:
     def test_roles_alternate_and_end_on_the_new_user_message(
         self, client: AnthropicClient
     ) -> None:
-        params = client._assemble_request(_compacted_history(), TOOLS, "auto")
+        params = client._assemble_request(
+            _compacted_history(), TOOLS, "auto", streaming=True
+        )
 
         roles = [m["role"] for m in params["messages"] if m["role"] != "system"]
         assert roles == ["user", "assistant", "user", "assistant", "user"]
@@ -205,7 +215,9 @@ class TestAnthropic:
     def test_the_attachment_is_a_text_reference_not_an_image(
         self, client: AnthropicClient
     ) -> None:
-        params = client._assemble_request(_compacted_history(), TOOLS, "auto")
+        params = client._assemble_request(
+            _compacted_history(), TOOLS, "auto", streaming=True
+        )
 
         assert not _anthropic_blocks(params, "user", "image")
         assert any(
@@ -218,7 +230,9 @@ class TestAnthropic:
     ) -> None:
         client = AnthropicClient(api_key="test-key", model="claude-sonnet-4-6")
 
-        params = client._assemble_request(_compacted_history(), TOOLS, "auto")
+        params = client._assemble_request(
+            _compacted_history(), TOOLS, "auto", streaming=True
+        )
 
         assert [t["name"] for t in params["tools"]] == ["activate_tools", "web_fetch"]
         assert all("defer_loading" not in t for t in params["tools"])

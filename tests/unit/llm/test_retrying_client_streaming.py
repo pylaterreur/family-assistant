@@ -255,7 +255,7 @@ async def test_anthropic_primary_failing_before_output_streams_from_fallback(
         model="claude-sonnet-4-6",
         model_parameters={
             "claude-sonnet-4-6": {
-                "thinking": {"type": "enabled", "budget_tokens": 8192}
+                "thinking": {"type": "enabled", "budget_tokens": 64_000}
             }
         },
     )
