@@ -21,7 +21,7 @@ lookups can pause for approval too. It's why a search that normally just runs so
 
 ## Reviewing saved artifacts
 
-Open **Automations → Artifact review** in the web interface to review saved notes, scripts, and
+Open **Automation → Artifact review** in the web interface to review saved notes, scripts, and
 automations. You can also reach it from **Review note trust** on Notes or **Review automation
 trust** on an automation's detail page. Filter by type or select **Needs review only** to find
 content that has not been approved for reuse.

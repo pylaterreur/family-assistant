@@ -34,12 +34,13 @@ messages as you would to a person.
 Open the web app at the URL your operator gave you (`{{ SERVER_URL }}`). It opens on the home page,
 works on phones and tablets, and supports dark mode.
 
-Use the top navigation on a large screen or open the navigation menu on a phone or tablet. Choosing
-a page closes the menu. The Family Assistant title takes you home; the menu also offers Chat, Voice,
-your notes and documents, and settings. Choose light, dark, or system appearance with the theme
-control.
+Every page, Chat included, shares the same navigation. On a computer or tablet it is the sidebar on
+the left; the arrows at its top shrink it to a strip of icons (hover an icon for its name) and the
+choice is remembered. On a phone, the menu button at the top left of every page opens the same list,
+and choosing a page closes it. The Family Assistant name takes you home. Help, About and the light,
+dark or system theme control sit at the bottom of the navigation.
 
-The home page cards can be opened with a tap, click, or keyboard. In **Internal → Tools**, use
+The home page cards can be opened with a tap, click, or keyboard. In **System → Tools**, use
 **Search tools** to find a tool by its name or description before opening its details.
 
 ![Landing Page](../../screenshots/desktop/landing-page.png) *The landing page gives quick access to
@@ -154,8 +155,9 @@ you can ask "are you still there?" at any point without it starting over.
 
 ### Pages
 
-The navigation groups notes and context under **Data**, files under **Documents**, and background
-work under **Automations** and **Internal**. **Help** opens the documentation:
+The navigation starts with Home, Chat, Voice and History, then groups notes, documents, search and
+context under **Knowledge**, background work under **Automation**, diagnostics under **System**, and
+connected accounts and API tokens under **Settings**. **Help** opens the documentation:
 
 - **Notes** — list, search, edit, and delete notes, and control which ones are included in the
   assistant's context automatically.

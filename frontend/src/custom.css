@@ -20,51 +20,6 @@ pre {
     border: 1px solid var(--border); /* Use theme border */
 }
 
-/* Navigation */
-nav {
-    margin-bottom: 1.5em;
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 0.5em;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.5em;
-    font-size: 0.9rem;
-    justify-content: center;
-    max-width: 100%;
-}
-
-/* Navigation groups */
-.nav-group {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4em;
-}
-
-.nav-label {
-    font-weight: bold;
-    color: var(--text-light);
-    font-size: 0.85em;
-}
-
-.nav-separator {
-    color: var(--text-light);
-    margin: 0 0.5em;
-}
-
-nav a {
-    text-decoration: none;
-    padding: 0.2em 0.4em;
-    border-radius: 3px;
-    transition: background-color 0.2s;
-    white-space: nowrap;
-}
-
-nav a:hover {
-    background-color: var(--accent-bg);
-    text-decoration: none;
-}
-
 /* Button styling adjustments */
 button, .button-link { /* Added class for link styled as button */
     margin-right: 0.5em; /* Space between buttons */
@@ -610,29 +565,6 @@ main pre {
     
     table th {
         display: none;
-    }
-    
-    nav {
-        margin-bottom: 0.75em;
-        padding-bottom: 0.3em;
-        gap: 0.3em;
-        font-size: 0.85rem;
-    }
-    
-    .nav-group {
-        gap: 0.3em;
-    }
-    
-    .nav-label {
-        font-size: 0.8em;
-    }
-    
-    .nav-separator {
-        margin: 0 0.3em;
-    }
-    
-    nav a {
-        padding: 0.15em 0.3em;
     }
     
     .filter-row {

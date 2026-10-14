@@ -277,7 +277,7 @@ describe('ConversationSidebar', () => {
     await renderChatApp({ waitForReady: true });
 
     // On desktop, the sidebar toggle button is present
-    const toggleButton = screen.getByLabelText('Toggle sidebar');
+    const toggleButton = screen.getByLabelText('Toggle conversation list');
 
     // Sidebar should be open by default on desktop (w-72 panel visible)
     const sidebar = document.querySelector('.w-72.flex-shrink-0.border-r');

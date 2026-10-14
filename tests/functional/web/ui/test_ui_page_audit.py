@@ -70,8 +70,8 @@ async def test_pages_fit_viewport(
         "document.documentElement.scrollWidth <= window.innerWidth"
     ), f"{path} overflows the {width}px viewport"
     if path == "/voice":
-        assert await page.get_by_role("banner").evaluate(
-            "header => header.parentElement.getBoundingClientRect().height >= innerHeight"
+        assert await page.get_by_test_id("voice-page").evaluate(
+            "root => root.getBoundingClientRect().bottom >= innerHeight"
         ), "Voice Mode's background should fill the viewport"
 
 

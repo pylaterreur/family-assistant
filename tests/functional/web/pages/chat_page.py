@@ -42,7 +42,7 @@ class ChatPage(BasePage):
     ASSISTANT_LOADING_PLACEHOLDER = "..."
 
     # Selectors - Updated for shadcn/ui components
-    SIDEBAR_TOGGLE = "button[aria-label='Toggle sidebar']"
+    SIDEBAR_TOGGLE = "button[aria-label='Toggle conversation list']"
     BACK_TO_CONVERSATIONS = "button[aria-label='Back to conversations']"
     CHAT_INPUT = '[data-testid="chat-input"]'
     SEND_BUTTON = '[data-testid="send-button"]'
@@ -89,7 +89,7 @@ class ChatPage(BasePage):
         # This ensures the React app has fully initialized
         # On desktop, the sidebar toggle is in the header; on mobile, back button is shown instead
         viewport_size = self.page.viewport_size
-        if viewport_size and viewport_size["width"] <= 768:
+        if viewport_size and viewport_size["width"] < 768:
             # Mobile: wait for back button (chat detail view) or conversation list
             await self.page.wait_for_selector(
                 f"{self.BACK_TO_CONVERSATIONS}, {self.NEW_CHAT_BUTTON}",
@@ -104,7 +104,7 @@ class ChatPage(BasePage):
 
         # Only wait for chat input if we're in chat detail view (not conversation list)
         viewport_size_check = self.page.viewport_size
-        is_mobile = viewport_size_check and viewport_size_check["width"] <= 768
+        is_mobile = viewport_size_check and viewport_size_check["width"] < 768
         if not is_mobile or await self.page.query_selector(self.BACK_TO_CONVERSATIONS):
             await self.page.wait_for_selector(
                 self.CHAT_INPUT, state="visible", timeout=15000
@@ -332,7 +332,7 @@ class ChatPage(BasePage):
         On desktop, this opens the sidebar if it's closed.
         """
         viewport_size = self.page.viewport_size
-        if viewport_size and viewport_size["width"] <= 768:
+        if viewport_size and viewport_size["width"] < 768:
             back_button = self.page.locator(self.BACK_TO_CONVERSATIONS)
             await back_button.click(timeout=10000)
             await self.page.wait_for_selector(
@@ -365,7 +365,7 @@ class ChatPage(BasePage):
                 )
 
         viewport_size = self.page.viewport_size
-        if viewport_size and viewport_size["width"] <= 768:
+        if viewport_size and viewport_size["width"] < 768:
             await self.page.wait_for_selector(
                 self.BACK_TO_CONVERSATIONS, state="visible", timeout=3000
             )
@@ -377,7 +377,7 @@ class ChatPage(BasePage):
         On mobile: use go_to_conversation_list() and open_chat_detail() instead.
         """
         viewport_size = self.page.viewport_size
-        if viewport_size and viewport_size["width"] <= 768:
+        if viewport_size and viewport_size["width"] < 768:
             # Mobile: list-detail navigation
             if await self.is_sidebar_open():
                 await self.open_chat_detail()
@@ -401,7 +401,7 @@ class ChatPage(BasePage):
         On mobile: checks if the conversation list view is currently showing.
         """
         viewport_size = self.page.viewport_size
-        if viewport_size and viewport_size["width"] <= 768:
+        if viewport_size and viewport_size["width"] < 768:
             # Mobile: conversation list is showing if new-chat-button is visible
             # (it's part of the conversation list header)
             new_chat = await self.page.query_selector(self.NEW_CHAT_BUTTON)

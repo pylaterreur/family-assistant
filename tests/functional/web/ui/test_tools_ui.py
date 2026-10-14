@@ -39,25 +39,11 @@ async def test_tools_page_loads(
     title = await page.title()
     assert "Tools" in title, f"Page title should contain 'Tools', got: {title}"
 
-    # Check for the navigation header
-    nav_header = await page.wait_for_selector(
-        "header nav", state="visible", timeout=5000
+    # The main navigation marks Tools as the current page
+    current = page.get_by_role("navigation", name="Main").locator(
+        "[aria-current='page']"
     )
-    assert nav_header is not None, "Navigation header should be visible"
-
-    # Check that Tools link exists in navigation
-    # First open the Internal menu since Tools is in a dropdown
-    internal_menu = page.get_by_role("button", name="Internal", exact=True)
-    if await internal_menu.is_visible():
-        await internal_menu.click()
-        # Wait for the Tools link to become visible in the dropdown
-        await page.wait_for_selector(
-            "nav a:has-text('Tools')", state="visible", timeout=5000
-        )
-
-    # Now check for the Tools link
-    tools_link = await page.query_selector("nav a:has-text('Tools')")
-    assert tools_link is not None, "Tools link should be present in navigation"
+    await expect(current).to_have_attribute("href", "/tools")
 
     # Check for the main tools container
     tools_container = await page.wait_for_selector(

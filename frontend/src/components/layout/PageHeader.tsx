@@ -15,8 +15,8 @@ interface PageHeaderProps {
 const PageHeader = ({ title, description, actions, eyebrow, className }: PageHeaderProps) => (
   <header className={cn('mb-6 space-y-2', className)}>
     {eyebrow}
-    <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-      <div className="min-w-0 space-y-1">
+    <div className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-start sm:justify-between">
+      <div className="min-w-0 space-y-1 sm:min-w-[16rem] sm:flex-1">
         <h1 className="break-words text-3xl font-bold tracking-tight">{title}</h1>
         {description ? <p className="max-w-2xl text-muted-foreground">{description}</p> : null}
       </div>

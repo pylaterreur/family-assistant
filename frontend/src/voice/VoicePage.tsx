@@ -6,7 +6,6 @@
  */
 
 import { useEffect } from 'react';
-import { Link } from 'react-router-dom';
 import { SESSION_CONFIG } from './types';
 import { StatusIndicator } from './StatusIndicator';
 import { TranscriptPanel } from './TranscriptPanel';
@@ -144,33 +143,16 @@ export function VoicePage() {
   const isSessionActive = sessionState.connection === 'connected';
 
   return (
-    <div className="min-h-dvh bg-gradient-to-b from-gray-50 to-gray-100 dark:from-gray-900 dark:to-gray-800">
-      {/* Header */}
-      <header className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-4 py-3">
-        <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-          <Link
-            to="/chat"
-            className="flex items-center gap-2 text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors"
-          >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M10 19l-7-7m0 0l7-7m-7 7h18"
-              />
-            </svg>
-            Back to Chat
-          </Link>
-
-          <h1 className="text-xl font-semibold text-gray-800 dark:text-white">Voice Mode</h1>
-
+    <div
+      data-testid="voice-page"
+      className="min-h-[calc(100dvh-3.5rem)] bg-gradient-to-b from-gray-50 to-gray-100 md:min-h-dvh dark:from-gray-900 dark:to-gray-800"
+    >
+      <div className="max-w-4xl mx-auto p-4">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pb-2">
+          <h1 className="text-2xl font-semibold text-gray-800 dark:text-white">Voice Mode</h1>
           <SessionTimer duration={sessionState.sessionDuration} isActive={isSessionActive} />
         </div>
-      </header>
 
-      {/* Main content */}
-      <main className="max-w-4xl mx-auto p-4">
         {/* Error display */}
         {sessionState.error && (
           <ErrorDisplay error={sessionState.error} onDismiss={handleDismissError} />
@@ -218,7 +200,7 @@ export function VoicePage() {
             For best results, use headphones
           </p>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

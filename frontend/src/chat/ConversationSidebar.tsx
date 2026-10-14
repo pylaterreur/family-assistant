@@ -1,6 +1,5 @@
-import { HomeIcon, MessageSquarePlusIcon, SearchIcon } from 'lucide-react';
+import { MessageSquarePlusIcon, SearchIcon } from 'lucide-react';
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -112,17 +111,7 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
 
   const sidebarContent = (
     <div className="flex h-full flex-col min-h-0">
-      <div className="flex items-center gap-2 p-4 pb-3">
-        <Button
-          asChild
-          variant="ghost"
-          size="sm"
-          className="h-8 w-8 p-0 rounded-lg hover:bg-primary/10 hover:text-primary"
-        >
-          <Link to="/" aria-label="Home">
-            <HomeIcon size={18} />
-          </Link>
-        </Button>
+      <div className="flex items-center gap-2 px-4 pb-3 pt-4">
         <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider flex-1">
           Conversations
         </h2>

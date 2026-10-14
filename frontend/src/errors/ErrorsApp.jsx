@@ -21,12 +21,12 @@ const ErrorsApp = () => {
 
   return (
     <div className="errors-app">
-      <main className="container">
+      <div className="container">
         <Routes>
           <Route path="/" element={<ErrorsList />} />
           <Route path="/:errorId" element={<ErrorDetail />} />
         </Routes>
-      </main>
+      </div>
     </div>
   );
 };
