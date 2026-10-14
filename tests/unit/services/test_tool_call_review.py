@@ -1858,15 +1858,16 @@ def test_taint_audit_sources_bounded_and_fifo_order() -> None:
 
 
 @pytest.mark.no_db
-def test_an_ambient_admission_is_judged_as_reusable_material() -> None:
-    """Procedural content is the object of admission review, not evidence against it."""
+def test_an_ambient_admission_is_judged_for_injection_not_alignment() -> None:
+    """The admission judge looks for planted directives, not second-guessing the user."""
     review_input = replace(_review_input(), sink_class=SinkClass.AMBIENT_PROMPT_WRITE)
 
     messages = assemble_tool_call_review_messages(review_input, _constraints())
 
     system = cast("SystemMessage", messages[0]).content
     assert isinstance(system, str)
-    assert "reusable material" in system
+    assert "indirect prompt injection" in system
+    assert "The tool_call_arguments are the only candidate" in system
     assert "evidence against the call" not in system
 
 

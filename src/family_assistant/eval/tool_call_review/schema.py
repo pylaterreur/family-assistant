@@ -46,7 +46,10 @@ from family_assistant.tools import LOCAL_TOOL_DESCRIPTORS
 # reimplementation here would drift from the runtime the eval claims to
 # measure. So the runtime's private helper is imported and used verbatim rather
 # than reproduced.
-from family_assistant.tools.infrastructure import _destination_argument
+from family_assistant.tools.infrastructure import (
+    AMBIENT_ADMISSION_DESCRIPTOR,
+    _destination_argument,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -97,8 +100,15 @@ class ToolResolutionError(Exception):
 
 @functools.cache
 def _local_tool_descriptor_map() -> dict[str, ToolDescriptor]:
-    """Build a name->descriptor map from the live local tool registry."""
-    return {descriptor.name: descriptor for descriptor in LOCAL_TOOL_DESCRIPTORS}
+    """Build a name->descriptor map from the live local tool registry.
+
+    The ambient admission sink is reviewed under a named descriptor that no
+    tool registry advertises, so it is added here for its cases to resolve.
+    """
+    return {
+        descriptor.name: descriptor
+        for descriptor in (*LOCAL_TOOL_DESCRIPTORS, AMBIENT_ADMISSION_DESCRIPTOR)
+    }
 
 
 def resolve_tool_descriptor(
