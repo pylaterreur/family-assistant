@@ -151,6 +151,10 @@ class MessageReasoningInfo(TypedDict, total=False):
     request_id: str
     """Joins this message to its diagnostics ring-buffer record and to the
     ``llm.request.id`` span attribute."""
+    response_id: str
+    """The provider's own id for the response -- OpenRouter's ``gen-...``
+    generation id, Anthropic's message id. What the call is found by in the
+    provider's logs and billing."""
     model_tier: str
     """The model tier this call ran at. Absent on a profile pinned to an inline
     model, which has no tier to name."""
