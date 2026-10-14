@@ -858,9 +858,15 @@ single `"claude-"` prefix entry cannot serve both:
 Applying the `enabled` shape to a model that wants `adaptive` is rejected by the API at request time
 with a message naming the alternative.
 
-`budget_tokens` must be less than `max_tokens` (default 8192). A budget that cannot fit is rejected
-up front with both values named, rather than failing mid-conversation. Raise `max_tokens` in the
-same `llm_parameters` entry if you want a larger budget.
+`budget_tokens` must be less than `max_tokens`. A budget that cannot fit is rejected up front with
+both values named, rather than failing mid-conversation.
+
+The Anthropic client picks `max_tokens` by call path rather than by model: 64000 on a streamed
+request (every agent turn) and 16000 otherwise (structured output, attachment selection, tool-call
+review). Thinking spends this budget before the reply does, so a tight cap returns a turn that is
+all thinking and no answer. Setting `max_tokens` in a model's `llm_parameters` overrides both; keep
+it at or below about 21000 if that model is ever called without streaming, because the SDK refuses
+larger non-streaming requests.
 
 Enabling thinking is worthwhile mainly for long tool loops — the profile running Claude (`engineer`)
 is the candidate. Note that thinking is incompatible with a non-default `temperature`.
@@ -3992,12 +3998,12 @@ such as the Anthropic client's `max_tokens`.
 
 Settings currently shipped in `defaults.yaml`:
 
-| Key               | Setting                                                                            | Why                                                                                                                                                                                                                                                        |
-| ----------------- | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `claude-opus-5`   | `thinking: {type: adaptive}`, `output_config: {effort: high}`, `max_tokens: 16000` | The recipe Opus 5 gets wherever a deployment names it; no shipped tier runs Opus 5 itself. Thinking on for the long tool loops it suits. `max_tokens` is raised because thinking shares that budget with the response. See the comment in `defaults.yaml`. |
-| `claude-opus-5-5` | `thinking: {type: adaptive}`, `output_config: {effort: high}`, `max_tokens: 16000` | The `deep` tier's primary, which `complex_tasks` and `engineer` run on and the assistant reaches by request. Restated rather than inherited from `claude-opus-5` because Opus 5.5 defaults to `medium` effort.                                             |
-| `gpt-6-sol`       | `reasoning_effort: high`                                                           | The `deep` tier's fallback, so it can afford to think longer.                                                                                                                                                                                              |
-| `gpt-5.6-terra`   | `reasoning_effort: medium`                                                         | The fallback for `default_assistant` and `camera_analyst`, both of which answer interactively, where time-to-first-token is felt directly.                                                                                                                 |
+| Key               | Setting                                                       | Why                                                                                                                                                                                                            |
+| ----------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claude-opus-5`   | `thinking: {type: adaptive}`, `output_config: {effort: high}` | The recipe Opus 5 gets wherever a deployment names it; no shipped tier runs Opus 5 itself. Thinking on for the long tool loops it suits. See the comment in `defaults.yaml`.                                   |
+| `claude-opus-5-5` | `thinking: {type: adaptive}`, `output_config: {effort: high}` | The `deep` tier's primary, which `complex_tasks` and `engineer` run on and the assistant reaches by request. Restated rather than inherited from `claude-opus-5` because Opus 5.5 defaults to `medium` effort. |
+| `gpt-6-sol`       | `reasoning_effort: high`                                      | The `deep` tier's fallback, so it can afford to think longer.                                                                                                                                                  |
+| `gpt-5.6-terra`   | `reasoning_effort: medium`                                    | The fallback for `default_assistant` and `camera_analyst`, both of which answer interactively, where time-to-first-token is felt directly.                                                                     |
 
 `reasoning_effort` accepts `none`, `low`, `medium`, `high`, `xhigh` or `max` on GPT-6 and GPT-5.6
 models and defaults to `medium` when unset. Raising it trades latency and tokens for capability; it

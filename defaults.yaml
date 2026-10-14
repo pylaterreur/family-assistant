@@ -59,7 +59,8 @@ llm_parameters:
   # Extended thinking on Claude. The shape differs by model generation and is
   # NOT interchangeable -- claude-sonnet-4-6 takes `enabled` + `budget_tokens`,
   # while claude-fable-5-1 rejects that and wants `adaptive` + output_config
-  # effort. budget_tokens must be less than max_tokens (default 8192).
+  # effort. budget_tokens must be less than max_tokens (64000 on a streamed
+  # request, 16000 otherwise).
   # Thinking blocks are captured and replayed automatically once enabled.
   # "claude-sonnet-4-6":
   #   thinking:
@@ -105,11 +106,6 @@ llm_parameters:
   # turns it on -- it is what keeps a later effort or display change from
   # silently landing on a model running without thinking.
   #
-  # Thinking shares the max_tokens budget with the response, which is why the
-  # client's hard-coded 8192 is raised here; 16000 is the ceiling because two of
-  # the three call sites are non-streaming and the SDK refuses non-streaming
-  # requests it estimates will exceed its HTTP timeout.
-  #
   # llm_parameters is keyed by model rather than by call path, so this also
   # reaches structured output and generate_json. Those need a specific tool
   # called, and the client asks for it in words instead of forcing the tool
@@ -120,7 +116,6 @@ llm_parameters:
       type: "adaptive"
     output_config:
       effort: "high"
-    max_tokens: 16000
   # Opus 5.5 is the `deep` tier's primary. It takes the same shape as Opus 5
   # (and inherits the entry above by substring), with two differences that
   # matter here. Its effort default is `medium`, one step below Opus 5's, so
@@ -136,7 +131,6 @@ llm_parameters:
       type: "adaptive"
     output_config:
       effort: "high"
-    max_tokens: 16000
   # GPT-6 and GPT-5.6 reasoning effort accept none/low/medium/high/xhigh/max and
   # default to medium. Both entries below are set explicitly so the separation between
   # the tiers they serve is a deliberate choice rather than a default.
@@ -212,9 +206,7 @@ model_tiers:
       # only place it is configured -- the global map deliberately has no
       # claude-fable- key (it matches by substring), so the
       # `claude_fable_5_1` preset below inherits nothing and runs at the
-      # model's own default effort. Thinking
-      # shares the max_tokens budget with the response, so the client's 8192
-      # default is raised to match the effort.
+      # model's own default effort.
       - provider: "anthropic"
         model: "claude-fable-5-1"
         llm_parameters:
@@ -222,7 +214,6 @@ model_tiers:
             type: "adaptive"
           output_config:
             effort: "xhigh"
-          max_tokens: 16000
   # Exact-model presets. Each is one model with no fallback, so a delegation
   # that names one gets that model's answer or a visible failure -- never
   # another model's answer under its name. They are for a delegating model that

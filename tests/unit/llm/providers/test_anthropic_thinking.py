@@ -222,13 +222,13 @@ def test_thinking_budget_at_or_above_max_tokens_is_rejected() -> None:
         model="claude-sonnet-4-6",
         model_parameters={
             "claude-sonnet-4-6": {
-                "thinking": {"type": "enabled", "budget_tokens": 8192}
+                "thinking": {"type": "enabled", "budget_tokens": 64_000}
             }
         },
     )
 
     with pytest.raises(InvalidRequestError, match="must be less than max_tokens"):
-        client._build_request_params([], None, None, "auto")
+        client._build_request_params([], None, None, "auto", streaming=True)
 
 
 def test_thinking_budget_below_max_tokens_is_accepted() -> None:
@@ -243,7 +243,7 @@ def test_thinking_budget_below_max_tokens_is_accepted() -> None:
         },
     )
 
-    params = client._build_request_params([], None, None, "auto")
+    params = client._build_request_params([], None, None, "auto", streaming=True)
 
     assert params["thinking"] == {
         "type": "enabled",
@@ -265,7 +265,7 @@ def test_adaptive_thinking_shape_is_not_budget_checked() -> None:
         },
     )
 
-    params = client._build_request_params([], None, None, "auto")
+    params = client._build_request_params([], None, None, "auto", streaming=True)
 
     assert params["thinking"]["type"] == "adaptive"
     assert params["output_config"] == {"effort": "high"}
@@ -278,7 +278,7 @@ async def test_nonstreaming_thinking_budget_error_keeps_invalid_request_type() -
         model="claude-sonnet-4-6",
         model_parameters={
             "claude-sonnet-4-6": {
-                "thinking": {"type": "enabled", "budget_tokens": 8192}
+                "thinking": {"type": "enabled", "budget_tokens": 16_000}
             }
         },
     )
@@ -298,7 +298,7 @@ async def test_streaming_thinking_budget_error_is_typed_invalid_request() -> Non
         model="claude-sonnet-4-6",
         model_parameters={
             "claude-sonnet-4-6": {
-                "thinking": {"type": "enabled", "budget_tokens": 8192}
+                "thinking": {"type": "enabled", "budget_tokens": 64_000}
             }
         },
     )
@@ -422,6 +422,7 @@ def test_forced_tool_choice_is_requested_in_words(
         system_blocks=None,
         tools=_CALC_TOOL,
         tool_choice=tool_choice,
+        streaming=True,
     )
 
     assert params["tool_choice"] == {"type": "auto"}
@@ -446,6 +447,7 @@ def test_tool_instruction_follows_tool_results_in_the_last_turn() -> None:
         system_blocks=None,
         tools=_CALC_TOOL,
         tool_choice="calc",
+        streaming=True,
     )
 
     assert params["messages"][-1]["content"] == [
@@ -461,6 +463,7 @@ def test_auto_tool_choice_keeps_thinking() -> None:
         system_blocks=None,
         tools=_CALC_TOOL,
         tool_choice="auto",
+        streaming=True,
     )
 
     assert params["tool_choice"] == {"type": "auto"}
@@ -554,7 +557,7 @@ def test_thinking_requests_drop_rather_than_reject_mismatched_blocks() -> None:
         model_parameters={"claude-opus-5-5": {"thinking": {"type": "adaptive"}}},
     )
 
-    params = client._build_request_params([], None, None, "auto")
+    params = client._build_request_params([], None, None, "auto", streaming=True)
 
     assert params["thinking"]["block_binding"] == {
         "prefix_mismatch_behavior": "drop_block"
@@ -568,7 +571,7 @@ def test_no_binding_without_a_thinking_config() -> None:
     """The field lives inside ``thinking`` and is rejected without the header."""
     client = AnthropicClient(api_key="test-key", model="claude-haiku-4-5")
 
-    params = client._build_request_params([], None, None, "auto")
+    params = client._build_request_params([], None, None, "auto", streaming=True)
 
     assert "thinking" not in params
     assert "extra_headers" not in params

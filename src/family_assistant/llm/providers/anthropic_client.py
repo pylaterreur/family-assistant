@@ -127,6 +127,18 @@ class _StreamingToolAccumulator(TypedDict):
 # parts. `redacted_thinking` blocks carry an opaque `data` payload instead.
 _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 
+# The API requires max_tokens on every request and has no default of its own.
+# Current models think on every turn, and thinking spends this budget before
+# the reply does, so a tight cap returns a turn that is all thinking and no
+# answer. Streamed requests get Anthropic's recommended starting point. Requests
+# that do not stream are capped where the SDK still accepts them: above about
+# 21k it refuses a non-streaming request outright, on the grounds that it could
+# outlast the HTTP timeout. Only short calls (a review verdict, an attachment
+# pick, a structured answer) take that path. A model's llm_parameters can still
+# set max_tokens, and then it applies to both.
+_STREAMING_MAX_TOKENS = 64_000
+_NON_STREAMING_MAX_TOKENS = 16_000
+
 # Opts a request into choosing what happens to a replayed thinking block whose
 # conversation prefix no longer matches the one that produced it.
 _THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
@@ -587,7 +599,7 @@ class AnthropicClient(BaseLLMClient):
             "messages": self._request_tool_by_instruction(
                 api_messages, f"Respond by calling the `{tool_name}` tool."
             ),
-            "max_tokens": 8192,
+            "max_tokens": _NON_STREAMING_MAX_TOKENS,
             "tools": [
                 self._create_native_output_tool(
                     name=tool_name,
@@ -635,7 +647,7 @@ class AnthropicClient(BaseLLMClient):
         params: dict[str, Any] = {
             "model": self.model,
             "messages": api_messages,
-            "max_tokens": 8192,
+            "max_tokens": _NON_STREAMING_MAX_TOKENS,
             **self.default_kwargs,
             **model_params,
             # Merged, not replaced: a model's configured effort lives here too.
@@ -1186,6 +1198,8 @@ class AnthropicClient(BaseLLMClient):
         messages: Sequence[LLMMessage],
         tools: list[ToolDefinition] | None,
         tool_choice: str | None,
+        *,
+        streaming: bool,
         # ast-grep-ignore: no-dict-any - kwargs dict for client.messages.create(**params) requires heterogeneous values
     ) -> dict[str, Any]:
         """Convert a typed request into messages.create / messages.stream kwargs.
@@ -1214,7 +1228,7 @@ class AnthropicClient(BaseLLMClient):
             processed_messages, activations=activations
         )
         params = self._build_request_params(
-            api_messages, system_blocks, tools, tool_choice
+            api_messages, system_blocks, tools, tool_choice, streaming=streaming
         )
         if deferred_names:
             _add_beta_header(params, _TOOL_CHANGES_BETA)
@@ -1227,6 +1241,8 @@ class AnthropicClient(BaseLLMClient):
         system_blocks: str | list[TextBlockParam] | None,
         tools: list[ToolDefinition] | None,
         tool_choice: str | None,
+        *,
+        streaming: bool,
         # ast-grep-ignore: no-dict-any - kwargs dict for client.messages.create(**params) requires heterogeneous values
     ) -> dict[str, Any]:
         """Assemble the kwargs for a messages.create / messages.stream call.
@@ -1238,7 +1254,9 @@ class AnthropicClient(BaseLLMClient):
         params: dict[str, Any] = {
             "model": self.model,
             "messages": api_messages,
-            "max_tokens": 8192,
+            "max_tokens": (
+                _STREAMING_MAX_TOKENS if streaming else _NON_STREAMING_MAX_TOKENS
+            ),
             **self.default_kwargs,
             **self._get_model_specific_params(self.model),
         }
@@ -1416,7 +1434,7 @@ class AnthropicClient(BaseLLMClient):
         telemetry: LLMCallTelemetry,
     ) -> LLMOutput:
         """Run and record one successful non-streaming Anthropic request."""
-        params = self._assemble_request(messages, tools, tool_choice)
+        params = self._assemble_request(messages, tools, tool_choice, streaming=False)
         response = await self.client.messages.create(**params)
         log_input_transformations(response)
 
@@ -1648,7 +1666,9 @@ class AnthropicClient(BaseLLMClient):
         try:
 
             async def stream_events() -> AsyncGenerator[LLMStreamEvent]:
-                params = self._assemble_request(messages, tools, tool_choice)
+                params = self._assemble_request(
+                    messages, tools, tool_choice, streaming=True
+                )
 
                 # Check for VCR replay mode
                 vcr_events = await self._maybe_parse_vcr_stream(params)
@@ -1866,8 +1886,10 @@ class AnthropicClient(BaseLLMClient):
 
         # In VCR replay mode, make a non-streaming request and convert to events.
         # Only catch connection/transport errors that indicate VCR isn't replaying.
+        # The params were built for a stream, so their max_tokens is above what
+        # the SDK accepts without one; an explicit timeout skips that check.
         try:
-            response = await self.client.messages.create(**params)
+            response = await self.client.messages.create(**params, timeout=600)
         except (anthropic.APIConnectionError, anthropic.APITimeoutError):
             return None
 
