@@ -654,29 +654,33 @@ struct MessageBubble: View {
             }
             .foregroundStyle(.secondary)
 
-            if message.isLoading && message.text.isEmpty {
+            if message.isLoading && message.text.isEmpty && message.toolCalls.isEmpty {
                 LoadingDotsView()
             }
-            if !message.text.isEmpty {
-                // Always route through the budgeted renderer. It decides plain vs
-                // markdown on a bounded prefix, so a huge plain response can't
-                // render as one unbounded `Text` and the syntax scan stays bounded
-                // — both layout-watchdog hazards if the plain fast path lived here.
-                NativeMarkdownView(markdown: message.text)
+            // Text and tool calls in the order they happened, so text written
+            // after a lookup sits below it.
+            ForEach(message.segments) { segment in
+                switch segment {
+                case .text(_, let text):
+                    // Always route through the budgeted renderer. It decides plain
+                    // vs markdown on a bounded prefix, so a huge plain response
+                    // can't render as one unbounded `Text` and the syntax scan
+                    // stays bounded — both layout-watchdog hazards if the plain
+                    // fast path lived here.
+                    NativeMarkdownView(markdown: text)
+                case .tools(_, let toolCalls):
+                    ToolGroupView(
+                        toolCalls: toolCalls,
+                        hoistedAttachmentKeys: hoistedKeys,
+                        attachmentLoader: attachmentLoader
+                    )
+                }
             }
-            // Images belong with the answer, not behind a disclosure arrow: the
-            // tool group collapses as soon as its calls complete, so an image
-            // left inside it is invisible on reload even though it rendered
-            // during the live turn.
+            // Images belong with the answer, not behind a disclosure arrow: a
+            // tool group stays collapsed, so an image left inside it would be
+            // invisible even though the reply produced it.
             if !inlineImages.isEmpty {
                 ResponseImageGallery(images: inlineImages, attachmentLoader: attachmentLoader)
-            }
-            if !message.toolCalls.isEmpty {
-                ToolGroupView(
-                    toolCalls: message.toolCalls,
-                    hoistedAttachmentKeys: hoistedKeys,
-                    attachmentLoader: attachmentLoader
-                )
             }
             let strayAttachments = message.attachments.filter { !hoistedKeys.contains($0.dedupeKey) }
             if !strayAttachments.isEmpty {
@@ -2090,27 +2094,16 @@ private struct ToolGroupView: View {
     /// holds whatever state the calls move through.
     @State private var userExpanded: Bool?
 
+    private var summary: ChatToolGroupSummary {
+        ChatToolGroupSummary(calls: toolCalls)
+    }
+
     private var autoExpanded: Bool {
         toolCalls.contains { $0.status.wantsAttention }
     }
 
-    private var summary: String {
-        var names: [String] = []
-        for call in toolCalls where !names.contains(call.displayName) {
-            names.append(call.displayName)
-        }
-        let unsuccessful = toolCalls.filter { $0.status.didNotSucceed }.count
-        var text = names.prefix(3).joined(separator: ", ")
-        if names.count > 3 {
-            text += " +\(names.count - 3)"
-        }
-        if unsuccessful > 0 {
-            text += " · \(unsuccessful) didn't finish"
-        }
-        return text
-    }
-
     var body: some View {
+        let summary = summary
         DisclosureGroup(isExpanded: Binding(get: { userExpanded ?? autoExpanded }, set: { userExpanded = $0 })) {
             VStack(spacing: 8) {
                 ForEach(toolCalls) { toolCall in
@@ -2123,12 +2116,52 @@ private struct ToolGroupView: View {
             }
             .padding(.top, 6)
         } label: {
-            Label(summary, systemImage: "wrench.and.screwdriver")
-                .font(.subheadline)
-                .lineLimit(1)
-                .accessibilityLabel("\(toolCalls.count) tool \(toolCalls.count == 1 ? "call" : "calls"): \(summary)")
+            HStack(spacing: 6) {
+                ToolGroupStatusIcon(summary: summary, hasFailures: toolCalls.contains { $0.status.didNotSucceed })
+                Text(summary.headline)
+                    .font(.subheadline)
+                    .foregroundStyle(summary.isRunning ? Color.primary : Color.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .accessibilityIdentifier("tool-group-headline")
+                if let detail = summary.detail {
+                    Spacer(minLength: 4)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(toolCalls.contains { $0.status.didNotSucceed } ? Color.red : Color.secondary)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel([summary.headline, summary.detail].compactMap { $0 }.joined(separator: ", "))
         }
         .accessibilityIdentifier("tool-group")
+    }
+}
+
+private struct ToolGroupStatusIcon: View {
+    let summary: ChatToolGroupSummary
+    let hasFailures: Bool
+
+    var body: some View {
+        Group {
+            if summary.needsApproval {
+                Image(systemName: "hand.raised")
+                    .foregroundStyle(.orange)
+            } else if summary.isRunning {
+                ProgressView()
+                    .controlSize(.mini)
+                    .accessibilityIdentifier("tool-group-spinner")
+            } else if hasFailures {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+            } else {
+                Image(systemName: "checkmark.circle")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 16, height: 16)
     }
 }
 
@@ -2143,9 +2176,9 @@ private struct ToolCallCard: View {
             HStack(spacing: 6) {
                 Image(systemName: icon)
                     .foregroundStyle(.secondary)
-                Text(toolCall.displayName)
+                Text(toolCall.phrase)
                     .font(.subheadline.bold())
-                    .lineLimit(1)
+                    .lineLimit(2)
                 Spacer(minLength: 4)
                 if let label = toolCall.status.displayLabel {
                     Text(label)
@@ -2154,7 +2187,8 @@ private struct ToolCallCard: View {
                         .accessibilityIdentifier("tool-call-status-\(toolCall.id)")
                 }
             }
-            if let summary = toolCall.argumentsSummary {
+            // The server's phrase already names the telling argument.
+            if toolCall.display == nil, let summary = toolCall.argumentsSummary {
                 Text(summary)
                     .font(.caption)
                     .foregroundStyle(.secondary)

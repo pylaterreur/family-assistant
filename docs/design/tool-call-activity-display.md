@@ -57,11 +57,16 @@ good phrase in the same change that adds it.
 ### 2. Collapsed header
 
 - **Running**: spinner + the `active` phrase of the most recent unfinished call, replaced in place
-  as calls start and finish, plus a step counter once there is more than one call ("· 3 steps").
+  as calls start and finish, plus how many have finished ("2 done").
 - **Finished**: the `done` phrase of the most significant call, plus "and N more". Significance is
   coarse: a call that changed state (created, sent, deleted, scheduled) outranks a read, and among
   equals the latest wins. "Created task “Call plumber” and 3 more" says more than "Searched notes".
-- **Any call not succeeded**: the existing "· N didn't finish" suffix stays, and the group opens.
+- **Awaiting approval**: "Needs your approval: …" ahead of anything else.
+- **Any call not succeeded**: the existing "N didn't finish" count stays, with a warning icon.
+
+A group opens by itself only for an approval. It no longer opens while calls run — the header is the
+live view — and a call that did not finish is counted rather than opened, since a historical call
+with no recorded result would otherwise open every old group.
 
 Expanded, each call is one row: status icon, the phrase, a result snippet. Tapping a row reveals the
 raw arguments and result, as the per-call details do today. Category icons are removed from the
@@ -69,16 +74,18 @@ header; the phrase carries the meaning.
 
 ### 3. Chronological placement
 
-A turn is an ordered list of segments — text, tool group, text, … — on both clients, in both
-streaming and history.
+A turn reads as text, tool group, text, … in the order it happened, on both clients, in both
+streaming and history. Both clients use the same mechanism: each tool call records how much of its
+message's text had arrived when it started, and the renderer splits the text at those offsets.
+Whitespace between two calls is dropped so it does not split their group. The message keeps one text
+and one list of calls, so copy, search and live-to-persisted reconciliation are untouched.
 
-- **Web**: streaming appends a new text part when text arrives after a tool call instead of
-  rewriting the leading one, so assistant-ui's consecutive-call grouping places each group where it
-  happened.
-- **iOS**: `ChatMessage` replaces its separate `text` / `toolCalls` with an ordered list of
-  segments. Streaming appends to the last segment (or opens a new one when the kind changes);
-  merging a turn's tool-call messages concatenates segment lists instead of joining text. The bubble
-  renders segments in order, each tool group with its own disclosure state.
+- **Web**: the streaming hook stamps each call with the offset; the message's parts are rebuilt as
+  text/call/text, and assistant-ui's consecutive-call grouping places each group where it happened.
+- **iOS**: the stream stamps each call with the offset (counting text still buffered for the flush
+  timer); a history row's calls sit after its own text, and merging a turn's tool-call rows shifts
+  the later row's offsets past the earlier text. The bubble renders the derived segments in order,
+  each tool group with its own disclosure state.
 
 ## Work plan
 
@@ -89,8 +96,9 @@ streaming and history.
 2. **Web** — ordered streaming parts and the new header/rows, used by both the live thread and the
    shared page. Verified by updated component tests, a streaming test asserting text-after-tools
    order, and the Playwright tool-grouping test.
-3. **iOS** — segment model, ordered streaming and merge, new header/rows. Verified by updated
-   `ToolRenderingTests` (ordering through streaming and history merge) and the layout budget tests.
+3. **iOS** — offsets through streaming and merge, segment rendering, new header/rows. Verified by
+   updated `ToolRenderingTests` (ordering through streaming and history merge) and the layout budget
+   tests.
 4. **Docs** — `docs/user` chat guide describes what the activity line shows.
 
 ## Deliberate simplifications

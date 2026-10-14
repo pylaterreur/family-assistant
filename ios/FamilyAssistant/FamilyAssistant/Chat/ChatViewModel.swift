@@ -4572,6 +4572,10 @@ final class ChatViewModel {
             scheduleTextFlush()
         case .toolCall:
             if let toolCall = event.toolCall {
+                // Text still buffered for the flush timer was written before
+                // this call, so it counts toward where the call sits.
+                let textBefore = messages[index].text.utf16.count
+                    + (pendingTextByMessageID[assistantMessageID]?.utf16.count ?? 0)
                 messages[index].toolCalls.append(
                     ChatToolCall(
                         id: toolCall.id,
@@ -4579,7 +4583,9 @@ final class ChatViewModel {
                         argumentsText: toolCall.argumentsText,
                         resultText: nil,
                         attachments: [],
-                        status: .running
+                        status: .running,
+                        display: toolCall.display,
+                        textOffset: textBefore
                     )
                 )
                 messages[index].isLoading = false
@@ -5186,6 +5192,12 @@ final class ChatViewModel {
                 return nil
             }
 
+            let role = backend.role == .error ? ChatMessageRole.assistant : backend.role
+            let text = backend.role == .error && backend.text.isEmpty
+                ? "An error occurred while processing this message."
+                : backend.text
+            // A persisted row's text was written before the calls it made.
+            let textOffset = text.utf16.count
             let toolCalls = backend.toolCalls.map { toolCall in
                 let result = toolResults[toolCall.id]
                 return ChatToolCall(
@@ -5196,7 +5208,9 @@ final class ChatViewModel {
                     attachments: result?.attachments ?? [],
                     // A call with no result is running only while its turn is.
                     status: result?.status
-                        ?? (backend.turnID.map { runningTurnIDs.contains($0) } ?? false ? .running : .unknown)
+                        ?? (backend.turnID.map { runningTurnIDs.contains($0) } ?? false ? .running : .unknown),
+                    display: toolCall.display,
+                    textOffset: textOffset
                 )
             }
 
@@ -5204,11 +5218,6 @@ final class ChatViewModel {
             if let metadataAttachments = metadataAttachments(from: backend.metadata) {
                 attachments.append(contentsOf: metadataAttachments)
             }
-
-            let role = backend.role == .error ? ChatMessageRole.assistant : backend.role
-            let text = backend.role == .error && backend.text.isEmpty
-                ? "An error occurred while processing this message."
-                : backend.text
             return ChatMessage(
                 id: "msg_\(backend.internalID)",
                 role: role,
@@ -5380,9 +5389,24 @@ final class ChatViewModel {
 
     private nonisolated static func merging(_ base: ChatMessage, with next: ChatMessage) -> ChatMessage {
         var result = base
-        result.toolCalls.append(contentsOf: next.toolCalls)
+        let separator = "\n\n"
+        result.text = [base.text, next.text].filter { !$0.isEmpty }.joined(separator: separator)
+        // Keep each call where it happened: the base's calls after the base's
+        // text, the next step's calls after the next step's text.
+        let baseLength = base.text.utf16.count
+        let nextStart = base.text.isEmpty || next.text.isEmpty
+            ? baseLength
+            : baseLength + separator.utf16.count
+        result.toolCalls = base.toolCalls.map { call in
+            var call = call
+            call.textOffset = call.textOffset ?? baseLength
+            return call
+        } + next.toolCalls.map { call in
+            var call = call
+            call.textOffset = nextStart + (call.textOffset ?? next.text.utf16.count)
+            return call
+        }
         result.attachments.append(contentsOf: next.attachments)
-        result.text = [base.text, next.text].filter { !$0.isEmpty }.joined(separator: "\n\n")
         // The grouped bubble represents the whole turn, so date it by its newest
         // folded-in step.
         result.createdAt = max(base.createdAt, next.createdAt)

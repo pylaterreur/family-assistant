@@ -430,6 +430,20 @@ struct ChatToolCall: Identifiable, Equatable {
     var resultText: String?
     var attachments: [ChatAttachment]
     var status: ChatToolStatus
+    /// How the server describes the call to the person watching.
+    var display: ChatToolCallDisplay? = nil
+    /// How much of its message's text (in UTF-16 code units) came before the
+    /// call, so the bubble can draw it between the text written before and
+    /// after it. Nil sorts after all of the text.
+    var textOffset: Int? = nil
+}
+
+/// The server's phrases for a tool call: what it is doing, what it did, and
+/// whether it changed anything (rather than only reading).
+struct ChatToolCallDisplay: Codable, Equatable {
+    let active: String
+    let done: String
+    let changes: Bool
 }
 
 /// What a tool call shows the user, the same states for a live stream and for
@@ -489,12 +503,13 @@ extension ChatToolStatus {
         }
     }
 
-    /// Whether a call still needs the user's eyes, so its group opens by itself.
+    /// Whether a call needs the user, so its group opens by itself: only an
+    /// approval they have to give. A running call is named in the group's
+    /// collapsed header instead, and one that did not succeed is counted there.
     /// Only the auto state depends on this: a group the user opened or closed
-    /// stays that way whatever its calls do next. A call that finished without
-    /// succeeding is counted in the group's collapsed summary instead.
+    /// stays that way whatever its calls do next.
     var wantsAttention: Bool {
-        isPending
+        self == .awaitingApproval
     }
 }
 
@@ -520,6 +535,28 @@ extension ChatToolCall {
             return "Tool"
         }
         return first.uppercased() + words.dropFirst()
+    }
+
+    /// What the call is doing, for a call still in progress or one that did
+    /// not succeed. A call the server did not describe reads as its name and
+    /// most telling argument.
+    var activePhrase: String {
+        display?.active ?? fallbackPhrase
+    }
+
+    /// What the call did, for a call that succeeded.
+    var donePhrase: String {
+        display?.done ?? fallbackPhrase
+    }
+
+    /// The phrase that matches the call's state: past tense only once it has
+    /// succeeded.
+    var phrase: String {
+        status == .succeeded ? donePhrase : activePhrase
+    }
+
+    private var fallbackPhrase: String {
+        argumentsSummary.map { "\(displayName) · \($0)" } ?? displayName
     }
 
     /// One line describing what the call was asked to do, or nil when the
@@ -981,6 +1018,7 @@ struct ChatBackendToolCall: Codable, Equatable {
     let function: ChatBackendToolFunction?
     let name: String?
     let arguments: JSONValue?
+    var display: ChatToolCallDisplay? = nil
 
     var displayName: String {
         function?.name ?? name ?? "unknown"
@@ -1196,4 +1234,118 @@ private extension ISO8601DateFormatter {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
+}
+
+/// One stretch of a message as it happened: text the assistant wrote, or a run
+/// of consecutive tool calls between two stretches of text.
+enum ChatMessageSegment: Identifiable, Equatable {
+    case text(id: String, String)
+    case tools(id: String, [ChatToolCall])
+
+    var id: String {
+        switch self {
+        case .text(let id, _), .tools(let id, _):
+            id
+        }
+    }
+}
+
+extension ChatMessage {
+    /// The message's text and tool calls in the order they happened.
+    ///
+    /// Each call records how much of the text came before it (`textOffset`);
+    /// splitting the text there puts every call between the text written
+    /// before it and the text written after it. Whitespace between two calls
+    /// is dropped so it does not split their group in two.
+    var segments: [ChatMessageSegment] {
+        let length = text.utf16.count
+        var segments: [ChatMessageSegment] = []
+        var consumed = 0
+        var pendingCalls: [ChatToolCall] = []
+
+        func flushCalls() {
+            guard let first = pendingCalls.first else {
+                return
+            }
+            segments.append(.tools(id: "\(id)-tools-\(first.id)", pendingCalls))
+            pendingCalls = []
+        }
+
+        func takeText(upTo end: Int) {
+            guard end > consumed else {
+                return
+            }
+            let start = String.Index(utf16Offset: consumed, in: text)
+            let stop = String.Index(utf16Offset: end, in: text)
+            // Newlines at either end only separated this stretch from a call
+            // or a merged step; the bubble spaces segments itself.
+            let stretch = String(text[start..<stop]).trimmingCharacters(in: .newlines)
+            consumed = end
+            guard !stretch.trimmingCharacters(in: .whitespaces).isEmpty else {
+                return
+            }
+            flushCalls()
+            segments.append(.text(id: "\(id)-text-\(segments.count)", stretch))
+        }
+
+        for call in toolCalls {
+            takeText(upTo: min(max(call.textOffset ?? length, 0), length))
+            pendingCalls.append(call)
+        }
+        flushCalls()
+        takeText(upTo: length)
+        return segments
+    }
+}
+
+/// The collapsed header of a group of consecutive tool calls.
+///
+/// While work is in flight it names the latest call still running, so the
+/// line reads as a live ticker. Once everything has finished it names the call
+/// that mattered most — the latest that changed something, otherwise the
+/// latest that succeeded — and counts the rest.
+struct ChatToolGroupSummary: Equatable {
+    let headline: String
+    /// Progress while running, failures once finished.
+    let detail: String?
+    let isRunning: Bool
+    let needsApproval: Bool
+    /// The call the headline names.
+    let subject: ChatToolCall?
+
+    init(calls: [ChatToolCall]) {
+        let unsuccessful = calls.filter { $0.status.didNotSucceed }.count
+        let failureDetail = unsuccessful > 0 ? "\(unsuccessful) didn't finish" : nil
+
+        if let awaiting = calls.last(where: { $0.status == .awaitingApproval }) {
+            headline = "Needs your approval: \(awaiting.activePhrase)"
+            detail = failureDetail
+            isRunning = true
+            needsApproval = true
+            subject = awaiting
+            return
+        }
+        if let running = calls.last(where: { $0.status == .running }) {
+            let finished = calls.filter { !$0.status.isPending }.count
+            headline = running.activePhrase
+            detail = finished > 0 ? "\(finished) done" : nil
+            isRunning = true
+            needsApproval = false
+            subject = running
+            return
+        }
+        let key = calls.last { $0.status == .succeeded && $0.display?.changes == true }
+            ?? calls.last { $0.status == .succeeded }
+            ?? calls.last
+        isRunning = false
+        needsApproval = false
+        detail = failureDetail
+        subject = key
+        guard let key else {
+            headline = "No tool calls"
+            return
+        }
+        let others = calls.count - 1
+        headline = others > 0 ? "\(key.phrase) and \(others) more" : key.phrase
+    }
 }

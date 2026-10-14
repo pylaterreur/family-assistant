@@ -798,6 +798,126 @@ final class ToolRenderingTests: XCTestCase {
         XCTAssertEqual(messages.map { $0.toolCalls.map(\.id) }, [["a"], ["b"]])
     }
 
+    /// A merged turn keeps each step's text ahead of the calls that step made,
+    /// rather than gathering all the text above all the calls.
+    func testMergedTurnKeepsEachStepsTextBeforeItsCalls() throws {
+        let json = """
+        [
+          {"internal_id": 1, "role": "assistant", "content": "Let me look.", "timestamp": "2026-06-08T12:00:00Z",
+           "tool_calls": [{"id": "a", "type": "function", "function": {"name": "get_note", "arguments": "{}"},
+                           "display": {"active": "Reading note", "done": "Read note", "changes": false}}]},
+          {"internal_id": 2, "role": "assistant", "content": "Now the calendar.", "timestamp": "2026-06-08T12:00:01Z",
+           "tool_calls": [{"id": "b", "type": "function", "function": {"name": "search_calendar_events", "arguments": "{}"}}]}
+        ]
+        """
+        let backendMessages = try JSONDecoder.chatDecoder.decode([ChatBackendMessage].self, from: Data(json.utf8))
+
+        let messages = ChatViewModel.groupToolCallTurns(ChatViewModel.renderMessages(from: backendMessages))
+
+        let bubble = try XCTUnwrap(messages.first)
+        XCTAssertEqual(bubble.segments.map(segmentSummary), ["Let me look.", "[a]", "Now the calendar.", "[b]"])
+        XCTAssertEqual(bubble.toolCalls.first?.display?.done, "Read note")
+    }
+
+    /// Text that streamed in after a call is drawn after it.
+    func testSegmentsPlaceCallsWhereTheyHappened() {
+        var first = toolCall(arguments: "{}")
+        first.textOffset = "Checking.".utf16.count
+        let message = assistantMessage(text: "Checking. Found it.", toolCalls: [first])
+
+        XCTAssertEqual(message.segments.map(segmentSummary), ["Checking.", "[call]", " Found it."])
+    }
+
+    /// Whitespace between two calls does not split them into two groups.
+    func testWhitespaceBetweenCallsKeepsThemInOneGroup() {
+        var first = ChatToolCall(id: "a", name: "t", argumentsText: "{}", attachments: [], status: .succeeded)
+        first.textOffset = 0
+        var second = ChatToolCall(id: "b", name: "t", argumentsText: "{}", attachments: [], status: .succeeded)
+        second.textOffset = 2
+        let message = assistantMessage(text: "\n\nDone.", toolCalls: [first, second])
+
+        XCTAssertEqual(message.segments.map(segmentSummary), ["[a,b]", "Done."])
+    }
+
+    func testGroupSummaryNamesTheRunningCall() {
+        let summary = ChatToolGroupSummary(calls: [
+            phrased("a", status: .succeeded, active: "Reading note", done: "Read note"),
+            phrased("b", status: .running, active: "Checking calendar", done: "Checked calendar"),
+        ])
+
+        XCTAssertEqual(summary.headline, "Checking calendar")
+        XCTAssertEqual(summary.detail, "1 done")
+        XCTAssertTrue(summary.isRunning)
+    }
+
+    func testGroupSummaryPrefersACallThatChangedSomething() {
+        let summary = ChatToolGroupSummary(calls: [
+            phrased("a", status: .succeeded, active: "Adding event", done: "Added event", changes: true),
+            phrased("b", status: .succeeded, active: "Reading note", done: "Read note"),
+        ])
+
+        XCTAssertEqual(summary.headline, "Added event and 1 more")
+        XCTAssertFalse(summary.isRunning)
+    }
+
+    func testGroupSummaryDoesNotCallAFailedChangeDone() {
+        let summary = ChatToolGroupSummary(calls: [
+            phrased("a", status: .failed, active: "Adding event", done: "Added event", changes: true),
+        ])
+
+        XCTAssertEqual(summary.headline, "Adding event")
+        XCTAssertEqual(summary.detail, "1 didn't finish")
+    }
+
+    func testGroupSummaryPutsAnApprovalFirst() {
+        let summary = ChatToolGroupSummary(calls: [
+            phrased("a", status: .awaitingApproval, active: "Deleting note", done: "Deleted note", changes: true),
+            phrased("b", status: .running, active: "Reading note", done: "Read note"),
+        ])
+
+        XCTAssertEqual(summary.headline, "Needs your approval: Deleting note")
+        XCTAssertTrue(summary.needsApproval)
+    }
+
+    private func phrased(
+        _ id: String,
+        status: ChatToolStatus,
+        active: String,
+        done: String,
+        changes: Bool = false
+    ) -> ChatToolCall {
+        ChatToolCall(
+            id: id,
+            name: "t",
+            argumentsText: "{}",
+            attachments: [],
+            status: status,
+            display: ChatToolCallDisplay(active: active, done: done, changes: changes)
+        )
+    }
+
+    private func assistantMessage(text: String, toolCalls: [ChatToolCall]) -> ChatMessage {
+        ChatMessage(
+            id: "m",
+            role: .assistant,
+            text: text,
+            createdAt: Date(timeIntervalSince1970: 0),
+            toolCalls: toolCalls,
+            attachments: [],
+            isLoading: false,
+            status: .complete
+        )
+    }
+
+    private func segmentSummary(_ segment: ChatMessageSegment) -> String {
+        switch segment {
+        case .text(_, let text):
+            text
+        case .tools(_, let calls):
+            "[" + calls.map(\.id).joined(separator: ",") + "]"
+        }
+    }
+
     private func toolCall(
         name: String = "query_trino",
         arguments: String,
@@ -858,10 +978,10 @@ final class ToolRenderingTests: XCTestCase {
         XCTAssertEqual(call.prettyResultText, "plain text")
     }
 
-    /// Only calls still in flight or awaiting the user open their group on
-    /// their own; finished, failed and rejected calls leave it closed.
-    func testOnlyInFlightToolCallsWantAttention() {
-        XCTAssertTrue(ChatToolStatus.running.wantsAttention)
+    /// Only a call awaiting the user's approval opens its group on its own; a
+    /// running call is named in the collapsed header instead.
+    func testOnlyApprovalsWantAttention() {
+        XCTAssertFalse(ChatToolStatus.running.wantsAttention)
         XCTAssertTrue(ChatToolStatus.awaitingApproval.wantsAttention)
         XCTAssertFalse(ChatToolStatus.succeeded.wantsAttention)
         XCTAssertFalse(ChatToolStatus.failed.wantsAttention)
