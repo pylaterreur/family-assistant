@@ -58,10 +58,15 @@ management, streaming response handling, tool call visualization, and attachment
 components: `ChatApp.tsx`, `ConversationSidebar.tsx`, and `useStreamingResponse.js` for the
 streaming API integration.
 
-### Routing
+### Routing and Navigation
 
-Client-side routing with separate entry points: `chat.html` for the chat interface, `router.html`
-for the main application router, plus feature-specific pages in `src/pages/`.
+`router.html` mounts `src/shared/AppRouter.jsx`, which serves every page. All pages except shared
+transcripts render inside one `AppShell` (`src/shared/AppShell.tsx`): a collapsible sidebar on `md`
+and wider, and on narrower screens an `AppTopBar` whose menu button opens the same links in a
+drawer. The links come from `NAV_SECTIONS` in `src/shared/navigation.ts` — add a page there and it
+appears in both. Chat is `fullBleed`: it manages its own height and renders `AppTopBar` itself so it
+can put conversation actions in it. Chat's `isMobile` switch uses the same 768px breakpoint as
+Tailwind's `md`, so the shell and chat agree on which layout is showing.
 
 ### Error Reporting
 

@@ -1,100 +1,107 @@
 import {
   AlertTriangle,
-  Calendar,
-  Cog,
-  FileText,
+  CalendarClock,
+  FileCode2,
   FolderOpen,
   HelpCircle,
   History,
   Home,
   Info,
+  KeyRound,
+  Layers,
+  ListChecks,
+  type LucideIcon,
   MessageCircle,
   Mic,
+  PlugZap,
   Search,
-  Settings,
-  Upload,
+  ShieldCheck,
+  StickyNote,
+  Wrench,
   Zap,
 } from 'lucide-react';
 
-export interface NavigationItem {
-  type: 'section' | 'external' | 'link' | 'current';
+export interface NavItem {
   title: string;
-  href?: string;
-  to?: string;
-  icon?: React.ComponentType<{ className?: string }>;
+  to: string;
+  icon: LucideIcon;
 }
 
-export const getNavigationItems = (currentPage?: string): NavigationItem[] => [
-  { type: 'section', title: 'Main' },
+export interface NavSection {
+  /** Omitted for the leading, unlabelled group of primary destinations. */
+  title?: string;
+  items: NavItem[];
+}
+
+/**
+ * Every page reachable from the main navigation. The desktop sidebar and the
+ * mobile drawer both render this list, so a page added here appears in both.
+ */
+export const NAV_SECTIONS: NavSection[] = [
   {
-    type: currentPage === 'home' ? 'current' : 'link',
-    to: '/',
-    title: 'Home',
-    icon: Home,
-  },
-  { type: 'section', title: 'Data' },
-  { type: 'external', href: '/notes', title: 'Notes', icon: FileText },
-  { type: 'link', to: '/context', title: 'Context', icon: FileText },
-  { type: 'section', title: 'Documents' },
-  { type: 'external', href: '/documents/', title: 'List', icon: FolderOpen },
-  { type: 'external', href: '/documents/upload', title: 'Upload', icon: Upload },
-  { type: 'external', href: '/vector-search', title: 'Search', icon: Search },
-  { type: 'section', title: 'Communication' },
-  {
-    type: currentPage === 'chat' ? 'current' : 'link',
-    to: '/chat',
-    title: 'Chat',
-    icon: MessageCircle,
+    items: [
+      { title: 'Home', to: '/', icon: Home },
+      { title: 'Chat', to: '/chat', icon: MessageCircle },
+      { title: 'Voice', to: '/voice', icon: Mic },
+      { title: 'History', to: '/history', icon: History },
+    ],
   },
   {
-    type: currentPage === 'voice' ? 'current' : 'link',
-    to: '/voice',
-    title: 'Voice',
-    icon: Mic,
-  },
-  { type: 'external', href: '/history', title: 'History', icon: History },
-  { type: 'section', title: 'Automation' },
-  {
-    type: currentPage === 'automations' ? 'current' : 'link',
-    to: '/automations',
-    title: 'Automations',
-    icon: Zap,
-  },
-  { type: 'link', to: '/scripts', title: 'Scripts', icon: FileText },
-  { type: 'link', to: '/artifacts', title: 'Artifact review', icon: FileText },
-  { type: 'external', href: '/events', title: 'Events', icon: Calendar },
-  { type: 'section', title: 'Internal' },
-  {
-    type: currentPage === 'tools' ? 'current' : 'link',
-    to: '/tools',
-    title: 'Tools',
-    icon: Cog,
-  },
-  { type: 'external', href: '/tasks', title: 'Task Queue', icon: Settings },
-  {
-    type: currentPage === 'errors' ? 'current' : 'link',
-    to: '/errors',
-    title: 'Error Logs',
-    icon: AlertTriangle,
+    title: 'Knowledge',
+    items: [
+      { title: 'Notes', to: '/notes', icon: StickyNote },
+      { title: 'Documents', to: '/documents', icon: FolderOpen },
+      { title: 'Search', to: '/vector-search', icon: Search },
+      { title: 'Context', to: '/context', icon: Layers },
+    ],
   },
   {
-    type: 'link',
-    to: '/settings/accounts',
-    title: 'Connected Accounts',
-    icon: Settings,
+    title: 'Automation',
+    items: [
+      { title: 'Automations', to: '/automations', icon: Zap },
+      { title: 'Events', to: '/events', icon: CalendarClock },
+      { title: 'Scripts', to: '/scripts', icon: FileCode2 },
+      { title: 'Artifact review', to: '/artifacts', icon: ShieldCheck },
+    ],
   },
   {
-    type: 'link',
-    to: '/settings/tokens',
-    title: 'API Tokens',
-    icon: Settings,
+    title: 'System',
+    items: [
+      { title: 'Tools', to: '/tools', icon: Wrench },
+      { title: 'Task queue', to: '/tasks', icon: ListChecks },
+      { title: 'Error logs', to: '/errors', icon: AlertTriangle },
+    ],
   },
-  { type: 'section', title: 'Help' },
-  { type: 'external', href: '/docs/', title: 'Help', icon: HelpCircle },
   {
-    type: currentPage === 'about' ? 'current' : 'link',
-    to: '/about',
-    title: 'About',
-    icon: Info,
+    title: 'Settings',
+    items: [
+      { title: 'Connected accounts', to: '/settings/accounts', icon: PlugZap },
+      { title: 'API tokens', to: '/settings/tokens', icon: KeyRound },
+    ],
   },
 ];
+
+/** Secondary destinations pinned to the bottom of the navigation. */
+export const NAV_FOOTER_ITEMS: NavItem[] = [
+  { title: 'Help', to: '/docs', icon: HelpCircle },
+  { title: 'About', to: '/about', icon: Info },
+];
+
+const ALL_NAV_ITEMS: NavItem[] = [
+  ...NAV_SECTIONS.flatMap((section) => section.items),
+  ...NAV_FOOTER_ITEMS,
+];
+
+/** Whether `pathname` is `item`'s page or one nested beneath it. */
+export function isNavItemActive(item: NavItem, pathname: string): boolean {
+  const path = pathname.replace(/\/+$/, '') || '/';
+  if (item.to === '/') {
+    return path === '/';
+  }
+  return path === item.to || path.startsWith(`${item.to}/`);
+}
+
+/** The navigation entry for the page at `pathname`, if it has one. */
+export function findActiveNavItem(pathname: string): NavItem | undefined {
+  return ALL_NAV_ITEMS.find((item) => isNavItemActive(item, pathname));
+}

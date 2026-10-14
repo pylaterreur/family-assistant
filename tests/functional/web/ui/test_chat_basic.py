@@ -54,7 +54,7 @@ async def test_basic_chat_conversation(
         '[data-testid="chat-input"]', state="visible", timeout=10000
     )
     await page.wait_for_selector(
-        "button[aria-label='Toggle sidebar']", state="visible", timeout=10000
+        "button[aria-label='Toggle conversation list']", state="visible", timeout=10000
     )  # Desktop: sidebar toggle is in the header
 
     # Create a new chat to ensure we start fresh

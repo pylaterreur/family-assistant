@@ -35,7 +35,7 @@ describe('ChatApp', () => {
   it('renders the chat interface with an empty, enabled composer', async () => {
     await renderChatApp({ waitForReady: true });
 
-    expect(screen.getByText('Chat')).toBeInTheDocument();
+    expect(screen.getByLabelText('Toggle conversation list')).toBeInTheDocument();
     expect(await screen.findByText('Conversations')).toBeInTheDocument();
     expect(await screen.findByRole('combobox', { name: 'Processing profile' })).toHaveTextContent(
       'Assistant'
@@ -342,7 +342,7 @@ describe('ChatApp', () => {
 
       expect(screen.getByText('Chat')).toBeInTheDocument();
       expect(screen.getByLabelText('Back to conversations')).toBeInTheDocument();
-      expect(screen.queryByLabelText('Toggle sidebar')).not.toBeInTheDocument();
+      expect(screen.queryByLabelText('Toggle conversation list')).not.toBeInTheDocument();
       expect(screen.queryByText('Conversations')).not.toBeInTheDocument();
     });
   });

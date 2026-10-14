@@ -8,7 +8,7 @@ scripts, understand the available APIs and sandbox constraints to write effectiv
 
 ## Editing stored scripts
 
-Open **Automations → Scripts** in the web interface. Choose **New script** to create one, or **Edit
+Open **Automation → Scripts** in the web interface. Choose **New script** to create one, or **Edit
 script** to change a stored script's description, Python code, or parameter schema. The parameter
 schema is an optional JSON object describing the script's inputs. Existing script names stay fixed
 so automations can keep referring to them.

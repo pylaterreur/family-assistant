@@ -1,9 +1,9 @@
 import React, { lazy, Suspense, useEffect } from 'react';
-import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Outlet, Route, Routes, useMatch } from 'react-router-dom';
 import { EMBEDDED_PAGE_BASE, isEmbeddedPage } from './embeddedNavigation';
 
 // Lazy load all route components for code splitting
-const Layout = lazy(() => import('./Layout.tsx'));
+const AppShell = lazy(() => import('./AppShell.tsx'));
 const ChatPage = lazy(() => import('../chat/ChatApp'));
 const SharedConversationPage = lazy(() => import('../chat/SharedConversationPage'));
 const ToolsApp = lazy(() => import('../tools/ToolsApp'));
@@ -49,27 +49,26 @@ const FallbackRedirect = () => {
   );
 };
 
-const withLayout = (element) => (
-  <Suspense fallback={<LoadingSpinner />}>
-    <Layout>
-      <Suspense fallback={<LoadingSpinner />}>{element}</Suspense>
-    </Layout>
-  </Suspense>
-);
+// One shell instance spans every page inside it, so moving between pages keeps
+// the sidebar mounted (and its scroll position) instead of rebuilding it.
+const ShellLayout = () => {
+  const fullBleed = useMatch('/chat') !== null;
+  return (
+    <Suspense fallback={<LoadingSpinner />}>
+      <AppShell fullBleed={fullBleed}>
+        <Suspense fallback={<LoadingSpinner />}>
+          <Outlet />
+        </Suspense>
+      </AppShell>
+    </Suspense>
+  );
+};
 
 const AppRouter = () => {
   return (
     <BrowserRouter basename={isEmbeddedPage() ? EMBEDDED_PAGE_BASE : undefined}>
       <Routes>
-        {/* Chat routes - no Layout wrapper as ChatApp has its own complete UI */}
-        <Route
-          path="/chat"
-          element={
-            <Suspense fallback={<LoadingSpinner />}>
-              <ChatPage />
-            </Suspense>
-          }
-        />
+        {/* Shared transcripts are read-only views without the app navigation */}
         <Route
           path="/shared/conversations/:token"
           element={
@@ -79,62 +78,32 @@ const AppRouter = () => {
           }
         />
 
-        {/* Tools routes */}
-        <Route path="/tools" element={withLayout(<ToolsApp />)} />
+        <Route element={<ShellLayout />}>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/voice" element={<VoicePage />} />
+          <Route path="/history/*" element={<HistoryApp />} />
 
-        {/* Errors routes */}
-        <Route path="/errors/*" element={withLayout(<ErrorsApp />)} />
+          <Route path="/notes/*" element={<NotesApp />} />
+          <Route path="/documents/*" element={<DocumentsPage />} />
+          <Route path="/vector-search/*" element={<VectorSearchPage />} />
+          <Route path="/context" element={<ContextPage />} />
 
-        {/* Context page (test conversion) */}
-        <Route path="/context" element={withLayout(<ContextPage />)} />
+          <Route path="/automations/*" element={<AutomationsApp />} />
+          <Route path="/events/*" element={<EventsApp />} />
+          <Route path="/scripts" element={<ScriptsPage />} />
+          <Route path="/artifacts" element={<ArtifactReviewPage />} />
 
-        {/* Notes routes */}
-        <Route path="/notes/*" element={withLayout(<NotesApp />)} />
+          <Route path="/tools" element={<ToolsApp />} />
+          <Route path="/tasks/*" element={<TasksApp />} />
+          <Route path="/errors/*" element={<ErrorsApp />} />
 
-        {/* Tasks routes */}
-        <Route path="/tasks/*" element={withLayout(<TasksApp />)} />
+          <Route path="/settings/accounts" element={<ConnectedAccounts />} />
+          <Route path="/settings/tokens" element={<TokenManagement />} />
 
-        {/* Event Listeners routes */}
-
-        {/* Automations routes */}
-        <Route path="/artifacts" element={withLayout(<ArtifactReviewPage />)} />
-        <Route path="/scripts" element={withLayout(<ScriptsPage />)} />
-        <Route path="/automations/*" element={withLayout(<AutomationsApp />)} />
-
-        {/* Events routes */}
-        <Route path="/events/*" element={withLayout(<EventsApp />)} />
-
-        {/* History routes */}
-        <Route path="/history/*" element={withLayout(<HistoryApp />)} />
-
-        {/* Documentation routes */}
-        <Route path="/docs/*" element={withLayout(<DocumentationApp />)} />
-
-        {/* Settings routes */}
-        <Route path="/settings/tokens" element={withLayout(<TokenManagement />)} />
-        <Route path="/settings/accounts" element={withLayout(<ConnectedAccounts />)} />
-
-        {/* Documents routes */}
-        <Route path="/documents/*" element={withLayout(<DocumentsPage />)} />
-
-        {/* Vector Search routes */}
-        <Route path="/vector-search/*" element={withLayout(<VectorSearchPage />)} />
-
-        {/* Voice mode - no Layout wrapper as VoicePage has its own complete UI */}
-        <Route
-          path="/voice"
-          element={
-            <Suspense fallback={<LoadingSpinner />}>
-              <VoicePage />
-            </Suspense>
-          }
-        />
-
-        {/* About page */}
-        <Route path="/about" element={withLayout(<AboutPage />)} />
-
-        {/* Default route: Landing Page */}
-        <Route path="/" element={withLayout(<LandingPage />)} />
+          <Route path="/docs/*" element={<DocumentationApp />} />
+          <Route path="/about" element={<AboutPage />} />
+        </Route>
 
         {/* Catch-all for unmatched routes - redirect to external pages for now */}
         <Route path="*" element={<FallbackRedirect />} />

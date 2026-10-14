@@ -5,13 +5,13 @@ import {
   MessageNotSentError,
   useExternalStoreRuntime,
 } from '@assistant-ui/react';
-import { ArrowLeft, Menu, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { MessagesSquare, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import React, { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { TooltipProvider } from '@/components/ui/tooltip';
-import NavigationSheet from '../shared/NavigationSheet';
+import { AppTopBar } from '../shared/AppShell';
 import { getDiagnosticsUrl } from '../utils/diagnosticsUrl';
 import { parseToolArguments } from '../utils/toolUtils';
 import { generateUUID } from '../utils/uuid';
@@ -550,7 +550,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   const [conversationsLoading, setConversationsLoading] = useState<boolean>(true);
   const conversationsLoadedRef = useRef(false);
   const [profilesLoading, setProfilesLoading] = useState<boolean>(true);
-  const [isMobile, setIsMobile] = useState<boolean>(window.innerWidth <= 768);
+  const [isMobile, setIsMobile] = useState<boolean>(window.innerWidth < 768);
   const [mobileShowList, setMobileShowList] = useState<boolean>(false);
   // `currentProfileId` is the *active* profile: it drives the picker and is sent
   // with every turn. It is distinct from the *preferred* profile persisted in
@@ -2240,7 +2240,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     // The mobile layout doesn't render the desktop sidebar, so its open state
     // is left as the user set it for when the window widens again.
     const handleResize = () => {
-      setIsMobile(window.innerWidth <= 768);
+      setIsMobile(window.innerWidth < 768);
     };
 
     window.addEventListener('resize', handleResize);
@@ -2985,10 +2985,11 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
 
   return (
     <TooltipProvider>
-      <div className="flex h-screen flex-col bg-background">
+      <div className="flex h-dvh flex-col bg-background">
         {/* Mobile: conversation list view (shown when no conversation is active) */}
         {isMobile && mobileShowList && (
           <div className="flex flex-1 flex-col min-h-0">
+            <AppTopBar title="Chat" />
             <ConversationSidebar
               conversations={conversations}
               conversationsLoading={conversationsLoading}
@@ -3005,48 +3006,47 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
         {/* Mobile: chat detail view (shown when not on list) */}
         {isMobile && !mobileShowList && (
           <div className="flex flex-1 flex-col min-h-0 overflow-hidden">
-            {/* Header with back button. Actions sit on the first row and the
-                profile/intelligence selectors on a second, and both rows wrap,
-                so nothing is pushed past the viewport at narrow widths or zoom. */}
+            {/* The shared top bar carries navigation and the conversation
+                actions; the profile/intelligence selectors sit on a second
+                row that wraps, so nothing is pushed past the viewport at
+                narrow widths or zoom. */}
             <div
-              className="flex-shrink-0 z-50 flex flex-col gap-2 border-b bg-background/95 px-3 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60"
+              className="flex-shrink-0 z-40 flex flex-col border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60"
               data-testid="mobile-chat-header"
             >
-              <div className="flex min-w-0 flex-wrap items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={handleBackToList}
-                  aria-label="Back to conversations"
-                >
-                  <ArrowLeft className="h-4 w-4" />
-                </Button>
-                <h2 className="min-w-0 flex-1 truncate text-xl font-semibold">Chat</h2>
-                <div className="flex flex-wrap items-center justify-end gap-1">
-                  <ShareConversationButton
-                    shareLink={shareLink}
-                    conversationId={conversationId}
-                    hasPersistedMessages={
-                      messages.length > 0 && persistedConversationId === conversationId
-                    }
-                  />
-                  <NotificationSettings
-                    enabled={notificationsEnabled}
-                    onEnabledChange={handleNotificationEnabledChange}
-                    permission={notificationPermission}
-                    onRequestPermission={requestNotificationPermission}
-                    isSupported={notificationsSupported}
-                  />
-                  <PushNotificationButton />
-                  <NavigationSheet currentPage="chat">
-                    <Button variant="ghost" size="sm" aria-label="Open navigation">
-                      <Menu className="h-4 w-4" />
+              <AppTopBar
+                title="Chat"
+                className="static border-b-0 bg-transparent backdrop-blur-none"
+                actions={
+                  <>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleBackToList}
+                      aria-label="Back to conversations"
+                    >
+                      <MessagesSquare className="h-4 w-4" />
                     </Button>
-                  </NavigationSheet>
-                </div>
-              </div>
+                    <ShareConversationButton
+                      shareLink={shareLink}
+                      conversationId={conversationId}
+                      hasPersistedMessages={
+                        messages.length > 0 && persistedConversationId === conversationId
+                      }
+                    />
+                    <NotificationSettings
+                      enabled={notificationsEnabled}
+                      onEnabledChange={handleNotificationEnabledChange}
+                      permission={notificationPermission}
+                      onRequestPermission={requestNotificationPermission}
+                      isSupported={notificationsSupported}
+                    />
+                    <PushNotificationButton />
+                  </>
+                }
+              />
 
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2 px-3 pb-2">
                 <ProfileSelector
                   selectedProfileId={currentProfileId}
                   onProfileChange={handleProfileChange}
@@ -3072,7 +3072,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                 currentConversationId={conversationId}
                 onOpenConversation={handleConversationSelect}
               />
-              <main className="flex flex-1 flex-col min-h-0">
+              <div className="flex flex-1 flex-col min-h-0">
                 <AssistantRuntimeProvider runtime={runtime}>
                   <ThreadErrorBoundary>
                     <ChatControlsContext.Provider value={chatControls}>
@@ -3084,7 +3084,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                     </ChatControlsContext.Provider>
                   </ThreadErrorBoundary>
                 </AssistantRuntimeProvider>
-              </main>
+              </div>
             </div>
           </div>
         )}
@@ -3093,12 +3093,13 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
         {!isMobile && (
           <>
             {/* Header */}
-            <div className="sticky top-0 z-50 flex items-center gap-4 border-b bg-background/95 p-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+            <div className="sticky top-0 z-40 flex min-h-14 items-center gap-3 border-b bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60">
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setSidebarOpen(!sidebarOpen)}
-                aria-label="Toggle sidebar"
+                aria-label="Toggle conversation list"
+                aria-expanded={sidebarOpen}
               >
                 {sidebarOpen ? (
                   <PanelLeftClose className="h-4 w-4" />
@@ -3106,7 +3107,6 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                   <PanelLeftOpen className="h-4 w-4" />
                 )}
               </Button>
-              <h2 className="text-xl font-semibold">Chat</h2>
 
               <div className="flex items-center gap-2">
                 <ProfileSelector
@@ -3141,11 +3141,6 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                   isSupported={notificationsSupported}
                 />
                 <PushNotificationButton />
-                <NavigationSheet currentPage="chat">
-                  <Button variant="ghost" size="sm" aria-label="Open navigation">
-                    <Menu className="h-4 w-4" />
-                  </Button>
-                </NavigationSheet>
               </div>
             </div>
 
@@ -3170,7 +3165,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                   currentConversationId={conversationId}
                   onOpenConversation={handleConversationSelect}
                 />
-                <main className="flex flex-1 flex-col min-h-0">
+                <div className="flex flex-1 flex-col min-h-0">
                   <AssistantRuntimeProvider runtime={runtime}>
                     <ThreadErrorBoundary>
                       <ChatControlsContext.Provider value={chatControls}>
@@ -3182,7 +3177,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                       </ChatControlsContext.Provider>
                     </ThreadErrorBoundary>
                   </AssistantRuntimeProvider>
-                </main>
+                </div>
               </div>
             </div>
           </>
