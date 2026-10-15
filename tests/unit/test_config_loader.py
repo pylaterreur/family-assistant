@@ -2115,10 +2115,14 @@ class TestLoadConfig:
 
         assert engine.evaluate(spawn_worker).decision is ToolPolicyDecision.DENY
 
-    def test_explicit_profile_tools_policy_preserves_operator_layer(
+    def test_explicit_profile_tools_policy_replaces_operator_layer(
         self, tmp_path: Path
     ) -> None:
-        """Explicit profile tools_policy should preserve operator layer for additive MCP rules."""
+        """A profile's own tools_policy replaces the operator's default-policy rules too.
+
+        Otherwise a deployment-wide grant reaches profiles confined by their own
+        deny-by-default policy, at the operator layer where nothing can deny it.
+        """
         defaults_file = tmp_path / "defaults.yaml"
         defaults_file.write_text(
             yaml.dump({
@@ -2179,11 +2183,8 @@ class TestLoadConfig:
         profile = config.service_profiles[0]
         assert profile.id == "custom_profile"
         assert profile.tools_policy is not None
-        assert profile.operator_tools_policy is not None
-        engine = PolicyEngine.from_layers(
-            defaults=profile.tools_policy,
-            operator=profile.operator_tools_policy,
-        )
+        assert profile.operator_tools_policy is None
+        engine = PolicyEngine.from_layers(defaults=profile.tools_policy)
         get_note = ToolDescriptor(
             name="get_note",
             definition={
@@ -2225,11 +2226,9 @@ class TestLoadConfig:
             mcp_server_id="code-execution",
         )
 
-        # Profile's own rules still work
         assert engine.evaluate(get_note).decision is ToolPolicyDecision.ALLOW
         assert engine.evaluate(spawn_worker).decision is ToolPolicyDecision.DENY
-        # Operator layer is now preserved — MCP tools from operator config are allowed
-        assert engine.evaluate(code_execution_tool).decision is ToolPolicyDecision.ALLOW
+        assert engine.evaluate(code_execution_tool).decision is ToolPolicyDecision.DENY
 
     def test_service_profiles_resolved(self, tmp_path: Path) -> None:
         """Test that service profiles are properly resolved."""

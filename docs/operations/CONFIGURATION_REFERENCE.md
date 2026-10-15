@@ -3955,6 +3955,13 @@ Operator merge note for tool policy:
   higher precedence.
 - `default_profile_settings.tools_policy.default_decision` still overrides the shipped default when
   explicitly set.
+- They extend the *default* policy, so they reach only the profiles that inherit it
+  (`default_assistant` and `complex_tasks` as shipped). A profile that declares its own
+  `tools_policy` replaces the default and the operator's additions with it, which is what keeps a
+  deployment-wide grant such as a web-search or code-execution MCP server out of confined profiles
+  like `memory_curator`, `media_analyst`, `coder` and `email_intake`. To grant a tool to one of
+  those, override that profile's `tools_policy`; to grant or deny one everywhere, use
+  `global_tools_policy`, which a profile can still refuse through `excluded_global_tools`.
 
 ### Remote A2A profiles
 
