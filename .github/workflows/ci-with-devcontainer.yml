@@ -114,6 +114,7 @@ jobs:
               - 'tests/functional/web/test_*.py'
             ci_workflow:
               - '.github/workflows/ci-*.yml'
+              - '.github/actions/**'
             web_api:
               - 'src/family_assistant/web/**/*.py'
             dockerfile_changes:
@@ -138,7 +139,7 @@ jobs:
               - '.github/workflows/ci-with-devcontainer.yml'
   build-ci-container:
     needs: [prepare, detect-changes]
-    if: needs.detect-changes.outputs.has_code_changes == 'true'
+    if: needs.detect-changes.outputs.has_code_changes == 'true' || needs.detect-changes.outputs.ast_grep_changes == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -158,6 +159,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
       - name: Log in to Container Registry
+        if: github.event.pull_request.head.repo.fork != true
         uses: ./.github/actions/docker-login-retry
         with:
           registry: ${{ env.REGISTRY }}
@@ -169,14 +171,23 @@ jobs:
           context: .
           file: .devcontainer/Dockerfile.ci
           platforms: linux/amd64
-          push: true
+          push: ${{ github.event.pull_request.head.repo.fork != true }}
+          outputs: ${{ github.event.pull_request.head.repo.fork == true && format('type=docker,dest={0}/ci-image.tar', runner.temp) || '' }}
           tags: ${{ needs.prepare.outputs.image-name }}
           cache-from: |
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:devcontainer-main
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:cache-devcontainer-dev
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:cache-devcontainer-ci
-          cache-to: |
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:cache-devcontainer-ci,mode=max
+          cache-to: ${{ github.event.pull_request.head.repo.fork != true && format('type=registry,ref={0}/{1}:cache-devcontainer-ci,mode=max', env.REGISTRY, env.IMAGE_PREFIX) || '' }}
+      - name: Upload fork CI image
+        if: github.event.pull_request.head.repo.fork == true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-devcontainer-${{ needs.prepare.outputs.image-tag }}
+          path: ${{ runner.temp }}/ci-image.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 1
   build-main-container:
     needs: [prepare, detect-changes]
     if: needs.detect-changes.outputs.dockerfile_changes == 'true'
@@ -209,6 +220,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
       - name: Log in to Container Registry
+        if: github.event.pull_request.head.repo.fork != true
         uses: ./.github/actions/docker-login-retry
         with:
           registry: ${{ env.REGISTRY }}
@@ -225,8 +237,7 @@ jobs:
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:buildcache-${{ matrix.arch }}
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:buildcache
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:main
-          cache-to: |
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:buildcache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.event.pull_request.head.repo.fork != true && format('type=registry,ref={0}/{1}:buildcache-{2},mode=max', env.REGISTRY, env.IMAGE_PREFIX, matrix.arch) || '' }}
   build-devcontainer:
     needs: [prepare, detect-changes]
     if: needs.detect-changes.outputs.dockerfile_changes == 'true'
@@ -259,6 +270,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
       - name: Log in to Container Registry
+        if: github.event.pull_request.head.repo.fork != true
         uses: ./.github/actions/docker-login-retry
         with:
           registry: ${{ env.REGISTRY }}
@@ -275,8 +287,7 @@ jobs:
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:cache-devcontainer-dev-${{ matrix.arch }}
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:cache-devcontainer-dev
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:devcontainer-main
-          cache-to: |
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}:cache-devcontainer-dev-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.event.pull_request.head.repo.fork != true && format('type=registry,ref={0}/{1}:cache-devcontainer-dev-{2},mode=max', env.REGISTRY, env.IMAGE_PREFIX, matrix.arch) || '' }}
   lint:
     needs: [prepare, build-ci-container, detect-changes]
     if: |
@@ -287,9 +298,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-      - name: Log in to Container Registry
-        uses: ./.github/actions/docker-login-retry
+      - name: Load CI image
+        uses: ./.github/actions/load-ci-image
         with:
+          artifact-name: ci-devcontainer-${{ needs.prepare.outputs.image-tag }}
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -325,9 +337,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-      - name: Log in to Container Registry
-        uses: ./.github/actions/docker-login-retry
+      - name: Load CI image
+        uses: ./.github/actions/load-ci-image
         with:
+          artifact-name: ci-devcontainer-${{ needs.prepare.outputs.image-tag }}
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -369,9 +382,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-      - name: Log in to Container Registry
-        uses: ./.github/actions/docker-login-retry
+      - name: Load CI image
+        uses: ./.github/actions/load-ci-image
         with:
+          artifact-name: ci-devcontainer-${{ needs.prepare.outputs.image-tag }}
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -485,9 +499,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-      - name: Log in to Container Registry
-        uses: ./.github/actions/docker-login-retry
+      - name: Load CI image
+        uses: ./.github/actions/load-ci-image
         with:
+          artifact-name: ci-devcontainer-${{ needs.prepare.outputs.image-tag }}
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -595,9 +610,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-      - name: Log in to Container Registry
-        uses: ./.github/actions/docker-login-retry
+      - name: Load CI image
+        uses: ./.github/actions/load-ci-image
         with:
+          artifact-name: ci-devcontainer-${{ needs.prepare.outputs.image-tag }}
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -677,9 +693,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-      - name: Log in to Container Registry
-        uses: ./.github/actions/docker-login-retry
+      - name: Load CI image
+        uses: ./.github/actions/load-ci-image
         with:
+          artifact-name: ci-devcontainer-${{ needs.prepare.outputs.image-tag }}
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -739,15 +756,17 @@ jobs:
     needs: [prepare, build-ci-container, detect-changes]
     if: |
       needs.detect-changes.outputs.has_code_changes == 'true' &&
-      needs.detect-changes.outputs.gemini_client == 'true'
+      needs.detect-changes.outputs.gemini_client == 'true' &&
+      github.event.pull_request.head.repo.fork != true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-      - name: Log in to Container Registry
-        uses: ./.github/actions/docker-login-retry
+      - name: Load CI image
+        uses: ./.github/actions/load-ci-image
         with:
+          artifact-name: ci-devcontainer-${{ needs.prepare.outputs.image-tag }}
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -792,9 +811,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
-      - name: Log in to Container Registry
-        uses: ./.github/actions/docker-login-retry
+      - name: Load CI image
+        uses: ./.github/actions/load-ci-image
         with:
+          artifact-name: ci-devcontainer-${{ needs.prepare.outputs.image-tag }}
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -848,7 +868,7 @@ jobs:
 
   # Require all test jobs to pass
   all-tests:
-    needs: [lint, test-frontend-unit, test-backend-sqlite, test-backend-postgres, test-playwright-sqlite, test-playwright-postgres, test-gemini-live, test-llm-integration, smoke-test-main-image, test-ios]
+    needs: [prepare, detect-changes, build-ci-container, build-main-container, build-devcontainer, lint, test-frontend-unit, test-backend-sqlite, test-backend-postgres, test-playwright-sqlite, test-playwright-postgres, test-gemini-live, test-llm-integration, smoke-test-main-image, test-ios]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -880,6 +900,11 @@ jobs:
           echo "Checking test results..."
           FAILED=0
 
+          check_job "prepare" "${{ needs.prepare.result }}" || FAILED=1
+          check_job "detect-changes" "${{ needs.detect-changes.result }}" || FAILED=1
+          check_job "build-ci-container" "${{ needs.build-ci-container.result }}" || FAILED=1
+          check_job "build-main-container" "${{ needs.build-main-container.result }}" || FAILED=1
+          check_job "build-devcontainer" "${{ needs.build-devcontainer.result }}" || FAILED=1
           check_job "lint" "${{ needs.lint.result }}" || FAILED=1
           check_job "test-frontend-unit" "${{ needs.test-frontend-unit.result }}" || FAILED=1
           check_job "test-backend-sqlite" "${{ needs.test-backend-sqlite.result }}" || FAILED=1

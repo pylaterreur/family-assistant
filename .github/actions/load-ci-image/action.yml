@@ -1,0 +1,46 @@
+name: Load CI image
+description: Load the current run's image artifact for forks, or authenticate to GHCR for internal runs
+inputs:
+  artifact-name:
+    description: Artifact containing ci-image.tar
+    required: true
+  registry:
+    description: Container registry for internal runs
+    required: true
+  username:
+    description: Registry username for internal runs
+    required: true
+  password:
+    description: Registry token for internal runs
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Free disk space for the image archive and loaded layers
+      if: github.event.pull_request.head.repo.fork == true
+      shell: bash
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker image prune --all --force
+        df -h
+    - name: Download fork CI image
+      if: github.event.pull_request.head.repo.fork == true
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/ci-image
+    - name: Load fork CI image
+      if: github.event.pull_request.head.repo.fork == true
+      shell: bash
+      env:
+        CI_IMAGE_ARCHIVE: ${{ runner.temp }}/ci-image/ci-image.tar
+      run: |
+        docker load --input "$CI_IMAGE_ARCHIVE"
+        rm "$CI_IMAGE_ARCHIVE"
+    - name: Log in to Container Registry
+      if: github.event.pull_request.head.repo.fork != true
+      uses: ./.github/actions/docker-login-retry
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
