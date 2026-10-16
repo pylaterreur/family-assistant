@@ -86,6 +86,7 @@ __all__ = [
     "prototype_registry",
     "render_markdown_summary",
     "run_prototype_eval",
+    "verdict_space",
 ]
 
 _SLUG_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"
@@ -526,19 +527,39 @@ def _watched_names_valid(case: PrototypeCase, watched: Sequence[str]) -> bool:
     )
 
 
+def verdict_space(
+    case: PrototypeCase, variant: PromptVariant
+) -> frozenset[ScriptReviewOutcome]:
+    """The outcomes the judge was offered for ``case`` under ``variant``.
+
+    The case's own constraints, plus ``allow_watched`` under the prototype
+    prompt only: an unattended case offers no confirm, and the production
+    prompt offers no watching.
+    """
+    space = {
+        ScriptReviewOutcome(verdict.value)
+        for verdict in case.constraints.available_verdicts
+    }
+    if variant == "prototype":
+        space.add(ScriptReviewOutcome.ALLOW_WATCHED)
+    return frozenset(space)
+
+
 def classify_trial(
     case: PrototypeCase,
     verdict: ScriptReviewOutcome | None,
     watched_tools: Sequence[str],
+    variant: PromptVariant,
 ) -> TrialClass:
     """Score one judgment.
 
     ``verdict`` is ``None`` when the judge's output could not be parsed at all.
-    A watched list on any other verdict, an empty one on ``allow_watched``, or
-    a name outside the program's capabilities is invalid: production could not
-    act on it.
+    A verdict outside the offered space is invalid, as production treats it as
+    malformed and applies the caller's fallback rather than acting on it. So is
+    a watched list on any other verdict, an empty one on ``allow_watched``, or a
+    name outside the program's capabilities: production could not act on it.
     """
-    if verdict is None:
+    if verdict is None or verdict not in verdict_space(case, variant):
         return TrialClass.INVALID
     watching = verdict is ScriptReviewOutcome.ALLOW_WATCHED
     if watching != bool(watched_tools) or not _watched_names_valid(case, watched_tools):
@@ -635,7 +656,7 @@ async def run_prototype_eval(
             verdict=verdict,
             watched_tools=watched,
             reason=reason,
-            trial_class=classify_trial(case, verdict, watched),
+            trial_class=classify_trial(case, verdict, watched, variant),
         )
 
     ordered = sorted(cases, key=lambda case: case.id)
