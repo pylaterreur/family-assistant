@@ -2971,3 +2971,62 @@ async def test_observe_program_review_keeps_a_live_static_confirmation(
     assert effects == ["inside"]
     assert [call[0] for call in confirmation.calls] == ["execute_script"]
     assert len(reviewer.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_live_denial_can_cross_the_observe_escalation_forecast(
+    db_engine: AsyncEngine,
+) -> None:
+    async def static_effect(value: str) -> str:
+        del value
+        return "must not run"
+
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.DENY,
+        ToolCallReviewVerdict.DENY,
+        ToolCallReviewVerdict.DENY,
+    )
+    provider = _provider(
+        [
+            _ordinary_effect_registration(effects),
+            _registration(
+                "static_effect",
+                cast("ToolImplementation", static_effect),
+                tags=(ToolTag.STATE_CHANGING, ToolTag.OUTPUT_TRUSTED),
+                properties={"value": {"type": "string"}},
+            ),
+        ],
+        reviewer=reviewer,
+        rules=[_review_rule("static_effect", ToolPolicyDecision.REVIEW)],
+        taint_policy=_observe_policy(),
+    )
+    context = _context(
+        db_engine,
+        provider,
+        state=_unknown_external_state(),
+        confirmation=_ConfirmationRecorder(),
+    )
+    for call_id in ("forecast-1", "forecast-2"):
+        await provider.execute_tool(
+            "ordinary_effect", {"value": call_id}, context, call_id
+        )
+    await provider.close()
+
+    result = await provider.execute_tool(
+        "static_effect", {"value": "live"}, context, "live-denial"
+    )
+
+    assert isinstance(result, ToolResult)
+    assert "blocked by automatic review" in result.get_text().lower()
+    assert effects == ["forecast-1", "forecast-2"]
+    assert context.tool_call_review_state.consecutive_denials == 1
+    assert not context.tool_call_review_state.escalation_handled
+    events = await context.db_context.taint_audit_events.list_for_turn(
+        "script-review-turn"
+    )
+    assert [
+        event["review_status"]
+        for event in events
+        if event["event_type"] == "tool_call_review_escalation"
+    ] == ["escalation_would_confirm"]

@@ -2123,9 +2123,11 @@ minimum for an adjudicated cell. In `observe` mode, adjudication runs exactly as
 its effect is `audit`: nothing is blocked or prompted, and the verdict is recorded. A taint-only
 review that also decides a script program (an `execute_script` call, or the first gated operation of
 a program no review has decided) is awaited, so a program the reviewer allows is approved and its
-covered operations inherit as they would under `enforce`; a `confirm` there is recorded as a
-forecast approval that covers only other taint-only gates. Every other taint-only review is detached
-from the execution path and drained during shutdown.
+covered operations inherit as they would under `enforce`. A `confirm` of the program an
+`execute_script` call starts is recorded as a forecast approval that covers only other taint-only
+gates. A `confirm` of a nested operation does not approve the program, as under `enforce`, so its
+later operations keep their own reviews. Every other taint-only review is detached from the
+execution path and drained during shutdown.
 
 Static policy can delegate a matched call in the same way:
 

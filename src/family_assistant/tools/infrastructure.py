@@ -1479,8 +1479,8 @@ class PolicyEnforcingToolsProvider(ToolsProvider):
         execute_authorized: AuthorizedToolExecutor,
     ) -> str | ToolResult:
         """Apply standalone confirmation semantics before authorized dispatch."""
-        inherited = (
-            context.script_execution is not None and context.script_execution.approved
+        inherited = context.script_execution is not None and _approval_binds(
+            context.script_execution, live_gate=True
         )
         if evaluation.decision is ToolPolicyDecision.CONFIRM or (
             evaluation.decision is ToolPolicyDecision.REVIEW and not inherited
@@ -2883,6 +2883,23 @@ class TaintTrackingToolsProvider(ToolsProvider):
                         taint_evaluation=evaluation,
                     ),
                 )
+                if (
+                    evaluation is not None
+                    and evaluation.mode is TaintPolicyMode.OBSERVE
+                ):
+                    # A live denial can be the one that crosses the forecast
+                    # threshold; a live escalation already reserved it.
+                    await self._record_forecast_escalation(
+                        descriptor=descriptor,
+                        arguments=arguments,
+                        context=context,
+                        call_id=call_id,
+                        state=state,
+                        sink_class=sink_class,
+                        taint_evaluation=evaluation,
+                        static_evaluation=static_evaluation,
+                        review_result=review_result,
+                    )
                 if escalation_result is not None:
                     action_attempted = (
                         escalation_result.action_attempted
