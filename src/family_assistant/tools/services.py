@@ -39,6 +39,7 @@ from family_assistant.services.tool_call_review import (
 )
 from family_assistant.storage.delegation_runs import TERMINAL_DELEGATION_STATUSES
 from family_assistant.storage.tasks import TaskPriority
+from family_assistant.tools.browser_session import delegated_browser_scope
 from family_assistant.tools.outcomes import ACTION_DECLINED_PREFIX
 from family_assistant.tools.types import (
     ConfirmationOutcome,
@@ -456,7 +457,10 @@ async def _synchronous_delegation_result(
     # the visual worker would resolve no binding and be handed the
     # conversation's ordinary, unconfined browser instead of the authenticated
     # tab it is supposed to share.
-    async with _inherited_authenticated_binding(exec_context, subconversation_id):
+    async with (
+        _inherited_authenticated_binding(exec_context, subconversation_id),
+        delegated_browser_scope(exec_context, subconversation_id),
+    ):
         return await _run_synchronous_delegation(
             exec_context,
             target_service=target_service,

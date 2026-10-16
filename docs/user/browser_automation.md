@@ -277,6 +277,8 @@ The browser profiles share these boundaries:
   accessibility tree. With `/browse_visual`, it captures screenshots after every action.
 - Browser sessions are isolated per conversation. No cookies or session data persist between
   conversations, and your personal browser is untouched.
+- Each browsing task the assistant hands off gets its own browser tab, so several tasks can run at
+  once without interfering. Continuing an earlier task picks up its tab where it left off.
 - Never share passwords in a browser automation request.
 - Be cautious with pages that display sensitive information — the content reaches the AI model.
 

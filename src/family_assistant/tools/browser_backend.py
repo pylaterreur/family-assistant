@@ -43,6 +43,7 @@ from rebrowser_playwright.async_api import Error as PlaywrightError
 
 from family_assistant.tools.browser_session import (
     BrowserSession,
+    browser_scope_key,
     close_browser_session,
     get_browser_session,
 )
@@ -1302,7 +1303,7 @@ def _origin_set(value: object) -> frozenset[str]:
     return frozenset(item.rstrip("/") for item in value if isinstance(item, str))
 
 
-# Each conversation has independent ordinary and credential-protected contexts.
+# Each browser scope has independent ordinary and credential-protected contexts.
 # Semantic and visual profiles share only within the same mode.
 _remote_backends: dict[tuple[str, bool], RemoteBrowserBackend] = {}
 
@@ -1495,8 +1496,8 @@ async def get_browser_backend(exec_context: ToolExecutionContext) -> BrowserBack
     Uses the remote ``browser-server`` backend when ``browser_handoff_config`` is
     enabled for the active profile (including ``browser_visual_profile``); otherwise
     the shared local Playwright session.  Both the semantic DOM profile and the
-    visual Computer Use profile share the same remote session keyed by
-    ``conversation_id`` and credential-protection mode. Semantic and visual
+    visual Computer Use profile share the same remote session keyed by browser
+    scope (see ``browser_scope_key``) and credential-protection mode. Semantic and visual
     delegation within a mode preserves the tab; moving to credential browsing
     uses a separate context, never the ordinary tab or its cookies.
     """
@@ -1530,15 +1531,14 @@ async def get_browser_backend(exec_context: ToolExecutionContext) -> BrowserBack
             "Credential browsing requires browser-server enabled for this profile."
         )
     if config is not None:
-        conversation_id = exec_context.conversation_id or "default"
-        session_key = (conversation_id, autofill_enabled)
+        session_key = (await browser_scope_key(exec_context), autofill_enabled)
         backend = _remote_backends.get(session_key)
         if backend is None:
             tz = getattr(exec_context, "timezone", None)
             timezone_id = str(tz) if tz else None
             backend = RemoteBrowserBackend(
                 config,
-                conversation_id,
+                exec_context.conversation_id or "default",
                 timezone_id=timezone_id,
                 autofill_enabled=autofill_enabled,
             )
@@ -1551,9 +1551,9 @@ async def get_browser_backend(exec_context: ToolExecutionContext) -> BrowserBack
 
 async def close_browser_backend(exec_context: ToolExecutionContext) -> None:
     """Close and remove any backend (local or remote) for this context."""
-    conversation_id = exec_context.conversation_id or "default"
+    scope = await browser_scope_key(exec_context)
     for autofill_enabled in (False, True):
-        remote = _remote_backends.pop((conversation_id, autofill_enabled), None)
+        remote = _remote_backends.pop((scope, autofill_enabled), None)
         if remote is not None:
             await remote.close()
     await close_browser_session(exec_context)

@@ -4,8 +4,13 @@ Both the coordinate-based Computer Use tools (``computer_use.py``) and the
 semantic DOM tools (``browser_dom.py``) run against the same underlying
 Playwright browser instance. Extracting session management here lets the two
 profiles share a tab when the first delegates to the second via
-``delegate_to_service`` — the shared ``conversation_id`` keeps them pointed at
-the same ``BrowserSession``.
+``delegate_to_service``.
+
+Browser state is keyed by *browser scope* (see :func:`browser_scope_key`), not by
+conversation: each delegated browser run gets its own tab, so two runs the main
+assistant starts at once do not drive the same page, while a turn delegated by a
+profile that itself drives the browser (the semantic-to-visual hop) stays in its
+parent's tab.
 
 The session is also the chokepoint every browser operation passes through: the
 ``@browser_operation`` decorator registers a tool as a browser operation and
@@ -174,13 +179,113 @@ class BrowserSession:
             self.playwright = None
 
 
-# Session storage keyed by conversation_id for multi-user support.
+# Session storage keyed by browser scope (see ``browser_scope_key``).
 _sessions: dict[str, BrowserSession] = {}
+
+# The browser scope of each delegated subconversation. Queued delegations are
+# resolved from their run row and memoized here; inline delegations have no run
+# row, so ``delegated_browser_scope`` registers them for the child's lifetime.
+_subconversation_scopes: dict[str, str] = {}
+
+
+async def browser_scope_key(exec_context: ToolExecutionContext) -> str:
+    """The key this turn's browser state (tab, lock, refs) lives under.
+
+    The top-level conversation turn uses the conversation's own scope. A
+    delegated turn inherits its parent's scope when the parent profile drives
+    the browser itself -- that is how the visual hop works in the semantic
+    profile's tab -- and otherwise gets a scope of its own, so parallel browser
+    runs delegated by the main assistant each have their own tab.
+    """
+    conversation_id = exec_context.conversation_id or "default"
+    subconversation_id = getattr(exec_context, "subconversation_id", None)
+    if subconversation_id is None:
+        return conversation_id
+    return await _subconversation_scope(
+        exec_context, conversation_id, subconversation_id
+    )
+
+
+async def _subconversation_scope(
+    exec_context: ToolExecutionContext,
+    conversation_id: str,
+    subconversation_id: str,
+) -> str:
+    scope = _subconversation_scopes.get(subconversation_id)
+    if scope is not None:
+        return scope
+    scope = await _inherited_scope(exec_context, conversation_id, subconversation_id)
+    if scope is None:
+        scope = f"{conversation_id}/{subconversation_id}"
+    _subconversation_scopes[subconversation_id] = scope
+    return scope
+
+
+async def _inherited_scope(
+    exec_context: ToolExecutionContext,
+    conversation_id: str,
+    subconversation_id: str,
+) -> str | None:
+    """The parent's scope, when a browser-driving profile queued this run."""
+    service = getattr(exec_context, "processing_service", None)
+    registry = getattr(service, "processing_services_registry", None)
+    if registry is None:
+        return None
+    run = await exec_context.db_context.delegation_runs.get_by_subconversation_id(
+        subconversation_id
+    )
+    if run is None:
+        return None
+    source = registry.get(run["source_profile_id"])
+    if source is None or not await _drives_browser(source):
+        return None
+    parent = run["source_subconversation_id"]
+    if parent is None:
+        return conversation_id
+    return await _subconversation_scope(exec_context, conversation_id, parent)
+
+
+async def _drives_browser(service: object) -> bool:
+    """Whether a profile has browser tools of its own to share a tab from."""
+    tools_provider = getattr(service, "tools_provider", None)
+    if tools_provider is None:
+        return False
+    from family_assistant.tools.infrastructure import (  # noqa: PLC0415 - infrastructure imports the tools package
+        get_tool_definitions_for_advertisement,
+    )
+
+    advertised = await get_tool_definitions_for_advertisement(
+        tools_provider, can_confirm=True
+    )
+    return any(
+        definition.get("function", {}).get("name") in BROWSER_TOOL_NAMES
+        for definition in advertised
+    )
+
+
+@asynccontextmanager
+async def delegated_browser_scope(
+    exec_context: ToolExecutionContext, subconversation_id: str
+) -> AsyncIterator[None]:
+    """Give an inline delegated turn its browser scope for its lifetime.
+
+    The inline path mints a subconversation with no run row, so the child could
+    not find its parent's scope by itself.
+    """
+    if await _drives_browser(getattr(exec_context, "processing_service", None)):
+        scope = await browser_scope_key(exec_context)
+    else:
+        scope = f"{exec_context.conversation_id or 'default'}/{subconversation_id}"
+    _subconversation_scopes[subconversation_id] = scope
+    try:
+        yield
+    finally:
+        _subconversation_scopes.pop(subconversation_id, None)
 
 
 async def get_browser_session(exec_context: ToolExecutionContext) -> BrowserSession:
-    """Get or create a browser session for the given execution context."""
-    session_key = exec_context.conversation_id or "default"
+    """Get or create the browser session for this turn's browser scope."""
+    session_key = await browser_scope_key(exec_context)
     if session_key not in _sessions:
         tz = getattr(exec_context, "timezone", None)
         _sessions[session_key] = BrowserSession(timezone_id=str(tz) if tz else None)
@@ -188,8 +293,8 @@ async def get_browser_session(exec_context: ToolExecutionContext) -> BrowserSess
 
 
 async def close_browser_session(exec_context: ToolExecutionContext) -> None:
-    """Close and remove the browser session for the given execution context."""
-    session_key = exec_context.conversation_id or "default"
+    """Close and remove the browser session for this turn's browser scope."""
+    session_key = await browser_scope_key(exec_context)
     if session_key in _sessions:
         await _sessions[session_key].close()
         del _sessions[session_key]
