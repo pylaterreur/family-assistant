@@ -23,9 +23,13 @@ It is looking for things that will still be true in a month:
 - Decisions, and the reasons behind them.
 - Routines: how your family usually does a recurring thing.
 - The state of something you are working on across several conversations — a trip, a project, a
-  purchase — including the constraints, the options you ruled out, and what is still undecided.
+  purchase, a repair — including the constraints, the options you ruled out, and what is still
+  undecided. A conversation about one task is often a step in a bigger project, and its next step is
+  worth keeping.
+- Rules you state for how things should be done, and anything you ask it to remember.
+- Where things are and how they work: which device, service, account or person handles something.
 
-Most conversations produce nothing. That is the normal outcome, not a failure.
+Plenty of conversations produce nothing, and that is fine.
 
 You can still ask directly: "remember that Sam is allergic to peanuts" can write the entry there and
 then, without waiting for a review. If the assistant has read outside content in that conversation,
@@ -33,14 +37,16 @@ it will tell you that the request can only be considered at the next review. Not
 
 ## What it never remembers
 
-- One-off requests, and how a single task turned out.
+- One-off requests with nothing to carry forward, such as a single lookup or a draft.
 - When things happen — appointment times belong on the calendar, not in memory.
 - Device state, sensor readings, the weather.
 - The raw text of search results or documents it looked at.
 - Passwords, card numbers, or anything else that is a credential.
 - Anything plainly meant for one person: a surprise, a present, something said in confidence.
-- Sensitive personal matters — health, money, relationships — that you did not ask it to keep. Ask,
-  and it will keep them.
+- Private matters you would not expect the rest of the household to see, such as a diagnosis or a
+  relationship difficulty, unless you ask it to keep them. Being about money, tax or health does not
+  make something private: which accounts, services and people handle the household's affairs, and
+  the decisions made about them, are kept like any other household fact.
 
 It can remember what a household member said even if the assistant also read a web page or email.
 The review leaves out replies and results that may contain outside content. If you refer to one of

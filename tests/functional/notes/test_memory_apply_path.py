@@ -833,7 +833,7 @@ async def test_a_stale_expected_revision_is_a_conflict(db_engine: AsyncEngine) -
 async def test_a_proposal_cannot_make_a_topic_note_always_loaded(
     db_engine: AsyncEngine,
 ) -> None:
-    """A writer asking for the prompt flag still gets an ordinary topic note."""
+    """A writer asking for the prompt flag is refused, and nothing is written."""
     db = _db(db_engine)
     await _seed_turn(db, count=1)
 
@@ -849,16 +849,11 @@ async def test_a_proposal_cannot_make_a_topic_note_always_loaded(
         ],
     )
 
-    assert "Applied" in result.get_text()
-    topic = await db.notes.get_by_title(
-        "Routines", read_policy=NoteReadPolicy.UNRESTRICTED
+    assert "include_in_prompt" in result.get_text()
+    assert (
+        await db.notes.get_by_title("Routines", read_policy=NoteReadPolicy.UNRESTRICTED)
+        is None
     )
-    assert topic is not None
-    assert topic.include_in_prompt is False
-    prompt_notes = await db.notes.get_prompt_notes(
-        read_policy=NoteReadPolicy.UNRESTRICTED
-    )
-    assert [note.title for note in prompt_notes] == [CORE_TITLE]
 
 
 # ---------------------------------------------------------------------------

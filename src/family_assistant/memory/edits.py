@@ -28,7 +28,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import sqlalchemy as sa
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from family_assistant.storage.message_history import message_history_table
 
@@ -55,6 +55,11 @@ entry's existing references and cites nothing new.
 
 class MemoryEdit(BaseModel):
     """One entry-level change to one memory note."""
+
+    # A misnamed key ("text" for "entry") is named in the first refusal, rather
+    # than surfacing only after the model has fixed the required fields and
+    # spent its one retry.
+    model_config = ConfigDict(extra="forbid")
 
     op: MemoryEditOp
     note_title: str = Field(min_length=1)
@@ -112,6 +117,8 @@ class MemoryEdit(BaseModel):
 
 class MemoryEditList(BaseModel):
     """A proposal: the edits applied together or not at all."""
+
+    model_config = ConfigDict(extra="forbid")
 
     edits: list[MemoryEdit] = Field(min_length=1)
 

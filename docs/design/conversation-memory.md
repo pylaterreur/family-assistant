@@ -366,10 +366,13 @@ The curator prompt is short and operational. Its instructions, at approach level
 - Remember durable things: standing preferences and their corrections, facts about people and the
   household, decisions and their reasons, routines, and the state of anything the family is working
   on across conversations, including the constraints, rationale, rejected options and open decisions
-  around an ongoing trip or project.
-- Do not remember one-off requests, appointment timing (the calendar owns when things happen),
-  device state, verbatim tool output, secrets or credentials, anything a speaker plainly meant for
-  one person, or sensitive personal matters the user did not ask to have kept.
+  around an ongoing trip or project, even when one conversation covers only one step of it. Keep
+  rules a person states, explicit requests to remember, and where things are and how they work.
+- Do not remember one-off requests with nothing to carry forward, appointment timing (the calendar
+  owns when things happen), device state, verbatim tool output, secrets or credentials, anything a
+  speaker plainly meant for one person, or private matters the speaker would not expect the rest of
+  the household to see unless they asked to have them kept. A subject is not private by being about
+  money, tax or health; the test is the expected audience, not the topic.
 - Say what kind of thing an entry is, in the text. A statement, a correction and an inference drawn
   from a pattern are different, and an inference is marked as one. An assistant suggestion is not a
   household fact until a person accepted it.

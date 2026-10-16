@@ -137,6 +137,20 @@ def test_the_curator_is_told_what_never_to_remember(curator_prompt: str) -> None
     assert "meant for one person" in curator_prompt
 
 
+def test_the_curator_keeps_what_it_is_asked_to_keep(curator_prompt: str) -> None:
+    """In prod the curator dismissed stated rules and project steps as one-offs."""
+    assert "anything somebody asks to have remembered" in curator_prompt
+    assert "A conversation spent on one task is often a step in such a project" in (
+        " ".join(curator_prompt.split())
+    )
+    assert "which is the common case" not in curator_prompt
+
+
+def test_the_curator_does_not_treat_a_subject_as_private(curator_prompt: str) -> None:
+    """Money or tax as a subject is not a reason to drop a household fact."""
+    assert "A subject is not private by being about money" in curator_prompt
+
+
 def test_the_curator_is_told_the_retry_budget_and_the_empty_reply(
     curator_prompt: str,
 ) -> None:
