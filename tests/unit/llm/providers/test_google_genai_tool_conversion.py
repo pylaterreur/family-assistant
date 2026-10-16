@@ -4,42 +4,38 @@ Focuses on JSON Schema ``type`` handling, including the list form
 (e.g. ``["string", "null"]``) used to express nullable/optional fields.
 """
 
-from typing import Any, cast
+import logging
 
+import pytest
 from google.genai import types
 
+from family_assistant.json_schema import JsonSchema
 from family_assistant.llm.providers.google_genai_client import (
     convert_tools_to_genai_format,
+    gemini_unrepresentable_parameters,
 )
+from family_assistant.processing.quiet_turn import END_TURN_QUIETLY_TOOL_DEFINITION
+from family_assistant.tools import ACTIVATE_TOOLS_DEFINITION, TOOLS_DEFINITION
 from family_assistant.tools.types import ToolDefinition, normalize_json_schema_type
 
 
 def _tool_with_properties(
-    # ast-grep-ignore: no-dict-any - test constructs raw JSON Schema property payloads
-    properties: dict[str, Any],
+    properties: dict[str, JsonSchema],
     required: list[str],
 ) -> ToolDefinition:
-    """Build a single-function tool definition around the given properties.
-
-    ``ToolPropertySchema.type`` is declared as ``str``, but real JSON Schema
-    payloads may carry a list ``type`` (e.g. ``["string", "null"]``). The cast
-    lets tests exercise that runtime shape.
-    """
-    return cast(
-        "ToolDefinition",
-        {
-            "type": "function",
-            "function": {
-                "name": "sample_tool",
-                "description": "Sample tool",
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
+    """Build a single-function tool definition around the given properties."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "sample_tool",
+            "description": "Sample tool",
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
             },
         },
-    )
+    }
 
 
 def _properties_of(tools: list[ToolDefinition]) -> dict[str, types.Schema]:
@@ -127,3 +123,51 @@ class TestConvertToolsToGenaiFormat:
         assert tags.items is not None
         assert tags.items.type == types.Type.STRING
         assert tags.items.nullable is True
+
+    def test_boolean_property_schema_converts_as_string(self) -> None:
+        tools = [_tool_with_properties({"anything": True}, required=[])]
+
+        anything = _properties_of(tools)["anything"]
+        assert anything.type == types.Type.STRING
+
+    def test_approximated_schema_is_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        tools = [_tool_with_properties({"anything": True}, required=[])]
+
+        with caplog.at_level(logging.WARNING):
+            convert_tools_to_genai_format(tools)
+
+        assert "'sample_tool'" in caplog.text
+        assert "anything" in caplog.text
+
+    def test_tuple_form_items_fall_back_to_string_items(self) -> None:
+        tools = [
+            _tool_with_properties(
+                {"pair": {"type": "array", "items": [{"type": "integer"}, True]}},
+                required=[],
+            )
+        ]
+
+        pair = _properties_of(tools)["pair"]
+        assert pair.items is not None
+        assert pair.items.type == types.Type.STRING
+
+
+_LOCAL_DEFINITIONS = [
+    *TOOLS_DEFINITION,
+    ACTIVATE_TOOLS_DEFINITION,
+    END_TURN_QUIETLY_TOOL_DEFINITION,
+]
+
+
+@pytest.mark.parametrize(
+    "definition",
+    _LOCAL_DEFINITIONS,
+    ids=[definition["function"]["name"] for definition in _LOCAL_DEFINITIONS],
+)
+def test_local_tool_schemas_are_representable_in_gemini(
+    definition: ToolDefinition,
+) -> None:
+    """Our own tools must not rely on the string fallback kept for MCP schemas."""
+    assert gemini_unrepresentable_parameters(definition["function"]["parameters"]) == []

@@ -110,6 +110,28 @@ class TestAttachmentSchemaTranslation:
         # Should be identical since no attachment types present
         assert translated_definitions == original_definitions
 
+    def test_translate_preserves_boolean_property_schemas(self) -> None:
+        """A ``true`` property schema, valid JSON Schema, passes through unchanged."""
+        original_definitions: list[ToolDefinition] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "mcp_tool",
+                    "description": "Tool with an unconstrained parameter",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"payload": True},
+                    },
+                },
+            }
+        ]
+
+        translated_definitions = translate_attachment_schemas_for_llm(
+            original_definitions
+        )
+
+        assert translated_definitions == original_definitions
+
     def test_translate_handles_missing_descriptions(self) -> None:
         """Test translation handles parameters without descriptions gracefully."""
         original_definitions: list[ToolDefinition] = [

@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 import pydantic_monty
 
+from family_assistant.json_schema import JsonSchemaObject
 from family_assistant.security.taint import TurnTaintState
 from family_assistant.tools.attachment_utils import (
     fetch_attachment_object,
@@ -31,7 +32,7 @@ from family_assistant.tools.infrastructure import (
     LocalToolsProvider,
 )
 from family_assistant.tools.outcomes import classify_tool_outcome, is_error_data
-from family_assistant.tools.types import ToolParametersSchema, ToolResult
+from family_assistant.tools.types import ToolResult
 
 from .apis import time as time_api
 from .apis.attachments import AttachmentInfoDict, create_attachment_api
@@ -49,7 +50,7 @@ class ToolInfo(TypedDict):
 
     name: str
     description: str
-    parameters: ToolParametersSchema
+    parameters: JsonSchemaObject
 
 
 class WakeRequest(TypedDict):

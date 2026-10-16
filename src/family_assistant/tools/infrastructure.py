@@ -313,6 +313,8 @@ def translate_attachment_schemas_for_llm(
 
             # Transform each parameter that has type: attachment
             for param_name, param_def in properties.items():
+                if not isinstance(param_def, dict):
+                    continue
                 if param_def.get("type") == "attachment":
                     # Direct attachment parameter
                     param_def["type"] = "string"

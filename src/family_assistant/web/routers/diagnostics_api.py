@@ -55,10 +55,8 @@ class LLMRequestExport(BaseModel):
     duration_ms: float
     # ast-grep-ignore: no-dict-any - LLM messages have provider-specific structure (OpenAI/Anthropic/Google formats differ)
     messages: list[dict[str, Any]]
-    # Tool schemas come from local tools and MCP servers and use any JSON Schema keyword
-    # (integer enums, schema-valued additionalProperties, anyOf, ...). ToolDefinition
-    # models only a subset, so validating against it rejects or silently drops the rest.
-    # Exported verbatim as sent to the provider.
+    # Exported verbatim as sent to the provider, without validation: a diagnostics
+    # export must not fail because one MCP server sent a malformed schema.
     tools: Sequence[Mapping[str, Any]] | None = None
     tool_choice: str | None = None
     # ast-grep-ignore: no-dict-any - LLM response structure varies by provider (OpenAI/Anthropic/Google formats differ)

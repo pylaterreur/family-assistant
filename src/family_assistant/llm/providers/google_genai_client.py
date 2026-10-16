@@ -27,6 +27,7 @@ from opentelemetry import trace
 from pydantic import BaseModel, ValidationError
 
 from family_assistant.config_models import AntigravityEnvironmentConfig
+from family_assistant.json_schema import JsonSchemaObject
 from family_assistant.llm import (
     BaseLLMClient,
     JsonObject,
@@ -242,6 +243,23 @@ def _normalize_thought_signature(raw_value: bytes | None) -> bytes | None:
     return raw_value
 
 
+def gemini_unrepresentable_parameters(parameters: JsonSchemaObject) -> list[str]:
+    """Name the parameters whose schemas the Gemini converter can only approximate.
+
+    A boolean property schema, and boolean or draft-07 tuple-form ``items``,
+    have no single typed schema to convert, so ``convert_tools_to_genai_format``
+    sends them as strings. That is tolerated for MCP servers, whose schemas we
+    do not control; our own tools are held to it by a test.
+    """
+    unrepresentable: list[str] = []
+    for name, schema in parameters.get("properties", {}).items():
+        if not isinstance(schema, dict):
+            unrepresentable.append(name)
+        elif "items" in schema and not isinstance(schema["items"], dict):
+            unrepresentable.append(f"{name}.items")
+    return unrepresentable
+
+
 def convert_tools_to_genai_format(tools: list[ToolDefinition]) -> list[Any]:
     """Convert OpenAI-style tools to Gemini format."""
 
@@ -256,17 +274,25 @@ def convert_tools_to_genai_format(tools: list[ToolDefinition]) -> list[Any]:
         # Convert OpenAI-style parameters to Google schema
         params = func_def.get("parameters", {})
         properties = params.get("properties", {})
+        if unrepresentable := gemini_unrepresentable_parameters(params):
+            logger.warning(
+                "Tool %r: Gemini cannot represent the schema of %s; sending as strings",
+                func_def.get("name"),
+                ", ".join(unrepresentable),
+            )
 
         # Convert properties to Google format
         google_properties = {}
-        for prop_name, prop_def in properties.items():
+        for prop_name, prop_schema in properties.items():
+            prop_def = prop_schema if isinstance(prop_schema, dict) else {}
             prop_type, prop_nullable = normalize_json_schema_type(
                 prop_def.get("type", "string")
             )
 
             if prop_type == "array":
                 # Handle array types - need to specify items
-                items_def = prop_def.get("items", {})
+                items_schema = prop_def.get("items", {})
+                items_def = items_schema if isinstance(items_schema, dict) else {}
                 items_type_name, items_nullable = normalize_json_schema_type(
                     items_def.get("type", "string")
                 )
