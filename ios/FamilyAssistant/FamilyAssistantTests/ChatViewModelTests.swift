@@ -12507,6 +12507,45 @@ final class ChatViewModelTests: XCTestCase {
         )
     }
 
+    func testOpeningAConversationOnATierNoLongerOfferedShowsTheDefault() async {
+        ChatMockBackendURLProtocol.respond { request in
+            switch request.url?.path ?? "" {
+            case "/api/v1/chat/conversations/web_conv_on_gone_tier/messages":
+                return .json(
+                    """
+                    {
+                      "conversation_id":"web_conv_on_gone_tier",
+                      "messages":[
+                        {"internal_id":1,"role":"user","content":"Hi",
+                         "timestamp":"2026-10-16T12:00:00Z",
+                         "processing_profile_id":"default_assistant"},
+                        {"internal_id":2,"role":"assistant","content":"Max reply",
+                         "timestamp":"2026-10-16T12:00:01Z",
+                         "processing_profile_id":"default_assistant",
+                         "reasoning_info":{"model_tier":"frontier","model_tier_source":"user"}}
+                      ],
+                      "count":2,
+                      "total_messages":2,
+                      "has_more_before":false,
+                      "has_more_after":false
+                    }
+                    """
+                )
+            default:
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+            }
+        }
+        let model = makeViewModel(conversationID: "web_conv_tier_elsewhere")
+        model.profiles = [Self.tieredProfile()]
+
+        await model.selectConversation("web_conv_on_gone_tier")
+
+        XCTAssertNil(
+            model.modelTierChoice,
+            "The server continues it on the default; sending the old tier would be refused."
+        )
+    }
+
     func testIntelligenceControlIsUnavailableWhileATurnRuns() async throws {
         let recorder = respondRecordingModelTiers(conversationID: "web_conv_tier_streaming")
         let model = makeViewModel(conversationID: "web_conv_tier_streaming")

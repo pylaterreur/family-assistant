@@ -1019,8 +1019,12 @@ final class ChatViewModel {
                 && $0.processingProfileID == selectedProfileID
                 && $0.modelTierSource != nil
         }
+        // A tier the profile no longer offers is not restored: the server
+        // already continues such a conversation on the default, and naming the
+        // tier on the next send would be refused.
         guard let latest, latest.modelTierSource == "user",
-              let tier = latest.modelTier, tier != defaultModelTierID
+              let tier = latest.modelTier, tier != defaultModelTierID,
+              availableModelTiers.contains(where: { $0.id == tier })
         else {
             return
         }
