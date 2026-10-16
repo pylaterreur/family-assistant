@@ -108,7 +108,7 @@ usage() {
     echo "Options:"
     echo "  --skip-lint      Skip linting and only run tests"
     echo "  --adaptive-pytest"
-    echo "                   Run pytest through GNU Parallel with load/cgroup memory gates (default)"
+    echo "                   Run pytest through GNU Parallel with load/memory gates (default)"
     echo "  --xdist-pytest   Run pytest directly with pytest-xdist"
     echo "  -n NUM           Set pytest-xdist parallelism when using --xdist-pytest"
     echo "  --help           Show this help message"

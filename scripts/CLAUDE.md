@@ -58,8 +58,10 @@ Runs a built image, waits for `/health`, then verifies the MCP servers in `$MCP_
 ### `run_pytest_adaptive.py`
 
 Default pytest runner used by `scripts/run-tests.sh`. It collects nodeids, groups complete test
-modules into serial pytest shards through GNU Parallel, and gates new shards on CPU load plus cgroup
-v2 memory usage. Use `scripts/run-tests.sh --xdist-pytest` or
+modules into serial pytest shards through GNU Parallel, and gates new shards on CPU load plus memory
+usage (`memory_gate.py`). Memory is read from cgroup v2 where a limit is set, and on macOS from
+`vm_stat` as Activity Monitor's "Memory Used" (app + wired + compressed) over physical memory;
+elsewhere it is not gated. Use `scripts/run-tests.sh --xdist-pytest` or
 `PYTEST_RUNNER=xdist scripts/run-tests.sh` to use direct pytest-xdist instead.
 
 Useful environment variables:
@@ -72,7 +74,8 @@ Useful environment variables:
   browser work remains distributed even in large modules. Markers and nodeids come from the final
   pytest collection, including selections made with `-m` and `-k`.
 - `PYTEST_ADAPTIVE_JOBS`: maximum concurrent pytest shards, defaults to `12`
-- `PYTEST_ADAPTIVE_MEM_THRESHOLD`: cgroup memory ratio that stops new shards, defaults to `0.80`
+- `PYTEST_ADAPTIVE_MEM_THRESHOLD`: memory usage ratio that stops new shards. Defaults to `0.80` for
+  cgroup and `0.90` on macOS, where a healthy full run at 16 jobs peaks around `0.85`
 - `PYTEST_ADAPTIVE_LOAD`: GNU Parallel `--load` value, defaults to `100%`
 
 ### `refresh-provider-model-skills.py`

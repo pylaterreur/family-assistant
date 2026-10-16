@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run pytest shards through GNU Parallel with live load and cgroup memory gates."""
+"""Run pytest shards through GNU Parallel with live load and memory gates."""
 
 from __future__ import annotations
 
@@ -357,7 +357,8 @@ def main() -> int:
         nodeids_file, batch_size, work_dir, set(collection["playwright_nodeids"])
     )
     load_limit = os.environ.get("PYTEST_ADAPTIVE_LOAD", "100%")
-    mem_threshold = os.environ.get("PYTEST_ADAPTIVE_MEM_THRESHOLD", "0.80")
+    # Unset leaves the default to memory_gate.py, which picks one per platform.
+    mem_threshold = os.environ.get("PYTEST_ADAPTIVE_MEM_THRESHOLD")
     delay = os.environ.get("PYTEST_ADAPTIVE_DELAY", "0.2")
     joblog = work_dir / "joblog.tsv"
     results_dir = work_dir / "results" / "{#}"
@@ -379,8 +380,8 @@ def main() -> int:
 
     limit_command = " ".join([
         shlex.quote(sys.executable),
-        shlex.quote(str(_repo_root() / "scripts" / "cgroup_memory_gate.py")),
-        shlex.quote(mem_threshold),
+        shlex.quote(str(_repo_root() / "scripts" / "memory_gate.py")),
+        *([shlex.quote(mem_threshold)] if mem_threshold else []),
     ])
     shard_runner = _repo_root() / "scripts" / "run_pytest_shard.py"
     command = [
@@ -414,7 +415,7 @@ def main() -> int:
     print(
         "Running adaptive pytest: "
         f"batch_size={batch_size}, jobs={jobs}, load={load_limit}, "
-        f"mem_threshold={mem_threshold}, delay={delay}"
+        f"mem_threshold={mem_threshold or 'platform default'}, delay={delay}"
     )
     result = subprocess.run(command, check=False, cwd=_repo_root(), env=env)
     if json_report_file is not None:
