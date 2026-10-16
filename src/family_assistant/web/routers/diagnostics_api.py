@@ -7,6 +7,7 @@ including error logs, LLM request/response records, and message history.
 import platform
 import sys
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
@@ -18,7 +19,6 @@ from family_assistant.llm.messages import MessageReasoningInfo
 from family_assistant.llm.request_buffer import get_request_buffer
 from family_assistant.storage.database import Database
 from family_assistant.storage.types import MessageHistoryRow
-from family_assistant.tools.types import ToolDefinition
 from family_assistant.web.dependencies import get_db, get_diagnostics_reader
 
 diagnostics_api_router = APIRouter()
@@ -55,7 +55,11 @@ class LLMRequestExport(BaseModel):
     duration_ms: float
     # ast-grep-ignore: no-dict-any - LLM messages have provider-specific structure (OpenAI/Anthropic/Google formats differ)
     messages: list[dict[str, Any]]
-    tools: list[ToolDefinition] | None = None
+    # Tool schemas come from local tools and MCP servers and use any JSON Schema keyword
+    # (integer enums, schema-valued additionalProperties, anyOf, ...). ToolDefinition
+    # models only a subset, so validating against it rejects or silently drops the rest.
+    # Exported verbatim as sent to the provider.
+    tools: Sequence[Mapping[str, Any]] | None = None
     tool_choice: str | None = None
     # ast-grep-ignore: no-dict-any - LLM response structure varies by provider (OpenAI/Anthropic/Google formats differ)
     response: dict[str, Any] | None = None
