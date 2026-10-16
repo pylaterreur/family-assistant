@@ -371,9 +371,10 @@ configuration line: if they slip beyond a few weeks, flip anyway and fix under e
 
    - A would-block is a taint-only `tool_call_review` with verdict `confirm` or `deny`, a live
      review whose verdict is `confirm` or whose `allow` is absent from its
-     `enforce_available_verdicts`, or a would-be escalation. A would-prompt is the subset that
-     reaches a person: `confirm` verdicts, an `allow` outside the enforce space, and
-     `escalation_would_confirm`.
+     `enforce_available_verdicts`, an inherited call that enforce's floor would still stop
+     (`inherited_would_deny` or `inherited_would_confirm`), or a would-be escalation. A would-prompt
+     is the subset that reaches a person: `confirm` verdicts, an `allow` outside the enforce space,
+     `inherited_would_confirm`, and `escalation_would_confirm`.
    - Events whose `parent_script_review_id` names a program review that did not allow are left out.
      Under enforce that program never ran, or ran on a person's approval its operations inherit, so
      neither its operations' reviews nor their prompts would have happened.

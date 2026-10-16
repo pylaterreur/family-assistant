@@ -6,7 +6,7 @@ import asyncio
 import json
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -3030,3 +3030,60 @@ async def test_live_denial_can_cross_the_observe_escalation_forecast(
         for event in events
         if event["event_type"] == "tool_call_review_escalation"
     ] == ["escalation_would_confirm"]
+
+
+@pytest.mark.parametrize(
+    ("floor", "expected"),
+    [
+        (TaintPolicyOutcome.DENY, ToolCallReviewVerdict.DENY),
+        (TaintPolicyOutcome.CONFIRM, ToolCallReviewVerdict.CONFIRM),
+    ],
+)
+@pytest.mark.asyncio
+async def test_observe_inherited_call_records_the_floor_enforce_would_apply(
+    db_engine: AsyncEngine,
+    floor: Literal[TaintPolicyOutcome.CONFIRM, TaintPolicyOutcome.DENY],
+    expected: ToolCallReviewVerdict,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
+    confirmation = _ConfirmationRecorder()
+    provider = _provider(
+        [_real_registration("execute_script"), _ordinary_effect_registration(effects)],
+        reviewer=reviewer,
+        rules=[],
+        taint_policy=TaintPolicyConfig(
+            mode=TaintPolicyMode.OBSERVE,
+            matrix_overrides={
+                SourceTrustTier.UNKNOWN_EXTERNAL: {
+                    SinkClass.ARTIFACT_WRITE: TaintAdjudicateCell(
+                        outcome=TaintPolicyOutcome.ADJUDICATE,
+                        verdict_floor=floor,
+                        fallback=floor,
+                    )
+                }
+            },
+        ),
+    )
+    context = _context(
+        db_engine,
+        provider,
+        state=_unknown_external_state(),
+        confirmation=confirmation,
+    )
+
+    await _execute_script(provider, context, script='ordinary_effect(value="inside")')
+    await provider.close()
+
+    assert effects == ["inside"]
+    assert confirmation.calls == []
+    assert len(reviewer.calls) == 1
+    events = await context.db_context.taint_audit_events.list_for_turn(
+        "script-review-turn"
+    )
+    inherited = [
+        (event["review_status"], event["effective_outcome"])
+        for event in events
+        if event["event_type"] == "script_inherited_authorization"
+    ]
+    assert inherited == [(f"inherited_would_{expected.value}", expected.value)]

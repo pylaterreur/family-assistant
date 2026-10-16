@@ -2025,7 +2025,13 @@ class TaintTrackingToolsProvider(ToolsProvider):
                     state=state,
                 )
             await self._record_script_inheritance(
-                context, name, call_id, state, sink_class
+                context,
+                name,
+                call_id,
+                state,
+                sink_class,
+                taint_evaluation=evaluation,
+                static_evaluation=None,
             )
             return
         profile_id = arguments.get("profile_id")
@@ -2736,7 +2742,13 @@ class TaintTrackingToolsProvider(ToolsProvider):
         pending_definition_review: PendingDefinitionReview | None = None
         if inherited:
             await self._record_script_inheritance(
-                context, name, call_id, state, sink_class
+                context,
+                name,
+                call_id,
+                state,
+                sink_class,
+                taint_evaluation=evaluation,
+                static_evaluation=static_evaluation,
             )
         elif confined_exemption and evaluation is not None:
             await self._record_confined_exemption_audit(
@@ -3774,7 +3786,19 @@ class TaintTrackingToolsProvider(ToolsProvider):
         call_id: str | None,
         state: TurnTaintState,
         sink_class: SinkClass,
+        *,
+        taint_evaluation: TaintPolicyEvaluation | None,
+        static_evaluation: PolicyEvaluation | None,
     ) -> None:
+        """Audit an inherited call, with the floor enforce would apply under observe.
+
+        Observe leaves the taint cell's floors out of the live check, so an
+        inherited call on a floored cell runs; the event records the denial
+        or confirmation enforce would have required instead of an allow.
+        """
+        would = self._inherited_forecast_floor(
+            taint_evaluation=taint_evaluation, static_evaluation=static_evaluation
+        )
         await self._record_taint_audit_event(
             context=context,
             event_type="script_inherited_authorization",
@@ -3783,11 +3807,24 @@ class TaintTrackingToolsProvider(ToolsProvider):
             sink_class=sink_class.value,
             state=state,
             requested_outcome="adjudicate",
-            effective_outcome="allow",
-            mode=self._taint_evaluator.mode.value,
-            reason="Covered deterministic operation inherits the enclosing program's approval; runtime controls remain enforced.",
+            effective_outcome=would.value if would is not None else "allow",
+            mode=(
+                taint_evaluation.mode.value
+                if taint_evaluation is not None
+                else self._taint_evaluator.mode.value
+            ),
+            reason=(
+                "Covered deterministic operation inherits the enclosing program's approval; runtime controls remain enforced."
+                if would is None
+                else "Covered deterministic operation inherits the enclosing program's approval, but enforce's "
+                f"floor for this cell would {would.value} it; observe mode ran it."
+            ),
             arguments_summary=None,
-            review_status="inherited_script_approval",
+            review_status=(
+                "inherited_script_approval"
+                if would is None
+                else f"inherited_would_{would.value}"
+            ),
             review_context={
                 "script_authorization": (
                     "inherited_forecast"
@@ -3797,6 +3834,34 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 )
             },
         )
+
+    def _inherited_forecast_floor(
+        self,
+        *,
+        taint_evaluation: TaintPolicyEvaluation | None,
+        static_evaluation: PolicyEvaluation | None,
+    ) -> ToolCallReviewVerdict | None:
+        """The deny or confirm floor enforce would put on an inherited call."""
+        if (
+            taint_evaluation is None
+            or taint_evaluation.mode is not TaintPolicyMode.OBSERVE
+        ):
+            return None
+        requested = taint_evaluation.requested_outcome
+        if requested in {TaintPolicyOutcome.DENY, TaintPolicyOutcome.REDACT}:
+            return ToolCallReviewVerdict.DENY
+        if requested is TaintPolicyOutcome.CONFIRM:
+            return ToolCallReviewVerdict.CONFIRM
+        available = self._review_constraints(
+            taint_evaluation=taint_evaluation,
+            static_evaluation=static_evaluation,
+            include_observe_taint_constraints=True,
+        ).available_verdicts
+        if available == frozenset({ToolCallReviewVerdict.DENY}):
+            return ToolCallReviewVerdict.DENY
+        if ToolCallReviewVerdict.ALLOW not in available:
+            return ToolCallReviewVerdict.CONFIRM
+        return None
 
     async def _record_taint_audit_event(
         self,

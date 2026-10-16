@@ -2181,7 +2181,10 @@ also recorded with review status `escalation_confirmation_requested` or
 threshold instead, and crossing it records `escalation_would_confirm` or
 `escalation_would_terminate` without prompting or ending the turn. A live review in observe mode
 (one a static `review` rule gates) is judged without the taint cell's floors, so its event also
-carries `enforce_available_verdicts`, the verdicts `enforce` would have offered.
+carries `enforce_available_verdicts`, the verdicts `enforce` would have offered. Likewise, an
+operation that inherits its program's approval in observe mode on a cell whose floor `enforce` would
+still apply records `inherited_would_deny` or `inherited_would_confirm` rather than a plain
+inheritance, and runs.
 
 #### Migration for deployments already enforcing taint policy
 
