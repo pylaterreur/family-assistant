@@ -44,14 +44,11 @@ describe('IntelligenceSelector', () => {
         tiers={TIERS}
         defaultTierId="standard"
         selectedTierId={null}
-        pinned={false}
         onChange={vi.fn()}
       />
     );
 
     expect(screen.getByRole('combobox', { name: 'Intelligence' })).toHaveTextContent('Standard');
-    // Nothing to pin while the profile default is in effect.
-    expect(screen.queryByTestId('intelligence-pin')).not.toBeInTheDocument();
   });
 
   it('lists every tier with its description and marks the default', async () => {
@@ -61,7 +58,6 @@ describe('IntelligenceSelector', () => {
         tiers={TIERS}
         defaultTierId="standard"
         selectedTierId={null}
-        pinned={false}
         onChange={vi.fn()}
       />
     );
@@ -76,7 +72,7 @@ describe('IntelligenceSelector', () => {
     expect(screen.getByRole('option', { name: /Max/ })).toBeInTheDocument();
   });
 
-  it('reports a non-default choice, keeping the current pin state', async () => {
+  it('reports a non-default choice', async () => {
     const user = setupUser();
     const onChange = vi.fn();
     render(
@@ -84,7 +80,6 @@ describe('IntelligenceSelector', () => {
         tiers={TIERS}
         defaultTierId="standard"
         selectedTierId="frontier"
-        pinned={true}
         onChange={onChange}
       />
     );
@@ -92,7 +87,7 @@ describe('IntelligenceSelector', () => {
     await user.click(screen.getByRole('combobox', { name: 'Intelligence' }));
     await user.click(await screen.findByRole('option', { name: /Deep/ }));
 
-    expect(onChange).toHaveBeenCalledWith('deep', true);
+    expect(onChange).toHaveBeenCalledWith('deep');
   });
 
   it('reports choosing the default as no choice at all', async () => {
@@ -103,7 +98,6 @@ describe('IntelligenceSelector', () => {
         tiers={TIERS}
         defaultTierId="standard"
         selectedTierId="deep"
-        pinned={true}
         onChange={onChange}
       />
     );
@@ -111,43 +105,22 @@ describe('IntelligenceSelector', () => {
     await user.click(screen.getByRole('combobox', { name: 'Intelligence' }));
     await user.click(await screen.findByRole('option', { name: /Standard/ }));
 
-    expect(onChange).toHaveBeenCalledWith(null, false);
+    expect(onChange).toHaveBeenCalledWith(null);
   });
 
-  it('toggles the pin for the selected tier', async () => {
-    const user = userEvent.setup();
-    const onChange = vi.fn();
+  it('says a chosen tier holds for the conversation', () => {
     render(
       <IntelligenceSelector
         tiers={TIERS}
         defaultTierId="standard"
         selectedTierId="deep"
-        pinned={false}
-        onChange={onChange}
-      />
-    );
-
-    const pin = screen.getByTestId('intelligence-pin');
-    expect(pin).toHaveAttribute('aria-pressed', 'false');
-    await user.click(pin);
-
-    expect(onChange).toHaveBeenCalledWith('deep', true);
-  });
-
-  it('looks pinned once the choice holds for the conversation', () => {
-    render(
-      <IntelligenceSelector
-        tiers={TIERS}
-        defaultTierId="standard"
-        selectedTierId="deep"
-        pinned={true}
         onChange={vi.fn()}
       />
     );
 
-    const pin = screen.getByTestId('intelligence-pin');
-    expect(pin).toHaveAttribute('aria-pressed', 'true');
-    expect(pin).toHaveAttribute('title', expect.stringContaining('stays selected'));
+    const trigger = screen.getByRole('combobox', { name: 'Intelligence' });
+    expect(trigger).toHaveTextContent('Deep');
+    expect(trigger).toHaveAttribute('title', expect.stringContaining('stays selected'));
   });
 
   it('renders nothing for a profile with no tier to choose', () => {
@@ -156,7 +129,6 @@ describe('IntelligenceSelector', () => {
         tiers={[]}
         defaultTierId={null}
         selectedTierId={null}
-        pinned={false}
         onChange={vi.fn()}
       />
     );
@@ -170,7 +142,6 @@ describe('IntelligenceSelector', () => {
         tiers={[TIERS[0]]}
         defaultTierId="standard"
         selectedTierId={null}
-        pinned={false}
         onChange={vi.fn()}
       />
     );

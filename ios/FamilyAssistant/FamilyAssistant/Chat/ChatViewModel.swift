@@ -39,26 +39,24 @@ final class ChatViewModel {
     // different profile doesn't overwrite the user's preferred profile for new
     // chats.
     @ObservationIgnored private var preferredProfileID: String
-    /// The user's intelligence (model tier) selection for the next message.
+    /// The intelligence (model tier) this conversation is on, as the control
+    /// shows it. Nil — the usual state — means the profile's own default tier.
     ///
-    /// Nil — the usual state — means the profile's own default tier, and is the
-    /// only state in which a send omits `model_tier` entirely. A choice is
-    /// one-shot: the send that carries it clears it, unless it is pinned, in
-    /// which case it holds for the rest of this conversation.
+    /// A choice is sticky: the server carries it forward to every later turn
+    /// that names no tier, so it holds for the rest of the conversation until
+    /// the user picks again. Switching tiers turn by turn would make each
+    /// switched turn start without the provider's cached copy of the thread.
     ///
     /// It is scoped to the conversation and profile it was made in — the
     /// `didSet` observers on `conversationID` and `selectedProfileID` clear it,
     /// so no path can carry a spend decision into a conversation or an agent the
-    /// user did not make it for — and is never persisted across launches:
-    /// spending more on a request is a decision about that request, not a
-    /// setting.
-    private(set) var modelTierChoice: ModelTierChoice?
-
-    struct ModelTierChoice: Equatable {
-        let tierID: String
-        /// Whether the choice holds for the conversation rather than one message.
-        let pinned: Bool
-    }
+    /// user did not make it for. Opening a conversation restores the tier its
+    /// history says it is on (`adoptConversationModelTier`).
+    private(set) var modelTierChoice: String?
+    /// The chosen tier the server already holds for this conversation, nil for
+    /// its default. Leaving a chosen tier has to be said — a send naming no tier
+    /// continues it — so this is what decides whether a send names the default.
+    @ObservationIgnored private var serverModelTierID: String?
     var conversationID: String? {
         didSet { clearModelTierChoiceIfScopeChanged(oldValue != conversationID) }
     }
@@ -983,6 +981,7 @@ final class ChatViewModel {
             // suspends and the user may have switched away meanwhile.
             if conversationID == id {
                 adoptConversationProfile()
+                adoptConversationModelTier()
             }
         }
         startLiveEvents(reason: isSwitchingConversation ? .conversationSwitch : .initial)
@@ -1004,6 +1003,29 @@ final class ChatViewModel {
             $0.role == .user && $0.processingProfileID != nil
         }?.processingProfileID
         selectedProfileID = conversationProfile ?? preferredProfileID
+    }
+
+    /// Restore the tier the conversation just loaded is on, for its profile.
+    ///
+    /// The server continues a person's chosen tier on every turn that names
+    /// none, and records on each reply who chose the tier it ran at. So the
+    /// tier in force is the latest reply's, when the user chose it and it is
+    /// not the profile's default (choosing the default is how a chosen tier is
+    /// left). Without this a reopened thread would show the default while its
+    /// turns still ran at the chosen tier.
+    private func adoptConversationModelTier() {
+        let latest = messages.last {
+            $0.role == .assistant
+                && $0.processingProfileID == selectedProfileID
+                && $0.modelTierSource != nil
+        }
+        guard let latest, latest.modelTierSource == "user",
+              let tier = latest.modelTier, tier != defaultModelTierID
+        else {
+            return
+        }
+        modelTierChoice = tier
+        serverModelTierID = tier
     }
 
     func startNewConversation(preservingDraft: Bool = false) {
@@ -1141,14 +1163,14 @@ final class ChatViewModel {
         offersModelTierChoice && !isStreaming
     }
 
-    /// Record the user's intelligence selection for the next message.
+    /// Record the user's intelligence selection for this conversation.
     ///
-    /// Choosing the profile's default is choosing nothing: there is no selection
-    /// to send and nothing to pin, so it clears the choice rather than storing a
-    /// selection that happens to name the default. A tier the active profile does
-    /// not offer clears it too — the menu cannot produce one, but a profile whose
-    /// tiers narrowed under a held selection must not keep sending it.
-    func selectModelTier(_ tierID: String?, pinned: Bool) {
+    /// Choosing the profile's default is choosing nothing, so it clears the
+    /// choice rather than storing a selection that happens to name the default.
+    /// A tier the active profile does not offer clears it too — the menu cannot
+    /// produce one, but a profile whose tiers narrowed under a held selection
+    /// must not keep sending it.
+    func selectModelTier(_ tierID: String?) {
         guard let tierID,
               tierID != defaultModelTierID,
               availableModelTiers.contains(where: { $0.id == tierID })
@@ -1156,7 +1178,7 @@ final class ChatViewModel {
             modelTierChoice = nil
             return
         }
-        modelTierChoice = ModelTierChoice(tierID: tierID, pinned: pinned)
+        modelTierChoice = tierID
     }
 
     /// Drop the selection when the conversation or profile it was made in changes.
@@ -1165,21 +1187,22 @@ final class ChatViewModel {
             return
         }
         modelTierChoice = nil
+        serverModelTierID = nil
     }
 
-    /// Take the tier this send runs at, spending an unpinned choice.
+    /// The tier this send names, recording it as what the server now holds.
+    ///
+    /// A chosen tier goes on every send, so the turn runs at what the control
+    /// shows whatever the server last recorded. The default is named only to
+    /// leave a chosen tier; otherwise nothing is, and the server continues the
+    /// conversation's own tier.
     ///
     /// Called once the turn is being built, so a submission rejected before that
-    /// point (an empty draft, an attachment still uploading) does not silently
-    /// consume the user's selection.
-    private func consumeModelTierForSend() -> String? {
-        guard let choice = modelTierChoice else {
-            return nil
-        }
-        if !choice.pinned {
-            modelTierChoice = nil
-        }
-        return choice.tierID
+    /// point (an empty draft, an attachment still uploading) changes nothing.
+    private func modelTierForSend() -> String? {
+        let tier = modelTierChoice ?? (serverModelTierID != nil ? defaultModelTierID : nil)
+        serverModelTierID = modelTierChoice
+        return tier
     }
 
     /// True for a conversation that exists only on this client and holds no turns:
@@ -1822,10 +1845,9 @@ final class ChatViewModel {
         cancelStream()
 
         let turnID = UUID().uuidString
-        // Past every early return: this send is happening, so an unpinned
-        // intelligence selection is spent here and the control returns to the
-        // profile default rather than quietly repricing the rest of the thread.
-        let modelTier = consumeModelTierForSend()
+        // Past every early return: this send is happening, so it is what tells
+        // the server which tier the conversation is on from here.
+        let modelTier = modelTierForSend()
         let uploadedAttachments = draftAttachments.filter { $0.uploadState == .uploaded }
         let userMessage = ChatMessage(
             id: "local_user_\(UUID().uuidString)",

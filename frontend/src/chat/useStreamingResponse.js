@@ -84,9 +84,9 @@ export const useStreamingResponse = ({
       interfaceType = 'web',
       attachments = undefined,
       turnId = undefined,
-      // The model tier the user selected, when it differs from the profile's
-      // default. Omitted from the request body otherwise, so the backend applies
-      // the profile default rather than being told what it already is.
+      // The model tier to run at, when the caller has one to name: a chosen
+      // tier, or the default when leaving one. Omitted from the request body
+      // otherwise, so the backend continues the conversation's own tier.
       modelTier = undefined,
     }) => {
       setIsStreaming(true);

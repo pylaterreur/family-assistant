@@ -93,8 +93,9 @@ Three internal objects, two prominent user-facing controls:
 - **Auto routing within `auto_model_tiers` is not confirmation-gated.** Choosing Auto authorizes the
   configured Auto range; a router that asks "may I use Deep?" per turn destroys the value of
   routing.
-- Manual overrides are **one-shot by default** (apply to the next request, then return to Auto),
-  with an explicit, visibly persistent per-conversation pin available.
+- Manual overrides are **sticky per conversation**: a chosen tier holds for every later turn that
+  names none, until the user chooses again; choosing the profile's default tier is the way back.
+  (Originally one-shot with a separate pin; see "Sticky selection" below for why that changed.)
 - The classifier router **selects tiers on one profile, not hidden clone profiles**. Conversation
   identity stays the profile identity; tier is run metadata, never a history namespace.
 - Child delegations resolve profile and model selection independently at each agent boundary; a
@@ -265,9 +266,8 @@ The composer keeps the profile selector and gains a small intelligence control b
 The intelligence menu offers **Auto** (best value per request), **Standard**, **Deep**, and **Max**
 (strongest configured recipe), with exact models as secondary detail. For most users the stable
 visible state is `[Assistant] [Auto ✦]` and the second control is never touched. Selecting Deep or
-Max applies to the next request and returns to Auto; a "use Deep for this conversation" pin is
-available and visibly persistent. Profiles that expose fewer tiers simply omit the inapplicable
-choices; a reminder profile may expose none.
+Max holds for the rest of the conversation, visibly, until the user selects again. Profiles that
+expose fewer tiers simply omit the inapplicable choices; a reminder profile may expose none.
 
 Routing is visible without dominating the UI: turn/run detail shows the equivalent of
 `Auto → Deep · GPT-5.6 Sol` (requested selection, resolved tier, actual model, fallback use). The
@@ -277,13 +277,39 @@ inventing one command per profile/model combination.
 
 **Telegram** has no composer control, but its profile slash commands are already per-message
 (`/complex <text>` routes that one message), which is exactly the one-shot semantics chosen above.
-Tier selection therefore surfaces as per-message tier commands: `/deep <request>` and
-`/max <request>` run that message on the conversation's current profile at the named tier, and a
-plain message stays on Auto. Tier commands and profile commands are separate commands, not a
-combinatorial set; a message carries one or the other, and the rare "specific profile at a specific
-tier" ask is served by the web UI (or, if demand appears, by letting a profile command accept a
-leading tier word — reasonable-behaviour territory, decided in the implementing PR). A persistent
-per-conversation pin on Telegram is deferred; one-shot commands cover the value.
+Tier selection therefore surfaces as tier commands: `/deep <request>` and `/max <request>` run that
+message, and the conversation after it, on the conversation's current profile at the named tier;
+`/standard <request>` returns it to the default. Tier commands and profile commands are separate
+commands, not a combinatorial set; a message carries one or the other, and the rare "specific
+profile at a specific tier" ask is served by the web UI (or, if demand appears, by letting a profile
+command accept a leading tier word — reasonable-behaviour territory, decided in the implementing
+PR).
+
+### Sticky selection
+
+One-shot selection turned out to be the wrong default because of prompt caching. Each tier runs on a
+different model, so a provider's cached prefix of the conversation belongs to one tier: a single
+Deep turn in a Standard conversation pays full prefill on the Deep turn *and* again on the Standard
+turn after it, where staying on Deep would have hit the cache. A hard question usually opens a hard
+stretch of conversation rather than standing alone, so the selection belongs to the conversation.
+
+The rule: **a person's tier choice holds for the conversation until they choose again.** The server
+owns it, so every surface (web, iOS, Telegram, and clients that never send a tier) behaves the same.
+A turn that names no tier, and is not a queued run's frozen envelope, continues the tier of the
+profile's latest reply in that conversation and subconversation when that reply's tier was chosen by
+a person and is not the profile's default. It is re-admitted as the person's selection, so a profile
+whose eligibility narrowed since falls back to its default. Wakes in the conversation (reminders,
+delegation results) continue it too: they extend the same cached history. The state is read back
+from the recorded replies rather than stored apart from them, so there is no second record to drift
+from what turns actually ran at.
+
+Only a person's choice carries forward. A delegating model's choice is about the run it made, and an
+Auto decision is per turn by design; whether active-mode Auto should also prefer staying on the
+conversation's current tier is a question for when Auto leaves shadow mode.
+
+Clients send a chosen tier on every turn, and name the default once to leave one; a send naming no
+tier means "continue". The web client reads the current tier from `conversation_model_tier` on the
+conversation messages response; iOS derives it from the latest reply's recorded tier and source.
 
 ## Compatibility constraints
 
@@ -390,6 +416,12 @@ Accepted residual behavior, recorded so review does not re-litigate it:
 - `research`/`research_max` stay as-is; deep-research models are pinned by design.
 - Auto's initial range excludes `frontier` even where manual selection allows it: classifier false
   positives have asymmetric cost, and widening later is a one-line config change.
+- Choosing the default tier is the only way to leave a chosen one, so there is no way to say "stay
+  on Standard and do not route": once Auto is active, an explicit Standard choice lasts one turn and
+  the conversation returns to Auto. Standard is inside Auto's range, so this costs at most a routing
+  decision the user did not want.
+- The web client treats what it sent as what the server holds. A send that fails before its turn
+  exists leaves the two apart until the next foreground load or the next tier change.
 - Prompt nudges to the Auto classifier are accepted as-is, with no injection filtering: the channel
   cannot select outside `auto_model_tiers`, so a planted nudge steals no authority Auto did not
   already hold (argued in full under "Auto routing").

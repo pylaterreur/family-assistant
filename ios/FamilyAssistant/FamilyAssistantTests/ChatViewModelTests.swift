@@ -12398,10 +12398,10 @@ final class ChatViewModelTests: XCTestCase {
         let model = makeViewModel(conversationID: "web_conv_tier_default")
         model.profiles = [Self.tieredProfile()]
 
-        model.selectModelTier("deep", pinned: false)
-        XCTAssertEqual(model.modelTierChoice?.tierID, "deep")
+        model.selectModelTier("deep")
+        XCTAssertEqual(model.modelTierChoice, "deep")
 
-        model.selectModelTier("standard", pinned: false)
+        model.selectModelTier("standard")
 
         XCTAssertNil(
             model.modelTierChoice,
@@ -12412,9 +12412,9 @@ final class ChatViewModelTests: XCTestCase {
     func testSelectingATierTheProfileDoesNotOfferClearsTheChoice() {
         let model = makeViewModel(conversationID: "web_conv_tier_unknown")
         model.profiles = [Self.tieredProfile()]
-        model.selectModelTier("deep", pinned: true)
+        model.selectModelTier("deep")
 
-        model.selectModelTier("frontier", pinned: true)
+        model.selectModelTier("frontier")
 
         XCTAssertNil(
             model.modelTierChoice,
@@ -12422,50 +12422,89 @@ final class ChatViewModelTests: XCTestCase {
         )
     }
 
-    func testModelTierChoiceIsSpentBySendAndOmittedFromTheNextTurn() async throws {
-        let recorder = respondRecordingModelTiers(conversationID: "web_conv_one_shot")
-        let model = makeViewModel(conversationID: "web_conv_one_shot")
+    func testChosenModelTierHoldsForEveryTurnOfTheConversation() async throws {
+        let recorder = respondRecordingModelTiers(conversationID: "web_conv_sticky")
+        let model = makeViewModel(conversationID: "web_conv_sticky")
         model.profiles = [Self.tieredProfile()]
-        model.selectModelTier("deep", pinned: false)
-
-        model.draftText = "Think hard"
-        await model.sendDraft()
-        try await waitUntil { !model.isStreaming }
-
-        XCTAssertEqual(recorder.tiers, ["deep"])
-        XCTAssertNil(
-            model.modelTierChoice,
-            "An unpinned selection is spent by the send that carried it."
-        )
-
-        model.draftText = "And now an easy one"
-        await model.sendDraft()
-        try await waitUntil { !model.isStreaming }
-
-        XCTAssertEqual(
-            recorder.tiers,
-            ["deep", nil],
-            "The following message runs at the profile's default, with no tier sent at all."
-        )
-    }
-
-    func testPinnedModelTierIsSentByEveryTurnOfTheConversation() async throws {
-        let recorder = respondRecordingModelTiers(conversationID: "web_conv_pinned")
-        let model = makeViewModel(conversationID: "web_conv_pinned")
-        model.profiles = [Self.tieredProfile()]
-        model.selectModelTier("deep", pinned: true)
+        model.selectModelTier("deep")
 
         model.draftText = "First"
         await model.sendDraft()
         try await waitUntil { !model.isStreaming }
 
-        XCTAssertEqual(model.modelTierChoice, ChatViewModel.ModelTierChoice(tierID: "deep", pinned: true))
+        XCTAssertEqual(model.modelTierChoice, "deep", "A choice is not spent by the send.")
 
         model.draftText = "Second"
         await model.sendDraft()
         try await waitUntil { !model.isStreaming }
 
         XCTAssertEqual(recorder.tiers, ["deep", "deep"])
+    }
+
+    func testLeavingAChosenTierNamesTheDefaultOnce() async throws {
+        let recorder = respondRecordingModelTiers(conversationID: "web_conv_leave_tier")
+        let model = makeViewModel(conversationID: "web_conv_leave_tier")
+        model.profiles = [Self.tieredProfile()]
+        model.selectModelTier("deep")
+
+        model.draftText = "Think hard"
+        await model.sendDraft()
+        try await waitUntil { !model.isStreaming }
+
+        model.selectModelTier("standard")
+        model.draftText = "Back to easy"
+        await model.sendDraft()
+        try await waitUntil { !model.isStreaming }
+
+        model.draftText = "Still easy"
+        await model.sendDraft()
+        try await waitUntil { !model.isStreaming }
+
+        XCTAssertEqual(
+            recorder.tiers,
+            ["deep", "standard", nil],
+            "The server continues a chosen tier, so leaving it is said once; after that nothing is."
+        )
+    }
+
+    func testOpeningAConversationRestoresTheTierItIsOn() async {
+        ChatMockBackendURLProtocol.respond { request in
+            switch request.url?.path ?? "" {
+            case "/api/v1/chat/conversations/web_conv_on_deep/messages":
+                return .json(
+                    """
+                    {
+                      "conversation_id":"web_conv_on_deep",
+                      "messages":[
+                        {"internal_id":1,"role":"user","content":"Hi",
+                         "timestamp":"2026-10-16T12:00:00Z",
+                         "processing_profile_id":"default_assistant"},
+                        {"internal_id":2,"role":"assistant","content":"Deep reply",
+                         "timestamp":"2026-10-16T12:00:01Z",
+                         "processing_profile_id":"default_assistant",
+                         "reasoning_info":{"model_tier":"deep","model_tier_source":"user"}}
+                      ],
+                      "count":2,
+                      "total_messages":2,
+                      "has_more_before":false,
+                      "has_more_after":false
+                    }
+                    """
+                )
+            default:
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+            }
+        }
+        let model = makeViewModel(conversationID: "web_conv_tier_elsewhere")
+        model.profiles = [Self.tieredProfile()]
+
+        await model.selectConversation("web_conv_on_deep")
+
+        XCTAssertEqual(
+            model.modelTierChoice,
+            "deep",
+            "The server keeps running the thread at Deep, so the control must say so."
+        )
     }
 
     func testIntelligenceControlIsUnavailableWhileATurnRuns() async throws {
@@ -12505,10 +12544,10 @@ final class ChatViewModelTests: XCTestCase {
         )
     }
 
-    func testChangingProfileClearsAPinnedModelTier() {
+    func testChangingProfileClearsAChosenModelTier() {
         let model = makeViewModel(conversationID: "web_conv_tier_profile")
         model.profiles = [Self.tieredProfile(), Self.tieredProfile(id: "engineer")]
-        model.selectModelTier("deep", pinned: true)
+        model.selectModelTier("deep")
 
         model.changeProfile(to: "engineer")
 
@@ -12518,17 +12557,17 @@ final class ChatViewModelTests: XCTestCase {
         )
     }
 
-    func testStartingANewConversationClearsAPinnedModelTier() {
+    func testStartingANewConversationClearsAChosenModelTier() {
         let model = makeViewModel(conversationID: "web_conv_tier_new")
         model.profiles = [Self.tieredProfile()]
-        model.selectModelTier("deep", pinned: true)
+        model.selectModelTier("deep")
 
         model.startNewConversation()
 
         XCTAssertNil(model.modelTierChoice)
     }
 
-    func testOpeningAnotherConversationClearsAPinnedModelTier() async {
+    func testOpeningAnotherConversationClearsAChosenModelTier() async {
         ChatMockBackendURLProtocol.respond { request in
             switch request.url?.path ?? "" {
             case "/api/v1/chat/conversations/web_conv_other/messages":
@@ -12550,7 +12589,7 @@ final class ChatViewModelTests: XCTestCase {
         }
         let model = makeViewModel(conversationID: "web_conv_tier_switch")
         model.profiles = [Self.tieredProfile()]
-        model.selectModelTier("deep", pinned: true)
+        model.selectModelTier("deep")
 
         await model.selectConversation("web_conv_other")
 
@@ -12588,8 +12627,8 @@ final class ChatViewModelTests: XCTestCase {
             postAccepted: false,
             lastAppliedSeq: nil
         )
-        // The picker has since returned to the default: the retry must reissue
-        // what the user actually sent, not what is selected now.
+        // The picker is on the default now: the retry must reissue what the
+        // user actually sent, not what is selected now.
         XCTAssertNil(model.modelTierChoice)
 
         await model.retryFailedSend(turnID: "turn-tier-retry")

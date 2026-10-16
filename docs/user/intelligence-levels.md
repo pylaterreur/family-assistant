@@ -30,7 +30,8 @@ why the request is hard: it turns on the answer being *right* rather than merely
 send your message. On iOS it is the gauge button in the Chat toolbar, which shows the level you
 picked once you have picked one.
 
-**In Telegram**, put a command at the start of the message:
+**In Telegram**, put a command at the start of the message (`/standard` takes the Assistant back to
+its usual level):
 
 ```
 /deep Work out whether moving the standing order to the 3rd would ever overdraw the account
@@ -39,15 +40,20 @@ picked once you have picked one.
 
 The rest of the message is your request, exactly as you would normally write it.
 
-## It applies to one request
+## It stays for the conversation
 
-An intelligence level is **one-shot**: it applies to the message you send it with, and the next
-message goes back to the assistant's usual level. That is deliberate — a hard question in the middle
-of an ordinary conversation is a property of that question, not of the conversation.
+An intelligence level, once picked, applies to the message you send it with **and to the rest of
+that conversation**, until you pick another. To go back, pick the assistant's usual level (marked
+"Default" in the apps; in Telegram, the command for that level).
 
-The web app and the iOS app also let you pin a level for the current conversation, when you know the
-whole conversation is going to be hard. The pin is visible while it is on, and clears when you start
-a new chat, open a different conversation, or switch assistants.
+That is deliberate. Each level runs on a different model, and a model answers fastest and most
+cheaply when it has seen the conversation before. Hopping to Deep for one message and straight back
+makes both of those messages start cold, so a conversation that has turned hard is better left at
+Deep for a while.
+
+The level you are on is shown on the control, and follows the conversation: reopen it later, or on
+another device, and it is still there. A new chat, or switching assistants, starts at the usual
+level again.
 
 Choosing a level never starts a new conversation and never loses your history. The assistant you
 were talking to is still the same assistant, with the same tools and the same access; only how hard

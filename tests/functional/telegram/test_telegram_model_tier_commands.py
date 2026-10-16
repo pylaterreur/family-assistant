@@ -1,11 +1,11 @@
-"""Choosing how hard the assistant thinks about one Telegram message.
+"""Choosing how hard the assistant thinks in a Telegram conversation.
 
 Telegram has no composer control, so a tier is chosen the way a profile is:
 with a leading command. What these pin is that the two kinds of command stay
 different things -- a tier command changes the models a message runs on and
 nothing else, keeps the conversation on the profile it was already using
-(including the profile a reply adopts), applies to that message only, and is
-refused out loud where the profile does not offer the tier.
+(including the profile a reply adopts), holds for the plain messages after it,
+and is refused out loud where the profile does not offer the tier.
 """
 
 from __future__ import annotations
@@ -273,6 +273,24 @@ async def test_max_runs_the_message_on_the_frontier_tier(
     reasoning = await assistant_reasoning_info(fix)
     assert reasoning.get("model_tier") == "frontier"
     assert reasoning.get("model_tier_source") == "user"
+
+
+@pytest.mark.asyncio
+async def test_plain_messages_after_a_tier_command_stay_on_that_tier(
+    telegram_handler_fixture: TelegramHandlerTestFixture,
+    tier_clients: dict[str, RuleBasedMockLLMClient],
+) -> None:
+    """The chat keeps the tier, so its cached history is not thrown away."""
+    fix = telegram_handler_fixture
+    install_tiered_service(fix, tier_clients, ALL_TIERS)
+    await run_command(fix, "/deep which of these two contracts is worse")
+    await last_bot_text(fix)
+
+    update = create_command_update("and what about the third", fix.bot, message_id=403)
+    await fix.handler.message_handler(update, create_context(fix.application, args=[]))
+
+    assert "deep served this" in await last_bot_text(fix)
+    assert not tier_clients["standard"].get_calls()
 
 
 @pytest.mark.asyncio

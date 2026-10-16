@@ -184,6 +184,75 @@ async def test_the_conversation_history_reports_the_tier_a_reply_ran_at(
     assert reasoning["model_tier_requested"] == "deep"
 
 
+async def _send(
+    api_test_client: AsyncClient, conversation_id: str, model_tier: str | None = None
+) -> str:
+    body: dict[str, str] = {"prompt": "next", "conversation_id": conversation_id}
+    if model_tier is not None:
+        body["model_tier"] = model_tier
+    response = await api_test_client.post("/api/v1/chat/send_message", json=body)
+    assert response.status_code == 200
+    return response.json()["reply"]
+
+
+@pytest.mark.usefixtures("tiered_app")
+async def test_a_chosen_tier_holds_for_later_turns_naming_none(
+    api_test_client: AsyncClient,
+    db_engine: AsyncEngine,
+) -> None:
+    """Switching models turn by turn would throw away the prompt cache each way."""
+    conversation_id = f"tier-sticky-{uuid.uuid4()}"
+    await _send(api_test_client, conversation_id, "deep")
+
+    reply = await _send(api_test_client, conversation_id)
+
+    assert reply == "deep served this"
+    reasoning = await _assistant_reasoning_info(db_engine, conversation_id)
+    assert reasoning.get("model_tier") == "deep"
+    assert reasoning.get("model_tier_source") == "user"
+
+
+@pytest.mark.usefixtures("tiered_app")
+async def test_choosing_the_default_tier_ends_a_chosen_one(
+    api_test_client: AsyncClient,
+) -> None:
+    conversation_id = f"tier-leave-{uuid.uuid4()}"
+    await _send(api_test_client, conversation_id, "deep")
+    await _send(api_test_client, conversation_id, "standard")
+
+    reply = await _send(api_test_client, conversation_id)
+
+    assert reply == "standard served this"
+
+
+@pytest.mark.usefixtures("tiered_app")
+async def test_a_chosen_tier_does_not_reach_another_conversation(
+    api_test_client: AsyncClient,
+) -> None:
+    await _send(api_test_client, f"tier-chosen-{uuid.uuid4()}", "deep")
+
+    reply = await _send(api_test_client, f"tier-other-{uuid.uuid4()}")
+
+    assert reply == "standard served this"
+
+
+@pytest.mark.usefixtures("tiered_app")
+async def test_a_reopened_conversation_reports_the_tier_it_is_on(
+    api_test_client: AsyncClient,
+) -> None:
+    """What a client shows as selected, so it matches what the next turn runs at."""
+    conversation_id = f"tier-reopen-{uuid.uuid4()}"
+    await _send(api_test_client, conversation_id, "deep")
+
+    response = await api_test_client.get(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        params={"include_conversation_profile": "true"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["conversation_model_tier"] == "deep"
+
+
 @pytest.mark.usefixtures("tiered_app")
 async def test_a_person_may_choose_a_tier_no_model_is_allowed_to(
     api_test_client: AsyncClient,

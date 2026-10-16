@@ -10,17 +10,19 @@ and recorded "no iOS control yet" as the surface that was left. This closes that
 Nothing about the tier contract changes here. `POST /api/v1/chat/turns` already accepts
 `model_tier`, `GET /api/v1/profiles` already reports each profile's selectable tiers and its
 default, and persisted assistant messages already carry `reasoning_info.model_tier*`. The work is
-entirely client-side: read those three, and give the user the same one-shot-with-optional-pin
-control the web composer has.
+entirely client-side: read those three, and give the user the same conversation-scoped control the
+web composer has. (Selection was originally one-shot with an optional pin; it is now sticky per
+conversation, owned by the server — see "Sticky selection" in [model-tiers.md](model-tiers.md).)
 
 ## What the user gets
 
 A tier control in the Chat toolbar beside the profile picker — the placement the design doc
 specifies — offering the tiers the _current_ profile permits, with the profile's default marked. The
 usual state is no selection at all, which sends no `model_tier` and lets the backend apply the
-profile default. Choosing a tier applies to the next message and is then spent; a pin in the same
-menu keeps it for the rest of the conversation. Replies carry a tier capsule beside the existing
-profile capsule, so what actually served a turn is visible in the thread.
+conversation's tier. Choosing a tier holds for the rest of the conversation: it is sent with every
+turn, choosing the default sends the default once to leave it, and opening a conversation restores
+the tier its latest reply was chosen at. Replies carry a tier capsule beside the existing profile
+capsule, so what actually served a turn is visible in the thread.
 
 Profiles that offer fewer than two selectable tiers show no control at all, rather than a menu with
 one dead entry. That is derived from `/v1/profiles`, so a profile becoming pinned (or gaining tiers)
@@ -34,14 +36,13 @@ whose every element is per-message. The toolbar already holds the profile picker
 and "how much thinking" are the two questions the design pairs.
 
 **Visible only when it is doing something.** The menu label is icon-only while no tier is selected
-and expands to the tier's name (with a pin glyph when pinned) once one is. The web control always
-shows a label because it always shows the effective tier; on a phone toolbar that would spend
-permanent width restating a default. A selection, which is the state the design requires to be
-visible, is what earns the label.
+and expands to the tier's name once one is. The web control always shows a label because it always
+shows the effective tier; on a phone toolbar that would spend permanent width restating a default. A
+selection, which is the state the design requires to be visible, is what earns the label.
 
-**One-shot is enforced at the send, not by the menu.** The choice is consumed where the turn is
-built, so every path that starts a turn spends it exactly once, and a submission that is rejected
-before a turn exists (an empty draft, an attachment still uploading) does not silently eat it.
+**What a send names is decided at the send, not by the menu.** Where the turn is built, a chosen
+tier is named and the default is named only to leave a chosen one, so a submission that is rejected
+before a turn exists (an empty draft, an attachment still uploading) changes nothing.
 
 **The control is unavailable while a turn runs.** The composer doubles as the steer box in that
 state, so the next thing the user sends folds into the running turn — whose tier was frozen when it
@@ -51,9 +52,10 @@ already unavailable mid-turn for the same reason, and the web selector likewise 
 turn is in flight.
 
 **A tier choice is scoped to the conversation and profile it was made in.** Switching profile,
-opening another conversation, and starting a new chat all clear it. This is the same rule the web
-applies, and it matters more here: `changeProfile` starts a fresh conversation, so a surviving pin
-would carry a spend decision into a conversation the user did not make it in.
+opening another conversation, and starting a new chat all clear it (opening one then restores that
+conversation's own tier). This is the same rule the web applies, and it matters more here:
+`changeProfile` starts a fresh conversation, so a surviving choice would carry a spend decision into
+a conversation the user did not make it in.
 
 **The selection travels with the turn, not with the UI.** `ActiveTurnSession` and `FailedSend`
 already carry the profile a turn was sent under so a retry reissues the same turn rather than
@@ -78,8 +80,8 @@ that cannot disagree with what was recorded.
 - **Voice, the Watch app and App Intents get no tier control.** Voice runs on a Live API session
   whose model is fixed; the Watch and Siri surfaces are deliberately zero-decision. They keep
   sending no `model_tier` and run at the profile default.
-- **The pin is not persisted across launches.** Neither is the web's. Spending more on a request is
-  a decision about that conversation, not a setting.
+- **The tier is not a client setting.** It lives with the conversation on the server, and the app
+  rereads it from history on open rather than persisting it across launches.
 
 ## Verification
 
@@ -89,9 +91,10 @@ Unit tests, in the bundle CI already runs:
   (no control).
 - A send with a selection puts `model_tier` on the turn body; a send with none omits the key
   entirely, so the backend applies its own default rather than being told what it already is.
-- One-shot: the choice is cleared by the send that spent it; a pinned choice survives and is sent
-  again by the following turn.
-- Reset: switching profile and opening another conversation both clear the choice, pinned or not.
+- Sticky: a choice survives the send and is sent again by the following turn; leaving it sends the
+  default once and then nothing.
+- Reset: switching profile and opening another conversation both clear the choice; opening a
+  conversation whose latest reply was chosen at Deep shows Deep.
 - Availability: the control accepts a choice only where the profile offers more than one tier and no
   turn is running.
 - Retry: a failed send retried reissues the tier it was sent under.
