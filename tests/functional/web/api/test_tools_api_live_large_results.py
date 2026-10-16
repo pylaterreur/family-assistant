@@ -69,16 +69,13 @@ def _registration(name: str, implementation: ToolImplementation) -> ToolRegistra
     )
 
 
-def _install_provider(app: FastAPI) -> None:
+def _install_provider(app: FastAPI, *, with_readers: bool = True) -> None:
+    readers = {"jq_query", "read_text_attachment"} if with_readers else set()
     provider = LocalToolsProvider(
         registrations=[
             _registration("home_overview", _home_overview),
             _registration("home_price", _home_price),
-            *(
-                r
-                for r in LOCAL_TOOL_REGISTRATIONS
-                if r.name in {"jq_query", "read_text_attachment"}
-            ),
+            *(r for r in LOCAL_TOOL_REGISTRATIONS if r.name in readers),
         ]
     )
     service = app.state.processing_service
@@ -152,6 +149,22 @@ async def test_reading_the_attachment_through_call_tool_returns_its_content(
     assert response.status_code == 200, response.text
     assert "sensor.reading_900" in response.text
     assert ATTACHMENT_ID_PATTERN.search(response.text) is None
+
+
+@pytest.mark.asyncio
+async def test_profile_without_a_reader_gets_the_whole_large_result(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+) -> None:
+    """A pointer the session has no tool to follow would leave it with nothing."""
+    _install_provider(app_fixture, with_readers=False)
+
+    response = await api_test_client.post(
+        "/api/tools/execute/call_tool", json=_voice_call("home_overview")
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(response.json()["result"]["data"]["entities"]) == ENTITY_COUNT
 
 
 @pytest.mark.asyncio

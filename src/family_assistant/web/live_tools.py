@@ -12,9 +12,13 @@ See docs/design/voice-mode-on-demand-tools.md.
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING, Any
 
 from family_assistant.config_models import GeminiLiveConfig
+from family_assistant.tools.infrastructure import (
+    get_tool_definitions_for_advertisement,
+)
 from family_assistant.tools.live_meta import CALL_TOOL_TOOL_NAME, LiveMetaToolsProvider
 from family_assistant.tools.types import ToolResult
 
@@ -22,6 +26,10 @@ if TYPE_CHECKING:
     from family_assistant.processing import ProcessingService
     from family_assistant.tools import ToolsProvider
     from family_assistant.tools.types import ToolExecutionContext
+
+logger = logging.getLogger(__name__)
+
+ATTACHMENT_READER_TOOL_NAMES = frozenset({"jq_query", "read_text_attachment"})
 
 
 async def resolve_live_tools(
@@ -57,7 +65,9 @@ async def execute_live_tool(
     result the chat loop would take in stride is heard as dead air. One past
     ``gemini_live_config.large_tool_result_threshold_kb`` is stored as an
     attachment, and the model gets the same pointer and ``jq_query`` /
-    ``read_text_attachment`` hint the chat loop gives it.
+    ``read_text_attachment`` hint the chat loop gives it. A profile that can
+    reach neither reader gets the whole result: slow, but a pointer it cannot
+    follow would leave it with nothing.
     """
     result = await service.live_tools_provider.execute_tool(
         name, arguments, context, call_id
@@ -67,22 +77,48 @@ async def execute_live_tool(
         if service.app_config is not None
         else GeminiLiveConfig()
     )
+    content = _live_response_text(result)
+    threshold_kb = live_config.large_tool_result_threshold_kb
+    if len(content.encode("utf-8")) < threshold_kb * 1024:
+        return result
+    if not await _can_read_attachments(service):
+        logger.info(
+            "Returning a large '%s' result whole: profile '%s' has no attachment reader",
+            name,
+            service.service_config.id,
+        )
+        return result
     taint_tracker = context.taint_tracker
     stub, attachment_id = await service.attachment_processor.handle_large_result(
         context.db_context,
-        _live_response_text(result),
+        content,
         _target_tool_name(name, arguments),
         context.conversation_id,
         call_id or context.turn_id or "",
         taint_tracker.snapshot().to_metadata() if taint_tracker else None,
         # The session belongs to one caller, so the result is theirs alone.
         owner_user_id=context.user_id,
-        threshold_kb=live_config.large_tool_result_threshold_kb,
+        threshold_kb=threshold_kb,
     )
     if attachment_id is None:
         return result
     attachments = result.attachments if isinstance(result, ToolResult) else None
     return ToolResult(text=stub, attachments=attachments)
+
+
+async def _can_read_attachments(service: ProcessingService) -> bool:
+    """Whether the session can follow a large-result pointer.
+
+    Everything advertised is reachable from a Live session, directly or through
+    ``call_tool``, so this is the same list the session is declared from.
+    """
+    definitions = await get_tool_definitions_for_advertisement(
+        service.tools_provider, can_confirm=False
+    )
+    return any(
+        definition.get("function", {}).get("name") in ATTACHMENT_READER_TOOL_NAMES
+        for definition in definitions
+    )
 
 
 # ast-grep-ignore: no-dict-any - Tool arguments are dynamic JSON from the model
