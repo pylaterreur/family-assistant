@@ -107,6 +107,9 @@ def plan_sample_times(
     records on motion it is a frame from each burst of activity, which is
     where anything worth finding happened.
     """
+    if interval <= timedelta(0):
+        msg = f"Sampling interval must be positive, not {interval}"
+        raise ValueError(msg)
     spans = [
         (max(span_start, start_time), min(span_end, end_time))
         for span_start, span_end in map(_sampleable_span, recordings)

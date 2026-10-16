@@ -882,3 +882,18 @@ async def test_find_change_says_when_the_condition_never_flips() -> None:
         "No change found: 'A parcel is on the doorstep.' was false in all 12 "
         "frames judged across the range."
     )
+
+
+@pytest.mark.asyncio
+async def test_find_change_rejects_a_range_that_does_not_move_forward() -> None:
+    backend = _continuous_camera({0: b"step"})
+
+    result = await find_camera_change_tool(
+        _judging_context(backend, jev=_jev_by_bytes({b"step": 0.03})),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=_SCAN_BASE.isoformat(),
+        condition="A parcel is on the doorstep.",
+    )
+
+    assert result.get_data() == {"error": "end_time must be after start_time."}

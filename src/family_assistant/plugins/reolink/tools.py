@@ -727,6 +727,8 @@ async def scan_camera_frames_tool(
         end_dt = _parse_local_time(end_time, exec_context.timezone)
     except ValueError as e:
         return ToolResult(data={"error": f"Invalid timestamp format: {e}"})
+    if end_dt < start_dt:
+        return ToolResult(data={"error": "end_time must not be before start_time."})
     interval = timedelta(seconds=max(interval_seconds, 1.0))
     max_frames = min(max(max_frames, 1), MAX_SCAN_FRAMES)
 
@@ -821,6 +823,8 @@ async def find_camera_change_tool(
         end_dt = _parse_local_time(end_time, exec_context.timezone)
     except ValueError as e:
         return ToolResult(data={"error": f"Invalid timestamp format: {e}"})
+    if end_dt <= start_dt:
+        return ToolResult(data={"error": "end_time must be after start_time."})
 
     try:
         recordings = await camera_backend.get_recordings(camera_id, start_dt, end_dt)

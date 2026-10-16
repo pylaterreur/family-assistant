@@ -190,3 +190,10 @@ def test_wall_clock_days_of_a_range_inside_one_day_is_that_range() -> None:
     assert wall_clock_days(start, start + timedelta(hours=1)) == [
         (start, start + timedelta(hours=1))
     ]
+
+
+def test_a_zero_interval_is_refused_rather_than_looping() -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        plan_sample_times(
+            [_clip(0, 600)], NOON, NOON, interval=timedelta(0), max_frames=5
+        )
