@@ -61,8 +61,13 @@ const EMPTY_MODEL_TIERS: ModelTier[] = [];
 interface ConversationModelTier {
   conversationId: string | null;
   profileId: string;
-  /** The chosen tier the server holds for the conversation; null for its default. */
-  server: string | null;
+  /**
+   * Whether the conversation has been on a chosen tier. From then on every send
+   * names its tier, the default included: a send naming none continues whatever
+   * the server last recorded, which a failed send could leave different from
+   * what the control shows.
+   */
+  namesTier: boolean;
   /** The tier the control shows; null for the profile default. */
   selected: string | null;
 }
@@ -591,9 +596,8 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   // The intelligence (model tier) the conversation is on. A choice is sticky:
   // the server carries it to every later turn that names no tier, so it holds
   // until the user picks again. `selected` is what the control shows, `null`
-  // for the profile's default; `server` is the chosen tier the server already
-  // holds for the conversation, which is what decides whether leaving it needs
-  // saying. Keyed by conversation and profile, so a new chat, another
+  // for the profile's default; `namesTier` says whether a send has to name the
+  // default, which it must once the conversation has been on a chosen tier. Keyed by conversation and profile, so a new chat, another
   // conversation and another profile all read as the default without an effect
   // racing the adoption of a reopened conversation's tier.
   const [modelTierState, setModelTierState] = useState<ConversationModelTier | null>(null);
@@ -1726,7 +1730,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
             setModelTierState({
               conversationId: convId,
               profileId: adoptedProfileId,
-              server: conversationTier,
+              namesTier: conversationTier !== null,
               selected: conversationTier,
             });
           }
@@ -2391,7 +2395,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       setModelTierState((prev) => ({
         conversationId,
         profileId: currentProfileId,
-        server: modelTierFor(prev, conversationId, currentProfileId)?.server ?? null,
+        namesTier: modelTierFor(prev, conversationId, currentProfileId)?.namesTier ?? false,
         selected: tierId,
       }));
     },
@@ -2568,19 +2572,19 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       selfTurnIdsRef.current.add(turnId);
 
       // A chosen tier goes on every send, so the turn runs at what the control
-      // shows whatever the server last recorded. Choosing the default sends
-      // nothing, unless the conversation was on a chosen tier: then the default
-      // is named, which is how the server is told to leave it.
+      // shows whatever the server last recorded. The default is sent as nothing
+      // until the conversation has been on a chosen tier; after that it is
+      // named, which is how the server is told to leave one.
       const tierState = modelTierFor(modelTierStateRef.current, conversationId, currentProfileId);
       const selectedTier = tierState?.selected ?? null;
       const modelTier =
         selectedTier ??
-        (tierState?.server ? (defaultModelTierRef.current ?? undefined) : undefined);
+        (tierState?.namesTier ? (defaultModelTierRef.current ?? undefined) : undefined);
       if (tierState) {
         setModelTierState({
           ...tierState,
           conversationId: targetConversationId,
-          server: selectedTier,
+          namesTier: tierState.namesTier || selectedTier !== null,
         });
       }
 

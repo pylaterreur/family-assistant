@@ -12441,7 +12441,7 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(recorder.tiers, ["deep", "deep"])
     }
 
-    func testLeavingAChosenTierNamesTheDefaultOnce() async throws {
+    func testLeavingAChosenTierKeepsNamingTheDefault() async throws {
         let recorder = respondRecordingModelTiers(conversationID: "web_conv_leave_tier")
         let model = makeViewModel(conversationID: "web_conv_leave_tier")
         model.profiles = [Self.tieredProfile()]
@@ -12462,8 +12462,8 @@ final class ChatViewModelTests: XCTestCase {
 
         XCTAssertEqual(
             recorder.tiers,
-            ["deep", "standard", nil],
-            "The server continues a chosen tier, so leaving it is said once; after that nothing is."
+            ["deep", "standard", "standard"],
+            "Once the conversation has been on a chosen tier, every send names what the control shows."
         )
     }
 

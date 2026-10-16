@@ -1103,7 +1103,7 @@ describe('ChatApp intelligence tier selection', () => {
     });
   }, 90000);
 
-  it('names the default tier once to leave a chosen one', async () => {
+  it('names the default tier to leave a chosen one, and keeps naming it', async () => {
     const user = setupSelectUser();
     await renderChatApp({ waitForReady: true });
 
@@ -1121,7 +1121,7 @@ describe('ChatApp intelligence tier selection', () => {
 
     await waitForTurnToSettle(2);
     await sendMessage(user, 'Another easy one');
-    await waitFor(() => expect(capturedTurnModelTiers).toEqual(['deep', 'standard', undefined]), {
+    await waitFor(() => expect(capturedTurnModelTiers).toEqual(['deep', 'standard', 'standard']), {
       timeout: 10000,
     });
   }, 90000);

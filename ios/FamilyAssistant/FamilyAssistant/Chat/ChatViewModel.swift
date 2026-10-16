@@ -53,10 +53,11 @@ final class ChatViewModel {
     /// user did not make it for. Opening a conversation restores the tier its
     /// history says it is on (`adoptConversationModelTier`).
     private(set) var modelTierChoice: String?
-    /// The chosen tier the server already holds for this conversation, nil for
-    /// its default. Leaving a chosen tier has to be said — a send naming no tier
-    /// continues it — so this is what decides whether a send names the default.
-    @ObservationIgnored private var serverModelTierID: String?
+    /// Whether this conversation has been on a chosen tier. From then on every
+    /// send names its tier, the default included: a send naming none continues
+    /// whatever the server last recorded, which a failed send could leave
+    /// different from what the control shows.
+    @ObservationIgnored private var namesModelTier = false
     var conversationID: String? {
         didSet { clearModelTierChoiceIfScopeChanged(oldValue != conversationID) }
     }
@@ -1029,7 +1030,7 @@ final class ChatViewModel {
             return
         }
         modelTierChoice = tier
-        serverModelTierID = tier
+        namesModelTier = true
     }
 
     func startNewConversation(preservingDraft: Bool = false) {
@@ -1191,21 +1192,21 @@ final class ChatViewModel {
             return
         }
         modelTierChoice = nil
-        serverModelTierID = nil
+        namesModelTier = false
     }
 
-    /// The tier this send names, recording it as what the server now holds.
+    /// The tier this send names.
     ///
     /// A chosen tier goes on every send, so the turn runs at what the control
-    /// shows whatever the server last recorded. The default is named only to
-    /// leave a chosen tier; otherwise nothing is, and the server continues the
-    /// conversation's own tier.
+    /// shows whatever the server last recorded. The default is sent as nothing
+    /// until the conversation has been on a chosen tier; after that it is
+    /// named, which is how the server is told to leave one.
     ///
     /// Called once the turn is being built, so a submission rejected before that
     /// point (an empty draft, an attachment still uploading) changes nothing.
     private func modelTierForSend() -> String? {
-        let tier = modelTierChoice ?? (serverModelTierID != nil ? defaultModelTierID : nil)
-        serverModelTierID = modelTierChoice
+        let tier = modelTierChoice ?? (namesModelTier ? defaultModelTierID : nil)
+        namesModelTier = namesModelTier || modelTierChoice != nil
         return tier
     }
 

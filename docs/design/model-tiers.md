@@ -307,9 +307,12 @@ Only a person's choice carries forward. A delegating model's choice is about the
 Auto decision is per turn by design; whether active-mode Auto should also prefer staying on the
 conversation's current tier is a question for when Auto leaves shadow mode.
 
-Clients send a chosen tier on every turn, and name the default once to leave one; a send naming no
-tier means "continue". The web client reads the current tier from `conversation_model_tier` on the
-conversation messages response; iOS derives it from the latest reply's recorded tier and source.
+A send naming no tier means "continue", so a client names what its control shows on every send once
+the conversation has been on a chosen tier, the default included. Tracking what the server last
+recorded instead would let a failed send leave the control and the server disagreeing; naming the
+tier makes every send correct whatever happened before it. The web client reads the current tier
+from `conversation_model_tier` on the conversation messages response; iOS derives it from the latest
+reply's recorded tier and source.
 
 ## Compatibility constraints
 
@@ -420,8 +423,12 @@ Accepted residual behavior, recorded so review does not re-litigate it:
   on Standard and do not route": once Auto is active, an explicit Standard choice lasts one turn and
   the conversation returns to Auto. Standard is inside Auto's range, so this costs at most a routing
   decision the user did not want.
-- The web client treats what it sent as what the server holds. A send that fails before its turn
-  exists leaves the two apart until the next foreground load or the next tier change.
+- A conversation that has been on a chosen tier names its tier on every later send from that client,
+  so its turns at the default are recorded as the person's choice and are not routed. Only
+  conversations where someone chose a tier lose Auto's shadow record.
+- iOS reads the tier from the latest reply, not from a failed turn's error row. Reopening a
+  conversation whose "back to Standard" turn failed shows the earlier chosen tier and runs at it:
+  what the control shows is what runs, and the user can choose again.
 - Prompt nudges to the Auto classifier are accepted as-is, with no injection filtering: the channel
   cannot select outside `auto_model_tiers`, so a planted nudge steals no authority Auto did not
   already hold (argued in full under "Auto routing").

@@ -20,9 +20,9 @@ A tier control in the Chat toolbar beside the profile picker — the placement t
 specifies — offering the tiers the _current_ profile permits, with the profile's default marked. The
 usual state is no selection at all, which sends no `model_tier` and lets the backend apply the
 conversation's tier. Choosing a tier holds for the rest of the conversation: it is sent with every
-turn, choosing the default sends the default once to leave it, and opening a conversation restores
-the tier its latest reply was chosen at. Replies carry a tier capsule beside the existing profile
-capsule, so what actually served a turn is visible in the thread.
+turn (the default too, once the conversation has been on a chosen tier), and opening a conversation
+restores the tier its latest reply was chosen at. Replies carry a tier capsule beside the existing
+profile capsule, so what actually served a turn is visible in the thread.
 
 Profiles that offer fewer than two selectable tiers show no control at all, rather than a menu with
 one dead entry. That is derived from `/v1/profiles`, so a profile becoming pinned (or gaining tiers)
@@ -92,7 +92,7 @@ Unit tests, in the bundle CI already runs:
 - A send with a selection puts `model_tier` on the turn body; a send with none omits the key
   entirely, so the backend applies its own default rather than being told what it already is.
 - Sticky: a choice survives the send and is sent again by the following turn; leaving it sends the
-  default once and then nothing.
+  default on every later turn.
 - Reset: switching profile and opening another conversation both clear the choice; opening a
   conversation whose latest reply was chosen at Deep shows Deep.
 - Availability: the control accepts a choice only where the profile offers more than one tier and no
