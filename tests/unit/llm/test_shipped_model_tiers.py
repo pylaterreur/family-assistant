@@ -23,6 +23,7 @@ from family_assistant.llm.model_tiers import (
     validate_profile_model_tier,
 )
 from family_assistant.llm.providers.anthropic_client import AnthropicClient
+from family_assistant.llm.providers.openai_client import OpenAIClient
 from tests.unit.conftest import shipped_profile
 
 
@@ -257,3 +258,52 @@ def test_profiles_share_one_client_per_tier(
 
     assert complex_clients["gemini_4_argon"] is assistant_clients["gemini_4_argon"]
     assert complex_clients["deep"] is assistant_clients["deep"]
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    [
+        pytest.param("browser_profile", id="browser"),
+        pytest.param("authenticated_browser_profile", id="authenticated-browser"),
+        pytest.param("credential_browser_profile", id="credential-browser"),
+    ],
+)
+def test_snapshot_browser_profiles_run_the_browser_tier(
+    shipped_config: AppConfig, profile_id: str
+) -> None:
+    profile = shipped_profile(shipped_config, profile_id)
+    assert profile.processing_config.model_tier == "browser"
+
+
+def test_browser_tier_runs_sol_with_a_sonnet_fallback_at_medium_effort(
+    shipped_config: AppConfig,
+) -> None:
+    """End to end: shipped tier -> factory -> the params each entry's request carries.
+
+    Sonnet 5.5 rejects `enabled` + `budget_tokens` mid-conversation, and the
+    global map has no `gpt-6.1-sol` key (`gpt-6-sol` does not match it by
+    substring), so both entries' parameters are asserted where they land.
+    """
+    resolved = resolve_tier_client_config(
+        shipped_config.model_tiers["browser"], shipped_config.llm_parameters
+    )["retry_config"]
+    primary = LLMClientFactory.create_client({
+        **resolved["primary"],
+        "api_key": "test-key",
+    })
+    fallback = LLMClientFactory.create_client({
+        **resolved["fallback"],
+        "api_key": "test-key",
+    })
+
+    assert isinstance(primary, OpenAIClient)
+    assert primary.model == "gpt-6.1-sol"
+    assert primary._get_model_specific_params(primary.model) == {
+        "reasoning_effort": "medium"
+    }
+    assert isinstance(fallback, AnthropicClient)
+    assert fallback.model == "claude-sonnet-5-5"
+    assert fallback._get_model_specific_params(fallback.model) == {
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "medium"},
+    }
