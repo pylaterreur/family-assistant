@@ -158,6 +158,7 @@ def exec_context(
 
     ctx = MagicMock(spec=ToolExecutionContext)
     ctx.conversation_id = "test-conversation"
+    ctx.subconversation_id = None
     # No batch: these tools are called one at a time, so the chokepoint only
     # has its lock to take.
     ctx.tool_call_batch = None

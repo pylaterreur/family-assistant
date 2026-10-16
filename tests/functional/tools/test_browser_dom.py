@@ -187,9 +187,9 @@ async def fixture_server() -> AsyncGenerator[BoundFixtureServer]:
 def exec_context(request: pytest.FixtureRequest) -> ToolExecutionContext:
     """A minimally-mocked ToolExecutionContext with a unique conversation id.
 
-    The browser_dom tools only touch ``conversation_id``, which keys the
-    per-conversation ``BrowserSession``. Using the test's nodeid keeps each
-    test's session isolated.
+    A top-level turn (no subconversation) keys its ``BrowserSession`` by
+    ``conversation_id``. Using the test's nodeid keeps each test's session
+    isolated.
     """
     return _context(f"browser-dom-test-{request.node.nodeid}")
 
@@ -206,6 +206,7 @@ def _context(
     return MagicMock(
         spec=ToolExecutionContext,
         conversation_id=conversation_id,
+        subconversation_id=None,
         tool_call_batch=batch,
         tool_call_id=call_id,
     )

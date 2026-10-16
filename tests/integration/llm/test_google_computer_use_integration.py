@@ -69,6 +69,7 @@ def mock_exec_context() -> ToolExecutionContext:
     return MagicMock(
         spec=ToolExecutionContext,
         conversation_id="test-conversation",
+        subconversation_id=None,
         tool_call_id=None,
         tool_call_batch=None,
     )
@@ -534,7 +535,9 @@ async def test_computer_use_browser_navigation_e2e(db_engine: AsyncEngine) -> No
         # Cleanup: close any browser sessions
         # The conversation_id used by ProcessingService for tool context
         cleanup_context = MagicMock(
-            spec=ToolExecutionContext, conversation_id="e2e-browser-test"
+            spec=ToolExecutionContext,
+            conversation_id="e2e-browser-test",
+            subconversation_id=None,
         )
         await close_browser_session(cleanup_context)
 
@@ -703,7 +706,9 @@ async def test_grab_screenshot_of_website(db_engine: AsyncEngine) -> None:
 
     finally:
         cleanup_context = MagicMock(
-            spec=ToolExecutionContext, conversation_id="screenshot-test"
+            spec=ToolExecutionContext,
+            conversation_id="screenshot-test",
+            subconversation_id=None,
         )
         await close_browser_session(cleanup_context)
         await assistant.stop_services()

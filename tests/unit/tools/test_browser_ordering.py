@@ -37,6 +37,7 @@ def _context(batch: ToolCallBatch | None, call_id: str | None) -> ToolExecutionC
     return MagicMock(
         spec=ToolExecutionContext,
         conversation_id="ordering-test",
+        subconversation_id=None,
         tool_call_batch=batch,
         tool_call_id=call_id,
     )

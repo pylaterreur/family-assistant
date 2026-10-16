@@ -61,8 +61,12 @@ Introduce a `BrowserBackend` protocol that the DOM tools call instead of touchin
   identical on the family-assistant side.
 
 The backend is selected per execution context: when `browser_handoff_config.enabled` and the active
-profile is handoff-capable, tools resolve a `RemoteBrowserBackend` keyed by `conversation_id`
-(mirroring today's per-conversation `BrowserSession`); otherwise they use `LocalPlaywrightBackend`.
+profile is handoff-capable, tools resolve a `RemoteBrowserBackend` keyed by browser scope (mirroring
+the `BrowserSession`); otherwise they use `LocalPlaywrightBackend`. A browser scope is the
+conversation for a top-level turn and the delegated run for a delegated one, except that a turn
+delegated by a profile that drives the browser itself, in the same credential mode (the visual hop),
+inherits its parent's scope. Parallel browser runs therefore get separate tabs while the semantic
+and visual profiles share one.
 
 ```text
 browser_* tools  ──▶  BrowserBackend (protocol)
