@@ -2128,7 +2128,7 @@ class MessageHistoryRepository(BaseRepository):
         subconversation_id: str | None,
         processing_profile_id: str,
     ) -> MessageReasoningInfo | None:
-        """The usage on the profile's most recent reply that recorded a tier.
+        """The usage on the profile's most recent reply or error that recorded a tier.
 
         What a conversation is currently running at is the tier its latest turn
         ran at, so this is where a tier choice is read back from. Scoped to one
@@ -2148,7 +2148,10 @@ class MessageHistoryRepository(BaseRepository):
                 message_history_table.c.conversation_id == conversation_id,
                 _exact_subconversation_condition(subconversation_id),
                 message_history_table.c.processing_profile_id == processing_profile_id,
-                message_history_table.c.role == "assistant",
+                # A failed turn records its selection on its error row, and it
+                # still said what tier the conversation is on: a turn that left
+                # Deep and then failed has left it.
+                message_history_table.c.role.in_(("assistant", "error")),
             )
             .order_by(message_history_table.c.internal_id.desc())
             .limit(_LATEST_MODEL_SELECTION_SCAN_ROWS)

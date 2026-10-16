@@ -10,11 +10,13 @@ reply so the conversation can say afterwards what it ran at and who chose it.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from family_assistant.llm import LLMOutput
+from family_assistant.llm.messages import AssistantMessage, ErrorMessage
 from family_assistant.llm.model_selection import (
     ModelTierEligibility,
     ModelTierOption,
@@ -30,7 +32,7 @@ if TYPE_CHECKING:
     from httpx import AsyncClient
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-    from family_assistant.llm.messages import MessageReasoningInfo
+    from family_assistant.llm.messages import LLMMessage, MessageReasoningInfo
 
 _ELIGIBILITY = ModelTierEligibility(
     default_tier="standard",
@@ -223,6 +225,42 @@ async def test_choosing_the_default_tier_ends_a_chosen_one(
     reply = await _send(api_test_client, conversation_id)
 
     assert reply == "standard served this"
+
+
+async def test_a_failed_turn_that_left_a_chosen_tier_still_left_it(
+    db_engine: AsyncEngine,
+) -> None:
+    """Otherwise the turn after a failed "back to Standard" would run at Deep."""
+    db = Database(engine=db_engine)
+    conversation_id = f"tier-failed-leave-{uuid.uuid4()}"
+    rows: list[tuple[LLMMessage, MessageReasoningInfo]] = [
+        (
+            AssistantMessage(content="deep served this"),
+            {"model_tier": "deep", "model_tier_source": "user"},
+        ),
+        (
+            ErrorMessage(content="the provider fell over"),
+            {"model_tier": "standard", "model_tier_source": "user"},
+        ),
+    ]
+    for message, reasoning in rows:
+        await db.message_history.add_message(
+            message,
+            interface_type="api",
+            conversation_id=conversation_id,
+            timestamp=datetime.now(UTC),
+            processing_profile_id="default_assistant",
+            reasoning_info=reasoning,
+        )
+
+    latest = await db.message_history.get_latest_model_selection_reasoning(
+        conversation_id,
+        subconversation_id=None,
+        processing_profile_id="default_assistant",
+    )
+
+    assert latest is not None
+    assert latest.get("model_tier") == "standard"
 
 
 @pytest.mark.usefixtures("tiered_app")
