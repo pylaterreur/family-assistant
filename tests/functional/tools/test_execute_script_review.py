@@ -1374,60 +1374,6 @@ async def test_missing_reviewer_fallback_runs_no_effects(
 
 
 @pytest.mark.asyncio
-async def test_observe_verdict_does_not_authorize_nested_calls(
-    db_engine: AsyncEngine,
-) -> None:
-    effects: list[str] = []
-
-    async def ordinary_effect(value: str) -> str:
-        effects.append(value)
-        return "done"
-
-    reviewer = _RecordingReviewer(
-        ToolCallReviewVerdict.ALLOW,
-        ToolCallReviewVerdict.ALLOW,
-    )
-    provider = _provider(
-        [
-            _real_registration("execute_script"),
-            _registration(
-                "ordinary_effect",
-                cast("ToolImplementation", ordinary_effect),
-                tags=(ToolTag.STATE_CHANGING, ToolTag.OUTPUT_TRUSTED),
-                properties={"value": {"type": "string"}},
-            ),
-        ],
-        reviewer=reviewer,
-        rules=[_review_rule("ordinary_effect", ToolPolicyDecision.REVIEW)],
-        taint_policy=TaintPolicyConfig(
-            mode=TaintPolicyMode.OBSERVE,
-            matrix_overrides={
-                SourceTrustTier.UNKNOWN_EXTERNAL: {
-                    SinkClass.SANDBOX_NETWORK: TaintAdjudicateCell(
-                        outcome=TaintPolicyOutcome.ADJUDICATE,
-                        fallback=TaintPolicyOutcome.DENY,
-                    )
-                }
-            },
-        ),
-    )
-    context = _context(db_engine, provider, state=_unknown_external_state())
-
-    await _execute_script(
-        provider,
-        context,
-        script='ordinary_effect(value="inside")',
-    )
-    await provider.close()
-
-    assert effects == ["inside"]
-    assert sorted(call.review_input.descriptor.name for call in reviewer.calls) == [
-        "execute_script",
-        "ordinary_effect",
-    ]
-
-
-@pytest.mark.asyncio
 async def test_static_named_descendants_share_outer_review(
     db_engine: AsyncEngine,
 ) -> None:
@@ -2714,3 +2660,314 @@ async def test_closure_preparation_error_inherits_loaded_descendant_taint(
         and "script_definition" in source.labels
         for source in state.sources
     )
+
+
+def _observe_policy() -> TaintPolicyConfig:
+    """Observe mode with ordinary state changes judged at external taint."""
+    return TaintPolicyConfig(
+        mode=TaintPolicyMode.OBSERVE,
+        matrix_overrides={
+            SourceTrustTier.UNKNOWN_EXTERNAL: {
+                SinkClass.ARTIFACT_WRITE: TaintAdjudicateCell(
+                    outcome=TaintPolicyOutcome.ADJUDICATE,
+                    fallback=TaintPolicyOutcome.DENY,
+                )
+            }
+        },
+    )
+
+
+def _ordinary_effect_registration(effects: list[str]) -> ToolRegistration:
+    async def ordinary_effect(value: str) -> str:
+        effects.append(value)
+        return "done"
+
+    return _registration(
+        "ordinary_effect",
+        cast("ToolImplementation", ordinary_effect),
+        tags=(ToolTag.STATE_CHANGING, ToolTag.OUTPUT_TRUSTED),
+        properties={"value": {"type": "string"}},
+    )
+
+
+async def _inheritance_authorizations(context: ToolExecutionContext) -> list[object]:
+    events = await context.db_context.taint_audit_events.list_for_turn(
+        "script-review-turn"
+    )
+    return [
+        cast("dict[str, object]", event["review_context_json"]).get(
+            "script_authorization"
+        )
+        for event in events
+        if event["event_type"] == "script_inherited_authorization"
+    ]
+
+
+_TWO_EFFECTS = 'ordinary_effect(value="first")\nordinary_effect(value="second")'
+
+
+@pytest.mark.asyncio
+async def test_observe_program_allow_covers_nested_gates_once(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
+    provider = _provider(
+        [_real_registration("execute_script"), _ordinary_effect_registration(effects)],
+        reviewer=reviewer,
+        rules=[],
+        taint_policy=_observe_policy(),
+    )
+    context = _context(db_engine, provider, state=_unknown_external_state())
+
+    await _execute_script(provider, context, script=_TWO_EFFECTS)
+    await provider.close()
+
+    assert effects == ["first", "second"]
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script"
+    ]
+    assert await _inheritance_authorizations(context) == ["inherited", "inherited"]
+
+
+@pytest.mark.asyncio
+async def test_observe_program_allow_covers_a_nested_static_review(
+    db_engine: AsyncEngine,
+) -> None:
+    """An observe-mode allow is a real model allow, with enforce's effect."""
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
+    provider = _provider(
+        [_real_registration("execute_script"), _ordinary_effect_registration(effects)],
+        reviewer=reviewer,
+        rules=[_review_rule("ordinary_effect", ToolPolicyDecision.REVIEW)],
+        taint_policy=_observe_policy(),
+    )
+    context = _context(db_engine, provider, state=_unknown_external_state())
+
+    await _execute_script(provider, context, script='ordinary_effect(value="inside")')
+    await provider.close()
+
+    assert effects == ["inside"]
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_observe_would_be_confirm_forecasts_an_approved_program(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.CONFIRM)
+    confirmation = _ConfirmationRecorder()
+    provider = _provider(
+        [_real_registration("execute_script"), _ordinary_effect_registration(effects)],
+        reviewer=reviewer,
+        rules=[],
+        taint_policy=_observe_policy(),
+    )
+    context = _context(
+        db_engine,
+        provider,
+        state=_unknown_external_state(),
+        confirmation=confirmation,
+    )
+
+    await _execute_script(provider, context, script=_TWO_EFFECTS)
+    await provider.close()
+
+    assert effects == ["first", "second"]
+    assert confirmation.calls == []
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script"
+    ]
+    assert await _inheritance_authorizations(context) == [
+        "inherited_forecast",
+        "inherited_forecast",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_forecast_approval_does_not_cover_a_live_static_review(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.CONFIRM,
+        ToolCallReviewVerdict.ALLOW,
+    )
+    provider = _provider(
+        [_real_registration("execute_script"), _ordinary_effect_registration(effects)],
+        reviewer=reviewer,
+        rules=[_review_rule("ordinary_effect", ToolPolicyDecision.REVIEW)],
+        taint_policy=_observe_policy(),
+    )
+    context = _context(
+        db_engine,
+        provider,
+        state=_unknown_external_state(),
+        confirmation=_ConfirmationRecorder(),
+    )
+
+    await _execute_script(provider, context, script='ordinary_effect(value="inside")')
+    await provider.close()
+
+    assert effects == ["inside"]
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script",
+        "ordinary_effect",
+    ]
+    live_review = reviewer.calls[1].review_input
+    assert not live_review.program_approval_requested
+    assert not live_review.enclosing_scripts[-1].approval_active
+    assert await _inheritance_authorizations(context) == []
+
+
+@pytest.mark.asyncio
+async def test_forecast_approval_stamps_no_definition(
+    db_engine: AsyncEngine,
+) -> None:
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.CONFIRM,
+        ToolCallReviewVerdict.DENY,
+    )
+    provider = _provider(
+        [_real_registration("execute_script"), _real_registration("save_script")],
+        reviewer=reviewer,
+        rules=[],
+        taint_policy=_observe_policy(),
+    )
+    context = _context(
+        db_engine,
+        provider,
+        state=_unknown_external_state(),
+        confirmation=_ConfirmationRecorder(),
+    )
+
+    await _execute_script(
+        provider,
+        context,
+        script='save_script(name="child", description="child", code="print(1)")',
+    )
+    await provider.close()
+
+    child = await context.db_context.scripts.get_by_name("child")
+    assert child is not None
+    record = definition_record_from_row(child.definition_record)
+    assert record is not None
+    assert record.disposition is CreationDisposition.JUDGE_DENIED
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script",
+        "save_script",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_observe_would_be_denied_program_keeps_nested_shadow_reviews(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.DENY,
+        ToolCallReviewVerdict.ALLOW,
+        ToolCallReviewVerdict.ALLOW,
+    )
+    provider = _provider(
+        [_real_registration("execute_script"), _ordinary_effect_registration(effects)],
+        reviewer=reviewer,
+        rules=[],
+        taint_policy=_observe_policy(),
+    )
+    context = _context(db_engine, provider, state=_unknown_external_state())
+
+    await _execute_script(provider, context, script=_TWO_EFFECTS)
+    await provider.close()
+
+    assert effects == ["first", "second"]
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script",
+        "ordinary_effect",
+        "ordinary_effect",
+    ]
+    assert not any(
+        call.review_input.program_approval_requested for call in reviewer.calls
+    )
+    assert await _inheritance_authorizations(context) == []
+
+
+@pytest.mark.asyncio
+async def test_observe_first_keychute_review_decides_the_program(
+    db_engine: AsyncEngine,
+) -> None:
+    proxy_requests: list[httpx.Request] = []
+    transport = _keychute_broker_handler("example.test", "/data", proxy_requests)
+    async_client_class = httpx.AsyncClient
+    source = (
+        "read_external()\n"
+        'keychute_http_request("weather", "https://example.test/data")\n'
+        'keychute_http_request("weather", "https://example.test/data")["status_code"]'
+    )
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
+    provider = _provider(
+        [_real_registration("execute_script"), _read_external_registration()],
+        reviewer=reviewer,
+        rules=[],
+        taint_policy=TaintPolicyConfig(mode=TaintPolicyMode.OBSERVE),
+    )
+    app_config = AppConfig(
+        keychute_config=KeychuteConfig(
+            enabled=True,
+            url="https://keychute.test",
+            token=SecretStr("test-token"),
+        )
+    )
+    context = _context(db_engine, provider, app_config=app_config)
+
+    with patch(
+        "family_assistant.scripting.apis.keychute.httpx.AsyncClient",
+        side_effect=lambda **kwargs: async_client_class(transport=transport, **kwargs),
+    ):
+        result = await _execute_script(provider, context, script=source)
+    await provider.close()
+
+    assert isinstance(result, ToolResult)
+    assert result.data == 200
+    assert len(proxy_requests) == 2
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "keychute_http_request"
+    ]
+    assert reviewer.calls[0].review_input.program_approval_requested
+    assert await _inheritance_authorizations(context) == ["inherited"]
+
+
+@pytest.mark.parametrize(
+    "verdict", [ToolCallReviewVerdict.DENY, ToolCallReviewVerdict.CONFIRM]
+)
+@pytest.mark.asyncio
+async def test_observe_program_review_keeps_a_live_static_confirmation(
+    db_engine: AsyncEngine,
+    verdict: ToolCallReviewVerdict,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(verdict)
+    confirmation = _ConfirmationRecorder()
+    provider = _provider(
+        [_real_registration("execute_script"), _ordinary_effect_registration(effects)],
+        reviewer=reviewer,
+        rules=[_review_rule("execute_script", ToolPolicyDecision.CONFIRM)],
+        taint_policy=TaintPolicyConfig(mode=TaintPolicyMode.OBSERVE),
+    )
+    context = _context(
+        db_engine,
+        provider,
+        state=_unknown_external_state(),
+        confirmation=confirmation,
+    )
+
+    await _execute_script(provider, context, script='ordinary_effect(value="inside")')
+    await provider.close()
+
+    assert effects == ["inside"]
+    assert [call[0] for call in confirmation.calls] == ["execute_script"]
+    assert len(reviewer.calls) == 1

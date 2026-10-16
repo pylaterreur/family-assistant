@@ -603,6 +603,20 @@ async def _prepare_script_call(
     return invocation.arguments()
 
 
+_ESCALATION_OUTCOMES = {
+    "escalation_turn_terminated": (
+        "the turn will terminate because confirmation is unavailable."
+    ),
+    "escalation_confirmation_requested": "a human confirmation was requested.",
+    "escalation_would_terminate": (
+        "enforce would terminate the turn; observe mode stopped nothing."
+    ),
+    "escalation_would_confirm": (
+        "enforce would request a human confirmation; observe mode prompted nothing."
+    ),
+}
+"""What each tool-call review escalation status did, or would have done."""
+
 _MODEL_STEERABLE_SINKS = frozenset({
     SinkClass.ARBITRARY_EXTERNAL_MESSAGE,
     SinkClass.ATTACKER_ADDRESSABLE_EGRESS,
@@ -610,23 +624,40 @@ _MODEL_STEERABLE_SINKS = frozenset({
 """Sinks whose destination a model's result could name once the program has one."""
 
 
+def _approval_binds(scope: ScriptExecutionScope, *, live_gate: bool) -> bool:
+    """Whether the running program's approval covers a gate.
+
+    A forecast approval stands in for a human confirmation observe mode never
+    asks for, so it covers only gates whose own verdicts would be forecasts.
+    """
+    return scope.approved and not (live_gate and scope.approval_is_forecast)
+
+
 def _script_call_inherits(
     descriptor: ToolDescriptor,
     context: ToolExecutionContext,
     arguments: Mapping[str, object],
+    *,
+    live_gate: bool,
 ) -> bool:
     scope = context.script_execution
     if scope is None:
         return False
+    approved = _approval_binds(scope, live_gate=live_gate)
     prepared = context.prepared_script
     if (
         descriptor.name == "execute_script"
         and prepared is not None
         and prepared.bound_child
     ):
-        if scope.approved:
-            _approve_prepared_script(context, "inherited", scope.approving_review_id)
-        return scope.approved
+        if approved:
+            _approve_prepared_script(
+                context,
+                "inherited",
+                scope.approving_review_id,
+                forecast=scope.approval_is_forecast,
+            )
+        return approved
     if (
         ToolTag.DELEGATION in descriptor.tags
         or ToolTag.SCRIPT_DETERMINISTIC not in descriptor.tags
@@ -649,7 +680,7 @@ def _script_call_inherits(
         or sink_class is SinkClass.SANDBOX_NETWORK
     ) and not _strings_are_program_literals(arguments, scope):
         return False
-    return scope.approved
+    return approved
 
 
 def _strings_are_program_literals(
@@ -692,10 +723,15 @@ def _program_scope_awaiting_review(
 
 
 def _approve_prepared_script(
-    context: ToolExecutionContext, decision: str, review_id: str | None = None
+    context: ToolExecutionContext,
+    decision: str,
+    review_id: str | None = None,
+    *,
+    forecast: bool = False,
 ) -> None:
     if context.prepared_script is not None:
         context.prepared_script.approved = True
+        context.prepared_script.forecast_approval = forecast
         context.prepared_script.review = replace(
             context.prepared_script.review, decision=decision, review_id=review_id
         )
@@ -1415,7 +1451,12 @@ class PolicyEnforcingToolsProvider(ToolsProvider):
         if isinstance(prepared, ToolResult):
             return prepared
         arguments = prepared
-        _script_call_inherits(descriptor, context, arguments)
+        _script_call_inherits(
+            descriptor,
+            context,
+            arguments,
+            live_gate=evaluation.decision is ToolPolicyDecision.REVIEW,
+        )
 
         async def execute_authorized() -> str | ToolResult:
             return await self.wrapped_provider.execute_tool(
@@ -1956,7 +1997,9 @@ class TaintTrackingToolsProvider(ToolsProvider):
             )
         if (
             scope is not None
-            and scope.approved
+            and _approval_binds(
+                scope, live_gate=evaluation.mode is TaintPolicyMode.ENFORCE
+            )
             and name == "keychute_http_request"
             and not scope.model_output_received
         ):
@@ -2024,7 +2067,9 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 tags=frozenset(),
                 origin="local",
             )
-            if evaluation.mode is TaintPolicyMode.OBSERVE:
+            forecast = evaluation.mode is TaintPolicyMode.OBSERVE
+            program_scope = _program_scope_awaiting_review(context)
+            if forecast and program_scope is None:
                 self._start_shadow_review(
                     descriptor=descriptor,
                     arguments=arguments,
@@ -2036,6 +2081,10 @@ class TaintTrackingToolsProvider(ToolsProvider):
                     static_evaluation=None,
                 )
                 return
+            # A review that also decides the running program is awaited in
+            # observe mode too, so a program enforce would approve is approved
+            # here and its later operations inherit rather than each being
+            # reviewed. Only the block or prompt is left out.
             result = await self._review_tool_call(
                 descriptor=descriptor,
                 arguments=arguments,
@@ -2045,9 +2094,12 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 sink_class=sink_class,
                 taint_evaluation=evaluation,
                 static_evaluation=None,
-                include_observe_taint_constraints=False,
-                program_scope=_program_scope_awaiting_review(context),
+                include_observe_taint_constraints=forecast,
+                forecast=forecast,
+                program_scope=program_scope,
             )
+            if forecast:
+                return
             if result.verdict is ToolCallReviewVerdict.DENY:
                 raise ToolPolicyDeniedError(name, result.reason)
             if result.verdict is ToolCallReviewVerdict.CONFIRM:
@@ -2170,9 +2222,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
                     taint_evaluation=evaluation,
                     static_evaluation=None,
                     include_observe_taint_constraints=True,
-                    program_scope=(
-                        _program_scope_awaiting_review(context) if enforce else None
-                    ),
+                    program_scope=_program_scope_awaiting_review(context),
                 )
                 if (
                     review_result.verdict is ToolCallReviewVerdict.ALLOW
@@ -2471,7 +2521,12 @@ class TaintTrackingToolsProvider(ToolsProvider):
         if isinstance(prepared, ToolResult):
             return prepared
         arguments = prepared
-        _script_call_inherits(descriptor, context, arguments)
+        _script_call_inherits(
+            descriptor,
+            context,
+            arguments,
+            live_gate=self._taint_evaluator.mode is TaintPolicyMode.ENFORCE,
+        )
 
         async def execute_authorized() -> str | ToolResult:
             return await self.wrapped_provider.execute_tool(
@@ -2541,7 +2596,17 @@ class TaintTrackingToolsProvider(ToolsProvider):
     ) -> str | ToolResult:
         """Merge static and taint decisions, then invoke authorized dispatch once."""
 
-        inherited = _script_call_inherits(descriptor, context, arguments)
+        static_review = (
+            static_evaluation is not None
+            and static_evaluation.decision is ToolPolicyDecision.REVIEW
+        )
+        inherited = _script_call_inherits(
+            descriptor,
+            context,
+            arguments,
+            live_gate=static_review
+            or self._taint_evaluator.mode is TaintPolicyMode.ENFORCE,
+        )
         if context.prepared_script is not None:
             review = context.prepared_script.review
             context.prepared_script.review = replace(
@@ -2617,13 +2682,17 @@ class TaintTrackingToolsProvider(ToolsProvider):
                     f"{evaluation.reason}; redaction outcomes are not executable yet",
                 )
 
-        static_review = (
-            static_evaluation is not None
-            and static_evaluation.decision is ToolPolicyDecision.REVIEW
-        )
         taint_review = (
             evaluation is not None
             and evaluation.requested_outcome is TaintPolicyOutcome.ADJUDICATE
+        )
+        # Observe runs enforce's decision path for a taint-only review and
+        # replaces only its block or prompt with a recorded verdict.
+        forecast_review = (
+            taint_review
+            and evaluation is not None
+            and evaluation.mode is TaintPolicyMode.OBSERVE
+            and not static_review
         )
         confined_exemption = (
             taint_review
@@ -2679,10 +2748,16 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 evaluation=evaluation,
             )
         elif (
-            taint_review
+            forecast_review
             and evaluation is not None
-            and (evaluation.mode is TaintPolicyMode.OBSERVE and not static_review)
+            and context.prepared_script is None
+            and _program_scope_awaiting_review(context) is None
         ):
+            # A review that decides no program is all forecast, so it runs off
+            # the critical path. One that decides a program is awaited below,
+            # because the program's approval changes what its later
+            # operations need.
+            #
             # The verdict does not block the call, so any definition this call
             # writes lands pending and resolves uncured until the review
             # completes -- a latency-bounded window, seconds wide, in which a
@@ -2708,6 +2783,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 taint_evaluation=evaluation,
                 static_evaluation=static_evaluation,
                 pending=pending_definition_review,
+                escalates=True,
             )
         elif (
             static_review or taint_review or context.prepared_script is not None
@@ -2742,7 +2818,8 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 sink_class=sink_class,
                 taint_evaluation=evaluation,
                 static_evaluation=static_evaluation,
-                include_observe_taint_constraints=False,
+                include_observe_taint_constraints=forecast_review,
+                forecast=forecast_review,
                 program_scope=_program_scope_awaiting_review(context),
             )
 
@@ -2765,7 +2842,19 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 taint_evaluation=evaluation,
                 static_evaluation=static_evaluation,
             )
-            if review_result.verdict is ToolCallReviewVerdict.DENY:
+            if forecast_review and evaluation is not None:
+                await self._record_forecast_consequence(
+                    descriptor=descriptor,
+                    arguments=arguments,
+                    context=context,
+                    call_id=call_id,
+                    state=state,
+                    sink_class=sink_class,
+                    taint_evaluation=evaluation,
+                    static_evaluation=static_evaluation,
+                    review_result=review_result,
+                )
+            elif review_result.verdict is ToolCallReviewVerdict.DENY:
                 state_before_confirmation = (
                     context.taint_tracker.snapshot()
                     if context.taint_tracker is not None
@@ -2910,6 +2999,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
         )
         if hard_confirm and (
             review_result is None
+            or forecast_review
             or review_result.verdict is ToolCallReviewVerdict.ALLOW
         ):
             state_before_confirmation = (
@@ -3237,14 +3327,29 @@ class TaintTrackingToolsProvider(ToolsProvider):
         static_evaluation: PolicyEvaluation | None,
         include_observe_taint_constraints: bool,
         count_reserved: bool = False,
-        update_denial_counters: bool = True,
+        forecast: bool = False,
         program_scope: ScriptExecutionScope | None = None,
     ) -> ToolCallReviewResult:
-        """Run one review; ``program_scope`` makes its verdict the program's too."""
+        """Run one review; ``program_scope`` makes its verdict the program's too.
+
+        ``forecast`` marks a review whose verdict binds nothing, so its denials
+        count only towards the forecast of an escalation.
+        """
         constraints = self._review_constraints(
             taint_evaluation=taint_evaluation,
             static_evaluation=static_evaluation,
             include_observe_taint_constraints=include_observe_taint_constraints,
+        )
+        enforce_constraints = (
+            self._review_constraints(
+                taint_evaluation=taint_evaluation,
+                static_evaluation=static_evaluation,
+                include_observe_taint_constraints=True,
+            )
+            if taint_evaluation is not None
+            and taint_evaluation.mode is TaintPolicyMode.OBSERVE
+            and not include_observe_taint_constraints
+            else None
         )
         config = self._review_config
         budget_exhausted = (
@@ -3332,6 +3437,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
             ),
             result=result,
             mode=taint_evaluation.mode if taint_evaluation is not None else None,
+            enforce_constraints=enforce_constraints,
         )
         result = result.model_copy(update={"audit_event_id": audit_event_id})
         if program_scope is not None:
@@ -3345,16 +3451,21 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 program_scope.record_program_decision(
                     f"{result.verdict.value}:{result.status.value}", audit_event_id
                 )
-        if update_denial_counters:
-            if _is_escalatable_review_denial(result, constraints):
-                context.tool_call_review_state.consecutive_denials += 1
-                context.tool_call_review_state.total_denials += 1
-            elif result.verdict is not ToolCallReviewVerdict.DENY:
-                # A non-escalatable deny (for example a timeout fallback or a
-                # deny-only policy floor) is not evidence of another model
-                # denial, but neither is it evidence that the denial streak
-                # ended. Only an allow/confirm verdict resets that streak.
-                context.tool_call_review_state.consecutive_denials = 0
+        review_state = context.tool_call_review_state
+        if _is_escalatable_review_denial(result, constraints):
+            review_state.forecast_consecutive_denials += 1
+            review_state.forecast_total_denials += 1
+            if not forecast:
+                review_state.consecutive_denials += 1
+                review_state.total_denials += 1
+        elif result.verdict is not ToolCallReviewVerdict.DENY:
+            # A non-escalatable deny (for example a timeout fallback or a
+            # deny-only policy floor) is not evidence of another model
+            # denial, but neither is it evidence that the denial streak
+            # ended. Only an allow/confirm verdict resets that streak.
+            review_state.forecast_consecutive_denials = 0
+            if not forecast:
+                review_state.consecutive_denials = 0
         return result
 
     async def _human_confirmation_decisions(
@@ -3416,7 +3527,14 @@ class TaintTrackingToolsProvider(ToolsProvider):
         taint_evaluation: TaintPolicyEvaluation,
         static_evaluation: PolicyEvaluation | None,
         pending: PendingDefinitionReview | None = None,
+        escalates: bool = False,
     ) -> None:
+        """Review off the critical path; ``escalates`` forecasts a denial escalation.
+
+        A detached review updates the forecast counters whenever it finishes,
+        not in the order the calls were made, so the forecast escalation is
+        approximate.
+        """
         config = self._review_config
         budget_exhausted = (
             config is not None
@@ -3436,8 +3554,20 @@ class TaintTrackingToolsProvider(ToolsProvider):
             static_evaluation=static_evaluation,
             include_observe_taint_constraints=True,
             count_reserved=not budget_exhausted,
-            update_denial_counters=False,
+            forecast=True,
         )
+        if escalates:
+            review = self._forecast_escalation_after(
+                review,
+                descriptor=descriptor,
+                arguments=arguments,
+                context=context,
+                call_id=call_id,
+                state=state,
+                sink_class=sink_class,
+                taint_evaluation=taint_evaluation,
+                static_evaluation=static_evaluation,
+            )
         task = spawn_detached(
             review
             if pending is None
@@ -3451,6 +3581,127 @@ class TaintTrackingToolsProvider(ToolsProvider):
         )
         self._review_tasks.add(task)
         task.add_done_callback(self._finish_shadow_review)
+
+    async def _forecast_escalation_after(
+        self,
+        review: Awaitable[ToolCallReviewResult],
+        *,
+        descriptor: ToolDescriptor,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+        call_id: str | None,
+        state: TurnTaintState,
+        sink_class: SinkClass,
+        taint_evaluation: TaintPolicyEvaluation,
+        static_evaluation: PolicyEvaluation | None,
+    ) -> ToolCallReviewResult:
+        result = await review
+        await self._record_forecast_escalation(
+            descriptor=descriptor,
+            arguments=arguments,
+            context=context,
+            call_id=call_id,
+            state=state,
+            sink_class=sink_class,
+            taint_evaluation=taint_evaluation,
+            static_evaluation=static_evaluation,
+            review_result=result,
+        )
+        return result
+
+    async def _record_forecast_consequence(
+        self,
+        *,
+        descriptor: ToolDescriptor,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+        call_id: str | None,
+        state: TurnTaintState,
+        sink_class: SinkClass,
+        taint_evaluation: TaintPolicyEvaluation,
+        static_evaluation: PolicyEvaluation | None,
+        review_result: ToolCallReviewResult,
+    ) -> None:
+        """Record what enforce would do with an observe-mode verdict, without doing it.
+
+        A ``confirm`` of the program a call starts counts as approved: under
+        enforce a person either approves it, and its operations inherit, or
+        the program never runs, and either way it prompts nothing further.
+        The approval is marked a forecast, so it binds no live gate and no
+        definition is stamped as confirmed by it.
+        """
+        if review_result.verdict is ToolCallReviewVerdict.CONFIRM:
+            _approve_prepared_script(
+                context,
+                "confirm:forecast",
+                review_result.audit_event_id,
+                forecast=True,
+            )
+        elif review_result.verdict is ToolCallReviewVerdict.DENY:
+            await self._record_forecast_escalation(
+                descriptor=descriptor,
+                arguments=arguments,
+                context=context,
+                call_id=call_id,
+                state=state,
+                sink_class=sink_class,
+                taint_evaluation=taint_evaluation,
+                static_evaluation=static_evaluation,
+                review_result=review_result,
+            )
+
+    async def _record_forecast_escalation(
+        self,
+        *,
+        descriptor: ToolDescriptor,
+        arguments: Mapping[str, object],
+        context: ToolExecutionContext,
+        call_id: str | None,
+        state: TurnTaintState,
+        sink_class: SinkClass,
+        taint_evaluation: TaintPolicyEvaluation,
+        static_evaluation: PolicyEvaluation | None,
+        review_result: ToolCallReviewResult,
+    ) -> None:
+        """Record, once per turn, where enforce's denial escalation would trip."""
+        constraints = self._review_constraints(
+            taint_evaluation=taint_evaluation,
+            static_evaluation=static_evaluation,
+            include_observe_taint_constraints=True,
+        )
+        review_state = context.tool_call_review_state
+        if (
+            not _is_escalatable_review_denial(review_result, constraints)
+            or review_state.forecast_escalation_handled
+            or not self._escalation_threshold_reached(
+                consecutive=review_state.forecast_consecutive_denials,
+                total=review_state.forecast_total_denials,
+            )
+        ):
+            return
+        review_state.forecast_escalation_handled = True
+        await self._record_review_escalation_audit(
+            descriptor=descriptor,
+            arguments=arguments,
+            context=context,
+            call_id=call_id,
+            state=state,
+            sink_class=sink_class,
+            mode=taint_evaluation.mode,
+            constraints=constraints,
+            status=(
+                "escalation_would_terminate"
+                if self._review_confirmation_unavailable(descriptor, context)
+                else "escalation_would_confirm"
+            ),
+        )
+
+    def _escalation_threshold_reached(self, *, consecutive: int, total: int) -> bool:
+        config = self._review_config
+        return config is not None and (
+            consecutive >= config.escalation.consecutive_denials
+            or total >= config.escalation.total_denials_per_turn
+        )
 
     async def _attach_shadow_verdict(
         self,
@@ -3520,7 +3771,14 @@ class TaintTrackingToolsProvider(ToolsProvider):
             reason="Covered deterministic operation inherits the enclosing program's approval; runtime controls remain enforced.",
             arguments_summary=None,
             review_status="inherited_script_approval",
-            review_context={"script_authorization": "inherited"},
+            review_context={
+                "script_authorization": (
+                    "inherited_forecast"
+                    if context.script_execution is not None
+                    and context.script_execution.approval_is_forecast
+                    else "inherited"
+                )
+            },
         )
 
     async def _record_taint_audit_event(
@@ -3597,6 +3855,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
         destination_echo: bool | None,
         result: ToolCallReviewResult,
         mode: TaintPolicyMode | None,
+        enforce_constraints: ToolCallReviewConstraints | None,
     ) -> str:
         review_context: TaintAuditReviewContext = {
             "delegating_contexts": [
@@ -3609,6 +3868,13 @@ class TaintTrackingToolsProvider(ToolsProvider):
             "used_fallback": result.used_fallback,
             "destination_echo": destination_echo,
         }
+        if enforce_constraints is not None:
+            # A live review in observe mode leaves out the taint cell's
+            # constraints; enforce would not, so a forecast reads its verdict
+            # against this space instead.
+            review_context["enforce_available_verdicts"] = sorted(
+                verdict.value for verdict in enforce_constraints.available_verdicts
+            )
         return await self._record_taint_audit_event(
             context=context,
             event_type="tool_call_review",
@@ -3761,12 +4027,9 @@ class TaintTrackingToolsProvider(ToolsProvider):
     ) -> _ConfirmationGateResult | ToolResult | None:
         if not _is_escalatable_review_denial(review_result, constraints):
             return self._review_denial_result(descriptor.name, review_result)
-        config = self._review_config
-        threshold_reached = config is not None and (
-            context.tool_call_review_state.consecutive_denials
-            >= config.escalation.consecutive_denials
-            or context.tool_call_review_state.total_denials
-            >= config.escalation.total_denials_per_turn
+        threshold_reached = self._escalation_threshold_reached(
+            consecutive=context.tool_call_review_state.consecutive_denials,
+            total=context.tool_call_review_state.total_denials,
         )
         if not threshold_reached or context.tool_call_review_state.escalation_handled:
             return self._review_denial_result(descriptor.name, review_result)
@@ -3775,6 +4038,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
         # this turn state must observe the reservation and cannot open a second
         # prompt or request another deterministic termination.
         context.tool_call_review_state.escalation_handled = True
+        context.tool_call_review_state.forecast_escalation_handled = True
         confirmation_unavailable = self._review_confirmation_unavailable(
             descriptor, context
         )
@@ -3862,17 +4126,14 @@ class TaintTrackingToolsProvider(ToolsProvider):
             requested_outcome="review_escalation",
             effective_outcome=(
                 ToolCallReviewVerdict.DENY.value
-                if status == "escalation_turn_terminated"
+                if status
+                in {"escalation_turn_terminated", "escalation_would_terminate"}
                 else ToolCallReviewVerdict.CONFIRM.value
             ),
             mode=mode.value if mode is not None else None,
             reason=(
                 "Automatic-review model-denial threshold reserved exactly once; "
-                + (
-                    "the turn will terminate because confirmation is unavailable."
-                    if status == "escalation_turn_terminated"
-                    else "a human confirmation was requested."
-                )
+                + _ESCALATION_OUTCOMES[status]
             ),
             arguments_summary=_summarize_tool_arguments(
                 arguments,
