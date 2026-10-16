@@ -193,9 +193,11 @@ async def browser_scope_key(exec_context: ToolExecutionContext) -> str:
 
     The top-level conversation turn uses the conversation's own scope. A
     delegated turn inherits its parent's scope when the parent profile drives
-    the browser itself -- that is how the visual hop works in the semantic
-    profile's tab -- and otherwise gets a scope of its own, so parallel browser
-    runs delegated by the main assistant each have their own tab.
+    the browser itself in the same credential mode -- that is how the visual
+    hop works in the semantic profile's tab -- and otherwise gets a scope of its
+    own, so parallel browser runs each have their own tab. A credential child of
+    an ordinary browser run never shares its parent's browser anyway, so it is
+    scoped to itself too, and parallel credential runs stay apart.
     """
     conversation_id = exec_context.conversation_id or "default"
     subconversation_id = getattr(exec_context, "subconversation_id", None)
@@ -226,7 +228,7 @@ async def _inherited_scope(
     conversation_id: str,
     subconversation_id: str,
 ) -> str | None:
-    """The parent's scope, when a browser-driving profile queued this run."""
+    """The parent's scope, when this run continues its parent's tab."""
     service = getattr(exec_context, "processing_service", None)
     registry = getattr(service, "processing_services_registry", None)
     if registry is None:
@@ -236,13 +238,42 @@ async def _inherited_scope(
     )
     if run is None:
         return None
-    source = registry.get(run["source_profile_id"])
-    if source is None or not await _drives_browser(source):
+    if not await _continues_parent_tab(
+        exec_context,
+        registry.get(run["source_profile_id"]),
+        run["source_profile_id"],
+        run["target_service_id"],
+    ):
         return None
     parent = run["source_subconversation_id"]
     if parent is None:
         return conversation_id
     return await _subconversation_scope(exec_context, conversation_id, parent)
+
+
+async def _continues_parent_tab(
+    exec_context: ToolExecutionContext,
+    source_service: object,
+    source_profile_id: str | None,
+    target_profile_id: str,
+) -> bool:
+    """Whether a delegated turn works in its parent's tab rather than its own.
+
+    Only when the parent drives the browser and both sit on the same side of
+    the credential-mode split, since ordinary and credential browsing never
+    share a browser context.
+    """
+    service = getattr(exec_context, "processing_service", None)
+    app_config = getattr(service, "app_config", None)
+    handoff = getattr(app_config, "browser_handoff_config", None)
+    credential_profiles = (
+        handoff.autofill_capable_profiles if handoff is not None else []
+    )
+    if (source_profile_id in credential_profiles) != (
+        target_profile_id in credential_profiles
+    ):
+        return False
+    return await _drives_browser(source_service)
 
 
 async def _drives_browser(service: object) -> bool:
@@ -265,14 +296,21 @@ async def _drives_browser(service: object) -> bool:
 
 @asynccontextmanager
 async def delegated_browser_scope(
-    exec_context: ToolExecutionContext, subconversation_id: str
+    exec_context: ToolExecutionContext,
+    subconversation_id: str,
+    target_profile_id: str,
 ) -> AsyncIterator[None]:
     """Give an inline delegated turn its browser scope for its lifetime.
 
     The inline path mints a subconversation with no run row, so the child could
     not find its parent's scope by itself.
     """
-    if await _drives_browser(getattr(exec_context, "processing_service", None)):
+    if await _continues_parent_tab(
+        exec_context,
+        getattr(exec_context, "processing_service", None),
+        getattr(exec_context, "processing_profile_id", None),
+        target_profile_id,
+    ):
         scope = await browser_scope_key(exec_context)
     else:
         scope = f"{exec_context.conversation_id or 'default'}/{subconversation_id}"

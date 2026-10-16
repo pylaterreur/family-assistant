@@ -459,7 +459,7 @@ async def _synchronous_delegation_result(
     # tab it is supposed to share.
     async with (
         _inherited_authenticated_binding(exec_context, subconversation_id),
-        delegated_browser_scope(exec_context, subconversation_id),
+        delegated_browser_scope(exec_context, subconversation_id, target_service_id),
     ):
         return await _run_synchronous_delegation(
             exec_context,

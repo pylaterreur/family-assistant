@@ -33,6 +33,8 @@ pytestmark = pytest.mark.asyncio
 ASSISTANT = "default_assistant"
 BROWSER = "browser_profile"
 VISUAL = "browser_visual_profile"
+CREDENTIAL = "credential_browser_profile"
+CREDENTIAL_VISUAL = "credential_browser_visual_profile"
 
 
 def _definition(name: str) -> ToolDefinition:
@@ -56,6 +58,13 @@ class _Service:
 
     tools_provider: _ToolsProvider
     processing_services_registry: dict[str, _Service] = field(default_factory=dict)
+    app_config: SimpleNamespace = field(
+        default_factory=lambda: SimpleNamespace(
+            browser_handoff_config=SimpleNamespace(
+                autofill_capable_profiles=[CREDENTIAL, CREDENTIAL_VISUAL]
+            )
+        )
+    )
 
 
 def _registry() -> dict[str, _Service]:
@@ -65,6 +74,10 @@ def _registry() -> dict[str, _Service]:
         ASSISTANT: _Service(_ToolsProvider(["delegate_to_service", "get_note"])),
         BROWSER: _Service(_ToolsProvider(["browser_open", "delegate_to_service"])),
         VISUAL: _Service(_ToolsProvider(["computer_use_click"])),
+        CREDENTIAL: _Service(
+            _ToolsProvider(["browser_open", "browser_autofill", "delegate_to_service"])
+        ),
+        CREDENTIAL_VISUAL: _Service(_ToolsProvider(["computer_use_click"])),
     }
     for service in registry.values():
         service.processing_services_registry = registry
@@ -86,6 +99,7 @@ def _context(
             subconversation_id=subconversation_id,
             db_context=db,
             processing_service=registry[profile_id],
+            processing_profile_id=profile_id,
             timezone=None,
         ),
     )
@@ -241,7 +255,7 @@ async def test_inline_hop_from_a_browser_turn_shares_its_scope(
     )
     inline_child = str(uuid.uuid4())
 
-    async with delegated_browser_scope(parent, inline_child):
+    async with delegated_browser_scope(parent, inline_child, VISUAL):
         child_scope = await browser_scope_key(
             _context(
                 db,
@@ -266,7 +280,7 @@ async def test_inline_delegation_from_a_non_browser_turn_gets_its_own_scope(
     )
     inline_child = str(uuid.uuid4())
 
-    async with delegated_browser_scope(parent, inline_child):
+    async with delegated_browser_scope(parent, inline_child, BROWSER):
         child_scope = await browser_scope_key(
             _context(
                 db,
@@ -278,3 +292,86 @@ async def test_inline_delegation_from_a_non_browser_turn_gets_its_own_scope(
         )
 
     assert child_scope != conversation_id
+
+
+async def test_parallel_credential_runs_from_a_browser_run_get_separate_scopes(
+    db_engine: AsyncEngine,
+) -> None:
+    """A credential child never shares its parent's browser, so siblings stay apart."""
+    db = Database(db_engine)
+    registry = _registry()
+    conversation_id = str(uuid.uuid4())
+    browser_run = await _delegate(
+        db,
+        conversation_id,
+        source_profile_id=ASSISTANT,
+        target_profile_id=BROWSER,
+        source_subconversation_id=None,
+    )
+    first, second = [
+        await _delegate(
+            db,
+            conversation_id,
+            source_profile_id=BROWSER,
+            target_profile_id=CREDENTIAL,
+            source_subconversation_id=browser_run,
+        )
+        for _ in range(2)
+    ]
+
+    first_scope = await browser_scope_key(
+        _context(
+            db,
+            registry,
+            conversation_id,
+            profile_id=CREDENTIAL,
+            subconversation_id=first,
+        )
+    )
+    second_scope = await browser_scope_key(
+        _context(
+            db,
+            registry,
+            conversation_id,
+            profile_id=CREDENTIAL,
+            subconversation_id=second,
+        )
+    )
+
+    assert first_scope != second_scope
+
+
+async def test_inline_credential_visual_hop_shares_the_credential_scope(
+    db_engine: AsyncEngine,
+) -> None:
+    db = Database(db_engine)
+    registry = _registry()
+    conversation_id = str(uuid.uuid4())
+    credential_run = await _delegate(
+        db,
+        conversation_id,
+        source_profile_id=BROWSER,
+        target_profile_id=CREDENTIAL,
+        source_subconversation_id=None,
+    )
+    parent = _context(
+        db,
+        registry,
+        conversation_id,
+        profile_id=CREDENTIAL,
+        subconversation_id=credential_run,
+    )
+    inline_child = str(uuid.uuid4())
+
+    async with delegated_browser_scope(parent, inline_child, CREDENTIAL_VISUAL):
+        child_scope = await browser_scope_key(
+            _context(
+                db,
+                registry,
+                conversation_id,
+                profile_id=CREDENTIAL_VISUAL,
+                subconversation_id=inline_child,
+            )
+        )
+
+    assert child_scope == await browser_scope_key(parent)

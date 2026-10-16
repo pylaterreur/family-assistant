@@ -64,8 +64,9 @@ The backend is selected per execution context: when `browser_handoff_config.enab
 profile is handoff-capable, tools resolve a `RemoteBrowserBackend` keyed by browser scope (mirroring
 the `BrowserSession`); otherwise they use `LocalPlaywrightBackend`. A browser scope is the
 conversation for a top-level turn and the delegated run for a delegated one, except that a turn
-delegated by a profile that drives the browser itself (the visual hop) inherits its parent's scope.
-Parallel browser runs therefore get separate tabs while the semantic and visual profiles share one.
+delegated by a profile that drives the browser itself, in the same credential mode (the visual hop),
+inherits its parent's scope. Parallel browser runs therefore get separate tabs while the semantic
+and visual profiles share one.
 
 ```text
 browser_* tools  ──▶  BrowserBackend (protocol)
