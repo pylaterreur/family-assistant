@@ -259,14 +259,19 @@ def convert_tools_to_genai_format(tools: list[ToolDefinition]) -> list[Any]:
 
         # Convert properties to Google format
         google_properties = {}
-        for prop_name, prop_def in properties.items():
+        for prop_name, prop_schema in properties.items():
+            # A boolean schema (``true``) constrains nothing, like ``{}``.
+            prop_def = prop_schema if isinstance(prop_schema, dict) else {}
             prop_type, prop_nullable = normalize_json_schema_type(
                 prop_def.get("type", "string")
             )
 
             if prop_type == "array":
                 # Handle array types - need to specify items
-                items_def = prop_def.get("items", {})
+                items_schema = prop_def.get("items", {})
+                # Boolean and draft-07 tuple-form ``items`` have no single item
+                # schema to convert, so the items fall back to strings.
+                items_def = items_schema if isinstance(items_schema, dict) else {}
                 items_type_name, items_nullable = normalize_json_schema_type(
                     items_def.get("type", "string")
                 )

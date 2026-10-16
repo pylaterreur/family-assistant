@@ -114,6 +114,8 @@ async def process_attachment_arguments(
             .get("properties", {})
         )
         param_def = properties.get(param_name, {})
+        if not isinstance(param_def, dict):
+            return False
 
         # Check if this parameter is defined as attachment type
         if param_def.get("type") == "attachment":
@@ -122,7 +124,7 @@ async def process_attachment_arguments(
         # Check if it's an array of attachments
         if param_def.get("type") == "array":
             items = param_def.get("items", {})
-            if items.get("type") == "attachment":
+            if isinstance(items, dict) and items.get("type") == "attachment":
                 return True
 
         return False

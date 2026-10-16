@@ -37,7 +37,8 @@ from family_assistant.tools.attachment_utils import is_attachment_id
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from family_assistant.tools.types import ToolDefinition, ToolPropertySchema
+    from family_assistant.json_schema import JsonSchemaObject
+    from family_assistant.tools.types import ToolDefinition
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +312,7 @@ def apply_parameter_overrides(
 
         parameter = override
         array_branch = _array_branch(parameter_schema, defs)
-        replacement: ToolPropertySchema = (
+        replacement: JsonSchemaObject = (
             {"type": "attachment"}
             if array_branch is None
             else {"type": "array", "items": {"type": "attachment"}}

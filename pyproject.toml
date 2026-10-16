@@ -145,6 +145,7 @@ dependencies = [
     "greenlet>=3.2.3",
     "prometheus-client>=0.21.0",
     "jsonschema>=4.24.0",
+    "typing-extensions>=4.15.0",
 ]
 
 [project.optional-dependencies]
@@ -204,6 +205,7 @@ dev = [
     "monkeytype>=23.3.0", # Runtime type inference from tests
     "browser-handoff-service",
     "pyarrow>=25.0.1",
+    "jsonschema-specifications>=2025.4.1",
 ]
 local-embeddings = [
     "sentence-transformers>=3.0.1",

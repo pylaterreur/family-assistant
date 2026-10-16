@@ -4,10 +4,9 @@ Focuses on JSON Schema ``type`` handling, including the list form
 (e.g. ``["string", "null"]``) used to express nullable/optional fields.
 """
 
-from typing import Any, cast
-
 from google.genai import types
 
+from family_assistant.json_schema import JsonSchema
 from family_assistant.llm.providers.google_genai_client import (
     convert_tools_to_genai_format,
 )
@@ -15,31 +14,22 @@ from family_assistant.tools.types import ToolDefinition, normalize_json_schema_t
 
 
 def _tool_with_properties(
-    # ast-grep-ignore: no-dict-any - test constructs raw JSON Schema property payloads
-    properties: dict[str, Any],
+    properties: dict[str, JsonSchema],
     required: list[str],
 ) -> ToolDefinition:
-    """Build a single-function tool definition around the given properties.
-
-    ``ToolPropertySchema.type`` is declared as ``str``, but real JSON Schema
-    payloads may carry a list ``type`` (e.g. ``["string", "null"]``). The cast
-    lets tests exercise that runtime shape.
-    """
-    return cast(
-        "ToolDefinition",
-        {
-            "type": "function",
-            "function": {
-                "name": "sample_tool",
-                "description": "Sample tool",
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
+    """Build a single-function tool definition around the given properties."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "sample_tool",
+            "description": "Sample tool",
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
             },
         },
-    )
+    }
 
 
 def _properties_of(tools: list[ToolDefinition]) -> dict[str, types.Schema]:
@@ -127,3 +117,21 @@ class TestConvertToolsToGenaiFormat:
         assert tags.items is not None
         assert tags.items.type == types.Type.STRING
         assert tags.items.nullable is True
+
+    def test_boolean_property_schema_converts_as_string(self) -> None:
+        tools = [_tool_with_properties({"anything": True}, required=[])]
+
+        anything = _properties_of(tools)["anything"]
+        assert anything.type == types.Type.STRING
+
+    def test_tuple_form_items_fall_back_to_string_items(self) -> None:
+        tools = [
+            _tool_with_properties(
+                {"pair": {"type": "array", "items": [{"type": "integer"}, True]}},
+                required=[],
+            )
+        ]
+
+        pair = _properties_of(tools)["pair"]
+        assert pair.items is not None
+        assert pair.items.type == types.Type.STRING

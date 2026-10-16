@@ -63,7 +63,10 @@ def _with_agent_choices(
 ) -> ToolRegistration:
     definition = copy.deepcopy(registration.definition)
     properties = definition["function"]["parameters"].get("properties", {})
-    properties["agent"]["enum"] = agents
+    agent = properties["agent"]
+    if not isinstance(agent, dict):
+        raise TypeError("spawn_worker's agent parameter must be an object schema")
+    agent["enum"] = [*agents]
     return dataclasses.replace(registration, definition=definition)
 
 

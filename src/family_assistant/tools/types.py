@@ -20,6 +20,7 @@ from typing import (
     runtime_checkable,
 )
 
+from family_assistant.json_schema import JsonSchemaObject  # noqa: TC001 - TypedDict field type
 from family_assistant.security.taint import (
     SourceTrustTier,  # noqa: TC001 - pydantic's ToolMessage embeds ToolResult and resolves its fields
 )
@@ -143,79 +144,8 @@ MCPServerConfig = (
 
 
 # Tool Definition Types
-# These TypedDicts provide proper typing for LLM tool definitions,
-# following the OpenAI function calling schema format (camelCase JSON Schema).
-#
-# Design rationale for using dict[str, Any] in nested structures:
-# 1. JSON Schema allows arbitrary recursive nesting (objects containing arrays
-#    of objects containing more objects, etc.). Python's type system doesn't
-#    elegantly handle recursive TypedDicts.
-# 2. Google genai's SchemaDict uses snake_case (max_items, additional_properties)
-#    while OpenAI-style tools use camelCase (maxItems, additionalProperties),
-#    making those types incompatible without conversion.
-# 3. No standard library provides TypedDict types for camelCase JSON Schema.
-#
-# Our approach: strict typing for the top-level structure we control
-# (ToolDefinition, ToolFunctionSchema, ToolParametersSchema), with dict[str, Any]
-# for deeply nested property definitions where JSON Schema's flexibility exceeds
-# what TypedDict can practically express.
-
-
-class ToolPropertyItems(TypedDict, total=False):
-    """Schema for array item definitions in tool parameters.
-
-    For complex nested objects, additional fields may be present.
-    """
-
-    # JSON Schema permits ``type`` to be a list such as ``["string", "null"]`` to
-    # express a nullable field, so it is not always a bare string. Use
-    # ``normalize_json_schema_type`` before treating it as a single scalar type.
-    type: str | list[str]
-    description: str
-    # ast-grep-ignore: no-dict-any - JSON Schema nested properties can be arbitrarily deep
-    properties: dict[str, Any]  # Nested object properties
-    required: list[str]  # Required fields for nested objects
-    # ast-grep-ignore: no-dict-any - JSON Schema array items can be arbitrarily nested
-    items: dict[str, Any]  # For nested arrays
-    enum: list[str]
-    minItems: int
-    maxItems: int
-
-
-class ToolPropertySchema(TypedDict, total=False):
-    """Schema for individual parameter properties in tool definitions.
-
-    Follows JSON Schema format as used by OpenAI function calling.
-    """
-
-    # See ``ToolPropertyItems.type``: JSON Schema allows the list form (e.g.
-    # ``["string", "null"]``) for nullable fields.
-    type: str | list[str]
-    description: str
-    format: str
-    default: Any
-    enum: list[str]
-    items: ToolPropertyItems
-    # ast-grep-ignore: no-dict-any - JSON Schema nested properties can be arbitrarily deep
-    properties: dict[str, Any]  # For nested object types
-    required: list[str]  # For nested object types
-    additionalProperties: bool
-    minItems: int
-    maxItems: int
-
-
-class ToolParametersSchema(TypedDict, total=False):
-    """Schema for the parameters object in tool definitions.
-
-    Follows JSON Schema 'object' type format.
-    """
-
-    # See ``ToolPropertyItems.type``: JSON Schema allows the list form here too,
-    # although the parameters object is conventionally a bare ``"object"``.
-    type: str | list[str]
-    properties: dict[str, ToolPropertySchema]
-    required: list[str]
-    additionalProperties: bool
+# The envelope LLM tool definitions travel in, in OpenAI function-calling format.
+# ``parameters`` is a full JSON Schema; see ``family_assistant.json_schema``.
 
 
 class ToolFunctionSchema(TypedDict):
@@ -226,7 +156,7 @@ class ToolFunctionSchema(TypedDict):
 
     name: str
     description: str
-    parameters: ToolParametersSchema
+    parameters: JsonSchemaObject
 
 
 class ToolDefinition(TypedDict):

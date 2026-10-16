@@ -67,7 +67,6 @@ from family_assistant.tools.metadata import (
 )
 from family_assistant.tools.types import (
     ToolDefinition,
-    ToolPropertySchema,
     ToolResult,
 )
 from family_assistant.web.app_creator import app as actual_app
@@ -80,6 +79,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+    from family_assistant.json_schema import JsonSchema
     from family_assistant.llm.messages import LLMMessage
 
 T = TypeVar("T", bound="BaseModel")
@@ -123,7 +123,7 @@ async def _read_inbound_message() -> ToolResult:
     )
 
 
-def _definition(name: str, properties: dict[str, ToolPropertySchema]) -> ToolDefinition:
+def _definition(name: str, properties: dict[str, JsonSchema]) -> ToolDefinition:
     return {
         "type": "function",
         "function": {

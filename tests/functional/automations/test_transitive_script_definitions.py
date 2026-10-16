@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from family_assistant.config_models import AppConfig, ToolsConfig
 from family_assistant.delegation_security import DelegationSecurityLevel
+from family_assistant.json_schema import JsonSchema, JsonSchemaObject
 from family_assistant.processing import ProcessingService, ProcessingServiceConfig
 from family_assistant.security.definition_resolution import (
     LoadedScriptRef,
@@ -36,8 +37,6 @@ from family_assistant.tools.execute_script import (
 from family_assistant.tools.types import (
     ToolDefinition,
     ToolExecutionContext,
-    ToolParametersSchema,
-    ToolPropertySchema,
 )
 from tests.mocks.mock_llm import LLMOutput, RuleBasedMockLLMClient
 
@@ -54,10 +53,10 @@ _GRANDCHILD = "inkplate-upload-image"
 def _tool_definition(
     name: str,
     *,
-    properties: dict[str, ToolPropertySchema] | None = None,
+    properties: dict[str, JsonSchema] | None = None,
     required: list[str] | None = None,
 ) -> ToolDefinition:
-    parameters = ToolParametersSchema(type="object", properties=properties or {})
+    parameters: JsonSchemaObject = {"type": "object", "properties": properties or {}}
     if required is not None:
         parameters["required"] = required
     return {
