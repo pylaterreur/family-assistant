@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from family_assistant.config_models import CameraFrameJudgeConfig, TypeSafeConfig
+from family_assistant.llm.typesafe import (
+    ChoiceQuestion,
+    JevAnswers,
+    JevImage,
+    NoulQuestion,
+)
 from family_assistant.plugins.reolink.fake import FakeCameraBackend
 from family_assistant.plugins.reolink.instance import ReolinkInstance
 from family_assistant.plugins.reolink.protocol import (
@@ -15,7 +24,7 @@ from family_assistant.plugins.reolink.protocol import (
     Recording,
 )
 from family_assistant.plugins.reolink.tools import (
-    FrameAnalysisLLMResponse,
+    find_camera_change_tool,
     get_camera_frame_tool,
     get_camera_frames_batch_tool,
     get_camera_recordings_tool,
@@ -25,6 +34,15 @@ from family_assistant.plugins.reolink.tools import (
 )
 from family_assistant.plugins.runtime import ProfilePlugins
 from family_assistant.tools.types import ToolExecutionContext, ToolResult
+from tests.mocks.fake_jev import FakeJevClient
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from pydantic import BaseModel
+
+    from family_assistant.llm import LLMInterface
+    from family_assistant.processing.service import ProcessingService
 
 
 @pytest.fixture
@@ -299,8 +317,7 @@ async def test_get_camera_frame_success(
 async def test_get_camera_frame_not_found(
     exec_context: ToolExecutionContext,
 ) -> None:
-    """Test getting frame returns error when no frame exists at timestamp."""
-    # Use a timestamp where no frame exists
+    """A moment no recording covers is an error, not a frame."""
     timestamp = datetime(2024, 1, 15, 20, 0, 0, tzinfo=UTC).isoformat()
 
     result = await get_camera_frame_tool(
@@ -313,7 +330,7 @@ async def test_get_camera_frame_not_found(
     data = result.get_data()
     assert isinstance(data, dict)
     assert "error" in data
-    assert "No frame available" in data["error"]
+    assert "No recording found" in data["error"]
 
 
 @pytest.mark.asyncio
@@ -508,84 +525,54 @@ async def test_get_camera_recordings_no_backend() -> None:
     assert "Camera backend not configured" in data["error"]
 
 
-# --- Tests for scan_camera_frames_tool ---
+# --- Tests for scan_camera_frames_tool and find_camera_change_tool ---
+
+_SCAN_BASE = datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC)
 
 
-def create_mock_llm_client(
-    responses: list[FrameAnalysisLLMResponse] | None = None,
-) -> Mock:
-    """Create a mock LLM client that returns specified responses.
+def _jev_by_bytes(scores: Mapping[bytes, float]) -> FakeJevClient:
+    """A Jev that answers each frame by its bytes, so a test controls every judgement."""
 
-    Args:
-        responses: List of FrameAnalysisLLMResponse objects. If None, generates default responses.
-    """
-    if responses is None:
-        # Default: first and third frames match
-        responses = [
-            FrameAnalysisLLMResponse(
-                matches_query=True,
-                description="Person visible",
-                confidence=0.9,
-                detected_objects=["person"],
-            ),
-            FrameAnalysisLLMResponse(
-                matches_query=False,
-                description="Empty yard",
-                confidence=0.8,
-                detected_objects=[],
-            ),
-            FrameAnalysisLLMResponse(
-                matches_query=True,
-                description="Person walking",
-                confidence=0.85,
-                detected_objects=["person"],
-            ),
-            FrameAnalysisLLMResponse(
-                matches_query=False,
-                description="Empty",
-                confidence=0.7,
-                detected_objects=[],
-            ),
-            FrameAnalysisLLMResponse(
-                matches_query=False,
-                description="Empty",
-                confidence=0.7,
-                detected_objects=[],
-            ),
-        ]
+    def answer(
+        images: Mapping[str, JevImage],
+        questions: Mapping[str, NoulQuestion | ChoiceQuestion],
+    ) -> JevAnswers:
+        (image,) = images.values()
+        return JevAnswers(
+            "jev-test", dict.fromkeys(questions, scores[image.data]), {}, 10
+        )
 
-    call_count = 0
-
-    async def mock_generate_structured(
-        messages: object,
-        response_model: type[FrameAnalysisLLMResponse],
-        max_retries: int = 2,
-    ) -> FrameAnalysisLLMResponse:
-        nonlocal call_count
-        response = responses[call_count % len(responses)]
-        call_count += 1
-        return response
-
-    mock_client = Mock()
-    mock_client.generate_structured = mock_generate_structured
-    return mock_client
+    return FakeJevClient(respond_to_images=answer)
 
 
-@pytest.fixture
-def exec_context_with_llm(
-    fake_camera_backend: FakeCameraBackend,
+def _judging_context(
+    backend: FakeCameraBackend,
+    *,
+    jev: FakeJevClient | None = None,
+    camera_frames: CameraFrameJudgeConfig | None = None,
+    llm_client: object = None,
 ) -> ToolExecutionContext:
-    """Create a ToolExecutionContext with fake camera backend and LLM client."""
+    service = cast(
+        "ProcessingService",
+        SimpleNamespace(
+            jev_client=jev,
+            app_config=SimpleNamespace(
+                typesafe=TypeSafeConfig(
+                    camera_frames=camera_frames or CameraFrameJudgeConfig()
+                )
+            ),
+        ),
+    )
     return ToolExecutionContext(
         interface_type="test",
         conversation_id="test_conv",
         user_name="test_user",
         turn_id=None,
         db_context=Mock(),
-        processing_service=Mock(),
-        llm_client=create_mock_llm_client(),
+        processing_service=service,
+        llm_client=cast("LLMInterface | None", llm_client),
         clock=None,
-        plugins=ProfilePlugins((ReolinkInstance(fake_camera_backend),)),
+        plugins=ProfilePlugins((ReolinkInstance(backend),)),
         event_sources=None,
         attachment_registry=None,
         timezone=ZoneInfo("UTC"),
@@ -594,328 +581,304 @@ def exec_context_with_llm(
     )
 
 
-@pytest.mark.asyncio
-async def test_scan_camera_frames_success(
-    exec_context_with_llm: ToolExecutionContext,
-) -> None:
-    """Test scanning camera frames with parallel analysis."""
-    base_time = datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC)
-    start_time = base_time.isoformat()
-    end_time = (base_time + timedelta(hours=1)).isoformat()
-
-    result = await scan_camera_frames_tool(
-        exec_context_with_llm,
-        camera_id="cam_front",
-        start_time=start_time,
-        end_time=end_time,
-        query="person in the yard",
-        interval_seconds=900,
-        max_frames=10,
-        filter_matching=True,
-    )
-
-    assert isinstance(result, ToolResult)
-    data = result.get_data()
-    assert isinstance(data, dict)
-
-    # Should have scanned frames
-    assert "frames_scanned" in data
-    assert data["frames_scanned"] == 5  # Based on fake backend setup
-
-    # Should have found matches (based on mock responses)
-    assert "matches_found" in data
-    assert data["matches_found"] == 2  # First and third frames match
-
-    # Should have analysis results for exactly the matching frames, in order
-    assert "analysis_results" in data
-    assert [r["description"] for r in data["analysis_results"]] == [
-        "Person visible",
-        "Person walking",
-    ]
-
-    # Should have attachments carrying the matching frames' own bytes, in order
-    assert result.attachments is not None
-    assert [a.content for a in result.attachments] == [b"frame_0", b"frame_2"]
-
-
-@pytest.mark.asyncio
-async def test_scan_camera_frames_no_filtering(
-    exec_context_with_llm: ToolExecutionContext,
-) -> None:
-    """Test scanning camera frames without filtering returns all frames."""
-    base_time = datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC)
-    start_time = base_time.isoformat()
-    end_time = (base_time + timedelta(hours=1)).isoformat()
-
-    result = await scan_camera_frames_tool(
-        exec_context_with_llm,
-        camera_id="cam_front",
-        start_time=start_time,
-        end_time=end_time,
-        query="person in the yard",
-        interval_seconds=900,
-        max_frames=10,
-        filter_matching=False,  # Return all frames
-    )
-
-    assert isinstance(result, ToolResult)
-    data = result.get_data()
-    assert isinstance(data, dict)
-
-    # Should have all frames in analysis results, in order
-    assert [r["description"] for r in data["analysis_results"]] == [
-        "Person visible",
-        "Empty yard",
-        "Person walking",
-        "Empty",
-        "Empty",
-    ]
-
-    # Should have attachments for all frames, in order, each carrying its own
-    # bytes and a MATCH / no match label in the description
-    assert result.attachments is not None
-    assert [a.content for a in result.attachments] == [
-        b"frame_0",
-        b"frame_1",
-        b"frame_2",
-        b"frame_3",
-        b"frame_4",
-    ]
-    assert [a.description for a in result.attachments] == [
-        "[2024-01-15T12:00:00+00:00] (MATCH) Person visible",
-        "[2024-01-15T12:15:00+00:00] (no match) Empty yard",
-        "[2024-01-15T12:30:00+00:00] (MATCH) Person walking",
-        "[2024-01-15T12:45:00+00:00] (no match) Empty",
-        "[2024-01-15T13:00:00+00:00] (no match) Empty",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_scan_camera_frames_no_matches() -> None:
-    """Test scanning camera frames when nothing matches."""
-    fake_backend = FakeCameraBackend()
-    fake_backend.add_camera("cam_test", "Test Camera", "online")
-
-    base_time = datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC)
-    for i in range(3):
-        fake_backend.set_frame(
-            "cam_test",
-            base_time + timedelta(minutes=i * 15),
-            f"frame_{i}".encode(),
+def _continuous_camera(frames: Mapping[int, bytes]) -> FakeCameraBackend:
+    """A camera recording 11:00-15:00 continuously, frames set at minutes past 12:00."""
+    backend = FakeCameraBackend()
+    backend.add_camera("cam", "Camera")
+    backend.add_recording(
+        Recording(
+            camera_id="cam",
+            start_time=_SCAN_BASE - timedelta(hours=1),
+            end_time=_SCAN_BASE + timedelta(hours=3),
         )
-
-    # LLM client that always returns no match
-    no_match_responses = [
-        FrameAnalysisLLMResponse(
-            matches_query=False,
-            description="Nothing found",
-            confidence=0.9,
-            detected_objects=[],
-        ),
-    ] * 3
-
-    exec_context = ToolExecutionContext(
-        interface_type="test",
-        conversation_id="test_conv",
-        user_name="test_user",
-        turn_id=None,
-        db_context=Mock(),
-        processing_service=Mock(),
-        llm_client=create_mock_llm_client(no_match_responses),
-        clock=None,
-        plugins=ProfilePlugins((ReolinkInstance(fake_backend),)),
-        event_sources=None,
-        attachment_registry=None,
-        timezone=ZoneInfo("UTC"),
-        credential_resolvers=None,
-        api_backend=None,
     )
-
-    result = await scan_camera_frames_tool(
-        exec_context,
-        camera_id="cam_test",
-        start_time=base_time.isoformat(),
-        end_time=(base_time + timedelta(hours=1)).isoformat(),
-        query="something that does not exist",
-        interval_seconds=900,
-        max_frames=10,
-    )
-
-    assert isinstance(result, ToolResult)
-    data = result.get_data()
-    assert isinstance(data, dict)
-
-    assert data["matches_found"] == 0
-    assert "No frames matched" in (result.text or "")
-    assert result.attachments is None or len(result.attachments) == 0
+    for minute, jpeg in frames.items():
+        backend.set_frame("cam", _SCAN_BASE + timedelta(minutes=minute), jpeg)
+    return backend
 
 
 @pytest.mark.asyncio
-async def test_scan_camera_frames_no_backend() -> None:
-    """Test scanning frames returns error when the profile has no cameras."""
-    exec_context = ToolExecutionContext(
-        interface_type="test",
-        conversation_id="test_conv",
-        user_name="test_user",
-        turn_id=None,
-        db_context=Mock(),
-        processing_service=Mock(),
-        llm_client=create_mock_llm_client(),
-        clock=None,
-        plugins=None,
-        event_sources=None,
-        attachment_registry=None,
-        timezone=ZoneInfo("UTC"),
-        credential_resolvers=None,
-        api_backend=None,
-    )
+async def test_scan_attaches_only_matching_frames_most_likely_first() -> None:
+    backend = _continuous_camera({
+        0: b"empty",
+        15: b"person",
+        30: b"maybe",
+        45: b"empty",
+    })
+    jev = _jev_by_bytes({b"empty": 0.05, b"person": 0.95, b"maybe": 0.6})
 
-    base_time = datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC)
     result = await scan_camera_frames_tool(
-        exec_context,
-        camera_id="cam_front",
-        start_time=base_time.isoformat(),
-        end_time=(base_time + timedelta(hours=1)).isoformat(),
-        query="test query",
+        _judging_context(backend, jev=jev),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=(_SCAN_BASE + timedelta(minutes=45)).isoformat(),
+        condition="A person is visible.",
+        interval_seconds=900,
     )
 
-    assert isinstance(result, ToolResult)
+    assert result.attachments is not None
+    assert [a.content for a in result.attachments] == [b"person", b"maybe"]
+
+
+@pytest.mark.asyncio
+async def test_scan_reports_every_judged_frame_in_the_timeline() -> None:
+    backend = _continuous_camera({0: b"empty", 15: b"person", 30: b"empty"})
+    jev = _jev_by_bytes({b"empty": 0.05, b"person": 0.95})
+
+    result = await scan_camera_frames_tool(
+        _judging_context(backend, jev=jev),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=(_SCAN_BASE + timedelta(minutes=30)).isoformat(),
+        condition="A person is visible.",
+        interval_seconds=900,
+    )
+
     data = result.get_data()
     assert isinstance(data, dict)
-    assert "error" in data
+    assert [entry["probability"] for entry in data["timeline"]] == [0.05, 0.95, 0.05]
+    assert data["judge"] == "typesafe:jev-test"
+
+
+@pytest.mark.asyncio
+async def test_scan_without_a_match_names_the_closest_frames() -> None:
+    backend = _continuous_camera({0: b"far", 15: b"near"})
+    jev = _jev_by_bytes({b"far": 0.05, b"near": 0.4})
+
+    result = await scan_camera_frames_tool(
+        _judging_context(backend, jev=jev),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=(_SCAN_BASE + timedelta(minutes=15)).isoformat(),
+        condition="A person is visible.",
+        interval_seconds=900,
+    )
+
+    assert result.attachments is None
+    assert "Closest: 2024-01-15T12:15:00+00:00 (p=0.40)" in (result.text or "")
+
+
+@pytest.mark.asyncio
+async def test_scan_samples_each_motion_clip_rather_than_a_blind_grid() -> None:
+    backend = FakeCameraBackend()
+    backend.add_camera("cam", "Camera")
+    clips = [(7, b"first"), (41, b"second")]
+    for minute, jpeg in clips:
+        clip_start = _SCAN_BASE + timedelta(minutes=minute)
+        backend.add_recording(
+            Recording(
+                camera_id="cam",
+                start_time=clip_start,
+                end_time=clip_start + timedelta(seconds=30),
+            )
+        )
+        backend.set_frame("cam", clip_start, jpeg)
+    jev = _jev_by_bytes({b"first": 0.9, b"second": 0.9})
+
+    result = await scan_camera_frames_tool(
+        _judging_context(backend, jev=jev),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=(_SCAN_BASE + timedelta(hours=1)).isoformat(),
+        condition="A chicken is visible.",
+        interval_seconds=900,
+    )
+
+    assert result.attachments is not None
+    assert sorted(a.content or b"" for a in result.attachments) == [b"first", b"second"]
+
+
+@pytest.mark.asyncio
+async def test_scan_counts_frames_the_judge_could_not_answer() -> None:
+    backend = _continuous_camera({0: b"frame"})
+
+    result = await scan_camera_frames_tool(
+        _judging_context(backend, jev=FakeJevClient(fail=True)),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=(_SCAN_BASE + timedelta(minutes=15)).isoformat(),
+        condition="A person is visible.",
+        interval_seconds=900,
+    )
+
+    data = result.get_data()
+    assert isinstance(data, dict)
+    assert data["warning"] == "2 frame(s) could not be extracted or judged"
+
+
+@pytest.mark.asyncio
+async def test_scan_reports_a_range_with_nothing_recorded() -> None:
+    backend = _continuous_camera({0: b"frame"})
+
+    result = await scan_camera_frames_tool(
+        _judging_context(backend, jev=_jev_by_bytes({})),
+        camera_id="cam",
+        start_time=(_SCAN_BASE + timedelta(hours=5)).isoformat(),
+        end_time=(_SCAN_BASE + timedelta(hours=6)).isoformat(),
+        condition="A person is visible.",
+    )
+
+    data = result.get_data()
+    assert isinstance(data, dict)
+    assert data["message"] == "The camera recorded nothing in this time range."
+
+
+@pytest.mark.asyncio
+async def test_scan_asks_the_turn_model_when_jev_is_off_for_camera_frames() -> None:
+    backend = _continuous_camera({0: b"frame"})
+
+    async def judge(messages: object, response_model: type[BaseModel]) -> BaseModel:
+        return response_model.model_validate({"satisfied": False, "confidence": 0.8})
+
+    llm = Mock()
+    llm.generate_structured = judge
+
+    result = await scan_camera_frames_tool(
+        _judging_context(
+            backend,
+            jev=_jev_by_bytes({}),
+            camera_frames=CameraFrameJudgeConfig(mode="off"),
+            llm_client=llm,
+        ),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=_SCAN_BASE.isoformat(),
+        condition="A person is visible.",
+    )
+
+    data = result.get_data()
+    assert isinstance(data, dict)
+    assert data["judge"] == "turn model"
+    assert data["timeline"][0]["probability"] == pytest.approx(0.2)
+
+
+@pytest.mark.asyncio
+async def test_scan_without_any_judge_is_an_error() -> None:
+    backend = _continuous_camera({0: b"frame"})
+    context = _judging_context(backend)
+
+    result = await scan_camera_frames_tool(
+        context,
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=_SCAN_BASE.isoformat(),
+        condition="A person is visible.",
+    )
+
+    assert result.get_data() == {
+        "error": "No frame judge is available for this search."
+    }
+
+
+@pytest.mark.asyncio
+async def test_scan_no_backend() -> None:
+    context = _judging_context(FakeCameraBackend(), jev=_jev_by_bytes({}))
+    context.plugins = None
+
+    result = await scan_camera_frames_tool(
+        context,
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=_SCAN_BASE.isoformat(),
+        condition="A person is visible.",
+    )
+
+    data = result.get_data()
+    assert isinstance(data, dict)
     assert "Camera backend not configured" in data["error"]
 
 
 @pytest.mark.asyncio
-async def test_scan_camera_frames_without_a_run_client(
-    fake_camera_backend: FakeCameraBackend,
-) -> None:
-    """A context outside a turn carries no client, and cannot analyse frames."""
-    exec_context = ToolExecutionContext(
-        interface_type="test",
-        conversation_id="test_conv",
-        user_name="test_user",
-        turn_id=None,
-        db_context=Mock(),
-        processing_service=None,
-        llm_client=None,
-        clock=None,
-        plugins=ProfilePlugins((ReolinkInstance(fake_camera_backend),)),
-        event_sources=None,
-        attachment_registry=None,
-        timezone=ZoneInfo("UTC"),
-        credential_resolvers=None,
-        api_backend=None,
+async def test_find_change_narrows_to_the_precision_around_the_true_moment() -> None:
+    # A parcel arrives at 12:47:30 and stays.
+    backend = _continuous_camera({0: b"step"})
+    arrival = _SCAN_BASE + timedelta(minutes=47, seconds=30)
+    backend.set_frame("cam", arrival, b"parcel")
+    jev = _jev_by_bytes({b"step": 0.03, b"parcel": 0.97})
+
+    result = await find_camera_change_tool(
+        _judging_context(backend, jev=jev),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=(_SCAN_BASE + timedelta(hours=2)).isoformat(),
+        condition="A parcel is on the doorstep.",
+        precision_seconds=30,
     )
 
-    base_time = datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC)
-    result = await scan_camera_frames_tool(
-        exec_context,
-        camera_id="cam_front",
-        start_time=base_time.isoformat(),
-        end_time=(base_time + timedelta(hours=1)).isoformat(),
-        query="test query",
-    )
-
-    assert isinstance(result, ToolResult)
     data = result.get_data()
     assert isinstance(data, dict)
-    assert "error" in data
-    assert "No LLM client is available" in data["error"]
+    (change,) = data["changes"]
+    before = datetime.fromisoformat(change["last_before"]["timestamp"])
+    after = datetime.fromisoformat(change["first_after"]["timestamp"])
+    assert (change["became"], change["resolved"]) == ("true", True)
+    assert before < arrival <= after
+    assert after - before <= timedelta(seconds=30)
 
 
 @pytest.mark.asyncio
-async def test_scan_camera_frames_no_frames_in_range(
-    exec_context_with_llm: ToolExecutionContext,
-) -> None:
-    """Test scanning frames returns empty result when no frames in range."""
-    # Use a time range with no frames
-    start_time = datetime(2024, 1, 15, 20, 0, 0, tzinfo=UTC).isoformat()
-    end_time = datetime(2024, 1, 15, 21, 0, 0, tzinfo=UTC).isoformat()
+async def test_find_change_attaches_the_frames_either_side_of_it() -> None:
+    backend = _continuous_camera({0: b"step"})
+    backend.set_frame("cam", _SCAN_BASE + timedelta(minutes=47), b"parcel")
+    jev = _jev_by_bytes({b"step": 0.03, b"parcel": 0.97})
 
-    result = await scan_camera_frames_tool(
-        exec_context_with_llm,
-        camera_id="cam_front",
-        start_time=start_time,
-        end_time=end_time,
-        query="person",
+    result = await find_camera_change_tool(
+        _judging_context(backend, jev=jev),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=(_SCAN_BASE + timedelta(hours=2)).isoformat(),
+        condition="A parcel is on the doorstep.",
     )
 
-    assert isinstance(result, ToolResult)
-    data = result.get_data()
-    assert isinstance(data, dict)
-    assert data["frames_scanned"] == 0
-    assert data["matches_found"] == 0
-    assert "No frames found" in data.get("message", "")
+    assert result.attachments is not None
+    assert [a.content for a in result.attachments] == [b"step", b"parcel"]
 
 
 @pytest.mark.asyncio
-async def test_scan_camera_frames_handles_llm_errors() -> None:
-    """Test scanning frames handles LLM errors gracefully."""
-    fake_backend = FakeCameraBackend()
-    fake_backend.add_camera("cam_test", "Test Camera", "online")
-
-    base_time = datetime(2024, 1, 15, 12, 0, 0, tzinfo=UTC)
-    for i in range(3):
-        fake_backend.set_frame(
-            "cam_test",
-            base_time + timedelta(minutes=i * 15),
-            f"frame_{i}".encode(),
+async def test_find_change_during_a_recording_gap_stops_at_the_gap() -> None:
+    backend = FakeCameraBackend()
+    backend.add_camera("cam", "Camera")
+    for start_minute, jpeg in ((0, b"step"), (60, b"parcel")):
+        clip_start = _SCAN_BASE + timedelta(minutes=start_minute)
+        backend.add_recording(
+            Recording(
+                camera_id="cam",
+                start_time=clip_start,
+                end_time=clip_start + timedelta(minutes=20),
+            )
         )
+        backend.set_frame("cam", clip_start, jpeg)
+    jev = _jev_by_bytes({b"step": 0.03, b"parcel": 0.97})
 
-    # Create mock that raises error on second call
-    call_count = 0
-
-    async def mock_generate_with_error(
-        messages: object,
-        response_model: type[FrameAnalysisLLMResponse],
-        max_retries: int = 2,
-    ) -> FrameAnalysisLLMResponse:
-        nonlocal call_count
-        call_count += 1
-        if call_count == 2:
-            raise RuntimeError("LLM error")
-        return FrameAnalysisLLMResponse(
-            matches_query=True,
-            description="Found",
-            confidence=0.9,
-            detected_objects=[],
-        )
-
-    erroring_client = Mock()
-    erroring_client.generate_structured = mock_generate_with_error
-
-    exec_context = ToolExecutionContext(
-        interface_type="test",
-        conversation_id="test_conv",
-        user_name="test_user",
-        turn_id=None,
-        db_context=Mock(),
-        processing_service=Mock(),
-        llm_client=erroring_client,
-        clock=None,
-        plugins=ProfilePlugins((ReolinkInstance(fake_backend),)),
-        event_sources=None,
-        attachment_registry=None,
-        timezone=ZoneInfo("UTC"),
-        credential_resolvers=None,
-        api_backend=None,
+    result = await find_camera_change_tool(
+        _judging_context(backend, jev=jev),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=(_SCAN_BASE + timedelta(minutes=80)).isoformat(),
+        condition="A parcel is on the doorstep.",
     )
 
-    result = await scan_camera_frames_tool(
-        exec_context,
-        camera_id="cam_test",
-        start_time=base_time.isoformat(),
-        end_time=(base_time + timedelta(hours=1)).isoformat(),
-        query="test",
-    )
-
-    assert isinstance(result, ToolResult)
     data = result.get_data()
     assert isinstance(data, dict)
+    (change,) = data["changes"]
+    assert change["resolved"] is False
+    assert change["stopped_because"] == (
+        "the camera was not recording between these frames"
+    )
 
-    # Should still return results for successful frames
-    assert data["frames_scanned"] == 3
-    assert "analysis_errors" in data
-    assert data["analysis_errors"] == 1  # One error
-    assert data["frames_analyzed"] == 2  # Two successful
+
+@pytest.mark.asyncio
+async def test_find_change_says_when_the_condition_never_flips() -> None:
+    backend = _continuous_camera({0: b"step"})
+
+    result = await find_camera_change_tool(
+        _judging_context(backend, jev=_jev_by_bytes({b"step": 0.03})),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=(_SCAN_BASE + timedelta(hours=1)).isoformat(),
+        condition="A parcel is on the doorstep.",
+    )
+
+    assert result.text == (
+        "No change found: 'A parcel is on the doorstep.' was false in all 12 "
+        "frames judged across the range."
+    )

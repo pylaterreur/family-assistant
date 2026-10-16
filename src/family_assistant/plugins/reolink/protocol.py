@@ -47,15 +47,6 @@ class Recording:
     size_bytes: int | None = None
 
 
-@dataclass
-class FrameWithTimestamp:
-    """A frame with its timestamp."""
-
-    timestamp: datetime
-    jpeg_bytes: bytes
-    camera_id: str
-
-
 class CameraBackend(Protocol):
     """Protocol for camera system backends (Reolink, Frigate, etc.).
 
@@ -64,7 +55,10 @@ class CameraBackend(Protocol):
     - Searching for detection events
     - Retrieving recordings metadata
     - Extracting frames at specific timestamps
-    - Batch frame extraction for binary search workflows
+
+    Times are aware datetimes in the household's zone, which is the zone the
+    cameras' clocks run on, and times a backend returns are in the zone of the
+    request that produced them.
     """
 
     async def list_cameras(self) -> list[CameraInfo]:
@@ -86,8 +80,8 @@ class CameraBackend(Protocol):
 
         Args:
             camera_id: ID of the camera to search.
-            start_time: Start of the time range (UTC).
-            end_time: End of the time range (UTC).
+            start_time: Start of the time range (household zone; see CameraBackend).
+            end_time: End of the time range (household zone; see CameraBackend).
             event_types: Optional filter for event types (person, vehicle, pet, motion).
 
         Returns:
@@ -105,8 +99,8 @@ class CameraBackend(Protocol):
 
         Args:
             camera_id: ID of the camera.
-            start_time: Start of the time range (UTC).
-            end_time: End of the time range (UTC).
+            start_time: Start of the time range (household zone; see CameraBackend).
+            end_time: End of the time range (household zone; see CameraBackend).
 
         Returns:
             List of Recording objects representing available footage.
@@ -122,7 +116,7 @@ class CameraBackend(Protocol):
 
         Args:
             camera_id: ID of the camera.
-            timestamp: Exact time to extract frame (UTC).
+            timestamp: Exact time to extract frame (household zone; see CameraBackend).
 
         Returns:
             JPEG bytes of the frame.
@@ -130,28 +124,6 @@ class CameraBackend(Protocol):
         Raises:
             ValueError: If no recording exists at the timestamp.
             RuntimeError: If frame extraction fails.
-        """
-        ...
-
-    async def get_frames_batch(
-        self,
-        camera_id: str,
-        start_time: datetime,
-        end_time: datetime,
-        interval_seconds: int = 900,
-        max_frames: int = 10,
-    ) -> list[FrameWithTimestamp]:
-        """Extract frames at regular intervals for binary search.
-
-        Args:
-            camera_id: ID of the camera.
-            start_time: Start of the time range (UTC).
-            end_time: End of the time range (UTC).
-            interval_seconds: Seconds between each frame (default 15 minutes).
-            max_frames: Maximum number of frames to return.
-
-        Returns:
-            List of FrameWithTimestamp objects with timestamps and JPEG bytes.
         """
         ...
 

@@ -215,17 +215,35 @@ class JevFilterConfig(BaseModel):
     timeout_seconds: float = Field(default=1.0, gt=0)
 
 
+class CameraFrameJudgeConfig(BaseModel):
+    """Jev as the judge of whether each camera frame satisfies a search condition.
+
+    ``active`` sends frames to Jev as images under TypeSafe's experimental
+    image input; ``off`` keeps frames off TypeSafe, and the camera search tools
+    ask the turn's model instead. See docs/design/camera-analyst-jev.md.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["off", "active"] = "active"
+    threshold: float = Field(default=0.5, ge=0, le=1)
+    """The probability at which a frame counts as satisfying the condition."""
+    timeout_seconds: float = Field(default=10.0, gt=0)
+    """Per frame. A frame not judged by then is reported as unanalysed."""
+
+
 class TypeSafeConfig(BaseModel):
     """TypeSafe's Jev classifier, an operator-configured external processor.
 
     Enabled by setting ``api_key`` (``TYPESAFE_API_KEY``). Jev then ranks which
     turns a new message continues at each history compaction event, classifies
     the Auto tier in place of the ``model_routing`` classifier, and filters
-    calendar search, duplicate-check and document search candidates. A
-    deployment without it compacts oldest-first, keeps its configured Auto
-    classifier, filters calendar events by title similarity alone and returns
-    document search's top results by rank. All of these send household
-    text to TypeSafe. See docs/design/history-compaction.md and
+    calendar search, duplicate-check and document search candidates, and judges
+    camera frames for the camera search tools. A deployment without it compacts
+    oldest-first, keeps its configured Auto classifier, filters calendar events
+    by title similarity alone, returns document search's top results by rank
+    and judges camera frames with the turn's model. All of these send household
+    text to TypeSafe, and camera search sends camera frames. See docs/design/history-compaction.md and
     docs/design/jev-search-filtering.md.
     """
 
@@ -258,6 +276,11 @@ class TypeSafeConfig(BaseModel):
     """Which of ``search_documents``' deeper candidate pool answer the query.
     Thirty candidates take several requests' worth of state, hence the longer
     timeout."""
+    camera_frames: CameraFrameJudgeConfig = Field(
+        default_factory=CameraFrameJudgeConfig
+    )
+    """Which camera frames satisfy a camera search's condition. Sends the
+    frames themselves to TypeSafe."""
 
     @property
     def enabled(self) -> bool:

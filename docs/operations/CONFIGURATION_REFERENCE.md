@@ -1132,7 +1132,7 @@ ______________________________________________________________________
 
 An optional external classifier ([TypeSafe](https://docs.typesafe.ai)'s Jev: typed, calibrated
 answers in a few hundred milliseconds, priced per input token). Configuring it sends conversation
-text to TypeSafe.
+text to TypeSafe, and, unless `camera_frames` is `off`, camera frames.
 
 ```yaml
 typesafe:
@@ -1143,6 +1143,7 @@ typesafe:
   calendar_duplicates: { mode: "shadow", threshold: 0.6, timeout_seconds: 1.0 }
   calendar_search: { mode: "shadow", threshold: 0.5, timeout_seconds: 1.0 }
   document_search: { mode: "shadow", threshold: 0.5, timeout_seconds: 2.5 }
+  camera_frames: { mode: "active", threshold: 0.5, timeout_seconds: 10.0 }
 ```
 
 | Property  | Value                                               |
@@ -1179,6 +1180,15 @@ typesafe:
   `shadow` (shipped) shows the top `limit` by rank and logs what Jev would have shown. The longer
   timeout covers 30 excerpts' worth of state. Sends excerpts of indexed documents, notes and emails
   to TypeSafe.
+- **Camera frames.** `scan_camera_frames` and `find_camera_change` ask Jev, one image per request,
+  whether each sampled frame satisfies the search's condition, using TypeSafe's experimental image
+  input (`TypeSafe-Danger-Zone-Images`). `active` (shipped) uses Jev; `off` keeps frames off
+  TypeSafe and the turn's model judges each frame instead, at several seconds and an output-token
+  bill per frame. A frame Jev fails on or does not answer within `timeout_seconds` is reported as
+  unjudged. Measured on a backyard camera, Jev answered in about 0.26s per frame against 4.5s for
+  `gemini-3.8-flash`, matched it on people and day/night, and missed more small, distant animals (16
+  of 18 chickens against 18); the agent looks at the attached frames before reporting, which catches
+  false matches but not misses. Sends camera frames to TypeSafe.
 - **Scripts.** `classify()` and `classify_yes_no()` in scripts call Jev (see
   [scripting.md](../user/scripting.md)); without a key they raise, pointing the script at
   `llm_json()`.
@@ -2858,10 +2868,12 @@ ______________________________________________________________________
 
 Reolink cameras are a plugin (see [Plugins](#plugins)) that backs the camera investigation tools
 (`list_cameras`, `search_camera_events`, `get_camera_frame`, `get_camera_frames_batch`,
-`get_camera_recordings`, `get_live_camera_snapshot`, `scan_camera_frames`). Each configured instance
-under `plugins.reolink` is one set of cameras, keyed by camera id; the instance named `default`
-serves every profile that doesn't choose another. Which profiles may call the tools is up to
-`tools_policy` — shipped `defaults.yaml` grants them only to `camera_analyst`.
+`get_camera_recordings`, `get_live_camera_snapshot`, `scan_camera_frames`, `find_camera_change`).
+The two search tools judge each frame with [TypeSafe Jev](#typesafe-jev) where it is configured, and
+with the turn's model otherwise. Each configured instance under `plugins.reolink` is one set of
+cameras, keyed by camera id; the instance named `default` serves every profile that doesn't choose
+another. Which profiles may call the tools is up to `tools_policy` — shipped `defaults.yaml` grants
+them only to `camera_analyst`.
 
 ```yaml
 plugins:
@@ -2889,6 +2901,10 @@ plugins:
 
 An unknown key is a startup error. An instance with no cameras is not started, with a warning at
 startup, and profiles that would use it get "not configured" from the camera tools.
+
+A camera's clock must run on the household's [TIMEZONE](#timezone): Reolink searches and reports
+recordings by the camera's wall clock alone, so the tools read every camera time as wall-clock time
+in that zone. Each camera serves up to four recording extractions at once.
 
 ### REOLINK_CAMERAS
 
