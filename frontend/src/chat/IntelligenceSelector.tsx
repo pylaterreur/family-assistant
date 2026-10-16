@@ -1,6 +1,5 @@
-import { Pin, Sparkles } from 'lucide-react';
+import { Sparkles } from 'lucide-react';
 import type React from 'react';
-import { Button } from '@/components/ui/button';
 import {
   Select,
   SelectContent,
@@ -15,17 +14,17 @@ interface IntelligenceSelectorProps {
   tiers: ModelTier[];
   /** The tier the profile runs at when the user chooses nothing. */
   defaultTierId: string | null;
-  /** The user's choice, or null for the profile default. */
+  /** The tier the conversation is on, or null for the profile default. */
   selectedTierId: string | null;
-  /** Whether that choice holds for the conversation rather than one message. */
-  pinned: boolean;
-  onChange: (tierId: string | null, pinned: boolean) => void;
+  onChange: (tierId: string | null) => void;
   disabled?: boolean;
 }
 
 /**
- * Picks how much model capability to apply to the next request, beside the
- * profile picker that says which agent handles it.
+ * Picks how much model capability the conversation runs at, beside the profile
+ * picker that says which agent handles it. A choice holds for the rest of the
+ * conversation: switching tiers turn by turn would make each switched turn
+ * start without the provider's cached copy of the conversation.
  *
  * Renders nothing where the profile offers no choice — a pinned profile, or one
  * whose single allowed tier is the one it already runs at — rather than a dead
@@ -35,7 +34,6 @@ const IntelligenceSelector: React.FC<IntelligenceSelectorProps> = ({
   tiers,
   defaultTierId,
   selectedTierId,
-  pinned,
   onChange,
   disabled = false,
 }) => {
@@ -50,13 +48,8 @@ const IntelligenceSelector: React.FC<IntelligenceSelectorProps> = ({
   const activeLabel = activeTier?.label ?? 'Intelligence';
 
   const handleTierChange = (tierId: string) => {
-    // Choosing the default is choosing nothing: there is no selection to send,
-    // and nothing to pin either.
-    if (tierId === defaultTierId) {
-      onChange(null, false);
-      return;
-    }
-    onChange(tierId, pinned);
+    // Choosing the default is choosing nothing.
+    onChange(tierId === defaultTierId ? null : tierId);
   };
 
   return (
@@ -69,9 +62,7 @@ const IntelligenceSelector: React.FC<IntelligenceSelectorProps> = ({
           title={
             selectedTierId === null
               ? `${activeLabel} is this profile's default intelligence`
-              : pinned
-                ? `${activeLabel} stays selected for this conversation`
-                : `${activeLabel} applies to your next message`
+              : `${activeLabel} stays selected for this conversation`
           }
         >
           <div className="flex items-center gap-2">
@@ -99,31 +90,6 @@ const IntelligenceSelector: React.FC<IntelligenceSelectorProps> = ({
           ))}
         </SelectContent>
       </Select>
-      {selectedTierId !== null && (
-        <Button
-          type="button"
-          variant={pinned ? 'default' : 'ghost'}
-          size="sm"
-          className="h-8 px-2"
-          disabled={disabled}
-          aria-pressed={pinned}
-          aria-label={
-            pinned
-              ? `Unpin ${activeLabel} from this conversation`
-              : `Pin ${activeLabel} to this conversation`
-          }
-          title={
-            pinned
-              ? `${activeLabel} stays selected for this conversation. Click to use it for the next message only.`
-              : `${activeLabel} applies to your next message only. Click to keep it for this conversation.`
-          }
-          data-testid="intelligence-pin"
-          data-pinned={pinned ? 'true' : 'false'}
-          onClick={() => onChange(selectedTierId, !pinned)}
-        >
-          <Pin className={`w-3.5 h-3.5 ${pinned ? 'fill-current' : ''}`} />
-        </Button>
-      )}
     </div>
   );
 };

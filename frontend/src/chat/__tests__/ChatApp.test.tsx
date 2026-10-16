@@ -1074,33 +1074,11 @@ describe('ChatApp intelligence tier selection', () => {
     await waitFor(() => expect(capturedTurnModelTiers).toEqual([undefined]), { timeout: 10000 });
   }, 30000);
 
-  it('spends a chosen tier on the next message and then returns to the default', async () => {
+  it('keeps a chosen tier for the conversation until a new chat', async () => {
     const user = setupSelectUser();
     await renderChatApp({ waitForReady: true });
 
     await chooseTier(user, /Deep/);
-    await sendMessage(user, 'A hard question');
-    await waitFor(() => expect(capturedTurnModelTiers).toEqual(['deep']), { timeout: 10000 });
-
-    // The control is back on the profile default, with nothing left to pin.
-    expect(screen.getByRole('combobox', { name: 'Intelligence' })).toHaveTextContent('Standard');
-    expect(screen.queryByTestId('intelligence-pin')).not.toBeInTheDocument();
-
-    await waitForTurnToSettle(1);
-    await sendMessage(user, 'An easy follow-up');
-    await waitFor(() => expect(capturedTurnModelTiers).toEqual(['deep', undefined]), {
-      timeout: 10000,
-    });
-  }, 60000);
-
-  it('keeps a pinned tier across messages until a new chat clears it', async () => {
-    const user = setupSelectUser();
-    await renderChatApp({ waitForReady: true });
-
-    await chooseTier(user, /Deep/);
-    await user.click(screen.getByTestId('intelligence-pin'));
-    expect(screen.getByTestId('intelligence-pin')).toHaveAttribute('aria-pressed', 'true');
-
     await sendMessage(user, 'A hard question');
     await waitFor(() => expect(capturedTurnModelTiers).toEqual(['deep']), { timeout: 10000 });
     expect(screen.getByRole('combobox', { name: 'Intelligence' })).toHaveTextContent('Deep');
@@ -1118,7 +1096,6 @@ describe('ChatApp intelligence tier selection', () => {
     await waitFor(() => {
       expect(screen.getByRole('combobox', { name: 'Intelligence' })).toHaveTextContent('Standard');
     });
-    expect(screen.queryByTestId('intelligence-pin')).not.toBeInTheDocument();
 
     await sendMessage(user, 'A brand new question');
     await waitFor(() => expect(capturedTurnModelTiers).toEqual(['deep', 'deep', undefined]), {
@@ -1126,24 +1103,85 @@ describe('ChatApp intelligence tier selection', () => {
     });
   }, 90000);
 
-  it('clears a pinned tier when the profile changes', async () => {
+  it('names the default tier to leave a chosen one, and keeps naming it', async () => {
     const user = setupSelectUser();
     await renderChatApp({ waitForReady: true });
 
     await chooseTier(user, /Deep/);
-    await user.click(screen.getByTestId('intelligence-pin'));
+    await sendMessage(user, 'A hard question');
+    await waitFor(() => expect(capturedTurnModelTiers).toEqual(['deep']), { timeout: 10000 });
+
+    await waitForTurnToSettle(1);
+    // The server is carrying Deep forward, so going back has to be said.
+    await chooseTier(user, /Standard/);
+    await sendMessage(user, 'An easy follow-up');
+    await waitFor(() => expect(capturedTurnModelTiers).toEqual(['deep', 'standard']), {
+      timeout: 10000,
+    });
+
+    await waitForTurnToSettle(2);
+    await sendMessage(user, 'Another easy one');
+    await waitFor(() => expect(capturedTurnModelTiers).toEqual(['deep', 'standard', 'standard']), {
+      timeout: 10000,
+    });
+  }, 90000);
+
+  it('clears a chosen tier when the profile changes', async () => {
+    const user = setupSelectUser();
+    await renderChatApp({ waitForReady: true });
+
+    await chooseTier(user, /Deep/);
 
     await user.click(screen.getByRole('combobox', { name: 'Processing profile' }));
     await user.click(await screen.findByRole('option', { name: /research/i }));
 
     // The research profile pins its model, so there is no control to show at
-    // all — and the pinned choice made under the assistant is gone with it.
+    // all — and the choice made under the assistant is gone with it.
     await waitFor(() => {
       expect(screen.queryByRole('combobox', { name: 'Intelligence' })).not.toBeInTheDocument();
     });
 
     await sendMessage(user, 'Research this');
     await waitFor(() => expect(capturedTurnModelTiers).toEqual([undefined]), { timeout: 10000 });
+  }, 30000);
+
+  it('shows the tier a reopened conversation is on and keeps sending it', async () => {
+    const { server } = await import('../../test/setup.js');
+    const { http, HttpResponse } = await import('msw');
+
+    server.use(
+      http.get('/api/v1/chat/conversations/:conversationId/messages', ({ params }) => {
+        if (params.conversationId !== 'web_conv_sticky_tier') {
+          return HttpResponse.json({ messages: [] });
+        }
+        return HttpResponse.json({
+          latest_user_profile_id: 'default_assistant',
+          conversation_model_tier: 'deep',
+          messages: [
+            {
+              internal_id: 301,
+              role: 'user',
+              content: 'Untangle this budget',
+              timestamp: '2026-10-16T01:00:00Z',
+              processing_profile_id: 'default_assistant',
+            },
+          ],
+        });
+      })
+    );
+    mockLocalStorage.getItem.mockImplementation((key: string) =>
+      key === 'lastConversationId' ? 'web_conv_sticky_tier' : null
+    );
+
+    const user = setupSelectUser();
+    await renderChatApp({ waitForReady: true });
+    expect(await screen.findByText('Untangle this budget')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: 'Intelligence' })).toHaveTextContent('Deep');
+    });
+    await sendMessage(user, 'Keep going');
+    await waitFor(() => expect(capturedTurnModelTiers).toEqual(['deep']), { timeout: 10000 });
   }, 30000);
 
   it('does not start a new conversation when the tier changes', async () => {

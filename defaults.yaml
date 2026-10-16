@@ -169,6 +169,10 @@ model_tiers:
   standard:
     label: "Standard"
     description: "Everyday conversation, retrieval and straightforward tool use."
+    # `/standard <request>` is how a chat leaves Deep or Max: a tier command's
+    # choice holds for the rest of the conversation, and choosing the default
+    # tier is what returns it to the default.
+    slash_command: "/standard"
     chain:
       # Gemini is the primary on the interactive path because it is the only
       # configured provider whose adapter represents audio and video at all, so
@@ -180,8 +184,8 @@ model_tiers:
   deep:
     label: "Deep"
     description: "Multi-stage reasoning, difficult judgement, conflicting evidence."
-    # Per-message chat command: `/deep <request>` runs that one message on this
-    # tier, on whatever profile the conversation is already using.
+    # Chat command: `/deep <request>` runs that message, and the rest of the
+    # conversation, on this tier, on whatever profile it is already using.
     slash_command: "/deep"
     chain:
       # Opus 5.5's thinking and effort, and Sol's reasoning_effort, come from

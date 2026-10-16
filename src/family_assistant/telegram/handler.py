@@ -1630,13 +1630,14 @@ class TelegramUpdateHandler:  # Renamed from TelegramBotHandler
     async def handle_tier_slash_command(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Runs one message at a chosen model tier.
+        """Runs a message at a chosen model tier, and the conversation after it.
 
-        A tier command says how hard to think about this message, not which
-        assistant answers it, so the run goes to the profile the conversation is
-        already on -- the same one a plain message would reach, including the
-        profile a reply adopts. The choice applies to this message only; nothing
-        is pinned.
+        A tier command says how hard to think, not which assistant answers, so
+        the run goes to the profile the conversation is already on -- the same
+        one a plain message would reach, including the profile a reply adopts.
+        The choice is sticky: later plain messages to that profile keep the
+        tier until another tier command changes it, and the default tier's
+        command is the way back.
         """
         invocation = await self._authorize_slash_command(update, context)
         if invocation is None:

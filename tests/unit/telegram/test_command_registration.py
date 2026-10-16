@@ -48,7 +48,11 @@ def test_the_shipped_tier_commands_dispatch_to_their_tiers(
 ) -> None:
     tier_commands = build_tier_slash_command_map(shipped_config)
 
-    assert tier_commands == {"/deep": "deep", "/max": "frontier"}
+    assert tier_commands == {
+        "/standard": "standard",
+        "/deep": "deep",
+        "/max": "frontier",
+    }
 
 
 def test_the_tier_commands_reach_the_bot_menu_with_a_description(

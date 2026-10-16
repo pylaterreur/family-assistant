@@ -57,6 +57,32 @@ import { useStreamingResponse } from './useStreamingResponse';
 // intelligence control's props keep their identity across renders.
 const EMPTY_MODEL_TIERS: ModelTier[] = [];
 
+/** The model tier one conversation is on, under one profile. */
+interface ConversationModelTier {
+  conversationId: string | null;
+  profileId: string;
+  /**
+   * Whether the conversation has been on a chosen tier. From then on every send
+   * names its tier, the default included: a send naming none continues whatever
+   * the server last recorded, which a failed send could leave different from
+   * what the control shows.
+   */
+  namesTier: boolean;
+  /** The tier the control shows; null for the profile default. */
+  selected: string | null;
+}
+
+/** *state* if it belongs to this conversation and profile, else null (the default). */
+function modelTierFor(
+  state: ConversationModelTier | null,
+  conversationId: string | null,
+  profileId: string
+): ConversationModelTier | null {
+  return state && state.conversationId === conversationId && state.profileId === profileId
+    ? state
+    : null;
+}
+
 // Error boundary to catch transient @assistant-ui/store tapClientLookup race
 // condition errors during rendering (assistant-ui/assistant-ui#3395).
 // Without this boundary, the error propagates up and destroys the entire
@@ -567,26 +593,27 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     const saved = localStorage.getItem('notificationsEnabled');
     return saved === 'true';
   });
-  // The intelligence (model tier) choice for the profile currently selected.
-  // `null` -- the usual state -- means the profile's default tier, and is the
-  // only state in which a send omits `model_tier` entirely. A choice is
-  // one-shot: the next send consumes it and the control returns to the default,
-  // unless it is pinned, in which case it holds for the rest of this
-  // conversation. Nothing about it is persisted: spending more on a request is a
-  // decision about that request, not a setting that should outlive a reload.
-  const [modelTierChoice, setModelTierChoice] = useState<{
-    tierId: string;
-    pinned: boolean;
-  } | null>(null);
+  // The intelligence (model tier) the conversation is on. A choice is sticky:
+  // the server carries it to every later turn that names no tier, so it holds
+  // until the user picks again. `selected` is what the control shows, `null`
+  // for the profile's default; `namesTier` says whether a send has to name the
+  // default, which it must once the conversation has been on a chosen tier. Keyed by conversation and profile, so a new chat, another
+  // conversation and another profile all read as the default without an effect
+  // racing the adoption of a reopened conversation's tier.
+  const [modelTierState, setModelTierState] = useState<ConversationModelTier | null>(null);
   // Mirror for handleNew, which must not take the choice as a dependency: its
   // identity feeds the assistant-ui runtime, and picking a tier should not
   // rebuild the send path mid-conversation.
-  const modelTierChoiceRef = useRef(modelTierChoice);
-  modelTierChoiceRef.current = modelTierChoice;
+  const modelTierStateRef = useRef(modelTierState);
+  modelTierStateRef.current = modelTierState;
   const { profilesById } = useProfiles();
   const currentProfile = profilesById[currentProfileId];
   const modelTiers: ModelTier[] = currentProfile?.model_tiers ?? EMPTY_MODEL_TIERS;
   const defaultModelTier = currentProfile?.default_model_tier ?? null;
+  const defaultModelTierRef = useRef(defaultModelTier);
+  defaultModelTierRef.current = defaultModelTier;
+  const selectedModelTierId =
+    modelTierFor(modelTierState, conversationId, currentProfileId)?.selected ?? null;
   const streamingMessageIdRef = useRef<string | null>(null);
   const activeStreamConversationIdRef = useRef<string | null>(null);
   const toolCallMessageIdRef = useRef<string | null>(null);
@@ -1697,6 +1724,15 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
           const adoptedProfileId = data.latest_user_profile_id;
           if (typeof adoptedProfileId === 'string' && adoptedProfileId) {
             setCurrentProfileId(adoptedProfileId);
+            // The tier the conversation is on comes with it, so the control
+            // shows what the next turn will actually run at.
+            const conversationTier = data.conversation_model_tier ?? null;
+            setModelTierState({
+              conversationId: convId,
+              profileId: adoptedProfileId,
+              namesTier: conversationTier !== null,
+              selected: conversationTier,
+            });
           }
         }
 
@@ -2351,19 +2387,20 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   const turnIsRunningRef = useRef(false);
   turnIsRunningRef.current = isLoading || isStreaming;
 
-  // A tier choice belongs to the profile and the conversation it was made in.
-  // A new chat, opening another conversation, and switching profile all return
-  // to the profile default rather than carrying a spend decision into somewhere
-  // the user did not make it.
-  useEffect(() => {
-    setModelTierChoice(null);
-  }, [conversationId, currentProfileId]);
-
-  // The control reports a choice of the profile default as no choice at all, so
-  // whatever is stored here differs from the default and is worth sending.
-  const handleModelTierChange = useCallback((tierId: string | null, pinned: boolean) => {
-    setModelTierChoice(tierId === null ? null : { tierId, pinned });
-  }, []);
+  // The control reports a choice of the profile default as `null`. The choice
+  // belongs to this conversation and profile; what the server holds for them
+  // is kept, since leaving a chosen tier is a change that has to be sent.
+  const handleModelTierChange = useCallback(
+    (tierId: string | null) => {
+      setModelTierState((prev) => ({
+        conversationId,
+        profileId: currentProfileId,
+        namesTier: modelTierFor(prev, conversationId, currentProfileId)?.namesTier ?? false,
+        selected: tierId,
+      }));
+    },
+    [conversationId, currentProfileId]
+  );
 
   // Handle profile changes
   const handleProfileChange = useCallback(
@@ -2534,12 +2571,21 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       lastStreamingErrorIsUserFacingRef.current = false;
       selfTurnIdsRef.current.add(turnId);
 
-      // A tier choice applies to this send. An unpinned one is spent here, so
-      // the control returns to the profile default instead of quietly repricing
-      // every later message in the conversation.
-      const tierChoice = modelTierChoiceRef.current;
-      if (tierChoice && !tierChoice.pinned) {
-        setModelTierChoice(null);
+      // A chosen tier goes on every send, so the turn runs at what the control
+      // shows whatever the server last recorded. The default is sent as nothing
+      // until the conversation has been on a chosen tier; after that it is
+      // named, which is how the server is told to leave one.
+      const tierState = modelTierFor(modelTierStateRef.current, conversationId, currentProfileId);
+      const selectedTier = tierState?.selected ?? null;
+      const modelTier =
+        selectedTier ??
+        (tierState?.namesTier ? (defaultModelTierRef.current ?? undefined) : undefined);
+      if (tierState) {
+        setModelTierState({
+          ...tierState,
+          conversationId: targetConversationId,
+          namesTier: tierState.namesTier || selectedTier !== null,
+        });
       }
 
       await sendStreamingMessage({
@@ -2549,7 +2595,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
         interfaceType: 'web',
         attachments: processedAttachments,
         turnId,
-        modelTier: tierChoice?.tierId,
+        modelTier,
       });
     },
     [conversationId, sendStreamingMessage, currentProfileId]
@@ -3056,8 +3102,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                 <IntelligenceSelector
                   tiers={modelTiers}
                   defaultTierId={defaultModelTier}
-                  selectedTierId={modelTierChoice?.tierId ?? null}
-                  pinned={modelTierChoice?.pinned ?? false}
+                  selectedTierId={selectedModelTierId}
                   onChange={handleModelTierChange}
                   disabled={isLoading}
                 />
@@ -3118,8 +3163,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                 <IntelligenceSelector
                   tiers={modelTiers}
                   defaultTierId={defaultModelTier}
-                  selectedTierId={modelTierChoice?.tierId ?? null}
-                  pinned={modelTierChoice?.pinned ?? false}
+                  selectedTierId={selectedModelTierId}
                   onChange={handleModelTierChange}
                   disabled={isLoading}
                 />

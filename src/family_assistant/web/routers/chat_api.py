@@ -569,6 +569,16 @@ class ConversationMessagesResponse(BaseModel):
             "loads the matching profile-partitioned history."
         ),
     )
+    conversation_model_tier: str | None = Field(
+        default=None,
+        description=(
+            "The model tier the conversation is on for latest_user_profile_id: "
+            "a tier chosen earlier that later turns naming none still run at. "
+            "Null when the conversation is on the profile's default. Populated "
+            "only alongside latest_user_profile_id. A client shows it as the "
+            "current selection, and sends the profile's default tier to leave it."
+        ),
+    )
     active_turns: list["ActiveTurnInfo"] = Field(
         default_factory=list,
         description=(
@@ -3036,6 +3046,20 @@ async def get_conversation_messages(
             if runs and runs[0]["origin_interface_type"] == "voice":
                 latest_user_profile_id = runs[0]["source_profile_id"]
 
+    conversation_model_tier = None
+    if latest_user_profile_id is not None:
+        processing_services_registry = getattr(
+            request.app.state, "processing_services", {}
+        )
+        adopted_service = processing_services_registry.get(latest_user_profile_id)
+        if isinstance(adopted_service, ProcessingService):
+            sticky = await adopted_service.conversation_model_selection(
+                db_context,
+                conversation_id=conversation_id,
+                subconversation_id=None,
+            )
+            conversation_model_tier = sticky.tier if sticky is not None else None
+
     return ConversationMessagesResponse(
         conversation_id=conversation_id,
         messages=response_messages,
@@ -3044,6 +3068,7 @@ async def get_conversation_messages(
         has_more_before=has_more_before,
         has_more_after=has_more_after,
         latest_user_profile_id=latest_user_profile_id,
+        conversation_model_tier=conversation_model_tier,
         active_turns=active_turns,
     )
 

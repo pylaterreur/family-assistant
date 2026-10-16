@@ -73,6 +73,7 @@ _MAX_ASSISTANT_ROWS_PER_TOOL_EXAMPLE = 20
 _DEFAULT_MESSAGE_HISTORY_LIMIT = 20
 _MAX_MESSAGE_HISTORY_LIMIT = 100
 _MAX_CONTEXT_MESSAGES_PER_SIDE = 10
+_LATEST_MODEL_SELECTION_SCAN_ROWS = 20
 
 MESSAGE_HISTORY_INDEX_DELAY = timedelta(minutes=2)
 """How long a persisted row waits before its turn is indexed.
@@ -2119,6 +2120,49 @@ class MessageHistoryRepository(BaseRepository):
             if isinstance(value, dict):
                 infos.append(cast("MessageReasoningInfo", value))
         return infos
+
+    async def get_latest_model_selection_reasoning(
+        self,
+        conversation_id: str,
+        *,
+        subconversation_id: str | None,
+        processing_profile_id: str,
+    ) -> MessageReasoningInfo | None:
+        """The usage on the profile's most recent reply or error that recorded a tier.
+
+        What a conversation is currently running at is the tier its latest turn
+        ran at, so this is where a tier choice is read back from. Scoped to one
+        profile because a tier is a choice about that profile's inference, and
+        to one subconversation because a delegated thread is another agent's
+        conversation.
+
+        Rows without a recorded selection -- a reply no model call produced --
+        are skipped rather than ending the search. The scan is bounded: every
+        model call stamps its row, so only a run of replies no model wrote can
+        put the latest selection out of reach, and then the conversation reads
+        as having none.
+        """
+        stmt = (
+            select(message_history_table.c.reasoning_info)
+            .where(
+                message_history_table.c.conversation_id == conversation_id,
+                _exact_subconversation_condition(subconversation_id),
+                message_history_table.c.processing_profile_id == processing_profile_id,
+                # A failed turn records its selection on its error row, and it
+                # still said what tier the conversation is on: a turn that left
+                # Deep and then failed has left it.
+                message_history_table.c.role.in_(("assistant", "error")),
+            )
+            .order_by(message_history_table.c.internal_id.desc())
+            .limit(_LATEST_MODEL_SELECTION_SCAN_ROWS)
+        )
+        for row in await self._db.fetch_all(stmt):
+            value = row["reasoning_info"]
+            if isinstance(value, str):
+                value = json.loads(value)
+            if isinstance(value, dict) and "model_tier_source" in value:
+                return cast("MessageReasoningInfo", value)
+        return None
 
     async def conversation_moved_past_turn(
         self,

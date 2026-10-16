@@ -32,9 +32,10 @@ Which commands exist depends on how your deployment is configured; these are the
 | `/engineer`                 | Diagnostics: "why did the assistant do that?"                                      |
 | `/interrupt`                | (Telegram) stop the request currently being processed in that chat                 |
 
-Two more Telegram commands choose *how hard* the assistant thinks about one message rather than
-which assistant answers it: `/deep` and `/max`. They keep the conversation on whatever assistant it
-is already using. See [intelligence-levels.md](intelligence-levels.md).
+Three more Telegram commands choose *how hard* the assistant thinks rather than which assistant
+answers: `/deep`, `/max` and `/standard`. They keep the conversation on whatever assistant it is
+already using, and the level you pick stays for the messages after it until you pick another. See
+[intelligence-levels.md](intelligence-levels.md).
 
 If you type a command the assistant doesn't recognise, it replies saying so.
 

@@ -1403,7 +1403,7 @@ private struct ProfilePickerView: View {
     }
 }
 
-/// Picks how much model capability to apply to the next message, beside the
+/// Picks how much model capability the conversation runs at, beside the
 /// profile picker that says which agent handles it.
 ///
 /// Renders nothing where the active profile offers no choice — one pinned to a
@@ -1419,7 +1419,7 @@ private struct ProfilePickerView: View {
 private struct IntelligencePickerView: View {
     var viewModel: ChatViewModel
 
-    private var choice: ChatViewModel.ModelTierChoice? {
+    private var choice: String? {
         viewModel.modelTierChoice
     }
 
@@ -1427,7 +1427,7 @@ private struct IntelligencePickerView: View {
         guard let choice else {
             return nil
         }
-        return viewModel.availableModelTiers.first { $0.id == choice.tierID }?.label ?? choice.tierID
+        return viewModel.availableModelTiers.first { $0.id == choice }?.label ?? choice
     }
 
     var body: some View {
@@ -1439,16 +1439,6 @@ private struct IntelligencePickerView: View {
                     }
                 }
                 .pickerStyle(.inline)
-                if let choice, let selectedLabel {
-                    Divider()
-                    Toggle(isOn: pinBinding(for: choice)) {
-                        Label(
-                            "Keep \(selectedLabel) for this chat",
-                            systemImage: "pin"
-                        )
-                    }
-                    .accessibilityIdentifier("intelligence-pin-toggle")
-                }
             } label: {
                 label
             }
@@ -1471,11 +1461,8 @@ private struct IntelligencePickerView: View {
     @ViewBuilder
     private var label: some View {
         if let selectedLabel {
-            Label(
-                selectedLabel,
-                systemImage: choice?.pinned == true ? "pin.fill" : "gauge.with.dots.needle.67percent"
-            )
-            .labelStyle(.titleAndIcon)
+            Label(selectedLabel, systemImage: "gauge.with.dots.needle.67percent")
+                .labelStyle(.titleAndIcon)
         } else {
             Image(systemName: "gauge.with.dots.needle.67percent")
         }
@@ -1485,9 +1472,7 @@ private struct IntelligencePickerView: View {
         guard let selectedLabel else {
             return "Intelligence"
         }
-        return choice?.pinned == true
-            ? "Intelligence: \(selectedLabel), kept for this chat"
-            : "Intelligence: \(selectedLabel), for the next message"
+        return "Intelligence: \(selectedLabel), for this chat"
     }
 
     /// The menu shows the tier actually in force, which is the profile's default
@@ -1495,15 +1480,8 @@ private struct IntelligencePickerView: View {
     /// nothing, which `selectModelTier` turns back into no choice at all.
     private var tierSelection: Binding<String> {
         Binding(
-            get: { choice?.tierID ?? viewModel.defaultModelTierID ?? "" },
-            set: { viewModel.selectModelTier($0, pinned: choice?.pinned ?? false) }
-        )
-    }
-
-    private func pinBinding(for choice: ChatViewModel.ModelTierChoice) -> Binding<Bool> {
-        Binding(
-            get: { choice.pinned },
-            set: { viewModel.selectModelTier(choice.tierID, pinned: $0) }
+            get: { choice ?? viewModel.defaultModelTierID ?? "" },
+            set: { viewModel.selectModelTier($0) }
         )
     }
 }

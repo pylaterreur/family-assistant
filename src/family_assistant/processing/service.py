@@ -33,6 +33,7 @@ from family_assistant.llm.model_selection import (
     ModelTierNotPermitted,
     ModelTierOption,
     ResolvedModelSelection,
+    model_selection_from_reasoning,
     resolve_model_selection,
     stamp_model_selection,
 )
@@ -494,6 +495,64 @@ class ProcessingService:
             profile_id=self.service_config.id,
         )
 
+    async def conversation_model_selection(
+        self,
+        db_context: Database,
+        *,
+        conversation_id: str,
+        subconversation_id: str | None,
+    ) -> ResolvedModelSelection | None:
+        """The tier a person chose for this conversation, still in force.
+
+        A tier choice is sticky: it holds for every later turn that names none,
+        until the person chooses again. Switching models turn by turn throws
+        away the provider's prompt cache each way, so a choice that lapsed
+        after one message would make the conversation pay full prefill on the
+        turn after it as well as on the turn itself.
+
+        Read back from the conversation's latest recorded selection rather than
+        stored apart from it, so there is no second record to drift from what
+        the turns actually ran at. Only a person's choice carries forward: a
+        delegating model's or Auto's is about the turn it was made for.
+        Choosing the profile's default tier is the way back, so a selection
+        naming it ends the stickiness rather than continuing it.
+
+        The carried choice is admitted again, as the person's: a profile that
+        no longer allows the tier gets its default, logged, rather than a
+        refusal for a request nobody made on this turn.
+        """
+        default_tier = self.service_config.tier_eligibility.default_tier
+        if default_tier is None:
+            return None
+        reasoning = (
+            await db_context.message_history.get_latest_model_selection_reasoning(
+                conversation_id,
+                subconversation_id=subconversation_id,
+                processing_profile_id=self.service_config.id,
+            )
+        )
+        previous = model_selection_from_reasoning(reasoning)
+        if (
+            previous is None
+            or previous.source != "user"
+            or previous.tier is None
+            or previous.tier == default_tier
+        ):
+            return None
+        try:
+            return self.resolve_model_selection(
+                ModelSelectionRequest(tier=previous.tier, source="user")
+            )
+        except ModelTierNotPermitted:
+            logger.info(
+                "Conversation %s was on model tier '%s', which profile '%s' no "
+                "longer allows; continuing on its default.",
+                conversation_id,
+                previous.tier,
+                self.service_config.id,
+            )
+            return None
+
     def _run_binding(
         self, selection: ResolvedModelSelection | None
     ) -> tuple[ResolvedModelSelection, LLMInterface]:
@@ -556,7 +615,23 @@ class ProcessingService:
         both. Reading them here rather than trusting each worker path to also
         pass a frozen envelope is what keeps a new wake from being routed by
         having forgotten something.
+
+        A turn that names no tier continues the conversation's sticky choice,
+        wakes included: they extend the same history, so running them at
+        another tier would cost the cache the choice exists to keep. A frozen
+        envelope is a queued run's own authorization and is left alone.
         """
+        if selection is None or (
+            selection.source == "default" and not selection.frozen
+        ):
+            selection = (
+                await self.conversation_model_selection(
+                    db_context,
+                    conversation_id=conversation_id,
+                    subconversation_id=subconversation_id,
+                )
+                or selection
+            )
         routed = await self._auto_routed_selection(
             db_context,
             selection,
