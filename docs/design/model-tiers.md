@@ -426,6 +426,9 @@ Accepted residual behavior, recorded so review does not re-litigate it:
 - A conversation that has been on a chosen tier names its tier on every later send from that client,
   so its turns at the default are recorded as the person's choice and are not routed. Only
   conversations where someone chose a tier lose Auto's shadow record.
+- A client learns the conversation's tier when it opens the conversation, not live. When the same
+  conversation is open on two clients and one changes the tier, the other's control is stale until
+  it reopens the conversation; the tier badge on the next reply shows what actually ran.
 - iOS reads the tier from the latest reply, not from a failed turn's error row. Reopening a
   conversation whose "back to Standard" turn failed shows the earlier chosen tier and runs at it:
   what the control shows is what runs, and the user can choose again.
