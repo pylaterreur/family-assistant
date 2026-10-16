@@ -322,9 +322,9 @@ def test_delegation_to_engineer_is_review_gated_not_blocked() -> None:
     delegate = _delegate_descriptor()
 
     # Every profile that can delegate at all must route the engineer through a
-    # review gate (never an unconditional allow or confirm). browser_profile,
-    # telephone, and complex_tasks each replace tools_policy wholesale, so each
-    # needs its own gate; default_assistant inherits default_profile_settings.
+    # review gate (never an unconditional allow or confirm). browser_profile
+    # and telephone each replace tools_policy wholesale, so each needs its own
+    # gate; default_assistant and complex_tasks inherit default_profile_settings.
     source_engines = {
         "default_profile_settings": PolicyEngine.from_policy_config(
             default_settings.tools_policy

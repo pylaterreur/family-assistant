@@ -1007,10 +1007,14 @@ def resolve_service_profile(
             profile_def["tools_config"],
         )
 
-    # Replace tools_policy entirely if defined (operator layer is preserved
-    # separately so it still applies via PolicyEngine.from_layers)
+    # A profile's own tools_policy replaces the default policy entirely, and
+    # the operator's default_profile_settings.tools_policy rules are additions
+    # to that default, so they go with it. Otherwise the operator layer, which
+    # outranks everything else, would hand every deployment-wide grant to
+    # profiles confined by their own deny-by-default policy.
     if "tools_policy" in profile_def:
         resolved["tools_policy"] = profile_def["tools_policy"]
+        resolved["operator_tools_policy"] = None
 
     if "taint_policy" in profile_def:
         resolved["taint_policy"] = profile_def["taint_policy"]

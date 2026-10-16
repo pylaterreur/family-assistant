@@ -75,7 +75,7 @@ are derived from those three inputs — do not edit them directly.
 
 Add a rule matching the tool name or one of its tags to the `tools_policy` of each profile that
 should have access. A profile's own `tools_policy` replaces `default_profile_settings.tools_policy`
-wholesale rather than merging with it.
+wholesale rather than merging with it, including any rules an operator added there.
 
 The one exception is the top-level `global_tools_policy`, whose rules are injected into every
 profile's policy engine regardless of that profile's own `tools_policy`, so a tool it covers is
