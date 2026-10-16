@@ -63,7 +63,7 @@ from family_assistant.tools.infrastructure import (
 from family_assistant.tools.types import ToolExecutionContext, ToolResult
 from family_assistant.web.audio_utils import StatefulResampler
 from family_assistant.web.dependencies import get_live_audio_client
-from family_assistant.web.live_tools import resolve_live_tools
+from family_assistant.web.live_tools import execute_live_tool, resolve_live_tools
 from family_assistant.web.models import GeminiLiveConfig
 from family_assistant.web.voice_client import (  # noqa: TC001 - FastAPI resolves this at runtime for Depends
     LiveAudioClient,
@@ -1336,8 +1336,12 @@ class AsteriskLiveHandler:
                 # Dispatch through the live view so `call_tool` resolves; the
                 # context keeps the plain provider, because a script the model
                 # starts must still see every tool policy allows.
-                result = await self.processing_service.live_tools_provider.execute_tool(
-                    current_name, current_args, exec_context, current_call_id
+                result = await execute_live_tool(
+                    self.processing_service,
+                    current_name,
+                    current_args,
+                    exec_context,
+                    current_call_id,
                 )
 
                 if isinstance(result, ToolResult):
