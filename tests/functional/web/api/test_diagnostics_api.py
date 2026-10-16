@@ -96,6 +96,49 @@ async def test_diagnostics_export_includes_llm_requests(
 
 
 @pytest.mark.asyncio
+async def test_diagnostics_export_preserves_arbitrary_tool_schemas(
+    api_client: httpx.AsyncClient,
+) -> None:
+    """Tool schemas using JSON Schema beyond ToolDefinition's subset export verbatim."""
+    parameters = {
+        "type": "object",
+        "properties": {
+            "rating": {"type": "integer", "enum": [7, 8, 9]},
+            "files": {"type": "object", "additionalProperties": {"type": "string"}},
+            "limit": {"type": "integer", "minimum": 1},
+        },
+    }
+    get_request_buffer().add(
+        LLMRequestRecord(
+            timestamp=datetime.now(UTC),
+            request_id="schema",
+            model_id="test-model",
+            messages=[{"role": "user", "content": "Hello"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mcp_tool",
+                        "description": "An MCP tool",
+                        "parameters": parameters,  # pyright: ignore[reportArgumentType]
+                    },
+                }
+            ],
+            tool_choice=None,
+            response=None,
+            duration_ms=1.0,
+            error=None,
+        )
+    )
+
+    response = await api_client.get("/api/diagnostics/export")
+
+    assert response.status_code == 200
+    [record] = response.json()["llm_requests"]
+    assert record["tools"][0]["function"]["parameters"] == parameters
+
+
+@pytest.mark.asyncio
 async def test_diagnostics_export_respects_time_filter(
     api_client: httpx.AsyncClient,
 ) -> None:
