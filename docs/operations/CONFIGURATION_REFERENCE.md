@@ -3022,6 +3022,22 @@ See [voice-mode-on-demand-tools.md](../design/voice-mode-on-demand-tools.md).
 
 ______________________________________________________________________
 
+## Large Tool Results in Voice (`gemini_live_config.large_tool_result_threshold_kb`)
+
+```yaml
+gemini_live_config:
+  large_tool_result_threshold_kb: 8
+```
+
+A Live model takes in the whole function response before it says anything, so a large one is heard
+as dead air. A tool result at least this many KiB is saved as an attachment, and the voice model
+gets the same pointer the chat assistant gets for results past
+`attachment_config.large_tool_result_threshold_kb` (default 100): the attachment ID and a hint to
+read it with `jq_query` or `read_text_attachment`. It applies to every voice entry point (browser,
+iOS, watch and Asterisk calls). In an app session the attachment belongs to the caller.
+
+______________________________________________________________________
+
 ## Assistant Voice (`gemini_live_config.voice`)
 
 ```yaml

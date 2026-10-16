@@ -595,6 +595,7 @@ Call attach_to_response with your selected attachment IDs."""
         taint_metadata: Mapping[str, object] | None = None,
         *,
         owner_user_id: str | None = None,
+        threshold_kb: int | None = None,
     ) -> tuple[str, str | None]:
         """
         Check if a tool result is too large and convert it to an attachment if necessary.
@@ -609,15 +610,17 @@ Call attach_to_response with your selected attachment IDs."""
             owner_user_id: Owner recorded on the auto-converted attachment. Set
                 only for personal-data tool results so ordinary tool output
                 stays ownerless (backward-compatible).
+            threshold_kb: Overrides the configured threshold, for a caller
+                whose model pays more for a large result than chat does.
 
         Returns:
             Tuple of (new_content, auto_attachment_id)
         """
-        # Threshold from config (default 100 KiB)
-        threshold_kb = 100
-        if self.app_config and self.app_config.attachment_config:
+        if threshold_kb is None:
             threshold_kb = (
                 self.app_config.attachment_config.large_tool_result_threshold_kb
+                if self.app_config and self.app_config.attachment_config
+                else 100
             )
 
         THRESHOLD_BYTES = threshold_kb * 1024

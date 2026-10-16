@@ -1188,6 +1188,13 @@ class GeminiLiveConfig(BaseModel):
     )
     thinking: GeminiThinkingConfig = Field(default_factory=GeminiThinkingConfig)
     telephone_overrides: TelephoneOverrides = Field(default_factory=TelephoneOverrides)
+    large_tool_result_threshold_kb: int = Field(default=8, ge=1)
+    """Tool results at least this size (KiB) reach a Live session as an attachment.
+
+    Far below the chat threshold (``attachment_config``): a Live model prefills
+    a function response before it says anything, so a large one is heard as
+    dead air.
+    """
 
 
 class IndexingProcessorConfig(BaseModel):

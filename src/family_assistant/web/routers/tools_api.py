@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 from family_assistant.llm.messages import UserMessage
+from family_assistant.processing import ProcessingService
 from family_assistant.security.taint import (
     InMemoryTurnTaintTracker,
     TaintMetadata,
@@ -29,6 +30,7 @@ from family_assistant.web.dependencies import (
     get_db,
     get_tools_provider_dependency,
 )
+from family_assistant.web.live_tools import execute_live_tool
 
 logger = logging.getLogger(__name__)
 tools_api_router = APIRouter()
@@ -68,6 +70,32 @@ def _serialize_tool_result(result: object) -> object:
         with contextlib.suppress(json.JSONDecodeError):
             return json.loads(result)
     return result
+
+
+async def _dispatch_tool(
+    processing_service: ProcessingService | None,
+    tools_provider: ToolsProvider,
+    tool_name: str,
+    # ast-grep-ignore: no-dict-any - Tool arguments vary per tool and cannot be statically typed
+    arguments: dict[str, Any],
+    context: ToolExecutionContext,
+) -> object:
+    if processing_service is None:
+        if context.interface_type == "voice":
+            raise RuntimeError("A voice tool call needs a processing service.")
+        return await tools_provider.execute_tool(
+            name=tool_name, arguments=arguments, context=context
+        )
+    if context.interface_type == "voice":
+        return await execute_live_tool(
+            processing_service, tool_name, arguments, context
+        )
+    # The live view resolves `call_tool`, while the context keeps the plain
+    # provider: a script started from here must still see every tool policy
+    # allows, not the voice declaration list.
+    return await processing_service.live_tools_provider.execute_tool(
+        name=tool_name, arguments=arguments, context=context
+    )
 
 
 @tools_api_router.post("/execute/{tool_name}", response_class=JSONResponse)
@@ -122,14 +150,6 @@ async def execute_tool_api(
     )
     selected_tools_provider = (
         processing_service.tools_provider if processing_service else tools_provider
-    )
-    # Dispatch through the live view so a voice session's `call_tool` resolves,
-    # while the context keeps the plain provider: a script started from here
-    # must still see every tool policy allows, not the voice declaration list.
-    dispatch_tools_provider = (
-        processing_service.live_tools_provider
-        if processing_service
-        else selected_tools_provider
     )
 
     # --- Create Execution Context ---
@@ -268,8 +288,12 @@ async def execute_tool_api(
     )
 
     try:
-        result = await dispatch_tools_provider.execute_tool(
-            name=tool_name, arguments=payload.arguments, context=execution_context
+        result = await _dispatch_tool(
+            processing_service,
+            selected_tools_provider,
+            tool_name,
+            payload.arguments,
+            execution_context,
         )
         logger.info(f"Tool '{tool_name}' executed successfully.")
         final_result = _serialize_tool_result(result)
