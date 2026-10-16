@@ -74,7 +74,11 @@ def _install_provider(app: FastAPI) -> None:
         registrations=[
             _registration("home_overview", _home_overview),
             _registration("home_price", _home_price),
-            *(r for r in LOCAL_TOOL_REGISTRATIONS if r.name == "jq_query"),
+            *(
+                r
+                for r in LOCAL_TOOL_REGISTRATIONS
+                if r.name in {"jq_query", "read_text_attachment"}
+            ),
         ]
     )
     service = app.state.processing_service
@@ -122,6 +126,32 @@ async def test_large_voice_result_arrives_as_an_attachment_the_model_can_query(
     follow_up_result = follow_up.json()["result"]
     queried = follow_up_result.get("data") or json.loads(follow_up_result["text"])
     assert queried == {"low": 0.07, "high": 0.13}
+
+
+@pytest.mark.asyncio
+async def test_reading_the_attachment_through_call_tool_returns_its_content(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+) -> None:
+    """The reader's exemption holds when the session reaches it via call_tool."""
+    _install_provider(app_fixture)
+    converted = await api_test_client.post(
+        "/api/tools/execute/call_tool", json=_voice_call("home_overview")
+    )
+    match = ATTACHMENT_ID_PATTERN.search(converted.json()["result"]["text"])
+    assert match is not None, converted.text
+
+    response = await api_test_client.post(
+        "/api/tools/execute/call_tool",
+        json=_voice_call(
+            "read_text_attachment",
+            json.dumps({"attachment_id": match.group(1), "limit": 1000}),
+        ),
+    )
+
+    assert response.status_code == 200, response.text
+    assert "sensor.reading_900" in response.text
+    assert ATTACHMENT_ID_PATTERN.search(response.text) is None
 
 
 @pytest.mark.asyncio

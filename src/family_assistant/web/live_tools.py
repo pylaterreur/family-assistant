@@ -15,7 +15,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from family_assistant.config_models import GeminiLiveConfig
-from family_assistant.tools.live_meta import LiveMetaToolsProvider
+from family_assistant.tools.live_meta import CALL_TOOL_TOOL_NAME, LiveMetaToolsProvider
 from family_assistant.tools.types import ToolResult
 
 if TYPE_CHECKING:
@@ -71,7 +71,7 @@ async def execute_live_tool(
     stub, attachment_id = await service.attachment_processor.handle_large_result(
         context.db_context,
         _live_response_text(result),
-        name,
+        _target_tool_name(name, arguments),
         context.conversation_id,
         call_id or context.turn_id or "",
         taint_tracker.snapshot().to_metadata() if taint_tracker else None,
@@ -83,6 +83,18 @@ async def execute_live_tool(
         return result
     attachments = result.attachments if isinstance(result, ToolResult) else None
     return ToolResult(text=stub, attachments=attachments)
+
+
+# ast-grep-ignore: no-dict-any - Tool arguments are dynamic JSON from the model
+def _target_tool_name(name: str, arguments: dict[str, Any]) -> str:
+    """The tool that produced the result, looking through ``call_tool``.
+
+    The large-result exemptions and the pointer text are about that tool, so a
+    wrapped ``read_text_attachment`` must not be converted where a declared one
+    would not.
+    """
+    inner = arguments.get("name") if name == CALL_TOOL_TOOL_NAME else None
+    return inner.strip() if isinstance(inner, str) and inner.strip() else name
 
 
 def _live_response_text(result: object) -> str:
