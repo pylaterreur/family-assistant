@@ -331,13 +331,21 @@ class CalendarEvent(TypedDict):
 
 @dataclass
 class ToolCallReviewTurnState:
-    """Mutable reviewer budget and escalation counters shared by one turn."""
+    """Mutable reviewer budget and escalation counters shared by one turn.
+
+    The ``forecast_`` counters also count observe-mode reviews whose verdicts
+    bind nothing, so observe can record where ``enforce`` would escalate
+    without those verdicts tripping a live escalation.
+    """
 
     review_count: int = 0
     consecutive_denials: int = 0
     total_denials: int = 0
     escalation_handled: bool = False
     terminal_denial_escalation_message: str | None = None
+    forecast_consecutive_denials: int = 0
+    forecast_total_denials: int = 0
+    forecast_escalation_handled: bool = False
 
 
 @dataclass

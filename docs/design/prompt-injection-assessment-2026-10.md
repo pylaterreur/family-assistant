@@ -361,16 +361,35 @@ configuration line: if they slip beyond a few weeks, flip anyway and fix under e
    outcomes with `mode = enforce`, and by the median daily count in `confirmation_requests` over the
    first thirty days of enforce landing at or under the recorded post-fix figure.
 
-   Two near-zeros in the observe-mode audit are expected and say nothing about whether the paths
-   behind them work: `tool_call_review_escalation` events, and `taint_policy_reason` on confirmation
-   rows. Taint-only reviews run off the critical path under observe, so they neither count toward
-   the denial streak nor create confirmations. Only calls that a static `review` rule also gates are
-   reviewed synchronously, so those are the only observe-mode source of either.
-   `tests/functional/tools/test_enforce_review_escalation.py` is the evidence instead: it drives an
-   enforce-mode turn through the chat API to a durable escalation after three model denials, and
-   shows a reviewer timeout falling back to confirm rather than allow. One week after the flip, read
-   the escalation events and the confirmation rows' policy reasons to check that the first real
-   escalations look like that test.
+   Observe runs enforce's decision path and replaces only the block, the prompt and the escalation
+   prompt with a recorded outcome (see
+   [script-execution-review-boundary.md](script-execution-review-boundary.md)), so its audit is a
+   forecast rather than a separate shadow population: a script program is reviewed once and its
+   operations inherit as under enforce, and a denial streak that would escalate is recorded as
+   `escalation_would_confirm` or `escalation_would_terminate`. The would-prompt count is read from
+   that audit for each turn:
+
+   - A would-block is a taint-only `tool_call_review` with verdict `confirm` or `deny`, a live
+     review whose verdict is `confirm` or whose `allow` is absent from its
+     `enforce_available_verdicts`, an inherited call that enforce's floor would still stop
+     (`inherited_would_deny` or `inherited_would_confirm`), or a would-be escalation. A would-prompt
+     is the subset that reaches a person: `confirm` verdicts, an `allow` outside the enforce space,
+     `inherited_would_confirm`, and `escalation_would_confirm`.
+   - Events whose `parent_script_review_id` names a program review that did not allow are left out.
+     Under enforce that program never ran, or ran on a person's approval its operations inherit, so
+     neither its operations' reviews nor their prompts would have happened.
+   - Report both the number of turns with at least one would-prompt and the total. After the first
+     would-block, enforce would have changed what the model did next, so the first figure is the
+     lower bound and the total the upper.
+
+   One near-zero in the observe-mode audit is still expected and says nothing about whether its path
+   works: `taint_policy_reason` on confirmation rows, because observe creates no taint
+   confirmations. `tests/functional/tools/test_enforce_review_escalation.py` is the evidence
+   instead: it drives an enforce-mode turn through the chat API to a durable escalation after three
+   model denials, and shows a reviewer timeout falling back to confirm rather than allow. One week
+   after the flip, read the escalation events and the confirmation rows' policy reasons to check
+   that the first real escalations look like that test, and that the would-be escalations recorded
+   under observe predicted them.
 
 5. **Cut the framework back to what discriminates.** After thirty days of enforce. Delete the policy
    matrix evaluator and its outcome lattice, tighten-only profile merging, `operator_minimum`,

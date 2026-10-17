@@ -14,6 +14,7 @@ from family_assistant.llm.call_context import (
 from family_assistant.llm.typesafe import (
     ChoiceQuestion,
     JevClient,
+    JevImage,
     NoulQuestion,
     TypeSafeError,
 )
@@ -96,6 +97,46 @@ async def test_request_authenticates_with_bearer_key() -> None:
         await client.close()
 
     assert captured[0].headers["Authorization"] == "Bearer test-key"
+
+
+async def _captured_request(images: dict[str, JevImage] | None = None) -> httpx.Request:
+    captured: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"answers": {"q": {"noul": 0.5}}})
+
+    client = JevClient(
+        api_key="test-key",
+        model="jev-test",
+        timeout_seconds=1,
+        transport=httpx.MockTransport(respond),
+    )
+    try:
+        await client.ask(
+            {"frame": "ref-1"},
+            {"q": NoulQuestion("Is there a person in `frame`?")},
+            images=images,
+        )
+    finally:
+        await client.close()
+    return captured[0]
+
+
+async def test_images_are_sent_as_base64_assets_under_the_images_header() -> None:
+    request = await _captured_request(images={"ref-1": JevImage(b"jpeg", "jpeg")})
+
+    assert request.headers["TypeSafe-Danger-Zone-Images"] == "true"
+    assert json.loads(request.content)["assets"] == {
+        "ref-1": {"type": "image", "format": "jpeg", "data_base64": "anBlZw=="}
+    }
+
+
+async def test_a_text_request_does_not_opt_into_image_input() -> None:
+    request = await _captured_request()
+
+    assert "TypeSafe-Danger-Zone-Images" not in request.headers
+    assert "assets" not in json.loads(request.content)
 
 
 async def test_parses_answers_model_and_usage() -> None:

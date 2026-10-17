@@ -20,7 +20,7 @@ import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -32,13 +32,11 @@ from reolink_aio.typings import VOD_file, VOD_trigger
 from family_assistant.plugins.reolink.protocol import (
     CameraEvent,
     CameraInfo,
-    FrameWithTimestamp,
     Recording,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from datetime import datetime
 
     from family_assistant.plugins.reolink.config import ReolinkCameraItemConfig
 
@@ -58,6 +56,46 @@ VOD_TRIGGER_TO_EVENT_TYPE: dict[str, str] = {
 
 # VOD split time for searching recordings (5 minutes per chunk)
 VOD_SPLIT_TIME = timedelta(minutes=5)
+# One request at a time per camera. Concurrent playback extraction is about
+# four times faster, but a camera has been seen refusing all playback for
+# minutes after concurrent extractions were cut off mid-stream, so it stays off
+# until that is understood. See docs/design/camera-analyst-jev.md.
+MAX_CONCURRENT_REQUESTS = 1
+
+
+def wall_clock_days(
+    start_time: datetime, end_time: datetime
+) -> list[tuple[datetime, datetime]]:
+    """Split a range into windows that each stay within one wall-clock day.
+
+    A Reolink recording search whose window crosses midnight returns no files
+    at all, so a range has to be searched one day at a time. The days are
+    those of *start_time*'s zone, which is the camera's wall clock.
+    """
+    zone = start_time.tzinfo
+    end_time = end_time.astimezone(zone)
+    windows: list[tuple[datetime, datetime]] = []
+    window_start = start_time
+    while window_start <= end_time:
+        next_midnight = datetime.combine(
+            window_start.date() + timedelta(days=1), datetime.min.time(), zone
+        )
+        window_end = min(end_time, next_midnight - timedelta(seconds=1))
+        windows.append((window_start, window_end))
+        window_start = next_midnight
+    return windows
+
+
+def as_wall_clock(camera_time: datetime, zone: tzinfo | None) -> datetime:
+    """A time the camera reported, placed in the zone its wall clock runs on.
+
+    Reolink searches and reports by wall-clock fields alone. The zone
+    ``reolink_aio`` attaches to the times it returns is the camera's base
+    offset without daylight saving, while the camera's clock -- the one its
+    recordings and overlay use -- follows the household's zone, so the
+    attached zone is replaced rather than converted from.
+    """
+    return camera_time.replace(tzinfo=zone)
 
 
 @dataclass
@@ -100,7 +138,9 @@ class ReolinkBackend:
     providing async methods for event search, recording access, and frame extraction.
 
     The implementation uses connection pooling to reuse Host instances and
-    per-camera locks to prevent concurrent API calls that could exceed session limits.
+    a per-camera semaphore to bound concurrent requests within the camera's
+    session limits. Connecting takes a per-camera lock, so concurrent requests
+    share one login rather than each opening a session.
     """
 
     def __init__(self, cameras: dict[str, ReolinkCameraConfig]) -> None:
@@ -111,7 +151,11 @@ class ReolinkBackend:
         """
         self._cameras = cameras
         self._hosts: dict[str, Host] = {}
-        self._locks: dict[str, asyncio.Lock] = {
+        self._slots: dict[str, asyncio.Semaphore] = {
+            camera_id: asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+            for camera_id in cameras
+        }
+        self._connect_locks: dict[str, asyncio.Lock] = {
             camera_id: asyncio.Lock() for camera_id in cameras
         }
 
@@ -142,13 +186,15 @@ class ReolinkBackend:
             ValueError: If camera_id is unknown.
         """
         self._validate_camera_id(camera_id)
+        async with self._connect_locks[camera_id]:
+            return await self._connect(camera_id)
 
-        # Check if we already have a host connection with active session
-        if camera_id in self._hosts:
-            host = self._hosts[camera_id]
+    async def _connect(self, camera_id: str) -> Host:
+        """The camera's live session, logging in again if it has expired."""
+        host = self._hosts.get(camera_id)
+        if host is not None:
             if host.session_active:
                 return host
-            # Session expired, clean up and reconnect
             logger.debug("Session expired for camera %s, reconnecting", camera_id)
             try:
                 await host.logout()
@@ -156,9 +202,8 @@ class ReolinkBackend:
                 logger.debug(
                     "Error during logout for camera %s", camera_id, exc_info=True
                 )
-            del self._hosts[camera_id]
+            self._hosts.pop(camera_id, None)
 
-        # Create new Host instance
         config = self._cameras[camera_id]
         host = Host(
             host=config.host,
@@ -168,12 +213,34 @@ class ReolinkBackend:
             use_https=config.use_https,
             timeout=120,  # Increase timeout from 30s default for VOD operations
         )
-
-        # Initialize connection
         await host.get_host_data()
-
         self._hosts[camera_id] = host
         return host
+
+    @staticmethod
+    async def _search_vod_files(
+        host: Host,
+        channel: int,
+        start_time: datetime,
+        end_time: datetime,
+        *,
+        stream: str,
+    ) -> list[VOD_file]:
+        """Recording files overlapping the range, searched one day at a time."""
+        vod_files: dict[tuple[str, datetime], VOD_file] = {}
+        for window_start, window_end in wall_clock_days(start_time, end_time):
+            _statuses, window_files = await host.request_vod_files(
+                channel,
+                window_start,
+                window_end,
+                stream=stream,
+                split_time=VOD_SPLIT_TIME,
+            )
+            for vod_file in window_files:
+                vod_files.setdefault(
+                    (vod_file.file_name, vod_file.start_time), vod_file
+                )
+        return list(vod_files.values())
 
     async def list_cameras(self) -> list[CameraInfo]:
         """List available cameras.
@@ -185,7 +252,7 @@ class ReolinkBackend:
 
         for camera_id, config in self._cameras.items():
             try:
-                async with self._locks[camera_id]:
+                async with self._slots[camera_id]:
                     host = await self._get_or_create_host(camera_id)
                     # Check if camera is connected
                     status = "online" if host.session_active else "offline"
@@ -228,15 +295,15 @@ class ReolinkBackend:
 
         Args:
             camera_id: ID of the camera to search.
-            start_time: Start of the time range (UTC).
-            end_time: End of the time range (UTC).
+            start_time: Start of the time range (household zone; see CameraBackend).
+            end_time: End of the time range (household zone; see CameraBackend).
             event_types: Optional filter for event types (person, vehicle, pet, motion).
 
         Returns:
             List of CameraEvent objects matching the criteria.
         """
         self._validate_camera_id(camera_id)
-        async with self._locks[camera_id]:
+        async with self._slots[camera_id]:
             host = await self._get_or_create_host(camera_id)
             config = self._cameras[camera_id]
             channel = config.channel
@@ -245,14 +312,12 @@ class ReolinkBackend:
 
             try:
                 # Search for VOD files with triggers
-                _statuses, vod_files = await host.request_vod_files(
-                    channel,
-                    start_time,
-                    end_time,
-                    stream="main",
-                    split_time=VOD_SPLIT_TIME,
+                vod_files = await self._search_vod_files(
+                    host, channel, start_time, end_time, stream="main"
                 )
-                events = self._events_from_vod_files(camera_id, event_types, vod_files)
+                events = self._events_from_vod_files(
+                    camera_id, event_types, vod_files, start_time.tzinfo
+                )
 
             except Exception:
                 logger.exception("Error searching events for camera %s", camera_id)
@@ -265,6 +330,7 @@ class ReolinkBackend:
         camera_id: str,
         event_types: list[str] | None,
         vod_files: list[VOD_file],
+        zone: tzinfo | None,
     ) -> list[CameraEvent]:
         """Convert triggered VOD files into camera events."""
         events: list[CameraEvent] = []
@@ -287,11 +353,16 @@ class ReolinkBackend:
                 if event_types and event_type not in event_types:
                     continue
 
+                end_time = getattr(vod_file, "end_time", None)
                 events.append(
                     CameraEvent(
                         camera_id=camera_id,
-                        start_time=vod_file.start_time,
-                        end_time=getattr(vod_file, "end_time", None),
+                        start_time=as_wall_clock(vod_file.start_time, zone),
+                        end_time=(
+                            as_wall_clock(end_time, zone)
+                            if end_time is not None
+                            else None
+                        ),
                         event_type=event_type,
                         confidence=None,
                         metadata={
@@ -312,14 +383,14 @@ class ReolinkBackend:
 
         Args:
             camera_id: ID of the camera.
-            start_time: Start of the time range (UTC).
-            end_time: End of the time range (UTC).
+            start_time: Start of the time range (household zone; see CameraBackend).
+            end_time: End of the time range (household zone; see CameraBackend).
 
         Returns:
             List of Recording objects representing available footage.
         """
         self._validate_camera_id(camera_id)
-        async with self._locks[camera_id]:
+        async with self._slots[camera_id]:
             host = await self._get_or_create_host(camera_id)
             config = self._cameras[camera_id]
             channel = config.channel
@@ -327,15 +398,12 @@ class ReolinkBackend:
             recordings: list[Recording] = []
 
             try:
-                # Search for VOD files
-                _statuses, vod_files = await host.request_vod_files(
-                    channel,
-                    start_time,
-                    end_time,
-                    stream="main",
-                    split_time=VOD_SPLIT_TIME,
+                vod_files = await self._search_vod_files(
+                    host, channel, start_time, end_time, stream="main"
                 )
-                recordings = self._recordings_from_vod_files(camera_id, vod_files)
+                recordings = self._recordings_from_vod_files(
+                    camera_id, vod_files, start_time.tzinfo
+                )
 
             except Exception:
                 logger.exception("Error getting recordings for camera %s", camera_id)
@@ -345,7 +413,7 @@ class ReolinkBackend:
 
     @staticmethod
     def _recordings_from_vod_files(
-        camera_id: str, vod_files: list[VOD_file]
+        camera_id: str, vod_files: list[VOD_file], zone: tzinfo | None
     ) -> list[Recording]:
         """Convert VOD file metadata into recordings."""
         recordings: list[Recording] = []
@@ -362,8 +430,8 @@ class ReolinkBackend:
             recordings.append(
                 Recording(
                     camera_id=camera_id,
-                    start_time=vod_file.start_time,
-                    end_time=file_end_time,
+                    start_time=as_wall_clock(vod_file.start_time, zone),
+                    end_time=as_wall_clock(file_end_time, zone),
                     filename=vod_file.file_name,
                     size_bytes=getattr(vod_file, "size", None),
                 )
@@ -376,14 +444,16 @@ class ReolinkBackend:
         Args:
             camera_id: ID of the camera.
         """
-        if camera_id in self._hosts:
+        # Concurrent requests may fail together; the first to get here drops
+        # the session and the rest find nothing left to drop.
+        host = self._hosts.pop(camera_id, None)
+        if host is not None:
             try:
-                await self._hosts[camera_id].logout()
+                await host.logout()
             except Exception:
                 logger.debug(
                     "Error during logout for camera %s", camera_id, exc_info=True
                 )
-            del self._hosts[camera_id]
 
     async def get_frame(
         self,
@@ -398,7 +468,7 @@ class ReolinkBackend:
 
         Args:
             camera_id: ID of the camera.
-            timestamp: Exact time to extract frame (UTC).
+            timestamp: Exact time to extract frame (household zone; see CameraBackend).
 
         Returns:
             JPEG bytes of the frame.
@@ -414,7 +484,7 @@ class ReolinkBackend:
         last_error: Exception | None = None
 
         for attempt in range(max_retries):
-            async with self._locks[camera_id]:
+            async with self._slots[camera_id]:
                 try:
                     return await self._get_frame_impl(camera_id, timestamp)
                 except (aiohttp.ServerDisconnectedError, aiohttp.ClientError) as e:
@@ -454,7 +524,7 @@ class ReolinkBackend:
 
         Args:
             camera_id: ID of the camera.
-            timestamp: Exact time to extract frame (UTC).
+            timestamp: Exact time to extract frame (household zone; see CameraBackend).
 
         Returns:
             JPEG bytes of the frame.
@@ -467,12 +537,8 @@ class ReolinkBackend:
         search_start = timestamp - timedelta(minutes=1)
         search_end = timestamp + timedelta(minutes=1)
 
-        _statuses, vod_files = await host.request_vod_files(
-            channel,
-            search_start,
-            search_end,
-            stream="sub",  # Use sub stream for faster extraction
-            split_time=VOD_SPLIT_TIME,
+        vod_files = await self._search_vod_files(
+            host, channel, search_start, search_end, stream="sub"
         )
 
         if not vod_files:
@@ -823,64 +889,6 @@ class ReolinkBackend:
         logger.info("Successfully extracted frame: %d bytes", len(frame_data))
         return frame_data
 
-    async def get_frames_batch(
-        self,
-        camera_id: str,
-        start_time: datetime,
-        end_time: datetime,
-        interval_seconds: int = 900,
-        max_frames: int = 10,
-    ) -> list[FrameWithTimestamp]:
-        """Extract frames at regular intervals for binary search.
-
-        Frames are extracted in parallel for better performance, with a limit
-        on concurrent extractions to avoid overwhelming the camera.
-
-        Args:
-            camera_id: ID of the camera.
-            start_time: Start of the time range (UTC).
-            end_time: End of the time range (UTC).
-            interval_seconds: Seconds between each frame (default 15 minutes).
-            max_frames: Maximum number of frames to return.
-
-        Returns:
-            List of FrameWithTimestamp objects with timestamps and JPEG bytes.
-        """
-        self._validate_camera_id(camera_id)
-
-        # Calculate timestamps
-        current = start_time
-        timestamps: list[datetime] = []
-        while current <= end_time and len(timestamps) < max_frames:
-            timestamps.append(current)
-            current += timedelta(seconds=interval_seconds)
-
-        # Limit concurrent extractions to avoid overwhelming the camera
-        # Using 3 concurrent downloads balances speed vs camera load
-        semaphore = asyncio.Semaphore(3)
-
-        async def extract_with_semaphore(
-            ts: datetime,
-        ) -> FrameWithTimestamp | None:
-            async with semaphore:
-                try:
-                    jpeg_bytes = await self.get_frame(camera_id, ts)
-                    return FrameWithTimestamp(
-                        timestamp=ts, jpeg_bytes=jpeg_bytes, camera_id=camera_id
-                    )
-                except (ValueError, RuntimeError) as e:
-                    # Skip timestamps where no recording exists or extraction fails
-                    logger.warning("Could not extract frame at %s: %s", ts, e)
-                    return None
-
-        # Extract frames in parallel
-        results = await asyncio.gather(
-            *(extract_with_semaphore(ts) for ts in timestamps)
-        )
-
-        # Filter out failed extractions and maintain timestamp order
-        return [frame for frame in results if frame is not None]
-
     async def get_live_snapshot(self, camera_id: str) -> bytes:
         """Get a live snapshot (current frame) from the camera.
 
@@ -928,7 +936,7 @@ class ReolinkBackend:
         """Cleanup connections and resources."""
         for camera_id, host in self._hosts.items():
             try:
-                async with self._locks[camera_id]:
+                async with self._slots[camera_id]:
                     await host.logout()
             except Exception:
                 logger.exception("Error closing host for camera %s", camera_id)

@@ -884,16 +884,23 @@ async def test_an_enforced_admission_review_decides_an_unreviewed_program(
 
 
 @pytest.mark.asyncio
-async def test_an_observed_admission_review_leaves_the_program_unreviewed(
+@pytest.mark.parametrize(
+    ("verdict", "approved"),
+    [(ToolCallReviewVerdict.ALLOW, True), (ToolCallReviewVerdict.DENY, False)],
+)
+async def test_an_observed_admission_review_decides_an_unreviewed_program(
     db_engine: AsyncEngine,
+    verdict: ToolCallReviewVerdict,
+    approved: bool,
 ) -> None:
     db = Database(db_engine)
-    reviewer = _Reviewer(ToolCallReviewVerdict.ALLOW)
+    reviewer = _Reviewer(verdict)
     context = _context(db, tracker_at(EXTERNAL), _gate(OBSERVE, reviewer))
     program = _unreviewed_program()
     context.script_execution = program
 
     await _save(context)
 
-    assert not reviewer.inputs[0].program_approval_requested
-    assert program.awaiting_program_review
+    assert reviewer.inputs[0].program_approval_requested
+    assert program.approved is approved
+    assert not program.awaiting_program_review

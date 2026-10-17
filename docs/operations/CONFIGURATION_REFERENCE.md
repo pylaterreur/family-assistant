@@ -1132,7 +1132,7 @@ ______________________________________________________________________
 
 An optional external classifier ([TypeSafe](https://docs.typesafe.ai)'s Jev: typed, calibrated
 answers in a few hundred milliseconds, priced per input token). Configuring it sends conversation
-text to TypeSafe.
+text to TypeSafe, and, unless `camera_frames` is `off`, camera frames.
 
 ```yaml
 typesafe:
@@ -1143,6 +1143,7 @@ typesafe:
   calendar_duplicates: { mode: "shadow", threshold: 0.6, timeout_seconds: 1.0 }
   calendar_search: { mode: "shadow", threshold: 0.5, timeout_seconds: 1.0 }
   document_search: { mode: "shadow", threshold: 0.5, timeout_seconds: 2.5 }
+  camera_frames: { mode: "active", threshold: 0.5, timeout_seconds: 10.0 }
 ```
 
 | Property  | Value                                               |
@@ -1179,6 +1180,15 @@ typesafe:
   `shadow` (shipped) shows the top `limit` by rank and logs what Jev would have shown. The longer
   timeout covers 30 excerpts' worth of state. Sends excerpts of indexed documents, notes and emails
   to TypeSafe.
+- **Camera frames.** `scan_camera_frames` and `find_camera_change` ask Jev, one image per request,
+  whether each sampled frame satisfies the search's condition, using TypeSafe's experimental image
+  input (`TypeSafe-Danger-Zone-Images`). `active` (shipped) uses Jev; `off` keeps frames off
+  TypeSafe and the turn's model judges each frame instead, at several seconds and an output-token
+  bill per frame. A frame Jev fails on or does not answer within `timeout_seconds` is reported as
+  unjudged. Measured on a backyard camera, Jev answered in about 0.26s per frame against 4.5s for
+  `gemini-3.8-flash`, matched it on people and day/night, and missed more small, distant animals (16
+  of 18 chickens against 18); the agent looks at the attached frames before reporting, which catches
+  false matches but not misses. Sends camera frames to TypeSafe.
 - **Scripts.** `classify()` and `classify_yes_no()` in scripts call Jev (see
   [scripting.md](../user/scripting.md)); without a key they raise, pointing the script at
   `llm_json()`.
@@ -2119,8 +2129,15 @@ turn.
 
 A `confirm` floor limits the model to `confirm`/`deny`; a `deny` floor limits it to `deny`.
 `operator_minimum` is applied as a verdict floor and profiles cannot relax it. `redact` cannot be a
-minimum for an adjudicated cell. In `observe` mode, adjudication still runs but its effect is
-`audit`; taint-only reviews are detached from the execution path and drained during shutdown.
+minimum for an adjudicated cell. In `observe` mode, adjudication runs exactly as under `enforce` but
+its effect is `audit`: nothing is blocked or prompted, and the verdict is recorded. A taint-only
+review that also decides a script program (an `execute_script` call, or the first gated operation of
+a program no review has decided) is awaited, so a program the reviewer allows is approved and its
+covered operations inherit as they would under `enforce`. A `confirm` of the program an
+`execute_script` call starts is recorded as a forecast approval that covers only other taint-only
+gates. A `confirm` of a nested operation does not approve the program, as under `enforce`, so its
+later operations keep their own reviews. Every other taint-only review is detached from the
+execution path and drained during shutdown.
 
 Static policy can delegate a matched call in the same way:
 
@@ -2170,8 +2187,14 @@ duplicating it in the audit table. Direct named-sink and other non-message-origi
 may have no corresponding message row, so their structured event is the complete durable record.
 When a blocking-path model-denial threshold is reserved, one `tool_call_review_escalation` event is
 also recorded with review status `escalation_confirmation_requested` or
-`escalation_turn_terminated`. Detached observe-only reviews do not update denial counters, so these
-trip counts intentionally describe blocking static/enforce paths rather than shadow traffic.
+`escalation_turn_terminated`. Observe-mode taint-only denials count toward a separate forecast
+threshold instead, and crossing it records `escalation_would_confirm` or
+`escalation_would_terminate` without prompting or ending the turn. A live review in observe mode
+(one a static `review` rule gates) is judged without the taint cell's floors, so its event also
+carries `enforce_available_verdicts`, the verdicts `enforce` would have offered. Likewise, an
+operation that inherits its program's approval in observe mode on a cell whose floor `enforce` would
+still apply records `inherited_would_deny` or `inherited_would_confirm` rather than a plain
+inheritance, and runs.
 
 #### Migration for deployments already enforcing taint policy
 
@@ -2324,14 +2347,14 @@ A tool that writes something that will run later with no human present — `crea
 
 The adjudicated cell is what makes the definition's creation gate run. A reviewer `allow`, or a
 sighted human confirmation, cures the definition so later firings resolve at `machine_reviewed`
-instead of `unknown_external`. In `observe` mode the review runs off the critical path: the write
-lands at once and its record picks up the verdict when the review completes, so the cell adds no
-latency and no prompts until `taint_policy.mode` is `enforce`. A definition written from a clean
-turn needs no review and is stamped trusted. `save_script` and `spawn_worker`, which registers a
-worker-completion listener, carry the tag too, but they also carry `code_execution`, which the
-resolver considers first, so they resolve to `sandbox_network`. That cell adjudicates at the same
-tiers; an operator who tightens `executable_persistence` and wants those two held to the same
-outcome tightens `sandbox_network` as well.
+instead of `unknown_external`. In `observe` mode the review runs off the critical path, unless it
+also decides a script program: the write lands at once and its record picks up the verdict when the
+review completes, so the cell adds no prompts until `taint_policy.mode` is `enforce`. A definition
+written from a clean turn needs no review and is stamped trusted. `save_script` and `spawn_worker`,
+which registers a worker-completion listener, carry the tag too, but they also carry
+`code_execution`, which the resolver considers first, so they resolve to `sandbox_network`. That
+cell adjudicates at the same tiers; an operator who tightens `executable_persistence` and wants
+those two held to the same outcome tightens `sandbox_network` as well.
 
 `enable_automation`, `disable_automation` and the delete tools change no definition content and stay
 on `artifact_write`. Raise `executable_persistence` to `confirm` at the external tiers through
@@ -2858,10 +2881,12 @@ ______________________________________________________________________
 
 Reolink cameras are a plugin (see [Plugins](#plugins)) that backs the camera investigation tools
 (`list_cameras`, `search_camera_events`, `get_camera_frame`, `get_camera_frames_batch`,
-`get_camera_recordings`, `get_live_camera_snapshot`, `scan_camera_frames`). Each configured instance
-under `plugins.reolink` is one set of cameras, keyed by camera id; the instance named `default`
-serves every profile that doesn't choose another. Which profiles may call the tools is up to
-`tools_policy` — shipped `defaults.yaml` grants them only to `camera_analyst`.
+`get_camera_recordings`, `get_live_camera_snapshot`, `scan_camera_frames`, `find_camera_change`).
+The two search tools judge each frame with [TypeSafe Jev](#typesafe-jev) where it is configured, and
+with the turn's model otherwise. Each configured instance under `plugins.reolink` is one set of
+cameras, keyed by camera id; the instance named `default` serves every profile that doesn't choose
+another. Which profiles may call the tools is up to `tools_policy` — shipped `defaults.yaml` grants
+them only to `camera_analyst`.
 
 ```yaml
 plugins:
@@ -2889,6 +2914,10 @@ plugins:
 
 An unknown key is a startup error. An instance with no cameras is not started, with a warning at
 startup, and profiles that would use it get "not configured" from the camera tools.
+
+A camera's clock must run on the household's [TIMEZONE](#timezone): Reolink searches and reports
+recordings by the camera's wall clock alone, so the tools read every camera time as wall-clock time
+in that zone.
 
 ### REOLINK_CAMERAS
 

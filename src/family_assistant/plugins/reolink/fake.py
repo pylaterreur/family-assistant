@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
-from family_assistant.plugins.reolink.protocol import (
-    CameraEvent,
-    CameraInfo,
-    FrameWithTimestamp,
-    Recording,
-)
+from family_assistant.plugins.reolink.protocol import CameraInfo
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from family_assistant.plugins.reolink.protocol import CameraEvent, Recording
 
 logger = logging.getLogger(__name__)
 
@@ -124,8 +124,8 @@ class FakeCameraBackend:
 
         Args:
             camera_id: ID of the camera to search.
-            start_time: Start of the time range (UTC).
-            end_time: End of the time range (UTC).
+            start_time: Start of the time range (household zone; see CameraBackend).
+            end_time: End of the time range (household zone; see CameraBackend).
             event_types: Optional filter for event types (person, vehicle, pet, motion).
 
         Returns:
@@ -167,8 +167,8 @@ class FakeCameraBackend:
 
         Args:
             camera_id: ID of the camera.
-            start_time: Start of the time range (UTC).
-            end_time: End of the time range (UTC).
+            start_time: Start of the time range (household zone; see CameraBackend).
+            end_time: End of the time range (household zone; see CameraBackend).
 
         Returns:
             List of Recording objects representing available footage.
@@ -199,69 +199,31 @@ class FakeCameraBackend:
         camera_id: str,
         timestamp: datetime,
     ) -> bytes:
-        """Extract single frame at timestamp.
+        """The frame showing at *timestamp*, as a real camera's recording would.
 
-        Args:
-            camera_id: ID of the camera.
-            timestamp: Exact time to extract frame (UTC).
-
-        Returns:
-            JPEG bytes of the frame.
+        A frame set with :meth:`set_frame` stays on screen until the next one,
+        and is only available while a recording covers the moment.
 
         Raises:
-            ValueError: If no frame exists at the timestamp.
+            ValueError: If no recording covers the timestamp, or no frame has
+                been set at or before it.
         """
-        key = (camera_id, timestamp)
-        if key not in self._frames:
+        if not any(
+            recording.camera_id == camera_id
+            and recording.start_time <= timestamp <= recording.end_time
+            for recording in self._recordings
+        ):
+            raise ValueError(f"No recording found at timestamp {timestamp}")
+        shown = [
+            frame_time
+            for (frame_camera, frame_time) in self._frames
+            if frame_camera == camera_id and frame_time <= timestamp
+        ]
+        if not shown:
             raise ValueError(
                 f"No frame available for camera {camera_id} at {timestamp}"
             )
-        return self._frames[key]
-
-    async def get_frames_batch(
-        self,
-        camera_id: str,
-        start_time: datetime,
-        end_time: datetime,
-        interval_seconds: int = 900,
-        max_frames: int = 10,
-    ) -> list[FrameWithTimestamp]:
-        """Extract frames at regular intervals for binary search.
-
-        Args:
-            camera_id: ID of the camera.
-            start_time: Start of the time range (UTC).
-            end_time: End of the time range (UTC).
-            interval_seconds: Seconds between each frame (default 15 minutes).
-            max_frames: Maximum number of frames to return.
-
-        Returns:
-            List of FrameWithTimestamp objects with timestamps and JPEG bytes.
-        """
-        results = []
-        current_time = start_time
-
-        while current_time <= end_time and len(results) < max_frames:
-            key = (camera_id, current_time)
-            if key in self._frames:
-                results.append(
-                    FrameWithTimestamp(
-                        timestamp=current_time,
-                        jpeg_bytes=self._frames[key],
-                        camera_id=camera_id,
-                    )
-                )
-            current_time += timedelta(seconds=interval_seconds)
-
-        logger.debug(
-            "Extracted %d frames for camera %s between %s and %s (interval: %ds)",
-            len(results),
-            camera_id,
-            start_time,
-            end_time,
-            interval_seconds,
-        )
-        return results
+        return self._frames[camera_id, max(shown)]
 
     async def get_live_snapshot(self, camera_id: str) -> bytes:
         """Get a live snapshot (current frame) from the camera.

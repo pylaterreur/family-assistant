@@ -44,11 +44,11 @@ never produces an approval.
 An allow, or the human confirmation that stands in for one, authorizes the program's deterministic
 operations through runtime-owned, invocation-scoped execution context at both enforcement
 chokepoints: tool dispatch and the named-sink gate used by brokered HTTP. `in_script`, a permissive
-policy result, an observe verdict and a taint snapshot are not approval. Approval never widens the
-profile's powers and never leaks to sibling calls or later turns. It ends on completion, failure,
-timeout or cancellation. Taint collection and result provenance stay live throughout. Persisted
-definitions keep their own provenance, so a parent approval never stamps runtime-derived executable
-content as reviewed.
+policy result and a taint snapshot are not approval. Approval never widens the profile's powers and
+never leaks to sibling calls or later turns. It ends on completion, failure, timeout or
+cancellation. Taint collection and result provenance stay live throughout. Persisted definitions
+keep their own provenance, so a parent approval never stamps runtime-derived executable content as
+reviewed.
 
 ## Review model output once (proposed)
 
@@ -124,10 +124,24 @@ rather than widening approval.
 
 Hard policy controls apply to every call regardless of program approval: deny rules, mandatory
 confirmations and taint floors. Delegations and writes of stored definitions keep their own gates
-with the enclosing program as context. Ambient admission of notes and skills is unchanged. Observe
-mode is being made to follow enforce's decision path
-([#1418](https://github.com/werdnum/family-assistant/pull/1418)), so it records whatever this
-boundary decides rather than a separate approximation of it.
+with the enclosing program as context. Ambient admission of notes and skills is unchanged.
+Confirmation replay is an inline invocation of the pinned program and must satisfy current policy
+for that invocation.
+
+## Observe mode (implemented)
+
+Observe runs enforce's decision path, so its record forecasts what enforce would do: a review that
+decides a program is awaited with enforce's verdict space, and only the block, the prompt and the
+escalation prompt become recorded would-have outcomes. An allow approves the program as under
+enforce. A would-be confirm of the program a call starts counts as approved, marked as a forecast so
+it covers only gates that are themselves forecasts and is never evidence for a live gate or a
+persisted definition. Whatever this boundary decides, observe records through the same path.
+
+The forecast is approximate where enforce would have changed what happens next: after the first
+would-block in a turn, later would-blocks are speculative; a would-be confirm is counted as
+approved; reviews off the critical path update the denial streak late; and note admission in observe
+offers no confirm. Each is accepted because the forecast only needs to bound the enforce-mode prompt
+rate.
 
 ## Watched-call arguments
 
@@ -182,10 +196,10 @@ reviewer under this design unless the program reviewer chose to watch it.
    script section, the scripting user guide's review section and the program policy text the
    reviewer is shown. _Verify:_ tests asserting the new behaviour (an `llm()` result followed by a
    send to a fixed recipient inherits unless watched); the eval re-run.
-5. **Observe parity follows.** Observe records these decisions through enforce's path. _Verify:_ an
-   observe-mode test showing the same review count and recorded outcomes as enforce for the printer
-   scenario, then a re-measured projected prompt rate on clean production data before the next
-   go/no-go.
+5. **Observe parity carries over.** Observe already follows enforce's path, so it records these
+   decisions without further design. _Verify:_ an observe-mode test showing the same review count
+   and recorded outcomes as enforce for the printer scenario, then a re-measured projected prompt
+   rate on clean production data before the next go/no-go.
 
 ## Appendix: evaluation
 

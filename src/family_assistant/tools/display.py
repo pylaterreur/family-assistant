@@ -297,7 +297,12 @@ _PHRASES: dict[str, _Phrase] = {
         "Taking camera snapshot", "Took camera snapshot", _plain("of", "camera_id")
     ),
     "scan_camera_frames": _Phrase(
-        "Scanning camera footage", "Scanned camera footage", _quoted("for", "query")
+        "Scanning camera footage", "Scanned camera footage", _quoted("for", "condition")
+    ),
+    "find_camera_change": _Phrase(
+        "Finding when it changed",
+        "Found when it changed",
+        _quoted("for", "condition"),
     ),
     # Media
     "generate_image": _Phrase(
