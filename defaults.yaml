@@ -2242,11 +2242,13 @@ service_profiles:
     slash_commands: []
   - id: "camera_analyst"
     user_selectable: true
-    description: "Analyze camera footage to investigate events using binary search through thumbnails"
+    description: "Analyze camera footage: find when something changed, or which moments show something, across hours of recordings"
     processing_config:
       include_aggregated_context: true
       model_tier: "standard"
-      max_iterations: 100
+      # The searching happens inside scan_camera_frames and find_camera_change,
+      # so an investigation is a handful of tool calls, not a loop of them.
+      max_iterations: 30
     # Cameras come from the reolink plugin (plugins.reolink, or the
     # REOLINK_CAMERAS environment variable for its default instance).
     tools_policy:
@@ -2261,6 +2263,7 @@ service_profiles:
               - "get_camera_recordings"
               - "get_live_camera_snapshot"
               - "scan_camera_frames"
+              - "find_camera_change"
               - "attach_to_response"
               - "get_attachment_info"
               - "get_weather_forecast"

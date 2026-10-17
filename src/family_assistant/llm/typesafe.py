@@ -14,6 +14,7 @@ exists to protect.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import math
 import time
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 TYPESAFE_BASE_URL = "https://api.typesafe.ai"
+IMAGES_HEADER = "TypeSafe-Danger-Zone-Images"
 
 
 class TypeSafeError(Exception):
@@ -78,6 +80,26 @@ class ChoiceQuestion:
 
 
 @dataclass(frozen=True, slots=True)
+class JevImage:
+    """An image the request's text refers to by its key in ``images``.
+
+    Jev substitutes the image wherever the key appears as text in ``state``,
+    instructions or criteria, and rejects a request whose image is never
+    referenced or falls outside 280-1568 pixels on either side.
+    """
+
+    data: bytes
+    format: Literal["jpeg", "png"]
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "type": "image",
+            "format": self.format,
+            "data_base64": base64.b64encode(self.data).decode("ascii"),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class JevAnswers:
     """Answers by question key: a probability for a noul, a distribution for a choice."""
 
@@ -115,8 +137,13 @@ class JevClient:
         self,
         state: str | Mapping[str, object],
         questions: Mapping[str, NoulQuestion | ChoiceQuestion],
+        *,
+        images: Mapping[str, JevImage] | None = None,
     ) -> JevAnswers:
         """Evaluate *questions* against *state*. Raises :class:`TypeSafeError`.
+
+        *images* are sent as assets under TypeSafe's experimental image
+        input, which the request opts into only when there are any.
 
         Every call is counted in the LLM call and token metrics under the
         current attribution, like any provider call, whether it answers, fails
@@ -124,7 +151,7 @@ class JevClient:
         """
         started = time.monotonic()
         try:
-            answers = await self._ask(state, questions)
+            answers = await self._ask(state, questions, images or {})
         except TypeSafeError as error:
             self._record(started, "error", type(error).__name__, None)
             raise
@@ -165,17 +192,22 @@ class JevClient:
         self,
         state: str | Mapping[str, object],
         questions: Mapping[str, NoulQuestion | ChoiceQuestion],
+        images: Mapping[str, JevImage],
     ) -> JevAnswers:
+        body: dict[str, object] = {
+            "model": self.model,
+            "state": state,
+            "questions": {
+                key: question.to_json() for key, question in questions.items()
+            },
+        }
+        headers: dict[str, str] = {}
+        if images:
+            body["assets"] = {key: image.to_json() for key, image in images.items()}
+            headers[IMAGES_HEADER] = "true"
         try:
             response = await self._client.post(
-                "/v1/systemone",
-                json={
-                    "model": self.model,
-                    "state": state,
-                    "questions": {
-                        key: question.to_json() for key, question in questions.items()
-                    },
-                },
+                "/v1/systemone", json=body, headers=headers
             )
             response.raise_for_status()
             body = response.json()

@@ -1337,6 +1337,7 @@ class Assistant:
                 typesafe.calendar_duplicates.timeout_seconds,
                 typesafe.calendar_search.timeout_seconds,
                 typesafe.document_search.timeout_seconds,
+                typesafe.camera_frames.timeout_seconds,
             ),
             base_url=typesafe.base_url,
         )

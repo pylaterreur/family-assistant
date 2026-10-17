@@ -6,17 +6,19 @@ and extract frames for visual analysis using binary search methodology.
 
 from __future__ import annotations
 
-import asyncio
-import base64
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field
-
-from family_assistant.llm.base import StructuredOutputError
 from family_assistant.plugins.reolink.instance import ReolinkInstance
+from family_assistant.plugins.reolink.judge import LlmFrameJudge, jev_frame_judge
+from family_assistant.plugins.reolink.search import (
+    find_changes,
+    judge_frames,
+    plan_sample_times,
+    sample_frames,
+)
 from family_assistant.tools.metadata import (
     ToolRegistration,
     ToolTag,
@@ -30,75 +32,25 @@ OLD_DATE_THRESHOLD = timedelta(days=30)
 if TYPE_CHECKING:
     from zoneinfo import ZoneInfo
 
-    from family_assistant.llm import LLMInterface
-    from family_assistant.llm.content_parts import (
-        ImageUrlContentPartDict,
-        TextContentPartDict,
-    )
+    from family_assistant.plugins.reolink.judge import FrameJudge
     from family_assistant.plugins.reolink.protocol import CameraBackend
+    from family_assistant.plugins.reolink.search import Change, JudgedFrame
     from family_assistant.tools.metadata import ToolImplementation
     from family_assistant.tools.types import ToolExecutionContext
 
 logger = logging.getLogger(__name__)
 
 
-# --- Pydantic model for structured LLM output ---
-
-
-class FrameAnalysisLLMResponse(BaseModel):
-    """Pydantic model for parsing LLM frame analysis response."""
-
-    matches_query: bool = Field(
-        description="Whether the frame shows what the user is looking for"
-    )
-    description: str = Field(
-        description="Brief description of what is visible in the frame"
-    )
-    confidence: float = Field(
-        ge=0.0, le=1.0, description="Confidence score from 0.0 to 1.0"
-    )
-    detected_objects: list[str] = Field(
-        default_factory=list, description="Key objects/entities visible in the frame"
-    )
-
-
-# --- TypedDicts for result structures ---
-
-
-class AnalysisSummaryDict(TypedDict):
-    """TypedDict for individual frame analysis summary."""
-
-    timestamp: str
-    matches_query: bool
-    description: str
-    confidence: float
-    detected_objects: list[str]
-
-
-class TimeRangeDict(TypedDict):
-    """TypedDict for time range in scan results."""
-
-    start: str
-    end: str
-    interval_seconds: float
-
-
-class ScanResultDict(TypedDict, total=False):
-    """TypedDict for scan_camera_frames result data.
-
-    Uses total=False for optional fields (analysis_errors, warning).
-    """
-
-    camera_id: str
-    query: str
-    time_range: TimeRangeDict
-    frames_scanned: int
-    frames_analyzed: int
-    matches_found: int
-    analysis_results: list[AnalysisSummaryDict]
-    analysis_errors: int  # Optional
-    warning: str  # Optional
-
+# Attaching every matching frame would put a scan's worth of images back into
+# the turn's context, which is the cost the judge exists to avoid.
+MAX_SCAN_ATTACHMENTS = 6
+MAX_SCAN_FRAMES = 50
+MAX_CHANGE_FRAMES = 40
+_CHANGE_COARSE_FRAMES = 12
+_MAX_CHANGES = 3
+# The bar a frame judged by the turn's model must clear. Jev's comes from
+# ``typesafe.camera_frames``, since it is tuned against Jev's probabilities.
+_LLM_JUDGE_THRESHOLD = 0.5
 
 # Tool Definitions
 CAMERA_TOOLS_DEFINITION: list[ToolDefinition] = [
@@ -189,13 +141,13 @@ CAMERA_TOOLS_DEFINITION: list[ToolDefinition] = [
         "function": {
             "name": "get_camera_frames_batch",
             "description": (
-                "Get multiple frames at regular intervals for BINARY SEARCH investigation.\n\n"
-                "This is the KEY TOOL for answering 'when did X happen' questions:\n"
-                "1. Start with a wide time range (e.g., 6 hours)\n"
-                "2. Review the batch frames to identify when the change occurred\n"
-                "3. Narrow down to a smaller range and repeat\n"
-                "4. Use get_camera_frame for the exact moment once identified\n\n"
-                "Default: 15-minute intervals, max 10 frames. Adjust interval_minutes and max_frames as needed."
+                "Get frames spread over the recorded footage in a range, every one "
+                "attached as an image for you to look at. Frames come from inside "
+                "recordings, so a camera that records on motion yields a frame per "
+                "burst of activity rather than empty gaps.\n\n"
+                "Every frame lands in your context, which is expensive: to find "
+                "frames matching something use scan_camera_frames, and to find when "
+                "something changed use find_camera_change."
             ),
             "parameters": {
                 "type": "object",
@@ -214,7 +166,7 @@ CAMERA_TOOLS_DEFINITION: list[ToolDefinition] = [
                     },
                     "interval_minutes": {
                         "type": "integer",
-                        "description": "Minutes between each frame (default: 15)",
+                        "description": "Minutes between frames where the camera recorded continuously (default: 15)",
                     },
                     "max_frames": {
                         "type": "integer",
@@ -285,19 +237,15 @@ CAMERA_TOOLS_DEFINITION: list[ToolDefinition] = [
         "function": {
             "name": "scan_camera_frames",
             "description": (
-                "Scan camera frames in parallel with AI-powered per-frame analysis.\n\n"
-                "This is the MOST EFFICIENT tool for scanning large time ranges:\n"
-                "- Extracts frames at regular intervals\n"
-                "- Analyzes EACH frame in PARALLEL with focused AI analysis\n"
-                "- Returns ONLY frames matching your query (unless filter_matching=false)\n\n"
-                "USE THIS TOOL when:\n"
-                "1. Scanning a large time range (hours) for a specific event\n"
-                "2. You want to quickly identify WHEN something happened\n"
-                "3. You need efficient analysis without manually reviewing all frames\n\n"
-                "The tool returns matching frames with descriptions like:\n"
-                "- '14:12: Delivery truck visible in driveway'\n"
-                "- '14:14: Person walking to door carrying brown package'\n\n"
-                "After finding matches, use get_camera_frame for detailed examination."
+                "Judge frames across a time range against a condition, and return "
+                "a timeline of how likely each frame is to satisfy it.\n\n"
+                "Frames are sampled from inside the camera's recordings and each is "
+                "judged by a fast classifier, so scanning hours of footage costs "
+                "seconds. Only the frames most likely to satisfy the condition are "
+                "attached as images; the rest appear as timestamps and "
+                "probabilities in the timeline.\n\n"
+                "Use this to find WHICH moments show something. To find WHEN "
+                "something started or stopped being true, use find_camera_change."
             ),
             "parameters": {
                 "type": "object",
@@ -314,32 +262,71 @@ CAMERA_TOOLS_DEFINITION: list[ToolDefinition] = [
                         "type": "string",
                         "description": "End of time range in LOCAL TIME (e.g., '2024-01-15T18:00:00'). Use local time, not UTC.",
                     },
-                    "query": {
+                    "condition": {
                         "type": "string",
                         "description": (
-                            "What to look for in each frame. Be specific about what constitutes a match. "
-                            "Examples: 'person entering the yard', 'package being delivered', "
-                            "'car in driveway', 'animal near the fence'"
+                            "A statement about a single frame that is either true or "
+                            "false, kept to one simple thing. Examples: 'A person is "
+                            "visible.', 'A vehicle is in the driveway.', 'A parcel is "
+                            "on the doorstep.' Ask about one thing at a time: split "
+                            "'a person carrying a parcel' into separate scans."
                         ),
                     },
                     "interval_seconds": {
                         "type": "number",
-                        "description": "Seconds between each frame (default: 300 = 5 minutes). Use smaller intervals (e.g., 30) for precise timing.",
+                        "description": "Seconds between frames where the camera recorded continuously (default: 300). Motion-triggered recordings get a frame each regardless.",
                     },
                     "max_frames": {
                         "type": "integer",
-                        "description": "Maximum number of frames to scan (default: 20, max: 50). Higher values scan more thoroughly.",
-                    },
-                    "filter_matching": {
-                        "type": "boolean",
-                        "description": "If true (default), only return frames that match the query. If false, return all frames with their analysis.",
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "Model to use for frame analysis. Defaults to the profile's configured model.",
+                        "description": f"Maximum number of frames to judge (default: 20, max: {MAX_SCAN_FRAMES}).",
                     },
                 },
-                "required": ["camera_id", "start_time", "end_time", "query"],
+                "required": ["camera_id", "start_time", "end_time", "condition"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_camera_change",
+            "description": (
+                "Find WHEN a condition about the scene started or stopped being "
+                "true within a time range, narrowed to a precision you choose.\n\n"
+                "The tool judges frames spread over the range, finds where the "
+                "answer flips, and bisects each flip in recorded footage until the "
+                "last frame before and the first frame after are within the "
+                "precision. It returns those two frames as images.\n\n"
+                "Phrase the condition as a state that holds for a while, not as "
+                "the event itself: 'A parcel is on the doorstep.' finds when a "
+                "parcel arrived or was taken; 'The gate is open.' finds when it was "
+                "opened or closed. Changes during gaps in recording are reported at "
+                "the gap's edges."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "camera_id": {
+                        "type": "string",
+                        "description": "Camera ID from list_cameras",
+                    },
+                    "start_time": {
+                        "type": "string",
+                        "description": "Start of time range in LOCAL TIME (e.g., '2024-01-15T08:00:00'). Use local time, not UTC.",
+                    },
+                    "end_time": {
+                        "type": "string",
+                        "description": "End of time range in LOCAL TIME (e.g., '2024-01-15T18:00:00'). Use local time, not UTC.",
+                    },
+                    "condition": {
+                        "type": "string",
+                        "description": "A statement about a single frame that is either true or false, describing a state rather than an event.",
+                    },
+                    "precision_seconds": {
+                        "type": "number",
+                        "description": "How close the before and after frames must be (default: 60).",
+                    },
+                },
+                "required": ["camera_id", "start_time", "end_time", "condition"],
             },
         },
     },
@@ -370,7 +357,9 @@ def _parse_local_time(time_str: str, timezone: ZoneInfo) -> datetime:
         dt = dt.replace(tzinfo=timezone)
         logger.debug(f"Time '{time_str}' lacks timezone, assuming {timezone}")
 
-    return dt
+    # Cameras are searched by wall clock, so a time given in another zone is
+    # moved onto the household's before it reaches a backend.
+    return dt.astimezone(timezone)
 
 
 def _to_local_isoformat(dt: datetime, timezone: ZoneInfo) -> str:
@@ -531,7 +520,7 @@ async def get_camera_frames_batch_tool(
     interval_minutes: int = 15,
     max_frames: int = 10,
 ) -> ToolResult:
-    """Get multiple frames at regular intervals for binary search."""
+    """Get frames spread over the recordings in a range, every one attached."""
     camera_backend = _camera_backend(exec_context)
     if camera_backend is None:
         return _not_configured()
@@ -543,45 +532,38 @@ async def get_camera_frames_batch_tool(
         return ToolResult(data={"error": f"Invalid timestamp format: {e}"})
 
     try:
-        frames = await camera_backend.get_frames_batch(
-            camera_id=camera_id,
-            start_time=start_dt,
-            end_time=end_dt,
-            interval_seconds=interval_minutes * 60,
-            max_frames=max_frames,
-        )
-
-        if not frames:
-            return ToolResult(
-                data={"camera_id": camera_id, "timestamps": [], "count": 0}
-            )
-
-        attachments = [
+        recordings = await camera_backend.get_recordings(camera_id, start_dt, end_dt)
+    except ValueError as e:
+        return ToolResult(data={"error": str(e)})
+    times = plan_sample_times(
+        recordings,
+        start_dt,
+        end_dt,
+        interval=timedelta(minutes=max(interval_minutes, 1)),
+        max_frames=max(max_frames, 1),
+    )
+    frames = [
+        frame
+        for frame in await sample_frames(camera_backend, camera_id, times)
+        if frame.jpeg_bytes is not None
+    ]
+    if not frames:
+        return ToolResult(data={"camera_id": camera_id, "timestamps": [], "count": 0})
+    timestamps = [
+        _to_local_isoformat(frame.timestamp, exec_context.timezone) for frame in frames
+    ]
+    return ToolResult(
+        data={"camera_id": camera_id, "timestamps": timestamps, "count": len(frames)},
+        attachments=[
             ToolAttachment(
                 mime_type="image/jpeg",
                 content=frame.jpeg_bytes,
-                description=f"Frame {i + 1}/{len(frames)} at {_to_local_isoformat(frame.timestamp, exec_context.timezone)}",
+                description=f"Frame {i + 1}/{len(frames)} at {timestamp}",
             )
-            for i, frame in enumerate(frames)
-        ]
-
-        return ToolResult(
-            data={
-                "camera_id": camera_id,
-                "timestamps": [
-                    _to_local_isoformat(f.timestamp, exec_context.timezone)
-                    for f in frames
-                ],
-                "count": len(frames),
-            },
-            attachments=attachments,
-        )
-    except ValueError as e:
-        # Expected errors (invalid camera ID, etc.) - return cleanly
-        return ToolResult(data={"error": str(e)})
-    except Exception as e:
-        logger.exception("Error getting camera frames batch")
-        return ToolResult(data={"error": f"Failed to get frames: {e}"})
+            for i, (frame, timestamp) in enumerate(zip(frames, timestamps, strict=True))
+            if frame.jpeg_bytes is not None
+        ],
+    )
 
 
 async def get_camera_recordings_tool(
@@ -667,253 +649,60 @@ async def get_live_camera_snapshot_tool(
         return ToolResult(data={"error": f"Failed to get live snapshot: {e}"})
 
 
-# --- Parallel Frame Scanning ---
-
-# System prompt for per-frame analysis
-_FRAME_ANALYSIS_SYSTEM_PROMPT = """You are analyzing a single frame from a security camera recording.
-Your task is to determine if this frame matches the user's query and provide a brief description.
-
-Be specific about what you observe. If the query asks for "person entering yard" and you see a person
-already in the yard (not entering), that may or may not match depending on context."""
+# --- Searching footage with a frame judge ---
 
 
-@dataclass
-class FrameAnalysisResult:
-    """Result of analyzing a single frame."""
-
-    timestamp: datetime
-    matches_query: bool
-    description: str
-    confidence: float
-    detected_objects: list[str]
-    jpeg_bytes: bytes
-    error: str | None = None
+@dataclass(frozen=True, slots=True)
+class _Judging:
+    judge: FrameJudge
+    threshold: float
 
 
-async def _analyze_single_frame(
-    llm_client: LLMInterface,
-    jpeg_bytes: bytes,
-    timestamp: datetime,
-    query: str,
-) -> FrameAnalysisResult:
-    """Analyze a single frame with the LLM using structured output.
-
-    Args:
-        llm_client: The LLM client to use for analysis
-        jpeg_bytes: The frame image bytes
-        timestamp: The timestamp of this frame
-        query: What to look for in the frame
-
-    Returns:
-        FrameAnalysisResult with the analysis
-    """
-    try:
-        return await _analyze_single_frame_impl(
-            llm_client, jpeg_bytes, timestamp, query
+def _frame_judging(exec_context: ToolExecutionContext) -> _Judging | None:
+    """Jev when the deployment has it for camera frames, else the turn's model."""
+    service = exec_context.processing_service
+    if service is not None:
+        camera_frames = service.app_config.typesafe.camera_frames
+        jev = jev_frame_judge(service.jev_client, camera_frames)
+        if jev is not None:
+            return _Judging(jev, camera_frames.threshold)
+    if exec_context.llm_client is not None:
+        return _Judging(
+            LlmFrameJudge(exec_context.llm_client, name="turn model"),
+            _LLM_JUDGE_THRESHOLD,
         )
-
-    except StructuredOutputError as e:
-        logger.warning(f"Structured output failed for frame at {timestamp}: {e}")
-        return FrameAnalysisResult(
-            timestamp=timestamp,
-            matches_query=False,
-            description="",
-            confidence=0.0,
-            detected_objects=[],
-            jpeg_bytes=jpeg_bytes,
-            error=f"Structured output failed: {e}",
-        )
-
-    except Exception as e:
-        logger.warning(f"Error analyzing frame at {timestamp}: {e}")
-        return FrameAnalysisResult(
-            timestamp=timestamp,
-            matches_query=False,
-            description="",
-            confidence=0.0,
-            detected_objects=[],
-            jpeg_bytes=jpeg_bytes,
-            error=str(e),
-        )
+    return None
 
 
-async def _analyze_single_frame_impl(
-    llm_client: LLMInterface,
-    jpeg_bytes: bytes,
-    timestamp: datetime,
-    query: str,
-) -> FrameAnalysisResult:
-    """Build and execute one frame-analysis request."""
-    b64_image = base64.b64encode(jpeg_bytes).decode("utf-8")
-    image_url = f"data:image/jpeg;base64,{b64_image}"
+def _no_judge() -> ToolResult:
+    return ToolResult(data={"error": "No frame judge is available for this search."})
 
-    from family_assistant.llm.messages import (  # noqa: PLC0415
-        SystemMessage,
-        UserMessage,
-    )
 
-    image_part: ImageUrlContentPartDict = {
-        "type": "image_url",
-        "image_url": {"url": image_url},
+def _timeline_entry(
+    frame: JudgedFrame, timezone: ZoneInfo
+) -> dict[str, str | float | None]:
+    entry: dict[str, str | float | None] = {
+        "timestamp": _to_local_isoformat(frame.timestamp, timezone),
+        "probability": (
+            round(frame.probability, 3) if frame.probability is not None else None
+        ),
     }
-    text_part: TextContentPartDict = {
-        "type": "text",
-        "text": f"Query: {query}\n\nAnalyze this frame.",
-    }
-    messages = [
-        SystemMessage(content=_FRAME_ANALYSIS_SYSTEM_PROMPT),
-        UserMessage(content=[image_part, text_part]),  # type: ignore[list-item]
-    ]
-    parsed = await llm_client.generate_structured(
-        messages=messages,
-        response_model=FrameAnalysisLLMResponse,
-    )
-    return FrameAnalysisResult(
-        timestamp=timestamp,
-        matches_query=parsed.matches_query,
-        description=parsed.description,
-        confidence=parsed.confidence,
-        detected_objects=parsed.detected_objects,
-        jpeg_bytes=jpeg_bytes,
-    )
+    if frame.error is not None:
+        entry["error"] = frame.error
+    return entry
 
 
-async def _scan_camera_frames_impl(
-    *,
-    camera_backend: CameraBackend,
-    llm_client: LLMInterface,
-    timezone: ZoneInfo,
-    camera_id: str,
-    start_time: str,
-    end_time: str,
-    start_dt: datetime,
-    end_dt: datetime,
-    query: str,
-    interval_seconds: float,
-    max_frames: int,
-    filter_matching: bool,
-) -> ToolResult:
-    """Fetch, analyze, and format one camera frame scan."""
-    logger.info(
-        f"Scanning {camera_id} from {start_time} to {end_time} "
-        f"(interval={interval_seconds}s, max_frames={max_frames})"
-    )
-    frames = await camera_backend.get_frames_batch(
-        camera_id=camera_id,
-        start_time=start_dt,
-        end_time=end_dt,
-        interval_seconds=int(interval_seconds),
-        max_frames=max_frames,
-    )
-    if not frames:
-        return ToolResult(
-            data={
-                "camera_id": camera_id,
-                "query": query,
-                "frames_scanned": 0,
-                "matches_found": 0,
-                "message": "No frames found in the specified time range.",
-            }
-        )
-
-    logger.info(f"Got {len(frames)} frames, starting parallel analysis")
-    analysis_tasks = [
-        _analyze_single_frame(
-            llm_client=llm_client,
-            jpeg_bytes=frame.jpeg_bytes,
-            timestamp=frame.timestamp,
-            query=query,
-        )
-        for frame in frames
-    ]
-    results = await asyncio.gather(*analysis_tasks)
-    successful_results = [result for result in results if result.error is None]
-    error_count = len(results) - len(successful_results)
-    matching_results = (
-        [result for result in successful_results if result.matches_query]
-        if filter_matching
-        else successful_results
-    )
-    matching_results.sort(key=lambda result: result.timestamp)
-
-    analysis_summaries: list[AnalysisSummaryDict] = []
-    attachments: list[ToolAttachment] = []
-    for result in matching_results:
-        ts_str = _to_local_isoformat(result.timestamp, timezone)
-        summary: AnalysisSummaryDict = {
-            "timestamp": ts_str,
-            "matches_query": result.matches_query,
-            "description": result.description,
-            "confidence": result.confidence,
-            "detected_objects": result.detected_objects,
-        }
-        analysis_summaries.append(summary)
-
-        if filter_matching and result.matches_query:
-            attachments.append(
-                ToolAttachment(
-                    mime_type="image/jpeg",
-                    content=result.jpeg_bytes,
-                    description=f"[{ts_str}] {result.description}",
-                )
-            )
-        elif not filter_matching:
-            match_label = "MATCH" if result.matches_query else "no match"
-            attachments.append(
-                ToolAttachment(
-                    mime_type="image/jpeg",
-                    content=result.jpeg_bytes,
-                    description=f"[{ts_str}] ({match_label}) {result.description}",
-                )
-            )
-
-    match_count = len([result for result in successful_results if result.matches_query])
-    time_range: TimeRangeDict = {
-        "start": start_time,
-        "end": end_time,
-        "interval_seconds": interval_seconds,
-    }
-    result_data: ScanResultDict = {
-        "camera_id": camera_id,
-        "query": query,
-        "time_range": time_range,
-        "frames_scanned": len(frames),
-        "frames_analyzed": len(successful_results),
-        "matches_found": match_count,
-        "analysis_results": analysis_summaries,
-    }
-    if error_count > 0:
-        result_data["analysis_errors"] = error_count
-        result_data["warning"] = f"{error_count} frame(s) could not be analyzed"
-
-    if match_count == 0:
-        text_summary = (
-            f"Scanned {len(frames)} frames from {camera_id} "
-            f"({start_time} to {end_time}). "
-            f"No frames matched the query: '{query}'"
-        )
-    else:
-        match_times = [
-            (
-                result.timestamp
-                if result.timestamp.tzinfo
-                else result.timestamp.replace(tzinfo=UTC)
-            )
-            .astimezone(timezone)
-            .strftime("%H:%M:%S")
-            for result in matching_results
-            if result.matches_query
-        ]
-        text_summary = (
-            f"Found {match_count} matching frame(s) from {len(frames)} scanned. "
-            f"Matches at: {', '.join(match_times)}. "
-            f"Query: '{query}'"
-        )
-
-    return ToolResult(
-        text=text_summary,
-        data=cast("dict[str, Any]", result_data),
-        attachments=attachments if attachments else None,
+def _frame_attachment(
+    frame: JudgedFrame, timezone: ZoneInfo, label: str
+) -> ToolAttachment:
+    assert frame.jpeg_bytes is not None
+    probability = f"p={frame.probability:.2f}" if frame.probability is not None else ""
+    return ToolAttachment(
+        mime_type="image/jpeg",
+        content=frame.jpeg_bytes,
+        description=(
+            f"[{_to_local_isoformat(frame.timestamp, timezone)}] {label} {probability}"
+        ).strip(),
     )
 
 
@@ -922,83 +711,208 @@ async def scan_camera_frames_tool(
     camera_id: str,
     start_time: str,
     end_time: str,
-    query: str,
+    condition: str,
     interval_seconds: float = 300,
     max_frames: int = 20,
-    filter_matching: bool = True,
-    model: str | None = None,
 ) -> ToolResult:
-    """Scan camera frames in parallel with per-frame LLM analysis.
-
-    This tool extracts frames at regular intervals and analyzes each one
-    in parallel to efficiently identify frames matching the query.
-
-    Args:
-        exec_context: The tool execution context
-        camera_id: Camera to scan
-        start_time: Start of time range in local time
-        end_time: End of time range in local time
-        query: What to look for in each frame
-        interval_seconds: Seconds between each frame (default 300 = 5 minutes)
-        max_frames: Maximum number of frames to scan (max 50)
-        filter_matching: If True, only return frames that match the query
-        model: Model to use for frame analysis. Defaults to profile's model.
-
-    Returns:
-        ToolResult with analysis summary and matching frame attachments
-    """
+    """Judge frames across a range against a condition, returning a timeline."""
     camera_backend = _camera_backend(exec_context)
     if camera_backend is None:
         return _not_configured()
-
-    # A named model overrides; otherwise this runs on the client the turn is
-    # bound to, so the frame analysis is spent at the tier the turn resolved to
-    # rather than at the profile's default one.
-    if model:
-        from family_assistant.llm import LLMClientFactory  # noqa: PLC0415
-
-        llm_client = LLMClientFactory.create_client({"model": model})
-        logger.info(f"Using custom model for frame analysis: {model}")
-    elif exec_context.llm_client is not None:
-        llm_client = exec_context.llm_client
-    else:
-        return ToolResult(
-            data={"error": "No LLM client is available for frame analysis."}
-        )
-
-    # Parse time range
+    judging = _frame_judging(exec_context)
+    if judging is None:
+        return _no_judge()
     try:
         start_dt = _parse_local_time(start_time, exec_context.timezone)
         end_dt = _parse_local_time(end_time, exec_context.timezone)
     except ValueError as e:
         return ToolResult(data={"error": f"Invalid timestamp format: {e}"})
-
-    # Validate parameters
-    interval_seconds = max(interval_seconds, 1.0)  # Minimum 1 second
-    max_frames = max(max_frames, 1)
-    max_frames = min(max_frames, 50)  # Cap at reasonable limit
+    if end_dt < start_dt:
+        return ToolResult(data={"error": "end_time must not be before start_time."})
+    interval = timedelta(seconds=max(interval_seconds, 1.0))
+    max_frames = min(max(max_frames, 1), MAX_SCAN_FRAMES)
 
     try:
-        return await _scan_camera_frames_impl(
-            camera_backend=camera_backend,
-            llm_client=llm_client,
-            timezone=exec_context.timezone,
-            camera_id=camera_id,
-            start_time=start_time,
-            end_time=end_time,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            query=query,
-            interval_seconds=interval_seconds,
-            max_frames=max_frames,
-            filter_matching=filter_matching,
-        )
+        recordings = await camera_backend.get_recordings(camera_id, start_dt, end_dt)
     except ValueError as e:
-        # Expected errors (invalid camera ID, etc.) - return cleanly
         return ToolResult(data={"error": str(e)})
-    except Exception as e:
-        logger.exception("Error scanning camera frames")
-        return ToolResult(data={"error": f"Failed to scan frames: {e}"})
+    times = plan_sample_times(
+        recordings, start_dt, end_dt, interval=interval, max_frames=max_frames
+    )
+    if not times:
+        return ToolResult(
+            data={
+                "camera_id": camera_id,
+                "condition": condition,
+                "frames_scanned": 0,
+                "matches_found": 0,
+                "message": "The camera recorded nothing in this time range.",
+            }
+        )
+    frames = await judge_frames(
+        judging.judge,
+        await sample_frames(camera_backend, camera_id, times),
+        condition,
+    )
+    judged = [frame for frame in frames if frame.probability is not None]
+    matches = sorted(
+        (frame for frame in judged if (frame.probability or 0.0) >= judging.threshold),
+        key=lambda frame: frame.probability or 0.0,
+        reverse=True,
+    )
+    timezone = exec_context.timezone
+    data: dict[str, object] = {
+        "camera_id": camera_id,
+        "condition": condition,
+        "judge": judging.judge.name,
+        "threshold": judging.threshold,
+        "recordings_in_range": len(recordings),
+        "frames_scanned": len(frames),
+        "frames_judged": len(judged),
+        "matches_found": len(matches),
+        "timeline": [_timeline_entry(frame, timezone) for frame in frames],
+    }
+    unjudged = len(frames) - len(judged)
+    if unjudged:
+        data["warning"] = f"{unjudged} frame(s) could not be extracted or judged"
+
+    if matches:
+        shown = matches[:MAX_SCAN_ATTACHMENTS]
+        text = (
+            f"{len(matches)} of {len(judged)} judged frames satisfy '{condition}'. "
+            f"Attached: the {len(shown)} most likely, highest first."
+        )
+        attachments = [_frame_attachment(frame, timezone, "match") for frame in shown]
+    else:
+        nearest = sorted(judged, key=lambda frame: frame.probability or 0.0)[-3:]
+        text = (
+            f"No frame of {len(judged)} judged satisfies '{condition}'. Closest: "
+            + ", ".join(
+                f"{_to_local_isoformat(frame.timestamp, timezone)} "
+                f"(p={frame.probability:.2f})"
+                for frame in reversed(nearest)
+            )
+            if nearest
+            else f"No frame could be judged for '{condition}'."
+        )
+        attachments = []
+    return ToolResult(
+        text=text,
+        data=data,
+        attachments=attachments or None,
+    )
+
+
+async def find_camera_change_tool(
+    exec_context: ToolExecutionContext,
+    camera_id: str,
+    start_time: str,
+    end_time: str,
+    condition: str,
+    precision_seconds: float = 60,
+) -> ToolResult:
+    """Find when a condition's answer flips in a range, to within a precision."""
+    camera_backend = _camera_backend(exec_context)
+    if camera_backend is None:
+        return _not_configured()
+    judging = _frame_judging(exec_context)
+    if judging is None:
+        return _no_judge()
+    try:
+        start_dt = _parse_local_time(start_time, exec_context.timezone)
+        end_dt = _parse_local_time(end_time, exec_context.timezone)
+    except ValueError as e:
+        return ToolResult(data={"error": f"Invalid timestamp format: {e}"})
+    if end_dt <= start_dt:
+        return ToolResult(data={"error": "end_time must be after start_time."})
+
+    try:
+        recordings = await camera_backend.get_recordings(camera_id, start_dt, end_dt)
+    except ValueError as e:
+        return ToolResult(data={"error": str(e)})
+    if not recordings:
+        return ToolResult(
+            data={
+                "camera_id": camera_id,
+                "condition": condition,
+                "changes": [],
+                "message": "The camera recorded nothing in this time range.",
+            }
+        )
+    search = await find_changes(
+        backend=camera_backend,
+        judge=judging.judge,
+        camera_id=camera_id,
+        recordings=recordings,
+        start_time=start_dt,
+        end_time=end_dt,
+        condition=condition,
+        threshold=judging.threshold,
+        precision=timedelta(seconds=max(precision_seconds, 1.0)),
+        coarse_frames=_CHANGE_COARSE_FRAMES,
+        max_changes=_MAX_CHANGES,
+        frame_budget=MAX_CHANGE_FRAMES,
+    )
+    timezone = exec_context.timezone
+
+    def describe(change: Change) -> dict[str, object]:
+        assert change.after.probability is not None
+        became = change.after.probability >= judging.threshold
+        entry: dict[str, object] = {
+            "became": "true" if became else "false",
+            "last_before": _timeline_entry(change.before, timezone),
+            "first_after": _timeline_entry(change.after, timezone),
+            "resolved": change.resolved,
+        }
+        if change.reason is not None:
+            entry["stopped_because"] = change.reason
+        return entry
+
+    changes = [describe(change) for change in search.changes]
+    data: dict[str, object] = {
+        "camera_id": camera_id,
+        "condition": condition,
+        "judge": judging.judge.name,
+        "threshold": judging.threshold,
+        "frames_judged": search.frames_judged,
+        "coarse_timeline": [
+            _timeline_entry(frame, timezone) for frame in search.coarse
+        ],
+        "changes": changes,
+    }
+    if not search.changes:
+        judged = [frame for frame in search.coarse if frame.probability is not None]
+        if not judged:
+            text = f"No frame could be judged for '{condition}'."
+        else:
+            holds = sum(
+                1 for frame in judged if (frame.probability or 0.0) >= judging.threshold
+            )
+            text = (
+                f"No change found: '{condition}' was "
+                + (
+                    "true"
+                    if holds == len(judged)
+                    else "false"
+                    if holds == 0
+                    else "mixed but never flipped between adjacent frames"
+                )
+                + f" in all {len(judged)} frames judged across the range."
+            )
+        return ToolResult(text=text, data=data)
+
+    lines = []
+    attachments: list[ToolAttachment] = []
+    for change, entry in zip(search.changes, changes, strict=True):
+        before = _to_local_isoformat(change.before.timestamp, timezone)
+        after = _to_local_isoformat(change.after.timestamp, timezone)
+        lines.append(
+            f"'{condition}' became {entry['became']} between {before} and {after}"
+            + ("" if change.resolved else f" (not narrowed further: {change.reason})")
+        )
+        attachments.append(_frame_attachment(change.before, timezone, "before"))
+        attachments.append(_frame_attachment(change.after, timezone, "after"))
+    return ToolResult(text="\n".join(lines), data=data, attachments=attachments)
 
 
 def _tool(
@@ -1041,6 +955,7 @@ CAMERA_TOOLS: tuple[ToolRegistration, ...] = (
             ("get_camera_recordings", get_camera_recordings_tool),
             ("get_live_camera_snapshot", get_live_camera_snapshot_tool),
             ("scan_camera_frames", scan_camera_frames_tool),
+            ("find_camera_change", find_camera_change_tool),
         )
     ),
 )

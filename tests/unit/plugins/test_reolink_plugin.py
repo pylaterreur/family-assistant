@@ -153,6 +153,7 @@ def test_camera_tools_keep_their_names_and_tags() -> None:
         "get_camera_recordings",
         "get_live_camera_snapshot",
         "scan_camera_frames",
+        "find_camera_change",
     ]
     assert {tag.value for tag in LOCAL_TOOL_METADATA_BY_NAME["list_cameras"].tags} == {
         "read_only",
