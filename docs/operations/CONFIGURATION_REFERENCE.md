@@ -2129,8 +2129,15 @@ turn.
 
 A `confirm` floor limits the model to `confirm`/`deny`; a `deny` floor limits it to `deny`.
 `operator_minimum` is applied as a verdict floor and profiles cannot relax it. `redact` cannot be a
-minimum for an adjudicated cell. In `observe` mode, adjudication still runs but its effect is
-`audit`; taint-only reviews are detached from the execution path and drained during shutdown.
+minimum for an adjudicated cell. In `observe` mode, adjudication runs exactly as under `enforce` but
+its effect is `audit`: nothing is blocked or prompted, and the verdict is recorded. A taint-only
+review that also decides a script program (an `execute_script` call, or the first gated operation of
+a program no review has decided) is awaited, so a program the reviewer allows is approved and its
+covered operations inherit as they would under `enforce`. A `confirm` of the program an
+`execute_script` call starts is recorded as a forecast approval that covers only other taint-only
+gates. A `confirm` of a nested operation does not approve the program, as under `enforce`, so its
+later operations keep their own reviews. Every other taint-only review is detached from the
+execution path and drained during shutdown.
 
 Static policy can delegate a matched call in the same way:
 
@@ -2180,8 +2187,14 @@ duplicating it in the audit table. Direct named-sink and other non-message-origi
 may have no corresponding message row, so their structured event is the complete durable record.
 When a blocking-path model-denial threshold is reserved, one `tool_call_review_escalation` event is
 also recorded with review status `escalation_confirmation_requested` or
-`escalation_turn_terminated`. Detached observe-only reviews do not update denial counters, so these
-trip counts intentionally describe blocking static/enforce paths rather than shadow traffic.
+`escalation_turn_terminated`. Observe-mode taint-only denials count toward a separate forecast
+threshold instead, and crossing it records `escalation_would_confirm` or
+`escalation_would_terminate` without prompting or ending the turn. A live review in observe mode
+(one a static `review` rule gates) is judged without the taint cell's floors, so its event also
+carries `enforce_available_verdicts`, the verdicts `enforce` would have offered. Likewise, an
+operation that inherits its program's approval in observe mode on a cell whose floor `enforce` would
+still apply records `inherited_would_deny` or `inherited_would_confirm` rather than a plain
+inheritance, and runs.
 
 #### Migration for deployments already enforcing taint policy
 
@@ -2334,14 +2347,14 @@ A tool that writes something that will run later with no human present — `crea
 
 The adjudicated cell is what makes the definition's creation gate run. A reviewer `allow`, or a
 sighted human confirmation, cures the definition so later firings resolve at `machine_reviewed`
-instead of `unknown_external`. In `observe` mode the review runs off the critical path: the write
-lands at once and its record picks up the verdict when the review completes, so the cell adds no
-latency and no prompts until `taint_policy.mode` is `enforce`. A definition written from a clean
-turn needs no review and is stamped trusted. `save_script` and `spawn_worker`, which registers a
-worker-completion listener, carry the tag too, but they also carry `code_execution`, which the
-resolver considers first, so they resolve to `sandbox_network`. That cell adjudicates at the same
-tiers; an operator who tightens `executable_persistence` and wants those two held to the same
-outcome tightens `sandbox_network` as well.
+instead of `unknown_external`. In `observe` mode the review runs off the critical path, unless it
+also decides a script program: the write lands at once and its record picks up the verdict when the
+review completes, so the cell adds no prompts until `taint_policy.mode` is `enforce`. A definition
+written from a clean turn needs no review and is stamped trusted. `save_script` and `spawn_worker`,
+which registers a worker-completion listener, carry the tag too, but they also carry
+`code_execution`, which the resolver considers first, so they resolve to `sandbox_network`. That
+cell adjudicates at the same tiers; an operator who tightens `executable_persistence` and wants
+those two held to the same outcome tightens `sandbox_network` as well.
 
 `enable_automation`, `disable_automation` and the delete tools change no definition content and stay
 on `artifact_write`. Raise `executable_persistence` to `confirm` at the external tiers through

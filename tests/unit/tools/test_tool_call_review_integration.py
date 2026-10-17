@@ -872,6 +872,9 @@ async def test_observe_taint_deny_floor_does_not_constrain_static_review(
         ToolCallReviewVerdict.DENY.value,
     ]
     assert review_context["fallback_verdict"] == ToolCallReviewVerdict.CONFIRM.value
+    assert review_context["enforce_available_verdicts"] == [
+        ToolCallReviewVerdict.DENY.value
+    ]
 
 
 async def test_observe_taint_only_deny_floor_constrains_shadow_review(
@@ -1788,6 +1791,74 @@ async def test_unattended_model_denial_threshold_requests_turn_termination_once(
     assert len(escalation_events) == 1
     assert escalation_events[0]["review_status"] == "escalation_turn_terminated"
     assert escalation_events[0]["effective_outcome"] == "deny"
+
+
+@pytest.mark.parametrize(
+    ("attended", "expected_status", "expected_outcome"),
+    [
+        (True, "escalation_would_confirm", "confirm"),
+        (False, "escalation_would_terminate", "deny"),
+    ],
+)
+async def test_observe_denials_record_the_escalation_enforce_would_make(
+    db_engine: AsyncEngine,
+    attended: bool,
+    expected_status: str,
+    expected_outcome: str,
+) -> None:
+    executions = 0
+
+    async def execute(**_kwargs: object) -> ToolResult:
+        nonlocal executions
+        executions += 1
+        return ToolResult(text="executed under observe")
+
+    confirmation = _ConfirmationRecorder() if attended else None
+    provider = _provider(
+        cast("ToolImplementation", execute),
+        reviewer_llm=_ReviewLLM(ToolCallReviewVerdict.DENY),
+        static_decision=ToolPolicyDecision.ALLOW,
+        taint_policy=TaintPolicyConfig(mode=TaintPolicyMode.OBSERVE),
+        sandbox=True,
+        review_config=ToolCallReviewConfig(
+            timeout_seconds=_HANG_GUARD_SECONDS,
+            escalation=ToolCallReviewEscalationConfig(
+                consecutive_denials=2,
+                total_denials_per_turn=20,
+            ),
+        ),
+    )
+    context = _context(
+        db_engine,
+        _unknown_external_state(),
+        confirmation=confirmation,
+        turn_id=f"observe-escalation-{expected_status}",
+    )
+
+    for call_id in ("first", "second", "third"):
+        result = await provider.execute_tool("reviewed_tool", {}, context, call_id)
+        assert isinstance(result, ToolResult)
+        assert result.get_text() == "executed under observe"
+    await provider.close()
+
+    assert executions == 3
+    assert confirmation is None or confirmation.calls == 0
+    review_state = context.tool_call_review_state
+    assert review_state.terminal_denial_escalation_message is None
+    assert review_state.consecutive_denials == 0
+    assert review_state.total_denials == 0
+    assert not review_state.escalation_handled
+    assert context.turn_id is not None
+    events = await context.db_context.taint_audit_events.list_for_turn(context.turn_id)
+    escalation_events = [
+        event
+        for event in events
+        if event["event_type"] == "tool_call_review_escalation"
+    ]
+    assert len(escalation_events) == 1
+    assert escalation_events[0]["review_status"] == expected_status
+    assert escalation_events[0]["effective_outcome"] == expected_outcome
+    assert escalation_events[0]["mode"] == TaintPolicyMode.OBSERVE.value
 
 
 async def test_rejected_escalation_is_not_repeated_in_the_same_turn(

@@ -307,7 +307,10 @@ intentionally the complete durable record.
 Adopted from the risk document: after 3 consecutive denied calls or a configured per-turn total, the
 pattern converts to a single summarizing human confirmation, or ends the turn with an explanation in
 unattended contexts. A per-turn review budget caps model spend; exceeding it resolves remaining
-gated calls at their fallback outcomes.
+gated calls at their fallback outcomes. In `observe` mode the threshold is forecast rather than
+acted on: taint-only denials count toward it, and crossing it records the escalation enforce would
+make without prompting or ending the turn. Those denials are counted apart from the live streak, so
+a verdict that binds nothing cannot trip a real escalation of a static `review` rule.
 
 **Deliberate v1 simplification:** escalation counters are turn-local and in-memory. A delegated run
 restarts them, so repeated fan-out can duck the threshold until the serialized-taint-schema
@@ -374,7 +377,11 @@ latency anywhere — including the browser hot path, whose every tool call resol
 and would otherwise pay a blocking reviewer round-trip per action until the M3 exemption lands. That
 is the free shadow phase: real verdicts against real traffic at zero user-visible cost, starting the
 day the defaults change, while the deployment's `mode` stays `observe`. Under `enforce` the
-invocation necessarily blocks, which is why the M5 gate includes p95 reviewer latency.
+invocation necessarily blocks, which is why the M5 gate includes p95 reviewer latency. *(Amended by
+[script-execution-review-boundary.md](script-execution-review-boundary.md): observe runs enforce's
+decision path and replaces only the block or prompt with a recorded outcome, so a taint review that
+also decides a script program is awaited in observe too -- the program's approval changes which of
+its operations need a review of their own, and enforce pays the same latency.)*
 
 The shadow property belongs to `observe` mode, not to the defaults change itself. For a deployment
 already running `mode: enforce`, adopting the new default matrix is a real posture change — cells
@@ -543,13 +550,15 @@ exactly that resolved payload. A durable human confirmation carries the resolved
 rather than only a stored-script name, so a later definition edit cannot substitute new code into an
 already-approved execution.
 
-One successful enforcing review or its resulting human confirmation creates an invocation-local
-authorization for deterministic internal operations. Tool dispatch and the brokered-HTTP named-sink
-gate consume that context to avoid repeating automatic intent adjudication. They continue to apply
-tool availability, access control, hard policy denials, mandatory confirmation floors, argument
-validation, and runtime limits. Taint collection and result provenance also remain live.
-Observe-mode verdicts, permissive policy results, `in_script`, and a taint snapshot are not
-authorization.
+One successful review that decides the program, or its resulting human confirmation, creates an
+invocation-local authorization for deterministic internal operations. Tool dispatch and the
+brokered-HTTP named-sink gate consume that context to avoid repeating automatic intent adjudication.
+They continue to apply tool availability, access control, hard policy denials, mandatory
+confirmation floors, argument validation, and runtime limits. Taint collection and result provenance
+also remain live. An observe-mode allow of a program authorizes it as an enforcing one would; an
+observe-mode confirm, standing in for the person enforce would ask, authorizes only gates whose
+verdicts are themselves forecasts. Permissive policy results, `in_script`, and a taint snapshot are
+not authorization.
 
 Statically named stored-script children are recursively resolved with their source, schema, content
 hash, and provenance. Those bound descendants are part of the reviewed program. Each child use

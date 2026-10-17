@@ -169,6 +169,7 @@ class TaintAuditReviewContext(TypedDict, total=False):
     script_authorization: str
     delegating_contexts: list[str]
     allowed_verdicts: list[str]
+    enforce_available_verdicts: list[str]
     fallback_verdict: str
     used_fallback: bool
     destination_echo: bool | None

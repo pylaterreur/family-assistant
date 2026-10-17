@@ -90,11 +90,20 @@ review covers the call only; the program's approval continues to cover its other
 
 A program admitted without a review of its own -- a scheduled or event firing, or an
 `execute_script` call no gate asked about -- is decided by the first blocking model review one of
-its operations needs, including an enforced review of a note entering every prompt. That review is
-given the program as the thing being approved alongside the call, and a model allow approves both.
-Any other outcome is recorded on the program and not asked again, so a stochastic verdict is not
-retried until it allows. Scheduled firings thereby pass through the same source-aware review
-boundary as an explicit `execute_script` call, paying for a review only when an operation needs one.
+its operations needs, including a review of a note entering every prompt. That review is given the
+program as the thing being approved alongside the call, and a model allow approves both. Any other
+outcome is recorded on the program and not asked again, so a stochastic verdict is not retried until
+it allows. Scheduled firings thereby pass through the same source-aware review boundary as an
+explicit `execute_script` call, paying for a review only when an operation needs one.
+
+Observe mode runs this same decision path, so its record forecasts what enforce would do. A taint
+review that decides a program is awaited with enforce's verdict space, and only the block, the
+prompt and the escalation prompt are replaced by a recorded would-have outcome. An allow approves
+the program exactly as under enforce. A confirm of the program a call starts counts as approved,
+because under enforce a person either approves it, and its operations inherit, or it never runs;
+that approval is marked a forecast, so it covers only gates that are themselves forecasts and is
+never evidence for a live gate or a persisted definition. A deny leaves the program unapproved. A
+taint review that decides no program stays off the critical path.
 
 The execution authorization is local to the invocation and ends on completion, failure, timeout, or
 cancellation. It must not leak to sibling calls or later turns. Persisted definitions retain their
@@ -143,8 +152,6 @@ than silently widening approval.
 
 Confirmation replay is an inline invocation of the pinned program and must satisfy current policy
 for that invocation. It does not retain a permission that applies only to a live named lookup.
-Observe-mode shadow reviews remain independent, so their counts are not a forecast of the number of
-reviews an approved program would need under enforcement.
 
 The literal rule for code execution is deliberately syntactic. It does not follow data into files: a
 literal command that runs a file an earlier step wrote from runtime data is covered by the program
@@ -152,8 +159,19 @@ review, which sees that the program writes and then runs it. The rule reads ever
 the call, working directory included, because an operator-supplied tag does not say which argument a
 remote server executes. Scripts that need runtime data in a sandbox pass it through a file written
 by a separate step rather than interpolating it into the call, or accept one review per
-runtime-built call. Observe-mode shadow reviews still do not approve a program, so observe-mode
-review counts are not a forecast of enforce-mode counts.
+runtime-built call.
+
+Observe's forecast is approximate where enforce would have changed what happens next. After the
+first would-block in a turn, enforce would have shown the model a denial or waited on a person, so
+later would-blocks in that turn are speculative. A program whose review would deny keeps running in
+observe, and its operations keep their own reviews, which enforce would never have run; the forecast
+excludes them rather than observe suppressing them. A would-be confirm is counted as approved,
+though a person might have declined. Reviews that run off the critical path update the denial streak
+when they finish rather than in call order, so a would-be escalation can land a call early or late.
+A note-admission review in observe offers no confirm, which could only mean "not admitted" there, so
+where enforce's reviewer might have confirmed it allows or denies, and its allow approves the
+program as an enforce allow would. Each is accepted because the alternative is machinery to simulate
+enforce's counterfactual, and the forecast only needs to bound the enforce-mode prompt rate.
 
 Deciding an unreviewed program on its first blocking review is best effort for the review count, not
 a guarantee. The ordinary shapes are covered: a gated operation, a sandbox call or a note admission

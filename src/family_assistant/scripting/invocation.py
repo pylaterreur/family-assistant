@@ -85,6 +85,13 @@ class PreparedScriptInvocation:
     review: ScriptReviewContext
     globals: dict[str, object]
     approved: bool = False
+    forecast_approval: bool = False
+    """Approved only as observe mode's forecast of a confirmation no human gave.
+
+    Such an approval stands in for the human ``enforce`` would have asked, so
+    it binds only gates whose verdicts are themselves forecasts; every live
+    gate still decides on its own.
+    """
     bound_child: bool = False
 
     def arguments(self) -> dict[str, object]:
@@ -128,6 +135,15 @@ class ScriptExecutionScope:
         if self.invocation.approved or self._bound_parent is None:
             return self.invocation.review.review_id
         return self._bound_parent.approving_review_id
+
+    @property
+    def approval_is_forecast(self) -> bool:
+        """Whether this run's approval only forecasts a human confirmation."""
+        if self.invocation.approved:
+            return self.invocation.forecast_approval
+        return (
+            self._bound_parent is not None and self._bound_parent.approval_is_forecast
+        )
 
     @property
     def _bound_parent(self) -> ScriptExecutionScope | None:
@@ -174,6 +190,7 @@ class ScriptExecutionScope:
     def approve_program(self, review_id: str | None) -> None:
         """Record a model allow of the complete program as its approval."""
         self.invocation.approved = True
+        self.invocation.forecast_approval = False
         self.invocation.review = replace(
             self.invocation.review, decision="allow", review_id=review_id
         )
@@ -212,7 +229,10 @@ class ScriptExecutionScope:
         parents = self.parent.review_contexts() if self.parent is not None else ()
         return (
             *parents,
-            replace(self.invocation.review, approval_active=self.approved),
+            replace(
+                self.invocation.review,
+                approval_active=self.approved and not self.approval_is_forecast,
+            ),
         )
 
 
