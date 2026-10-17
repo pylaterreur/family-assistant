@@ -2904,7 +2904,7 @@ startup, and profiles that would use it get "not configured" from the camera too
 
 A camera's clock must run on the household's [TIMEZONE](#timezone): Reolink searches and reports
 recordings by the camera's wall clock alone, so the tools read every camera time as wall-clock time
-in that zone. Each camera serves up to four recording extractions at once.
+in that zone.
 
 ### REOLINK_CAMERAS
 

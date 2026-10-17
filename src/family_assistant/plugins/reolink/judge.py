@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from pydantic import BaseModel, Field
 
-from family_assistant.llm.base import StructuredOutputError
+from family_assistant.llm.base import LLMProviderError
 from family_assistant.llm.messages import (
     ImageUrlContentPart,
     SystemMessage,
@@ -128,8 +128,12 @@ class LlmFrameJudge:
                 ],
                 response_model=_FrameJudgementResponse,
             )
-        except StructuredOutputError as error:
-            raise FrameJudgeError(f"Structured output failed: {error}") from error
+        except LLMProviderError as error:
+            # One frame's failure -- a rate limit, a timeout, unparseable
+            # output -- leaves that frame unjudged rather than ending the search.
+            raise FrameJudgeError(
+                f"The model could not judge the frame: {error}"
+            ) from error
         if response.satisfied:
             return response.confidence
         return 1.0 - response.confidence

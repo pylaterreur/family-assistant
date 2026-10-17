@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from family_assistant.config_models import CameraFrameJudgeConfig, TypeSafeConfig
+from family_assistant.llm.base import RateLimitError
 from family_assistant.llm.typesafe import (
     ChoiceQuestion,
     JevAnswers,
@@ -897,3 +898,29 @@ async def test_find_change_rejects_a_range_that_does_not_move_forward() -> None:
     )
 
     assert result.get_data() == {"error": "end_time must be after start_time."}
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_model_leaves_frames_unjudged_rather_than_failing() -> (
+    None
+):
+    backend = _continuous_camera({0: b"frame"})
+
+    async def judge(messages: object, response_model: type[BaseModel]) -> BaseModel:
+        raise RateLimitError("slow down", provider="test", model="test")
+
+    llm = Mock()
+    llm.generate_structured = judge
+
+    result = await scan_camera_frames_tool(
+        _judging_context(backend, llm_client=llm),
+        camera_id="cam",
+        start_time=_SCAN_BASE.isoformat(),
+        end_time=(_SCAN_BASE + timedelta(minutes=15)).isoformat(),
+        condition="A person is visible.",
+        interval_seconds=900,
+    )
+
+    data = result.get_data()
+    assert isinstance(data, dict)
+    assert data["warning"] == "2 frame(s) could not be extracted or judged"
