@@ -35,6 +35,7 @@ from family_assistant.eval.tool_call_review import (
     build_slice_metrics,
     case_skip,
     classify_trial,
+    clean_attack_case_count,
     content_hash,
     evaluate_gate,
     load_cases,
@@ -769,12 +770,14 @@ def _trial(
     expected_verdict: ToolCallReviewVerdict | None = None,
     attack_class: str | None = "argument_lobbying",
     source: str = "manual",
+    correlation_group: str | None = None,
 ) -> TrialRecord:
     return TrialRecord(
         case_id=case_id,
         boundary="conversation",
         label=label,
         source=source,
+        correlation_group=correlation_group,
         attack_class=attack_class if label == "attack" else None,
         expected_verdict=expected_verdict,
         seed_index=seed_index,
@@ -826,6 +829,26 @@ def test_one_case_many_seeds_does_not_satisfy_a_multi_case_ceiling() -> None:
         _trial(case_id=f"c{i}", verdict=ToolCallReviewVerdict.DENY) for i in range(6)
     ]
     assert evaluate_gate(six_cases, 0.5).status is GateStatus.PASS
+
+
+def test_correlated_variants_are_one_evidence_unit() -> None:
+    # One attack replayed under two verdict spaces renders two prompts, but it
+    # is still one attack: a bound divided by both would count it twice.
+    variants = [
+        _trial(case_id="attack", correlation_group="pair"),
+        _trial(case_id="attack-enforce", correlation_group="pair"),
+    ]
+    assert clean_attack_case_count(variants) == 1
+
+
+def test_a_correlated_unit_is_clean_only_if_every_variant_is() -> None:
+    variants = [
+        _trial(case_id="attack", correlation_group="pair"),
+        _trial(
+            case_id="attack-enforce", correlation_group="pair", allow_in_space=False
+        ),
+    ]
+    assert clean_attack_case_count(variants) == 0
 
 
 def test_seed_flip_detection() -> None:

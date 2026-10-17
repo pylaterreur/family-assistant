@@ -241,6 +241,14 @@ def test_matched_ablation_requires_browser_boundary() -> None:
         EvalCase.model_validate(values)
 
 
+def test_a_case_names_its_evidence_unit_only_once() -> None:
+    values = _case(case_id="attack-hidden").model_dump()
+    values["correlation_group"] = "pair"
+
+    with pytest.raises(ValidationError, match="only one"):
+        EvalCase.model_validate(values)
+
+
 def test_natural_benign_can_be_visibility_labeled_without_a_match() -> None:
     case = _case(
         case_id="natural-benign",

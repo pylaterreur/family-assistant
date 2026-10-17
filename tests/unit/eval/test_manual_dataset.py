@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from family_assistant.config_models import ToolCallReviewConfig
 from family_assistant.eval.tool_call_review.loader import load_cases
+from family_assistant.eval.tool_call_review.runner import run_eval
 from family_assistant.eval.tool_call_review.schema import (
     ConversationPayload,
     EvalCase,
@@ -28,7 +31,9 @@ from family_assistant.security.taint import (
 )
 from family_assistant.services.tool_call_review import (
     ToolCallReviewConstraints,
+    ToolCallReviewer,
     ToolCallReviewInput,
+    ToolCallReviewResponse,
     ToolCallReviewVerdict,
     assemble_tool_call_review_messages,
 )
@@ -37,6 +42,12 @@ from family_assistant.tools.infrastructure import (
     LocalToolsProvider,
     TaintTrackingToolsProvider,
 )
+from tests.mocks.mock_llm import (  # pylint: disable=no-name-in-module
+    RuleBasedMockLLMClient,
+)
+
+if TYPE_CHECKING:
+    from family_assistant.llm import LLMInterface
 
 _EIGHT_ATTACK_CLASSES = frozenset({
     "tool_result_injection",
@@ -293,6 +304,8 @@ def test_every_ambient_case_has_an_enforce_twin(
             observe.label,
             observe.attack_class,
         )
+        assert observe.correlation_group is not None
+        assert enforce.correlation_group == observe.correlation_group
         assert enforce.payload.model_dump(
             exclude={"policy_contexts"}
         ) == observe.payload.model_dump(exclude={"policy_contexts"})
@@ -301,6 +314,35 @@ def test_every_ambient_case_has_an_enforce_twin(
         # prompt, so it must say allow.
         expected = ToolCallReviewVerdict.ALLOW if observe.label == "benign" else None
         assert enforce.expected_verdict is expected, enforce.id
+
+
+async def test_enforce_twins_do_not_inflate_the_false_allow_bound(
+    manual_cases: list[EvalCase],
+) -> None:
+    ambient = _ambient_cases(manual_cases)
+    judge = RuleBasedMockLLMClient(
+        rules=[],
+        structured_rules=[
+            (
+                lambda _args: True,
+                ToolCallReviewResponse(
+                    verdict=ToolCallReviewVerdict.DENY, reason="Planted directive."
+                ),
+            )
+        ],
+    )
+    reviewer = ToolCallReviewer(
+        cast("LLMInterface", judge), ToolCallReviewConfig(timeout_seconds=5)
+    )
+
+    report = await run_eval(ambient, reviewer, seeds=1)
+
+    attacks = [case for case in ambient if case.label == "attack"]
+    observe_attacks = [
+        case for case in attacks if not case.id.endswith(_ENFORCE_SUFFIX)
+    ]
+    assert len(attacks) == 2 * len(observe_attacks)
+    assert report.clean_attack_cases() == len(observe_attacks)
 
 
 def test_conversation_cases_round_trip(manual_cases: list[EvalCase]) -> None:
