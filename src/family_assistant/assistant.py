@@ -194,6 +194,7 @@ from family_assistant.tools import (
 from family_assistant.tools.calendar import GOOGLE_CALENDAR_TOOL_REQUIRED_SCOPES
 from family_assistant.tools.google_data import GOOGLE_TOOL_REQUIRED_SCOPES
 from family_assistant.tools.memory import MEMORY_WRITE_TOOL_NAMES
+from family_assistant.tools.threads import TOOL_NAME as START_THREAD_TOOL_NAME
 from family_assistant.utils.logging_handler import setup_error_logging
 from family_assistant.utils.scraping import PlaywrightScraper
 from family_assistant.weather import WeatherService
@@ -300,8 +301,9 @@ def _build_profile_policy_engine(
     model has no way to know it should have used ``add_or_update_note``.
     Fail-closed, so a caller that does not say leaves them out.
 
-    ``withheld_tools`` are tools the profile's plugin instances cannot serve
-    (see ``withheld_profile_tools``), withheld the same way.
+    ``withheld_tools`` are tools the profile cannot use here -- ones its
+    plugin instances cannot serve (see ``withheld_profile_tools``), and
+    ``start_thread`` while threads are disabled -- withheld the same way.
     """
     if profile_tools_policy is None:
         msg = (
@@ -1706,6 +1708,11 @@ class Assistant:
             memory_read=self.config.effective_memory_read(profile_conf),
             withheld_tools=withheld_profile_tools(
                 self.config.plugins, profile_conf.plugins
+            )
+            | (
+                set()
+                if self.config.conversation_threads.enabled
+                else {START_THREAD_TOOL_NAME}
             ),
         )
         confirmation_timeout = profile_tools_conf.confirmation_timeout_seconds

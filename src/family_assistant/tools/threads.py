@@ -14,6 +14,7 @@ import logging
 import uuid
 from typing import TYPE_CHECKING
 
+from family_assistant.llm.messages import MessageAttachmentMetadata
 from family_assistant.llm.model_selection import (
     ModelSelectionRequest,
     ModelTierNotPermitted,
@@ -38,7 +39,10 @@ from family_assistant.utils.clock import SystemClock
 
 if TYPE_CHECKING:
     from family_assistant.config_models import AppConfig
-    from family_assistant.storage.database import DatabaseTransaction
+    from family_assistant.storage.database import (
+        DatabaseExecutor,
+        DatabaseTransaction,
+    )
     from family_assistant.tools.types import ToolDefinition, ToolExecutionContext
 
 logger = logging.getLogger(__name__)
@@ -111,32 +115,36 @@ def _new_thread_conversation_id(interface_type: str) -> str:
     return f"thread_{uuid.uuid4().hex}"
 
 
-async def _refusal_outside_home(
-    exec_context: ToolExecutionContext, interface_type: str
-) -> ToolResult | None:
-    """Why this turn cannot start a thread, or None if it can.
+async def thread_start_refusal(
+    db: DatabaseExecutor,
+    *,
+    app_config: AppConfig | None,
+    async_delegation_enabled: bool,
+    in_script: bool,
+    interface_type: str,
+    conversation_id: str,
+    subconversation_id: str | None,
+    user_id: str | None,
+) -> str | None:
+    """Why a turn cannot start a thread, or None if it can.
 
     Threads hang off Home and do not nest, so the turn must be running at the
     top level of the acting user's Home. Starting one is a background run, so
-    it needs the asynchronous delegation machinery.
+    it needs the asynchronous delegation machinery. The model loop asks this
+    too, and does not advertise the tool on a turn it would refuse: a tool that
+    refuses every call is a dead end advertised as a capability.
     """
-    app_config = _app_config(exec_context)
     if app_config is None or not app_config.conversation_threads.enabled:
-        return _error("Threads are not enabled.")
-    if (
-        exec_context.in_script
-        or not delegation_tools_config(exec_context).async_delegation_enabled
-    ):
-        return _error(
-            "Threads need asynchronous delegation, which is not available here."
-        )
-    if exec_context.subconversation_id is not None or not exec_context.user_id:
-        return _error("A thread can only be started from the user's Home.")
-    home = await exec_context.db_context.conversation_threads.get_home(
-        exec_context.user_id, interface_type
+        return "Threads are not enabled."
+    if in_script or not async_delegation_enabled:
+        return "Threads need asynchronous delegation, which is not available here."
+    if subconversation_id is not None or not user_id:
+        return "A thread can only be started from the user's Home."
+    home = await db.conversation_threads.get_home(
+        user_id, "web" if interface_type == "voice" else interface_type
     )
-    if home != exec_context.conversation_id:
-        return _error("A thread can only be started from the user's Home.")
+    if home != conversation_id:
+        return "A thread can only be started from the user's Home."
     return None
 
 
@@ -150,9 +158,20 @@ async def start_thread_tool(
 ) -> ToolResult:
     """Start a thread of the user's Home on ``target_service_id``."""
     interface_type = delegation_interface_type(exec_context)
-    refusal = await _refusal_outside_home(exec_context, interface_type)
+    refusal = await thread_start_refusal(
+        exec_context.db_context,
+        app_config=_app_config(exec_context),
+        async_delegation_enabled=delegation_tools_config(
+            exec_context
+        ).async_delegation_enabled,
+        in_script=exec_context.in_script,
+        interface_type=exec_context.interface_type,
+        conversation_id=exec_context.conversation_id,
+        subconversation_id=exec_context.subconversation_id,
+        user_id=exec_context.user_id,
+    )
     if refusal is not None:
-        return refusal
+        return _error(refusal)
     title = title.strip()
     request = request.strip()
     if not title or not request:
@@ -221,6 +240,16 @@ async def start_thread_tool(
     turn_id = str(uuid.uuid4())
     now = (exec_context.clock or SystemClock()).now()
 
+    # Recorded on the seed so the files stay part of the thread's history after
+    # its first turn, as an uploaded file does.
+    seed_attachments = [
+        MessageAttachmentMetadata(
+            type="attachment_reference", attachment_id=part["attachment_id"]
+        )
+        for part in content_parts
+        if part["type"] == "attachment"
+    ]
+
     async def _create(txn: DatabaseTransaction) -> None:
         await txn.conversation_threads.create_thread(
             conversation_id=thread_conversation_id,
@@ -242,7 +271,11 @@ async def start_thread_tool(
                 profile=target_config,
                 user_id=owner,
             ),
-            payload=AssistantRequest(text=request, taint=taint),
+            payload=AssistantRequest(
+                text=request,
+                taint=taint,
+                attachments=seed_attachments,
+            ),
             turn_id=turn_id,
             now=now,
         )

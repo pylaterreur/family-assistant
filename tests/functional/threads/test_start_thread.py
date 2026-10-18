@@ -26,6 +26,7 @@ from family_assistant.interfaces import ChatInterface
 from family_assistant.llm import ToolCallFunction, ToolCallItem
 from family_assistant.llm.messages import UserMessage
 from family_assistant.processing import ProcessingService, ProcessingServiceConfig
+from family_assistant.services.attachment_registry import AttachmentRegistry
 from family_assistant.storage import delegation_runs_table, message_history_table
 from family_assistant.storage.database import Database
 from family_assistant.tools import LOCAL_TOOL_REGISTRATIONS as local_tool_registrations
@@ -43,6 +44,7 @@ from tests.mocks.mock_llm import LLMOutput, MatcherArgs, RuleBasedMockLLMClient
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from pathlib import Path
 
     from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -94,7 +96,14 @@ def _has_tool_result(messages: list[LLMMessage]) -> bool:
     return any(getattr(message, "role", None) == "tool" for message in messages)
 
 
-def _start_thread_call() -> LLMOutput:
+def _start_thread_call(attachment_ids: list[str]) -> LLMOutput:
+    arguments: dict[str, object] = {
+        "target_service_id": TARGET_PROFILE,
+        "title": "Hot water system quotes",
+        "request": REQUEST,
+    }
+    if attachment_ids:
+        arguments["attachment_ids"] = attachment_ids
     return LLMOutput(
         content="Starting a thread.",
         tool_calls=[
@@ -103,11 +112,7 @@ def _start_thread_call() -> LLMOutput:
                 type="function",
                 function=ToolCallFunction(
                     name="start_thread",
-                    arguments=json.dumps({
-                        "target_service_id": TARGET_PROFILE,
-                        "title": "Hot water system quotes",
-                        "request": REQUEST,
-                    }),
+                    arguments=json.dumps(arguments),
                 ),
             )
         ],
@@ -122,6 +127,28 @@ class ThreadWorld:
     home_service: ProcessingService
     target_calls: list[list[LLMMessage]] = field(default_factory=list)
     home_tool_results: list[str] = field(default_factory=list)
+    home_llm: RuleBasedMockLLMClient | None = None
+    attachment_registry: AttachmentRegistry | None = None
+    # Passed by the Home model when it starts a thread.
+    attachment_ids: list[str] = field(default_factory=list)
+
+    async def upload(self) -> str:
+        assert self.attachment_registry is not None
+        record = await self.attachment_registry.register_user_attachment(
+            db_context=self.db,
+            content=b"%PDF-1.4 quote",
+            mime_type="application/pdf",
+            filename="quote.pdf",
+            conversation_id=HOME,
+            user_id=USER,
+            description="A plumber's quote",
+        )
+        return record.attachment_id
+
+    def tools_offered_on_first_call(self) -> set[str]:
+        assert self.home_llm is not None
+        tools = self.home_llm.get_calls()[0]["kwargs"]["tools"] or []
+        return {tool["function"]["name"] for tool in tools}
 
     async def say_in(self, conversation_id: str, text: str) -> None:
         result = await self.home_service.handle_chat_interaction(
@@ -167,12 +194,20 @@ async def world(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[Any, Any, Any]],
     request: pytest.FixtureRequest,
+    tmp_path: Path,
 ) -> ThreadWorld:
     marker = request.node.get_closest_marker("target_sources")
     allowed_sources = marker.args[0] if marker else None
     db = Database(engine=db_engine)
     app_config = AppConfig(conversation_threads=ConversationThreadsConfig(enabled=True))
-    world = ThreadWorld(db=db, home_service=cast("ProcessingService", None))
+    attachment_registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    world = ThreadWorld(
+        db=db,
+        home_service=cast("ProcessingService", None),
+        attachment_registry=attachment_registry,
+    )
 
     def home_tool_result(kwargs: MatcherArgs) -> LLMOutput:
         messages = kwargs.get("messages", [])
@@ -187,7 +222,7 @@ async def world(
             ),
             (
                 lambda kwargs: "start a thread" in str(kwargs["messages"][-1].content),
-                _start_thread_call(),
+                lambda _kwargs: _start_thread_call(world.attachment_ids),
             ),
         ],
         default_response=LLMOutput(content="Noted."),
@@ -199,6 +234,7 @@ async def world(
 
     target_llm = RuleBasedMockLLMClient(rules=[(lambda _kwargs: True, target_reply)])
 
+    world.home_llm = home_llm
     world.home_service = ProcessingService(
         llm_client=home_llm,
         tools_provider=await _tools(),
@@ -206,6 +242,7 @@ async def world(
         context_providers=[],
         server_url="http://test.server",
         app_config=app_config,
+        attachment_registry=attachment_registry,
     )
     target_service = ProcessingService(
         llm_client=target_llm,
@@ -216,6 +253,7 @@ async def world(
         context_providers=[],
         server_url="http://test.server",
         app_config=app_config,
+        attachment_registry=attachment_registry,
     )
     registry = {HOME_PROFILE: world.home_service, TARGET_PROFILE: target_service}
     world.home_service.processing_services_registry = registry
@@ -289,3 +327,39 @@ async def test_a_thread_cannot_be_started_outside_home(world: ThreadWorld) -> No
 
     assert await world.thread_ids() == []
     assert "only be started from the user's Home" in world.home_tool_results[0]
+
+
+@pytest.mark.asyncio
+async def test_home_turns_are_offered_the_tool(world: ThreadWorld) -> None:
+    await world.say_in(HOME, "hello")
+
+    assert "start_thread" in world.tools_offered_on_first_call()
+
+
+@pytest.mark.asyncio
+async def test_turns_outside_home_are_not_offered_the_tool(world: ThreadWorld) -> None:
+    await world.say_in("web_conv_other", "hello")
+
+    assert "start_thread" not in world.tools_offered_on_first_call()
+
+
+@pytest.mark.asyncio
+async def test_attachments_passed_to_a_thread_stay_in_its_history(
+    world: ThreadWorld,
+) -> None:
+    attachment_id = await world.upload()
+    world.attachment_ids = [attachment_id]
+
+    await world.say_in(HOME, "please start a thread for the quotes")
+
+    [thread_id] = await world.thread_ids()
+    thread = await world.db.conversation_threads.get_thread(thread_id)
+    assert thread is not None
+    seed_rows = [
+        row
+        for row in await world.rows(thread_id)
+        if row["internal_id"] == thread.seed_message_id
+    ]
+    assert [row["attachments"] for row in seed_rows] == [
+        [{"type": "attachment_reference", "attachment_id": attachment_id}]
+    ]

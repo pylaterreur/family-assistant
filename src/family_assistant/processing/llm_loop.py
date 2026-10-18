@@ -36,6 +36,8 @@ from family_assistant.tools import (
     find_provider_by_type,
     get_tool_definitions_for_advertisement,
 )
+from family_assistant.tools.threads import TOOL_NAME as START_THREAD_TOOL_NAME
+from family_assistant.tools.threads import thread_start_refusal
 from family_assistant.tools.types import ToolCallBatch, ToolCallReviewTurnState
 
 from .attachments import AttachmentSelectionError
@@ -459,6 +461,34 @@ class LLMStreamingLoop:
             except ToolPolicyDeniedError as exc:
                 raise TaintedSinkRefusedError(str(exc)) from exc
 
+        start_thread_available: bool | None = None
+
+        async def thread_start_available() -> bool:
+            """Whether this turn could start a thread, decided once per turn."""
+            nonlocal start_thread_available
+            if start_thread_available is None:
+                start_thread_available = (
+                    await thread_start_refusal(
+                        db_context,
+                        app_config=(
+                            processing_service.app_config
+                            if processing_service is not None
+                            else None
+                        ),
+                        async_delegation_enabled=(
+                            processing_service is not None
+                            and processing_service.service_config.tools_config.async_delegation_enabled
+                        ),
+                        in_script=False,
+                        interface_type=interface_type,
+                        conversation_id=conversation_id,
+                        subconversation_id=subconversation_id,
+                        user_id=user_id,
+                    )
+                    is None
+                )
+            return start_thread_available
+
         async def declared_tools_and_catalog() -> tuple[
             list[ToolDefinition], str | None
         ]:
@@ -492,6 +522,19 @@ class LLMStreamingLoop:
                 if view_addition:
                     additions.append(view_addition)
             addition = "\n\n".join(additions) if additions else None
+            if (
+                any(
+                    definition.get("function", {}).get("name") == START_THREAD_TOOL_NAME
+                    for definition in defs
+                )
+                and not await thread_start_available()
+            ):
+                defs = [
+                    definition
+                    for definition in defs
+                    if definition.get("function", {}).get("name")
+                    != START_THREAD_TOOL_NAME
+                ]
             if allow_quiet_end:
                 defs = [*defs, END_TURN_QUIETLY_TOOL_DEFINITION]
             return defs, addition
