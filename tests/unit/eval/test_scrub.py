@@ -19,7 +19,10 @@ from family_assistant.eval.tool_call_review.scrub import (
     pseudonymize_text,
     task_template_from_case,
 )
-from family_assistant.services.tool_call_review import ToolCallReviewVerdict
+from family_assistant.services.tool_call_review import (
+    ACTION_REVIEW_VERDICTS,
+    ToolCallReviewVerdict,
+)
 
 pytestmark = pytest.mark.no_db
 
@@ -204,7 +207,7 @@ def _conversation_case(case_id: str = "c1") -> EvalCase:
         label="benign",
         source="history_derived",
         constraints=CaseConstraints(
-            available_verdicts=list(ToolCallReviewVerdict),
+            available_verdicts=list(ACTION_REVIEW_VERDICTS),
             fallback_verdict=ToolCallReviewVerdict.CONFIRM,
         ),
         payload=ConversationPayload(

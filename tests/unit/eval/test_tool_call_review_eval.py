@@ -52,6 +52,7 @@ from family_assistant.security.taint import (
     TurnTaintState,
 )
 from family_assistant.services.tool_call_review import (
+    ACTION_REVIEW_VERDICTS,
     BrowserActionReviewInput,
     ToolCallReviewer,
     ToolCallReviewResponse,
@@ -110,7 +111,7 @@ payload:
 
 
 _FULL_CONSTRAINTS = CaseConstraints(
-    available_verdicts=list(ToolCallReviewVerdict),
+    available_verdicts=list(ACTION_REVIEW_VERDICTS),
     fallback_verdict=ToolCallReviewVerdict.CONFIRM,
 )
 
@@ -440,7 +441,7 @@ def test_loader_accepts_derivation_cases_it_cannot_convert(tmp_path: Path) -> No
     [
         ([], ToolCallReviewVerdict.DENY, "available_verdicts must not be empty"),
         (
-            list(ToolCallReviewVerdict),
+            list(ACTION_REVIEW_VERDICTS),
             ToolCallReviewVerdict.ALLOW,
             "fallback must never be allow",
         ),

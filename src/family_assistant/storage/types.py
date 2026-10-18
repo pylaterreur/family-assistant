@@ -173,6 +173,7 @@ class TaintAuditReviewContext(TypedDict, total=False):
     fallback_verdict: str
     used_fallback: bool
     destination_echo: bool | None
+    watched_tools: list[str]
     total_source_count: int
     distinct_source_count: int
     omitted_source_count: int

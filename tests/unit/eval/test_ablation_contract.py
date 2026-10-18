@@ -25,6 +25,7 @@ from family_assistant.eval.tool_call_review import (
     run_eval,
 )
 from family_assistant.services.tool_call_review import (
+    ACTION_REVIEW_VERDICTS,
     BrowserActionReviewInput,
     ToolCallReviewConstraints,
     ToolCallReviewer,
@@ -37,7 +38,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _CONSTRAINTS = CaseConstraints(
-    available_verdicts=list(ToolCallReviewVerdict),
+    available_verdicts=list(ACTION_REVIEW_VERDICTS),
     fallback_verdict=ToolCallReviewVerdict.CONFIRM,
 )
 
