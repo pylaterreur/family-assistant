@@ -397,6 +397,31 @@ class DelegationRunsRepository(BaseRepository):
         row = result.one_or_none()
         return self._row_to_dict(dict(row)) if row is not None else None
 
+    async def absorb_queued_thread_run(
+        self, conversation_id: str, now: datetime
+    ) -> bool:
+        """Retire a thread's first run that has not started, for a user's turn.
+
+        A message the user sends into a fresh thread becomes the thread's first
+        turn: the request the run would have answered is already in the thread's
+        history, so the user's turn answers it. Only a run still ``queued`` is
+        absorbed -- one the worker has claimed is in progress and is steered
+        instead. Returns whether a run was absorbed.
+        """
+        result = await self._db.execute(
+            update(delegation_runs_table)
+            .where(delegation_runs_table.c.conversation_id == conversation_id)
+            .where(delegation_runs_table.c.run_kind == "thread")
+            .where(delegation_runs_table.c.status == "queued")
+            .values(
+                status="completed",
+                completed_at=now,
+                notified_at=now,
+                updated_at=now,
+            )
+        )
+        return result.rowcount > 0
+
     async def mark_awaiting_children(
         self, delegation_id: str
     ) -> DelegationRunDict | None:

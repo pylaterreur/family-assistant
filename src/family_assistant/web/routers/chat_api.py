@@ -66,6 +66,9 @@ from family_assistant.services.user_identity import (
 )
 from family_assistant.storage.database import Database
 from family_assistant.storage.repositories.conversation_shares import ConversationShare
+from family_assistant.storage.repositories.conversation_threads import (
+    ConversationThread,
+)
 from family_assistant.storage.types import MessageHistoryRow
 from family_assistant.threads.listing import ThreadSummary, summarize_threads
 from family_assistant.tools import MCPToolsProvider, find_provider_by_type
@@ -1486,7 +1489,7 @@ async def api_chat_create_turn(
             )
         if candidate:
             selected_processing_service = candidate
-    selected_processing_service = await _pin_thread_profile(
+    selected_processing_service, pinned_thread = await _pin_thread_profile(
         request, conversation_id, selected_processing_service
     )
 
@@ -1601,6 +1604,14 @@ async def api_chat_create_turn(
         # durable can always be resumed if this process goes away mid-turn.
         lease: TurnLease | None = None
         async with user_msg_db.transaction() as txn:
+            # A message sent into a thread before its first turn has started
+            # becomes that turn, so the queued run must not run as well. This
+            # turn already holds the conversation in the hub, so the worker
+            # cannot claim the run in the meantime.
+            if pinned_thread is not None:
+                await txn.delegation_runs.absorb_queued_thread_run(
+                    conversation_id, datetime.now(UTC)
+                )
             await txn.message_history.add_message(
                 UserMessage(
                     content=payload.prompt,
@@ -2431,16 +2442,17 @@ async def _pin_thread_profile(
     request: Request,
     conversation_id: str,
     selected: ProcessingService,
-) -> ProcessingService:
+) -> tuple[ProcessingService, ConversationThread | None]:
     """A thread always runs on its own profile, whatever the request named.
 
     History is partitioned by profile, so a turn on any other profile would not
-    see the request the thread was started with.
+    see the request the thread was started with. Returns the service to run on,
+    and the thread when the conversation is one.
     """
     db_context = Database(request.app.state.database_engine)
     thread = await db_context.conversation_threads.get_thread(conversation_id)
     if thread is None:
-        return selected
+        return selected, None
     registry = getattr(request.app.state, "processing_services", {})
     pinned = registry.get(thread.profile_id)
     if not isinstance(pinned, ProcessingService):
@@ -2451,7 +2463,7 @@ async def _pin_thread_profile(
                 "not available."
             ),
         )
-    return pinned
+    return pinned, thread
 
 
 def _select_processing_service(
@@ -2792,7 +2804,7 @@ async def api_chat_send_message(
     ProcessingService, and returns the assistant's reply.
     """
     conversation_id = payload.conversation_id or str(uuid.uuid4())
-    selected_processing_service = await _pin_thread_profile(
+    selected_processing_service, _thread = await _pin_thread_profile(
         request,
         conversation_id,
         _select_processing_service(

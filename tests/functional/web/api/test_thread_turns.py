@@ -121,25 +121,51 @@ async def _create_thread_run(
     return delegation_id, turn_id
 
 
+@dataclass
+class QueuedThread:
+    """A thread whose first run is queued, and a worker ready to run it."""
+
+    client: AsyncClient
+    db: Database
+    target_gate: asyncio.Event
+    target_llm: RuleBasedMockLLMClient
+    delegation_id: str
+    turn_id: str
+    worker: TaskWorker
+    context: ToolExecutionContext
+
+    async def run_worker(self) -> None:
+        await self.worker.handle_delegated_profile_run(
+            self.context,
+            {
+                "delegation_id": self.delegation_id,
+                "interface_type": "web",
+                "conversation_id": THREAD,
+                "user_name": "Test User",
+            },
+        )
+
+
 @pytest.fixture
-async def live_thread(
+async def queued_thread(
     app_fixture: FastAPI,
     api_test_client: AsyncClient,
     api_test_processing_service: ProcessingService,
     db_engine: AsyncEngine,
-) -> AsyncGenerator[LiveThread]:
+) -> QueuedThread:
     app_config = AppConfig(
         database_url=app_fixture.state.config.database_url,
         conversation_threads=ConversationThreadsConfig(enabled=True),
     )
     app_fixture.state.config = app_config
     target_gate = asyncio.Event()
+    target_llm = RuleBasedMockLLMClient(
+        rules=[],
+        default_response=LLMOutput(content=THREAD_REPLY),
+        response_gate=target_gate,
+    )
     target_service = ProcessingService(
-        llm_client=RuleBasedMockLLMClient(
-            rules=[],
-            default_response=LLMOutput(content=THREAD_REPLY),
-            response_gate=target_gate,
-        ),
+        llm_client=target_llm,
         tools_provider=api_test_processing_service.tools_provider,
         service_config=replace(api_test_processing_service.service_config, id=TARGET),
         context_providers=[],
@@ -153,7 +179,6 @@ async def live_thread(
     db = Database(engine=db_engine)
     home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
     delegation_id, turn_id = await _create_thread_run(db, home, target_service)
-
     worker = TaskWorker(
         processing_service=api_test_processing_service,
         chat_interface=MagicMock(spec=ChatInterface),
@@ -181,21 +206,28 @@ async def live_thread(
         credential_resolvers=None,
         api_backend=None,
     )
-    handler = asyncio.create_task(
-        worker.handle_delegated_profile_run(
-            context,
-            {
-                "delegation_id": delegation_id,
-                "interface_type": "web",
-                "conversation_id": THREAD,
-                "user_name": "Test User",
-            },
-        )
+    return QueuedThread(
+        client=api_test_client,
+        db=db,
+        target_gate=target_gate,
+        target_llm=target_llm,
+        delegation_id=delegation_id,
+        turn_id=turn_id,
+        worker=worker,
+        context=context,
     )
+
+
+@pytest.fixture
+async def live_thread(queued_thread: QueuedThread) -> AsyncGenerator[LiveThread]:
+    handler = asyncio.create_task(queued_thread.run_worker())
     yield LiveThread(
-        client=api_test_client, db=db, target_gate=target_gate, turn_id=turn_id
+        client=queued_thread.client,
+        db=queued_thread.db,
+        target_gate=queued_thread.target_gate,
+        turn_id=queued_thread.turn_id,
     )
-    target_gate.set()
+    queued_thread.target_gate.set()
     await handler
 
 
@@ -236,3 +268,47 @@ async def test_a_message_while_the_first_turn_runs_is_sent_to_steer_it(
         409,
         live_thread.turn_id,
     )
+
+
+async def _send_before_the_first_turn(queued_thread: QueuedThread) -> None:
+    queued_thread.target_gate.set()
+    turn = await queued_thread.client.post(
+        "/api/v1/chat/turns",
+        json={
+            "turn_id": str(uuid.uuid4()),
+            "conversation_id": THREAD,
+            "prompt": "Gas, please.",
+            "interface_type": "web",
+        },
+    )
+    assert turn.status_code == 200
+    await queued_thread.client.get(
+        f"/api/v1/chat/conversations/{THREAD}/stream",
+        params={"from_seq": 0, "follow": "false"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_message_before_the_first_turn_becomes_that_turn(
+    queued_thread: QueuedThread,
+) -> None:
+    await _send_before_the_first_turn(queued_thread)
+
+    [call] = queued_thread.target_llm.get_calls()
+    texts = [str(message.content) for message in call["kwargs"]["messages"]]
+    request_at = next(
+        i for i, text in enumerate(texts) if "Find three plumbers." in text
+    )
+    message_at = next(i for i, text in enumerate(texts) if "Gas, please." in text)
+    assert request_at < message_at
+
+
+@pytest.mark.asyncio
+async def test_the_absorbed_run_does_not_run_afterwards(
+    queued_thread: QueuedThread,
+) -> None:
+    await _send_before_the_first_turn(queued_thread)
+
+    await queued_thread.run_worker()
+
+    assert len(queued_thread.target_llm.get_calls()) == 1
