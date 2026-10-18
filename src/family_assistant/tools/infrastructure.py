@@ -191,6 +191,12 @@ AMBIENT_ADMISSION_DESCRIPTOR = ToolDescriptor(
 _NO_TAINT_GATE_MODE = "none"
 """Recorded mode for a gate no runtime taint policy participated in."""
 
+# The policy an execute_script review carries; the script-review eval replays it
+# as its production baseline.
+SCRIPT_REVIEW_RUNTIME_CONTROLS = "Tool availability, hard denials, confirmation floors and resource limits remain enforced."
+SCRIPT_REVIEW_MODEL_BOUNDARIES = "Hash-bound static child scripts share program approval. Unbound scripts, delegations and other non-script_deterministic tools are reviewed on their own; their results, like llm/llm_json output, are data the approved program continues to process, though an external message, egress or brokered credential request after one is reviewed again. A code-execution tool inherits only when every string argument is a complete string literal of the reviewed source."
+SCRIPT_REVIEW_MAX_EXECUTION_TIME_SECONDS = 600
+
 
 @dataclass(frozen=True, slots=True)
 class _ConfirmationGateResult:
@@ -580,9 +586,11 @@ async def _prepare_script_call(
         ]
     policy_context: dict[str, object] = {
         "tool_tags": {item.name: sorted(item.tags) for item in inventory},
-        "runtime_controls": "Tool availability, hard denials, confirmation floors and resource limits remain enforced.",
-        "model_boundaries": "Hash-bound static child scripts share program approval. Unbound scripts, delegations and other non-script_deterministic tools are reviewed on their own; their results, like llm/llm_json output, are data the approved program continues to process, though an external message, egress or brokered credential request after one is reviewed again. A code-execution tool inherits only when every string argument is a complete string literal of the reviewed source.",
-        "resource_limits": {"max_execution_time_seconds": 600},
+        "runtime_controls": SCRIPT_REVIEW_RUNTIME_CONTROLS,
+        "model_boundaries": SCRIPT_REVIEW_MODEL_BOUNDARIES,
+        "resource_limits": {
+            "max_execution_time_seconds": SCRIPT_REVIEW_MAX_EXECUTION_TIME_SECONDS
+        },
     }
     if policy is not None:
         policy_context["default_decision"] = policy.default_decision.value
