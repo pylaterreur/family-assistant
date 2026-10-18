@@ -236,6 +236,12 @@ and each path is governed:
   into it are refused. An assistant-started seed holds no more than a delegation carries, which is
   the request and its explicit attachments. Assistant-written text is never stored as the user's
   words, so it can't become memory evidence.
+- **An echo exposes Home to no more than a delegation result does today.** A browser or research
+  result is untrusted content. Today that result is written into the source conversation's history,
+  and the default assistant is woken to restate it. The echo copies the same message with the same
+  taint, and does not wake Home. Content steering a later Home turn is governed by the existing
+  taint policy, as it is for delegation results now. Tightening that policy is a separate decision,
+  and this design neither depends on it nor weakens it.
 - **Home's view of a thread** is a title (carrying its creating turn's taint), a code-derived or
   explicitly set state, and echoes (carrying their source's taint). Generated summaries never reach
   a prompt.
@@ -271,7 +277,8 @@ and each path is governed:
    - Verified by functional tests: a started thread runs on its own profile.
    - The target's delegation policy is enforced.
    - Seeded rows are visible to the thread's history window and keep their taint.
-   - Coder and browser receive no seed.
+   - Coder and browser threads receive their request and nothing else from Home: no transcript and
+     no tool rows.
    - Moving a Home turn into a coder or browser thread is refused.
    - An assistant-written request is not a user row, and doesn't make memory review due.
    - An assistant-started seed holds only the request.
