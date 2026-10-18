@@ -119,6 +119,7 @@ async def _run(args: argparse.Namespace) -> int:
         )
         return 1
     variant: PromptVariant = args.prompt
+    source_revision = _source_revision()
     registry = prototype_registry()
     cases = load_prototype_cases(args.cases)
     if args.case:
@@ -169,7 +170,7 @@ async def _run(args: argparse.Namespace) -> int:
                     "model": args.model,
                     "prompt": variant,
                     "seeds": args.seeds,
-                    "source_revision": _source_revision(),
+                    "source_revision": source_revision,
                     "cases_digest": cases_digest(cases),
                     "registry_digest": registry_digest(registry),
                     "trials": [trial.model_dump(mode="json") for trial in trials],
@@ -183,7 +184,11 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def _source_revision() -> dict[str, object] | None:
-    """The commit the run's prompts and cases came from, or None outside git."""
+    """The checkout's commit and whether it had uncommitted changes.
+
+    ``dirty`` means the run is not pinned to the commit: the uncommitted
+    changes themselves are not recorded. None outside a git checkout.
+    """
     repo = Path(__file__).resolve().parent.parent
     try:
         head = subprocess.run(
