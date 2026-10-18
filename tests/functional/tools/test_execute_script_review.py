@@ -45,6 +45,8 @@ from family_assistant.security.taint import (
     TurnTaintState,
 )
 from family_assistant.services.tool_call_review import (
+    MAX_REVIEWABLE_ARGUMENT_TOKENS,
+    ProgramReviewResponse,
     ToolCallReviewConstraints,
     ToolCallReviewer,
     ToolCallReviewInput,
@@ -90,6 +92,8 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+    from family_assistant.llm import LLMInterface
+    from family_assistant.llm.messages import LLMMessage
     from family_assistant.scripting.invocation import ScriptReviewContext
 
 
@@ -601,6 +605,123 @@ async def test_approved_program_covers_keychute_named_sink_once(
         ])
         == 1
     )
+
+
+async def _run_watched_keychute_program(
+    db_engine: AsyncEngine,
+    watched_verdict: ToolCallReviewVerdict,
+    *,
+    taint_policy: TaintPolicyConfig | None = None,
+    confirmation: _ConfirmationRecorder | None = None,
+    source: str = 'keychute_http_request("weather", "https://example.test/data")',
+) -> tuple[list[httpx.Request], _RecordingReviewer]:
+    proxy_requests: list[httpx.Request] = []
+    transport = _keychute_broker_handler("example.test", "/data", proxy_requests)
+    async_client_class = httpx.AsyncClient
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.ALLOW_WATCHED,
+        watched_verdict,
+        watched_tools=("keychute_http_request",),
+    )
+
+    async def read_inbox() -> str:
+        return "An email from outside the household."
+
+    provider = _provider(
+        [
+            _real_registration("execute_script"),
+            _registration(
+                "read_inbox",
+                cast("ToolImplementation", read_inbox),
+                tags=(ToolTag.READ_ONLY, ToolTag.OUTPUT_UNTRUSTED),
+            ),
+        ],
+        reviewer=reviewer,
+        rules=[_review_rule("execute_script", ToolPolicyDecision.REVIEW)],
+        taint_policy=taint_policy,
+    )
+    app_config = AppConfig(
+        keychute_config=KeychuteConfig(
+            enabled=True,
+            url="https://keychute.test",
+            token=SecretStr("test-token"),
+        )
+    )
+    context = _context(
+        db_engine,
+        provider,
+        app_config=app_config,
+        confirmation=confirmation,
+    )
+
+    with patch(
+        "family_assistant.scripting.apis.keychute.httpx.AsyncClient",
+        side_effect=lambda **kwargs: async_client_class(transport=transport, **kwargs),
+    ):
+        await _execute_script(provider, context, script=source)
+    return proxy_requests, reviewer
+
+
+@pytest.mark.asyncio
+async def test_watched_keychute_request_is_reviewed_on_its_arguments(
+    db_engine: AsyncEngine,
+) -> None:
+    proxy_requests, reviewer = await _run_watched_keychute_program(
+        db_engine, ToolCallReviewVerdict.ALLOW
+    )
+
+    assert len(proxy_requests) == 1
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script",
+        "keychute_http_request",
+    ]
+    watched = reviewer.calls[1].review_input
+    assert watched.watched_call
+    assert watched.arguments["url"] == "https://example.test/data"
+
+
+@pytest.mark.asyncio
+async def test_denied_watched_keychute_request_is_not_sent(
+    db_engine: AsyncEngine,
+) -> None:
+    proxy_requests, _ = await _run_watched_keychute_program(
+        db_engine, ToolCallReviewVerdict.DENY
+    )
+
+    assert proxy_requests == []
+
+
+@pytest.mark.asyncio
+async def test_watched_keychute_allow_does_not_bypass_a_policy_confirmation(
+    db_engine: AsyncEngine,
+) -> None:
+    # The program is approved on a trusted turn; reading untrusted content
+    # then puts the request in a confirm cell. The harness cannot answer a
+    # named-sink confirmation, so the confirmation the policy still requires
+    # refuses the request.
+    proxy_requests, reviewer = await _run_watched_keychute_program(
+        db_engine,
+        ToolCallReviewVerdict.ALLOW,
+        taint_policy=TaintPolicyConfig(
+            mode=TaintPolicyMode.ENFORCE,
+            matrix_overrides={
+                SourceTrustTier.UNKNOWN_EXTERNAL: {
+                    SinkClass.SANDBOX_NETWORK: TaintPolicyOutcome.CONFIRM
+                }
+            },
+        ),
+        confirmation=_ConfirmationRecorder(),
+        source=(
+            "read_inbox()\n"
+            'keychute_http_request("weather", "https://example.test/data")'
+        ),
+    )
+
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script",
+        "keychute_http_request",
+    ]
+    assert proxy_requests == []
 
 
 @pytest.mark.asyncio
@@ -1342,77 +1463,140 @@ async def test_rejected_program_runs_no_effects(db_engine: AsyncEngine) -> None:
     assert "blocked by automatic review" in result.get_text().lower()
 
 
-def _watched_program_provider(
-    effects: list[str],
-) -> tuple[TaintTrackingToolsProvider, _RecordingReviewer]:
-    async def ordinary_effect(value: str) -> str:
-        effects.append(value)
+def _effect_registration(name: str, effects: list[str]) -> ToolRegistration:
+    async def effect(value: str) -> str:
+        effects.append(f"{name}:{value}")
         return "ran"
 
+    return _registration(
+        name,
+        cast("ToolImplementation", effect),
+        tags=(ToolTag.STATE_CHANGING, ToolTag.OUTPUT_TRUSTED),
+        properties={"value": {"type": "string"}},
+    )
+
+
+def _watched_program_provider(
+    effects: list[str],
+    *verdicts: ToolCallReviewVerdict,
+    taint_policy: TaintPolicyConfig | None = None,
+) -> tuple[TaintTrackingToolsProvider, _RecordingReviewer]:
+    """A program whose review watches ``watched``, then each verdict in turn."""
     reviewer = _RecordingReviewer(
-        ToolCallReviewVerdict.ALLOW_WATCHED, watched_tools=("ordinary_effect",)
+        ToolCallReviewVerdict.ALLOW_WATCHED,
+        *verdicts,
+        watched_tools=("watched",),
     )
     provider = _provider(
         [
             _real_registration("execute_script"),
-            _registration(
-                "ordinary_effect",
-                cast("ToolImplementation", ordinary_effect),
-                tags=(ToolTag.STATE_CHANGING, ToolTag.OUTPUT_TRUSTED),
-                properties={"value": {"type": "string"}},
-            ),
+            _effect_registration("watched", effects),
+            _effect_registration("unwatched", effects),
         ],
         reviewer=reviewer,
         rules=[_review_rule("execute_script", ToolPolicyDecision.REVIEW)],
+        taint_policy=taint_policy,
     )
     return provider, reviewer
 
 
+_WATCHED_PROGRAM = (
+    'watched(value="a")\nunwatched(value="b")\nwatched(value="c")\nunwatched(value="d")'
+)
+
+
 @pytest.mark.asyncio
-async def test_watched_program_runs_only_after_a_human_confirms_it(
+async def test_each_watched_call_is_reviewed_and_the_rest_inherit(
     db_engine: AsyncEngine,
 ) -> None:
-    # Until per-call review of watched tools exists, a watched allow stands in
-    # as a confirm of the whole program rather than running unwatched.
     effects: list[str] = []
-    provider, reviewer = _watched_program_provider(effects)
+    provider, reviewer = _watched_program_provider(
+        effects, ToolCallReviewVerdict.ALLOW, ToolCallReviewVerdict.ALLOW
+    )
+    context = _context(db_engine, provider)
+
+    await _execute_script(provider, context, script=_WATCHED_PROGRAM)
+
+    assert effects == ["watched:a", "unwatched:b", "watched:c", "unwatched:d"]
+    watched_reviews = [
+        (call.review_input.descriptor.name, dict(call.review_input.arguments))
+        for call in reviewer.calls[1:]
+    ]
+    assert watched_reviews == [
+        ("watched", {"value": "a"}),
+        ("watched", {"value": "c"}),
+    ]
+    assert all(call.review_input.watched_call for call in reviewer.calls[1:])
+    assert all(
+        "program_watch" in {item.kind for item in call.review_input.policy_contexts}
+        for call in reviewer.calls[1:]
+    )
+
+
+@pytest.mark.asyncio
+async def test_denied_watched_call_does_not_run(db_engine: AsyncEngine) -> None:
+    effects: list[str] = []
+    provider, _ = _watched_program_provider(effects, ToolCallReviewVerdict.DENY)
+    context = _context(db_engine, provider)
+
+    await _execute_script(provider, context, script='watched(value="a")')
+
+    assert effects == []
+
+
+@pytest.mark.asyncio
+async def test_denied_watched_call_leaves_the_program_approved(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    provider, reviewer = _watched_program_provider(
+        effects, ToolCallReviewVerdict.DENY, ToolCallReviewVerdict.ALLOW
+    )
+    context = _context(db_engine, provider)
+    script = 'blocked = watched(value="a")\nunwatched(value="b")\nwatched(value="c")'
+
+    await _execute_script(provider, context, script=script)
+
+    assert effects == ["unwatched:b", "watched:c"]
+    assert len(reviewer.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_watched_call_confirm_asks_about_that_call(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    provider, _ = _watched_program_provider(effects, ToolCallReviewVerdict.CONFIRM)
     confirmation = _ConfirmationRecorder()
     context = _context(db_engine, provider, confirmation=confirmation)
 
-    await _execute_script(provider, context, script='ordinary_effect(value="approved")')
+    await _execute_script(provider, context, script='watched(value="a")')
 
-    assert ToolCallReviewVerdict.ALLOW_WATCHED in (
-        reviewer.calls[0].constraints.available_verdicts
-    )
-    assert [call[0] for call in confirmation.calls] == ["execute_script"]
-    assert effects == ["approved"]
+    assert confirmation.calls == [("watched", {"value": "a"})]
+    assert effects == ["watched:a"]
 
 
 @pytest.mark.asyncio
-async def test_unattended_watched_program_runs_no_effects(
+async def test_unattended_watched_call_confirm_is_denied(
     db_engine: AsyncEngine,
 ) -> None:
     effects: list[str] = []
-    provider, _ = _watched_program_provider(effects)
+    provider, _ = _watched_program_provider(effects, ToolCallReviewVerdict.CONFIRM)
     context = _context(db_engine, provider)
 
-    result = await _execute_script(
-        provider, context, script='ordinary_effect(value="blocked")'
-    )
+    await _execute_script(provider, context, script='watched(value="a")')
 
     assert effects == []
-    assert isinstance(result, ToolResult)
-    assert "confirmation is required but unavailable" in result.get_text().lower()
 
 
 @pytest.mark.asyncio
 async def test_watched_program_audit_records_the_reviewers_own_verdict(
     db_engine: AsyncEngine,
 ) -> None:
-    provider, _ = _watched_program_provider([])
+    provider, _ = _watched_program_provider([], ToolCallReviewVerdict.ALLOW)
     context = _context(db_engine, provider)
 
-    await _execute_script(provider, context, script='ordinary_effect(value="x")')
+    await _execute_script(provider, context, script='watched(value="x")')
 
     events = await context.db_context.taint_audit_events.list_for_turn(
         "script-review-turn"
@@ -1426,7 +1610,108 @@ async def test_watched_program_audit_records_the_reviewers_own_verdict(
     assert review["review_verdict"] == ToolCallReviewVerdict.ALLOW_WATCHED.value
     review_context = review["review_context_json"]
     assert review_context is not None
-    assert review_context.get("watched_tools") == ["ordinary_effect"]
+    assert review_context.get("watched_tools") == ["watched"]
+
+
+@pytest.mark.asyncio
+async def test_observe_reviews_watched_calls_without_blocking_them(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    provider, reviewer = _watched_program_provider(
+        effects,
+        ToolCallReviewVerdict.DENY,
+        ToolCallReviewVerdict.DENY,
+        taint_policy=_observe_policy(),
+    )
+    context = _context(db_engine, provider, state=_unknown_external_state())
+
+    await _execute_script(provider, context, script=_WATCHED_PROGRAM)
+    await provider.close()
+
+    assert effects == ["watched:a", "unwatched:b", "watched:c", "unwatched:d"]
+    assert sorted(
+        str(call.review_input.arguments["value"]) for call in reviewer.calls[1:]
+    ) == ["a", "c"]
+
+
+class _ProgramThenNothingClient:
+    """Answers the program review, and fails any later review it is asked for."""
+
+    def __init__(self, response: ProgramReviewResponse) -> None:
+        self.response = response
+        self.calls = 0
+
+    async def generate_structured(
+        self,
+        messages: Sequence[LLMMessage],
+        response_model: type[object],
+        max_retries: int = 2,
+    ) -> object:
+        del messages, response_model, max_retries
+        self.calls += 1
+        if self.calls > 1:
+            raise AssertionError("an oversized watched call reached the model")
+        return self.response
+
+
+def _oversized_watched_provider(
+    effects: list[str],
+) -> tuple[TaintTrackingToolsProvider, _ProgramThenNothingClient]:
+    client = _ProgramThenNothingClient(
+        ProgramReviewResponse(
+            reason="The upload is watched.",
+            verdict=ToolCallReviewVerdict.ALLOW_WATCHED,
+            watched_tools=["watched"],
+        )
+    )
+    reviewer = ToolCallReviewer(
+        cast("LLMInterface", client), ToolCallReviewConfig(timeout_seconds=5)
+    )
+    provider = _provider(
+        [
+            _real_registration("execute_script"),
+            _effect_registration("watched", effects),
+        ],
+        reviewer=reviewer,
+        rules=[_review_rule("execute_script", ToolPolicyDecision.REVIEW)],
+    )
+    return provider, client
+
+
+_OVERSIZED_WATCHED_CALL = (
+    f'watched(value="x" * {4 * MAX_REVIEWABLE_ARGUMENT_TOKENS + 4})'
+)
+
+
+@pytest.mark.asyncio
+async def test_oversized_watched_call_asks_a_human_when_one_is_present(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    provider, client = _oversized_watched_provider(effects)
+    confirmation = _ConfirmationRecorder()
+    context = _context(db_engine, provider, confirmation=confirmation)
+
+    await _execute_script(provider, context, script=_OVERSIZED_WATCHED_CALL)
+
+    assert client.calls == 1
+    assert [call[0] for call in confirmation.calls] == ["watched"]
+    assert len(effects) == 1
+
+
+@pytest.mark.asyncio
+async def test_oversized_watched_call_is_denied_unattended(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    provider, client = _oversized_watched_provider(effects)
+    context = _context(db_engine, provider)
+
+    await _execute_script(provider, context, script=_OVERSIZED_WATCHED_CALL)
+
+    assert client.calls == 1
+    assert effects == []
 
 
 @pytest.mark.asyncio
