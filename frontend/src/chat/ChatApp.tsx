@@ -2611,6 +2611,8 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       landingSettledRef.current = true;
       if (!conversationId) {
         setConversationId(targetConversationId);
+        localStorage.setItem('lastConversationId', targetConversationId);
+        window.history.replaceState({}, '', `/chat?conversation_id=${targetConversationId}`);
       }
 
       // Optimistically surface the conversation in the sidebar the instant the

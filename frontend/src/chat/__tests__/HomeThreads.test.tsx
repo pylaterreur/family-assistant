@@ -372,6 +372,33 @@ describe('Home and threads', () => {
     expect(screen.getByRole('textbox')).toHaveValue('Is the bin out?');
   });
 
+  it('stays in a conversation sent before Home was known, and links to it', async () => {
+    const user = userEvent.setup();
+    serveThreads();
+    let releaseHome: () => void = () => {};
+    const homeGate = new Promise<void>((resolve) => {
+      releaseHome = resolve;
+    });
+    server.use(
+      http.get('/api/v1/chat/home', async () => {
+        await homeGate;
+        return HttpResponse.json({ enabled: true, conversation_id: HOME });
+      })
+    );
+
+    await renderChatApp({ waitForReady: true });
+    await user.type(screen.getByRole('textbox'), 'Is the bin out?');
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(window.location.search).toMatch(/^\?conversation_id=web_conv_/));
+    const sentTo = window.location.search;
+    releaseHome();
+
+    expect(await screen.findByTestId('home-item')).toBeInTheDocument();
+    expect(window.location.search).toBe(sentTo);
+    expect(screen.getByTestId('user-message')).toHaveTextContent('Is the bin out?');
+    expect(screen.queryByText("On it. I've started a thread for it.")).not.toBeInTheDocument();
+  });
+
   it('moves a thread between groups when a turn ends and the list is refetched', async () => {
     const user = userEvent.setup();
     const threads = serveThreads();
