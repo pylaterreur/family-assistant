@@ -34,6 +34,9 @@ import {
 } from './chatControls';
 import { interleaveTextAndToolCalls, isToolCallDisplay, toolCallParts } from './orderedParts';
 import { Thread } from './Thread';
+import { ThreadBanner } from './ThreadBanner';
+import { ThreadsContext } from './threadsContext';
+import { fetchHome } from './threadsApi';
 import { ToolConfirmationProvider } from './ToolConfirmationContext';
 import type { PendingToolConfirmation } from './ToolConfirmationContext';
 import { isTerminalToolOutcome, type TerminalToolOutcome } from './toolOutcome';
@@ -46,8 +49,10 @@ import {
   Message,
   MessageContent,
   MessageReasoningInfo,
+  ThreadSummary,
 } from './types';
 import { useActivityStream } from './useActivityStream';
+import { useHomeThreads } from './useHomeThreads';
 import { useLiveMessageUpdates } from './useLiveMessageUpdates';
 import { useNotifications } from './useNotifications';
 import { usePendingDelegations } from './usePendingDelegations';
@@ -563,6 +568,22 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   // synchronously check whether the conversation changed before it fires.
   const conversationIdRef = useRef<string | null>(null);
   conversationIdRef.current = conversationId;
+  // The caller's Home while threads are enabled; null while they are disabled
+  // or not yet known, in which case the chat behaves as a list of conversations.
+  const [homeConversationId, setHomeConversationId] = useState<string | null>(null);
+  const homeConversationIdRef = useRef<string | null>(null);
+  homeConversationIdRef.current = homeConversationId;
+  const { threads: homeThreads, refresh: refreshHomeThreads } = useHomeThreads(homeConversationId);
+  // The thread a foreground load reported the open conversation to be, for a
+  // thread that is not (yet) in Home's list.
+  const [openedThread, setOpenedThread] = useState<{
+    convId: string;
+    thread: ThreadSummary;
+  } | null>(null);
+  // Set once anything decides what the chat shows (opening a conversation, a
+  // new chat, a send), so a landing on Home that resolves later doesn't
+  // replace it.
+  const landingSettledRef = useRef(false);
   // True while the open conversation exists only in this client and holds no
   // turns: an id minted by handleNewChat (or at startup) that has never been
   // sent. Tracked explicitly rather than inferred from an empty `messages`,
@@ -606,7 +627,27 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   // rebuild the send path mid-conversation.
   const modelTierStateRef = useRef(modelTierState);
   modelTierStateRef.current = modelTierState;
-  const { profilesById } = useProfiles();
+  const { profilesById, defaultProfileId } = useProfiles();
+  const isHome = homeConversationId !== null && conversationId === homeConversationId;
+  const currentThread: ThreadSummary | null = conversationId
+    ? (homeThreads.find((thread) => thread.conversation_id === conversationId) ??
+      (openedThread?.convId === conversationId ? openedThread.thread : null))
+    : null;
+  // Home always runs on the default profile and a thread on its own, so the
+  // picker is locked there: changing profile would otherwise start a new
+  // conversation, leaving Home or the thread behind.
+  const lockedProfileId = currentThread
+    ? currentThread.profile_id
+    : isHome
+      ? (defaultProfileId ?? profileId)
+      : null;
+  const profileLockedRef = useRef(false);
+  profileLockedRef.current = lockedProfileId !== null;
+  useEffect(() => {
+    if (lockedProfileId !== null && lockedProfileId !== currentProfileId) {
+      setCurrentProfileId(lockedProfileId);
+    }
+  }, [lockedProfileId, currentProfileId]);
   const currentProfile = profilesById[currentProfileId];
   const modelTiers: ModelTier[] = currentProfile?.model_tiers ?? EMPTY_MODEL_TIERS;
   const defaultModelTier = currentProfile?.default_model_tier ?? null;
@@ -726,7 +767,9 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       if (!conversationsLoadedRef.current) {
         setConversationsLoading(true);
       }
-      const response = await fetch('/api/v1/chat/conversations?interface_type=web', {
+      // Home and its threads are listed from their own endpoint.
+      const kindFilter = homeConversationIdRef.current ? '&kind=ordinary' : '';
+      const response = await fetch(`/api/v1/chat/conversations?interface_type=web${kindFilter}`, {
         signal: abortController.signal,
       });
       if (response.ok) {
@@ -1185,6 +1228,8 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       lastStreamingErrorRef.current = null;
       lastStreamingErrorIsUserFacingRef.current = false;
       fetchConversations();
+      // The turn may have started a thread, or been one.
+      refreshHomeThreads();
 
       // Recover/queue follow-ups on any terminal outcome except a deliberate
       // Stop, which abandons queued work by definition.
@@ -1336,7 +1381,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
         }
       }
     },
-    [conversationId, fetchConversations, refreshPendingDelegations]
+    [conversationId, fetchConversations, refreshHomeThreads, refreshPendingDelegations]
   );
 
   // A mid-turn steering message the user sent while the turn was running. Render
@@ -1721,6 +1766,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
         // actually talking to, and not bounded by the returned page, so adoption
         // is correct even when the last user message is many rows back.
         if (!background) {
+          setOpenedThread(data.thread ? { convId, thread: data.thread } : null);
           const adoptedProfileId = data.latest_user_profile_id;
           if (typeof adoptedProfileId === 'string' && adoptedProfileId) {
             setCurrentProfileId(adoptedProfileId);
@@ -2208,6 +2254,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       // Cancel any active streaming before switching conversations
       cancelStream();
 
+      landingSettledRef.current = true;
       conversationIsUnsentDraftRef.current = false;
       // The transcript on screen belongs to the conversation being left; it
       // must not stand in for this one while its history loads, or if it fails.
@@ -2339,10 +2386,23 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   // new chat started in another tab/device, or a delegated/scheduled/background
   // reply) via the account-global activity stream. The per-conversation stream
   // above only sees the currently-open thread.
+  // A thread's run starting or ending is activity too, and changes its state.
+  const handleActivity = useCallback(() => {
+    fetchConversations();
+    refreshHomeThreads();
+  }, [fetchConversations, refreshHomeThreads]);
   useActivityStream({
     enabled: true,
-    onActivity: fetchConversations,
+    onActivity: handleActivity,
   });
+
+  // Home is known after the first list load, which then left Home and its
+  // threads in; list again without them.
+  useEffect(() => {
+    if (homeConversationId) {
+      fetchConversations();
+    }
+  }, [homeConversationId, fetchConversations]);
 
   // Handle new chat creation
   const handleNewChat = useCallback(() => {
@@ -2351,6 +2411,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     }
     // Cancel any active streaming before creating a new chat
     cancelStream();
+    landingSettledRef.current = true;
     // A history load still in flight belongs to the conversation being left.
     messagesAbortControllerRef.current?.abort();
     openInFlightConvIdRef.current = null;
@@ -2408,7 +2469,9 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       // The message being sent was written for this profile and conversation;
       // changing either before the runtime hands it over would send it under
       // the new one.
-      if (composerSendingRef.current) {
+      // Read from a ref rather than the deps, so the callback keeps its identity
+      // (see the note on ProfileSelector below).
+      if (composerSendingRef.current || profileLockedRef.current) {
         return;
       }
       setCurrentProfileId(newProfileId);
@@ -2536,6 +2599,11 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       conversationIsUnsentDraftRef.current = false;
 
       const targetConversationId = conversationId || `web_conv_${generateUUID()}`;
+      // A send before the landing view resolved keeps the chat where it is.
+      landingSettledRef.current = true;
+      if (!conversationId) {
+        setConversationId(targetConversationId);
+      }
 
       // Optimistically surface the conversation in the sidebar the instant the
       // user sends, so a brand-new chat appears immediately (and an existing one
@@ -2903,6 +2971,29 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     ]
   );
 
+  const threadsContextValue = useMemo(() => {
+    if (!homeConversationId) {
+      return null;
+    }
+    const bySourceToolCallId = new Map<string, ThreadSummary>();
+    for (const thread of homeThreads) {
+      if (thread.source_tool_call_id) {
+        bySourceToolCallId.set(thread.source_tool_call_id, thread);
+      }
+    }
+    return {
+      threadsBySourceToolCallId: bySourceToolCallId,
+      openConversation: handleConversationSelect,
+    };
+  }, [homeConversationId, homeThreads, handleConversationSelect]);
+
+  const homeSidebar = useMemo(
+    () => (homeConversationId ? { homeConversationId, threads: homeThreads } : null),
+    [homeConversationId, homeThreads]
+  );
+
+  const conversationTitle = isHome ? 'Home' : (currentThread?.title ?? null);
+
   // Initialize conversation ID from URL or localStorage
   useEffect(() => {
     fetchConversations();
@@ -2911,25 +3002,59 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     const urlConversationId = urlParams.get('conversation_id');
     const initialPrompt = urlParams.get('q');
     const lastConversationId = localStorage.getItem('lastConversationId');
+    const opensLanding =
+      !(initialPrompt && !initialPromptProcessedRef.current) && !urlConversationId;
 
     if (initialPrompt && !initialPromptProcessedRef.current) {
       // If there's a prompt, start a new chat with it
+      landingSettledRef.current = true;
       const newConvId = `web_conv_${generateUUID()}`;
       setConversationId(newConvId);
       setMessages([]);
       localStorage.setItem('lastConversationId', newConvId);
     } else if (urlConversationId) {
+      landingSettledRef.current = true;
       conversationIsUnsentDraftRef.current = false;
       setConversationId(urlConversationId);
       loadConversationMessages(urlConversationId);
-    } else if (lastConversationId) {
-      conversationIsUnsentDraftRef.current = false;
-      setConversationId(lastConversationId);
-      loadConversationMessages(lastConversationId);
-      window.history.replaceState({}, '', `/chat?conversation_id=${lastConversationId}`);
-    } else {
-      handleNewChat();
     }
+
+    // With threads enabled the chat lands on Home; otherwise on the last
+    // conversation, or a new one.
+    let cancelled = false;
+    void fetchHome()
+      .then(
+        (home) => (home.enabled ? home.conversation_id : null),
+        (error: unknown) => {
+          console.error('Error fetching Home:', error);
+          return null;
+        }
+      )
+      .then((home) => {
+        if (cancelled) {
+          return;
+        }
+        setHomeConversationId(home);
+        if (!opensLanding || landingSettledRef.current) {
+          return;
+        }
+        landingSettledRef.current = true;
+        const landingConversationId = home ?? lastConversationId;
+        if (landingConversationId) {
+          conversationIsUnsentDraftRef.current = false;
+          // Outside a React event the render that updates the mirror can come
+          // after the history response, which would then look superseded.
+          conversationIdRef.current = landingConversationId;
+          setConversationId(landingConversationId);
+          loadConversationMessages(landingConversationId);
+          window.history.replaceState({}, '', `/chat?conversation_id=${landingConversationId}`);
+        } else {
+          handleNewChat();
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Handle initial prompt from query parameter once runtime is ready
@@ -3029,6 +3154,24 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   const handleTrayConfirmation = (requestId: string, approved: boolean) =>
     handleConfirmation(requestId, requestId, approved);
 
+  const threadBanner = currentThread ? (
+    <ThreadBanner thread={currentThread} onOpenHome={handleConversationSelect} />
+  ) : null;
+
+  const threadView = (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <ThreadErrorBoundary>
+        <ChatControlsContext.Provider value={chatControls}>
+          <ToolConfirmationProvider value={{ pendingConfirmations, handleConfirmation }}>
+            <ThreadsContext.Provider value={threadsContextValue}>
+              <Thread />
+            </ThreadsContext.Provider>
+          </ToolConfirmationProvider>
+        </ChatControlsContext.Provider>
+      </ThreadErrorBoundary>
+    </AssistantRuntimeProvider>
+  );
+
   return (
     <TooltipProvider>
       <div className="flex h-dvh flex-col bg-background">
@@ -3045,6 +3188,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
               isOpen={true}
               onRefresh={fetchConversations}
               isMobile={isMobile}
+              home={homeSidebar}
             />
           </div>
         )}
@@ -3061,7 +3205,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
               data-testid="mobile-chat-header"
             >
               <AppTopBar
-                title="Chat"
+                title={conversationTitle ?? 'Chat'}
                 className="static border-b-0 bg-transparent backdrop-blur-none"
                 actions={
                   <>
@@ -3096,7 +3240,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                 <ProfileSelector
                   selectedProfileId={currentProfileId}
                   onProfileChange={handleProfileChange}
-                  disabled={isLoading}
+                  disabled={isLoading || lockedProfileId !== null}
                   onLoadingChange={setProfilesLoading}
                 />
                 <IntelligenceSelector
@@ -3117,19 +3261,8 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                 currentConversationId={conversationId}
                 onOpenConversation={handleConversationSelect}
               />
-              <div className="flex flex-1 flex-col min-h-0">
-                <AssistantRuntimeProvider runtime={runtime}>
-                  <ThreadErrorBoundary>
-                    <ChatControlsContext.Provider value={chatControls}>
-                      <ToolConfirmationProvider
-                        value={{ pendingConfirmations, handleConfirmation }}
-                      >
-                        <Thread />
-                      </ToolConfirmationProvider>
-                    </ChatControlsContext.Provider>
-                  </ThreadErrorBoundary>
-                </AssistantRuntimeProvider>
-              </div>
+              {threadBanner}
+              <div className="flex flex-1 flex-col min-h-0">{threadView}</div>
             </div>
           </div>
         )}
@@ -3153,11 +3286,20 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                 )}
               </Button>
 
+              {conversationTitle && (
+                <h1
+                  className="min-w-0 max-w-xs truncate text-base font-semibold"
+                  data-testid="conversation-title"
+                >
+                  {conversationTitle}
+                </h1>
+              )}
+
               <div className="flex items-center gap-2">
                 <ProfileSelector
                   selectedProfileId={currentProfileId}
                   onProfileChange={handleProfileChange}
-                  disabled={isLoading}
+                  disabled={isLoading || lockedProfileId !== null}
                   onLoadingChange={setProfilesLoading}
                 />
                 <IntelligenceSelector
@@ -3199,6 +3341,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                 isOpen={sidebarOpen}
                 onRefresh={fetchConversations}
                 isMobile={isMobile}
+                home={homeSidebar}
               />
 
               <div className="flex min-w-0 flex-1 flex-col">
@@ -3209,19 +3352,8 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
                   currentConversationId={conversationId}
                   onOpenConversation={handleConversationSelect}
                 />
-                <div className="flex flex-1 flex-col min-h-0">
-                  <AssistantRuntimeProvider runtime={runtime}>
-                    <ThreadErrorBoundary>
-                      <ChatControlsContext.Provider value={chatControls}>
-                        <ToolConfirmationProvider
-                          value={{ pendingConfirmations, handleConfirmation }}
-                        >
-                          <Thread />
-                        </ToolConfirmationProvider>
-                      </ChatControlsContext.Provider>
-                    </ThreadErrorBoundary>
-                  </AssistantRuntimeProvider>
-                </div>
+                {threadBanner}
+                <div className="flex flex-1 flex-col min-h-0">{threadView}</div>
               </div>
             </div>
           </>
