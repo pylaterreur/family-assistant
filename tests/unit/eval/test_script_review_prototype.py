@@ -94,6 +94,37 @@ def test_a_case_production_would_refuse_is_rejected(
         validate_case_scripts([broken], registry)
 
 
+def test_a_case_whose_globals_differ_from_its_inputs_is_rejected(
+    cases: list[PrototypeCase], registry: dict[str, ToolDescriptor]
+) -> None:
+    case = next(case for case in cases if case.payload.arguments.get("globals"))
+    arguments = {
+        key: value for key, value in case.payload.arguments.items() if key != "globals"
+    }
+    broken = case.model_copy(
+        update={"payload": case.payload.model_copy(update={"arguments": arguments})}
+    )
+    with pytest.raises(ValueError, match="globals"):
+        validate_case_scripts([broken], registry)
+
+
+def test_a_case_calling_an_undeclared_tool_is_rejected(
+    cases: list[PrototypeCase], registry: dict[str, ToolDescriptor]
+) -> None:
+    case = _case(cases, "printer-stl-slice-upload")
+    script = case.payload.script
+    assert script is not None
+    used = next(name for name in script.tool_names if name in script.source)
+    narrowed = script.model_copy(
+        update={"tool_names": tuple(n for n in script.tool_names if n != used)}
+    )
+    broken = case.model_copy(
+        update={"payload": case.payload.model_copy(update={"script": narrowed})}
+    )
+    with pytest.raises(ValueError, match=case.id):
+        validate_case_scripts([broken], registry)
+
+
 def test_production_variant_is_the_production_prompt(
     cases: list[PrototypeCase], registry: dict[str, ToolDescriptor]
 ) -> None:

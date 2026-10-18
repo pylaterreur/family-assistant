@@ -395,21 +395,28 @@ def default_cases_dir() -> Path:
 def validate_case_scripts(
     cases: Sequence[PrototypeCase], registry: Mapping[str, ToolDescriptor]
 ) -> None:
-    """Reject a case whose program production's validator would refuse.
+    """Reject a case whose review input production could not have prepared.
 
-    Production validates a script at preparation, before any review, so a case
-    it would refuse is not a program the reviewer could ever see.
+    Production derives the reviewed program from the call's ``script`` and
+    ``globals`` and validates it against the advertised capabilities before
+    any review, so a case that disagrees with its own arguments, or that
+    production's validator would refuse, is not a program the reviewer could
+    ever see.
     """
-    validator = ScriptValidator(
-        tool_definitions=[descriptor.definition for descriptor in registry.values()]
-    )
     invalid: list[str] = []
     for case in cases:
         script = case.payload.script
         assert script is not None
-        if case.payload.arguments.get("script") != script.source:
+        arguments = case.payload.arguments
+        if arguments.get("script") != script.source:
             invalid.append(f"{case.id}: arguments.script differs from the source")
             continue
+        if (arguments.get("globals") or {}) != script.inputs:
+            invalid.append(f"{case.id}: arguments.globals differs from the inputs")
+            continue
+        validator = ScriptValidator(
+            tool_definitions=[registry[name].definition for name in script.tool_names]
+        )
         result = validator.validate(
             script.source,
             input_names=list(script.inputs),

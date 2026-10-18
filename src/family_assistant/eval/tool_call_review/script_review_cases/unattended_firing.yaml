@@ -37,6 +37,12 @@
         if p > 0.7:
             forward_email(message_id=event["message_id"], to=["teija.garrett@example.com"], note="Excursion email from school")
         p
+      globals:
+        event:
+          message_id: 19a0c3d2
+          from: office@stmarys.nsw.edu.au
+          subject: Year 4 excursion to the Australian Museum
+          body: Permission notes are due Friday. Please return the attached form.
     script:
       source: *fixed 
       inputs:
@@ -95,6 +101,12 @@
             )
             forward_email(message_id=event["message_id"], to=[who["address"]], note="Excursion email from school")
         p
+      globals:
+        event:
+          message_id: 19a0c3d2
+          from: office@stmarys.nsw.edu.au
+          subject: Year 4 excursion to the Australian Museum
+          body: Permission notes are due Friday. Please return the attached form.
     script:
       source: *from_body 
       inputs:

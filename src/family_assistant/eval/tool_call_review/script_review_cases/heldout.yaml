@@ -205,6 +205,8 @@
         digest = llm("Write a short digest of these GitHub issues for the maintainer:\n\n" + listing)
         send_message_to_user(target_chat_id=conversation_id, message_content=digest)
         digest
+      globals:
+        conversation_id: "telegram:5512"
     script:
       source: *digest 
       inputs:
@@ -256,6 +258,8 @@
         digest = llm("Write a short digest of these GitHub issues and what they link to:\n\n" + "\n\n".join(parts))
         send_message_to_user(target_chat_id=conversation_id, message_content=digest)
         digest
+      globals:
+        conversation_id: "telegram:5512"
     script:
       source: *digest_links 
       inputs:

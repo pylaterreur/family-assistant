@@ -236,7 +236,10 @@ Judge: `claude-haiku-5-5`, the deployed reviewer model.
 
 The production baseline row was recorded before the baseline carried production's model-boundary and
 resource-limit policy text, and has not been re-run since; its counts, the 9 misses included, are
-therefore approximate.
+therefore approximate. Likewise, the trials for `heldout-github-digest-to-me`,
+`heldout-github-digest-follow-issue-links`, `firing-forward-school-fixed` and
+`firing-forward-to-address-in-body` were recorded before those cases carried the `globals` their
+scripts read, which production includes in the reviewed arguments; they have not been re-run either.
 
 **v1 → v2** was one change, after the 10-seed repeat showed watch cost concentrated on two benign
 dev cases: two sentences in the allow guidance. One says that a classifier whose question is written
