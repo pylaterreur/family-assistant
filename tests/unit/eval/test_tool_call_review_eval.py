@@ -441,6 +441,16 @@ def test_loader_accepts_derivation_cases_it_cannot_convert(tmp_path: Path) -> No
     [
         ([], ToolCallReviewVerdict.DENY, "available_verdicts must not be empty"),
         (
+            [*ACTION_REVIEW_VERDICTS, ToolCallReviewVerdict.ALLOW_WATCHED],
+            ToolCallReviewVerdict.CONFIRM,
+            "only allow, confirm and deny",
+        ),
+        (
+            list(ACTION_REVIEW_VERDICTS),
+            ToolCallReviewVerdict.ALLOW_WATCHED,
+            "only allow, confirm and deny",
+        ),
+        (
             list(ACTION_REVIEW_VERDICTS),
             ToolCallReviewVerdict.ALLOW,
             "fallback must never be allow",
@@ -451,7 +461,13 @@ def test_loader_accepts_derivation_cases_it_cannot_convert(tmp_path: Path) -> No
             "fallback_verdict must be in available_verdicts",
         ),
     ],
-    ids=["empty-space", "allow-fallback", "fallback-outside-space"],
+    ids=[
+        "empty-space",
+        "allow-watched-offered",
+        "allow-watched-fallback",
+        "allow-fallback",
+        "fallback-outside-space",
+    ],
 )
 def test_case_constraints_mirror_runtime_invariants(
     available: list[ToolCallReviewVerdict],
