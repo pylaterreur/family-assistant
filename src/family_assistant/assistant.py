@@ -1574,6 +1574,7 @@ class Assistant:
                 self.config.memory_config.contributing_interfaces
             ),
             include_aggregated_context=(profile_proc_conf.include_aggregated_context),
+            receives_household_context=(profile_proc_conf.receives_household_context),
             note_registry=note_registry,
             calendar_config=_profile_calendar_config(
                 profile_conf.processing_config.calendar_config,

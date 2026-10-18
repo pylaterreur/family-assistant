@@ -306,6 +306,10 @@ class ProcessingServiceConfig:
     # Whether the context providers' output reaches this profile at all. See
     # ProcessingConfig.include_aggregated_context.
     include_aggregated_context: bool = False
+    # Whether household data reaches this profile at all, judged from the switch
+    # above and the profile's provider exclusions together. See
+    # ProcessingConfig.receives_household_context.
+    receives_household_context: bool = False
     # Submit-then-poll tuning for a pollable local profile (e.g. Deep
     # Research) delegated to via delegate_to_service. None means "use the
     # worker's module defaults" (mirrors RemoteServiceConfig's fields of the
