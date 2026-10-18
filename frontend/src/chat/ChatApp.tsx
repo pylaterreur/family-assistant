@@ -2261,6 +2261,10 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       if (convId !== conversationIdRef.current) {
         setMessages([]);
       }
+      // Called outside a React event (a retried Home lookup), the render that
+      // updates the mirror can come after the history response, which would
+      // then look superseded.
+      conversationIdRef.current = convId;
       setConversationId(convId);
       setMobileShowList(false);
       localStorage.setItem('lastConversationId', convId);
@@ -2994,6 +2998,29 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
 
   const conversationTitle = isHome ? 'Home' : (currentThread?.title ?? null);
 
+  const [homeLookupFailed, setHomeLookupFailed] = useState(false);
+  // Home's id, null while threads are disabled, or 'failed' when it could not
+  // be looked up.
+  const lookUpHome = useCallback(async (): Promise<string | null | 'failed'> => {
+    try {
+      const home = await fetchHome();
+      setHomeLookupFailed(false);
+      return home.enabled ? home.conversation_id : null;
+    } catch (error) {
+      console.error('Error fetching Home:', error);
+      setHomeLookupFailed(true);
+      return 'failed';
+    }
+  }, []);
+
+  const retryHomeLookup = useCallback(async () => {
+    const lookup = await lookUpHome();
+    if (lookup !== 'failed' && lookup !== null) {
+      setHomeConversationId(lookup);
+      handleConversationSelect(lookup);
+    }
+  }, [lookUpHome, handleConversationSelect]);
+
   // Initialize conversation ID from URL or localStorage
   useEffect(() => {
     fetchConversations();
@@ -3020,38 +3047,31 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     }
 
     // With threads enabled the chat lands on Home; otherwise on the last
-    // conversation, or a new one.
+    // conversation, or a new one. A failed lookup lands as if threads were off,
+    // so the chat stays usable, and says so with a way to retry.
     let cancelled = false;
-    void fetchHome()
-      .then(
-        (home) => (home.enabled ? home.conversation_id : null),
-        (error: unknown) => {
-          console.error('Error fetching Home:', error);
-          return null;
-        }
-      )
-      .then((home) => {
-        if (cancelled) {
-          return;
-        }
-        setHomeConversationId(home);
-        if (!opensLanding || landingSettledRef.current) {
-          return;
-        }
-        landingSettledRef.current = true;
-        const landingConversationId = home ?? lastConversationId;
-        if (landingConversationId) {
-          conversationIsUnsentDraftRef.current = false;
-          // Outside a React event the render that updates the mirror can come
-          // after the history response, which would then look superseded.
-          conversationIdRef.current = landingConversationId;
-          setConversationId(landingConversationId);
-          loadConversationMessages(landingConversationId);
-          window.history.replaceState({}, '', `/chat?conversation_id=${landingConversationId}`);
-        } else {
-          handleNewChat();
-        }
-      });
+    void lookUpHome().then((lookup) => {
+      if (cancelled) {
+        return;
+      }
+      const home = lookup === 'failed' ? null : lookup;
+      setHomeConversationId(home);
+      if (!opensLanding || landingSettledRef.current) {
+        return;
+      }
+      landingSettledRef.current = true;
+      const landingConversationId = home ?? lastConversationId;
+      if (landingConversationId) {
+        conversationIsUnsentDraftRef.current = false;
+        // See handleConversationSelect.
+        conversationIdRef.current = landingConversationId;
+        setConversationId(landingConversationId);
+        loadConversationMessages(landingConversationId);
+        window.history.replaceState({}, '', `/chat?conversation_id=${landingConversationId}`);
+      } else {
+        handleNewChat();
+      }
+    });
     return () => {
       cancelled = true;
     };
@@ -3154,9 +3174,25 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   const handleTrayConfirmation = (requestId: string, approved: boolean) =>
     handleConfirmation(requestId, requestId, approved);
 
-  const threadBanner = currentThread ? (
-    <ThreadBanner thread={currentThread} onOpenHome={handleConversationSelect} />
-  ) : null;
+  const threadBanner = (
+    <>
+      {homeLookupFailed && (
+        <div
+          role="alert"
+          className="flex flex-shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-4 py-2 text-sm text-destructive md:px-6"
+          data-testid="home-lookup-failed"
+        >
+          <span className="flex-1">Couldn't load Home.</span>
+          <Button variant="outline" size="sm" onClick={() => void retryHomeLookup()}>
+            Retry
+          </Button>
+        </div>
+      )}
+      {currentThread && (
+        <ThreadBanner thread={currentThread} onOpenHome={handleConversationSelect} />
+      )}
+    </>
+  );
 
   const threadView = (
     <AssistantRuntimeProvider runtime={runtime}>

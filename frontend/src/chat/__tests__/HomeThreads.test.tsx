@@ -299,6 +299,33 @@ describe('Home and threads', () => {
     );
   });
 
+  it('says when Home could not be loaded, and lands on it once a retry succeeds', async () => {
+    const user = userEvent.setup();
+    serveThreads();
+    let homeAvailable = false;
+    server.use(
+      http.get('/api/v1/chat/home', () =>
+        homeAvailable
+          ? HttpResponse.json({ enabled: true, conversation_id: HOME })
+          : new HttpResponse(null, { status: 500 })
+      )
+    );
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await renderChatApp({ waitForReady: true });
+
+    const alert = await screen.findByTestId('home-lookup-failed');
+    expect(screen.queryByTestId('home-item')).not.toBeInTheDocument();
+
+    homeAvailable = true;
+    await user.click(within(alert).getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByText("On it. I've started a thread for it.")).toBeInTheDocument();
+    expect(screen.queryByTestId('home-lookup-failed')).not.toBeInTheDocument();
+    expect(screen.getByTestId('home-item')).toBeInTheDocument();
+    consoleError.mockRestore();
+  });
+
   it('moves a thread between groups when a turn ends and the list is refetched', async () => {
     const user = userEvent.setup();
     const threads = serveThreads();
