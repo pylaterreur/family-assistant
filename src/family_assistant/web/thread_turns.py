@@ -145,7 +145,14 @@ class WebThreadTurnRunner:
         # Waited on rather than awaited: Stop cancels the producer, and that
         # cancellation must end the turn, not propagate into the worker as if
         # the worker itself were being shut down.
-        await asyncio.wait([producer])
+        try:
+            await asyncio.wait([producer])
+        except asyncio.CancelledError:
+            # The worker itself is being cancelled -- a timeout or shutdown --
+            # so the turn must not outlive the run it belongs to.
+            producer.cancel()
+            await asyncio.wait([producer])
+            raise
         record = hub.get_turn(conversation_id, turn_id)
         # The stream reports a provider error or a refusal as an event and still
         # ends the turn complete, so completion alone is not success.

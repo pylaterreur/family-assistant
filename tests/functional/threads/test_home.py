@@ -72,3 +72,22 @@ async def test_voice_turns_belong_to_the_web_home(db_engine: AsyncEngine) -> Non
     home = await ensure_web_home(db, CONFIG, user_id="alice", now=NOW)
 
     assert await find_home(db, CONFIG, user_id="alice", interface_type="voice") == home
+
+
+@pytest.mark.asyncio
+async def test_a_home_survives_mapping_its_login_to_a_user(
+    db_engine: AsyncEngine,
+) -> None:
+    db = Database(engine=db_engine)
+    before = await ensure_web_home(db, AppConfig(), user_id="oidc-sub-9", now=NOW)
+    mapped = AppConfig(
+        users=[
+            UserIdentityConfig(
+                id="carol", oidc=OIDCUserIdentityConfig(subjects={"oidc-sub-9"})
+            )
+        ]
+    )
+
+    after = await ensure_web_home(db, mapped, user_id="carol", now=NOW)
+
+    assert after == before

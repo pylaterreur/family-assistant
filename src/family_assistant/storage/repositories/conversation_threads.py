@@ -72,6 +72,23 @@ class ConversationThreadsRepository(BaseRepository):
         )
         return row["conversation_id"] if row is not None else None
 
+    async def find_home_among(
+        self, user_ids: Collection[str], interface_type: str
+    ) -> str | None:
+        """A Home stored under any of ``user_ids`` on this interface, if one exists."""
+        if not user_ids:
+            return None
+        rows = await self._db.fetch_all(
+            select(conversation_homes_table.c.conversation_id)
+            .where(
+                conversation_homes_table.c.user_id.in_(list(user_ids)),
+                conversation_homes_table.c.interface_type == interface_type,
+            )
+            .order_by(conversation_homes_table.c.created_at)
+            .limit(1)
+        )
+        return rows[0]["conversation_id"] if rows else None
+
     async def designate_home(
         self,
         *,

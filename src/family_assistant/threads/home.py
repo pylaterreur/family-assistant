@@ -30,6 +30,18 @@ def home_owner_id(app_config: AppConfig, user_id: str) -> str:
     return UserIdentityResolver(app_config).canonicalize_owner_id(user_id)
 
 
+def _home_keys(app_config: AppConfig, user_id: str) -> set[str]:
+    """Every key the user's Home may be stored under.
+
+    The canonical id, plus each configured alias of it: a Home created before
+    an operator mapped a login to this user is stored under that login's own
+    id, and must still be found rather than replaced by a second Home.
+    """
+    resolver = UserIdentityResolver(app_config)
+    canonical = resolver.canonicalize_owner_id(user_id)
+    return {canonical, *resolver.owner_ids_canonicalizing_to(canonical)}
+
+
 async def find_home(
     db: DatabaseExecutor,
     app_config: AppConfig,
@@ -38,8 +50,8 @@ async def find_home(
     interface_type: str,
 ) -> str | None:
     """The user's Home on this surface, if one has been designated."""
-    return await db.conversation_threads.get_home(
-        home_owner_id(app_config, user_id), home_interface_type(interface_type)
+    return await db.conversation_threads.find_home_among(
+        _home_keys(app_config, user_id), home_interface_type(interface_type)
     )
 
 
@@ -51,6 +63,9 @@ async def ensure_web_home(
     now: datetime,
 ) -> str:
     """The user's web Home, designating a fresh conversation if they have none."""
+    existing = await find_home(db, app_config, user_id=user_id, interface_type="web")
+    if existing is not None:
+        return existing
     return await db.conversation_threads.designate_home(
         user_id=home_owner_id(app_config, user_id),
         interface_type="web",

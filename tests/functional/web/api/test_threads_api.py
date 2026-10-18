@@ -374,3 +374,24 @@ async def test_background_work_a_thread_handed_off_keeps_it_working(
     body = (await api_test_client.get("/api/v1/chat/home/threads")).json()
 
     assert [entry["state"] for entry in body["threads"]] == ["working"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_a_turn_naming_no_interface_still_sees_the_thread(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+    api_test_processing_service: ProcessingService,
+    db_engine: AsyncEngine,
+) -> None:
+    seen: list[list[LLMMessage]] = []
+    thread = await _thread_on_its_own_profile(
+        app_fixture, api_test_client, api_test_processing_service, db_engine, seen
+    )
+
+    await api_test_client.post(
+        "/api/v1/chat/send_message",
+        json={"prompt": "Gas, please.", "conversation_id": thread},
+    )
+
+    assert any("Find three plumbers." in str(m.content) for m in seen[0])

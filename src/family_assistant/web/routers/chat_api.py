@@ -1383,7 +1383,12 @@ async def api_chat_create_turn(
     new producer is started.
     """
     conversation_id = payload.conversation_id or str(uuid.uuid4())
-    interface_type = payload.interface_type or "api"
+    pinned_thread = await _thread_for(request, conversation_id)
+    interface_type = (
+        pinned_thread.interface_type
+        if pinned_thread is not None
+        else payload.interface_type or "api"
+    )
     user_name = _user_name_for_chat(current_user)
     hub = get_stream_hub(request)
 
@@ -1475,11 +1480,12 @@ async def api_chat_create_turn(
         raise _running_turn_conflict(conversation_id, payload.turn_id, running_turn)
 
     # Resolve processing service profile.
-    pinned_service, pinned_thread = await _thread_profile(request, conversation_id)
     selected_processing_service: ProcessingService = (
-        pinned_service or default_processing_service
+        _thread_profile(request, pinned_thread)
+        if pinned_thread is not None
+        else default_processing_service
     )
-    if pinned_service is None and payload.profile_id:
+    if pinned_thread is None and payload.profile_id:
         registry = getattr(request.app.state, "processing_services", {})
         candidate = registry.get(payload.profile_id)
         if candidate and candidate.kind == "remote":
@@ -2438,21 +2444,23 @@ class ProfilesResponse(BaseModel):
     default_profile_id: str = Field(..., description="ID of the default profile")
 
 
-async def _thread_profile(
+async def _thread_for(
     request: Request, conversation_id: str
-) -> tuple[ProcessingService | None, ConversationThread | None]:
-    """The profile a thread runs on, and the thread, when the conversation is one.
-
-    A thread always runs on its own profile, whatever the request names:
-    history is partitioned by profile, so a turn on any other profile would not
-    see the request the thread was started with. Callers resolve this before
-    looking at the requested profile at all, so a stale selection on the client
-    can neither redirect nor refuse a thread's turn.
-    """
+) -> ConversationThread | None:
+    """The thread record for a conversation, or None if it is not a thread."""
     db_context = Database(request.app.state.database_engine)
-    thread = await db_context.conversation_threads.get_thread(conversation_id)
-    if thread is None:
-        return None, None
+    return await db_context.conversation_threads.get_thread(conversation_id)
+
+
+def _thread_profile(request: Request, thread: ConversationThread) -> ProcessingService:
+    """The profile a thread runs on, whatever the request names.
+
+    A turn in a thread runs on the thread's profile and under its interface:
+    history is partitioned by both, so a turn under any other would not see the
+    request the thread was started with. Callers resolve this before looking at
+    the requested profile at all, so a stale selection on the client can
+    neither redirect nor refuse a thread's turn.
+    """
     registry = getattr(request.app.state, "processing_services", {})
     pinned = registry.get(thread.profile_id)
     if not isinstance(pinned, ProcessingService):
@@ -2463,7 +2471,7 @@ async def _thread_profile(
                 "not available."
             ),
         )
-    return pinned, thread
+    return pinned
 
 
 def _select_processing_service(
@@ -2804,11 +2812,20 @@ async def api_chat_send_message(
     ProcessingService, and returns the assistant's reply.
     """
     conversation_id = payload.conversation_id or str(uuid.uuid4())
-    pinned_service, _thread = await _thread_profile(request, conversation_id)
-    selected_processing_service = pinned_service or _select_processing_service(
-        request, payload, default_processing_service, conversation_id
-    )
-    payload = payload.model_copy(update={"conversation_id": conversation_id})
+    thread = await _thread_for(request, conversation_id)
+    if thread is not None:
+        selected_processing_service = _thread_profile(request, thread)
+        payload = payload.model_copy(
+            update={
+                "conversation_id": conversation_id,
+                "interface_type": thread.interface_type,
+            }
+        )
+    else:
+        selected_processing_service = _select_processing_service(
+            request, payload, default_processing_service, conversation_id
+        )
+        payload = payload.model_copy(update={"conversation_id": conversation_id})
     return await run_non_streaming_turn(
         request,
         current_user,

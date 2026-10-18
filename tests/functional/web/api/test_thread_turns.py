@@ -452,3 +452,24 @@ async def test_the_first_turn_gets_the_attachments_it_was_started_with(
     await queued_thread.run_worker()
 
     assert received == [parts]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_worker_stops_the_turn(
+    queued_thread: QueuedThread,
+) -> None:
+    handler = asyncio.create_task(queued_thread.run_worker())
+    live = LiveThread(
+        client=queued_thread.client,
+        db=queued_thread.db,
+        target_gate=queued_thread.target_gate,
+        turn_id=queued_thread.turn_id,
+    )
+    await live.wait_until_running()
+
+    handler.cancel()
+    await asyncio.wait([handler])
+
+    record = queued_thread.hub.get_turn(THREAD, queued_thread.turn_id)
+    assert record is not None
+    assert record.status != "running"
