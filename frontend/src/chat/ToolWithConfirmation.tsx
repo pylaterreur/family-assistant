@@ -24,6 +24,7 @@ interface ToolWithConfirmationProps {
   display?: ToolCallDisplay;
   ToolComponent: React.ComponentType<{
     toolName: string;
+    toolCallId?: string;
     args: Record<string, unknown>;
     result?: string | Record<string, unknown>;
     status?: ToolPartStatus;
@@ -75,6 +76,7 @@ export const ToolWithConfirmation: React.FC<ToolWithConfirmationProps> = ({
       <div data-testid="tool-call" data-tool-outcome={outcome}>
         <ToolComponent
           toolName={toolName}
+          toolCallId={toolCallId}
           args={args}
           result={result}
           status={rendererStatusForOutcome(outcome)}

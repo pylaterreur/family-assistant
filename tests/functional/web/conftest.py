@@ -318,6 +318,8 @@ async def _create_web_assistant(
     api_socket_and_port: tuple[int, socket.socket],
     mock_llm_client: RuleBasedMockLLMClient,
     scope_label: str = "",
+    *,
+    conversation_threads_enabled: bool = False,
 ) -> AsyncGenerator[Assistant]:
     """Helper function to create a web-only Assistant instance.
 
@@ -326,6 +328,7 @@ async def _create_web_assistant(
         api_socket_and_port: Tuple of (port, socket) for the API server
         mock_llm_client: Mock LLM client instance
         scope_label: Label for logging (e.g., "SESSION" or "")
+        conversation_threads_enabled: Whether the chat has Home and threads
     """
     api_port, api_socket = api_socket_and_port
     log_prefix = f"{scope_label} " if scope_label else ""
@@ -464,6 +467,7 @@ async def _create_web_assistant(
         "mcp_config": {"mcpServers": {}},
         "indexing_pipeline_config": {"processors": []},
         "event_system": {"enabled": False},
+        "conversation_threads": {"enabled": conversation_threads_enabled},
     }
 
     # Create Assistant instance
@@ -647,18 +651,30 @@ def mock_llm_client() -> RuleBasedMockLLMClient:
     )
 
 
+@pytest.fixture(scope="function")
+def web_conversation_threads_enabled() -> bool:
+    """Whether ``web_only_assistant`` (and so ``web_test_fixture``) has Home and threads.
+
+    Off by default; a test module that exercises threads overrides this fixture
+    to return True.
+    """
+    return False
+
+
 @pytest_asyncio.fixture(scope="function")
 async def web_only_assistant(
     db_engine: AsyncEngine,
     api_socket_and_port: tuple[int, socket.socket],
     build_frontend_assets: None,  # Ensure assets are built
     mock_llm_client: RuleBasedMockLLMClient,
+    web_conversation_threads_enabled: bool,
 ) -> AsyncGenerator[Assistant]:
     """Start Assistant in web-only mode for testing."""
     async for assistant in _create_web_assistant(
         db_engine,
         api_socket_and_port,
         mock_llm_client,
+        conversation_threads_enabled=web_conversation_threads_enabled,
     ):
         yield assistant
 

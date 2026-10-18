@@ -520,9 +520,16 @@ class ProcessingService:
         The carried choice is admitted again, as the person's: a profile that
         no longer allows the tier gets its default, logged, rather than a
         refusal for a request nobody made on this turn.
+
+        Home is the exception: it is everlasting, so a sticky tier would apply
+        to every later quick question. A tier chosen there is for its turn only.
         """
         default_tier = self.service_config.tier_eligibility.default_tier
         if default_tier is None:
+            return None
+        if subconversation_id is None and await db_context.conversation_threads.is_home(
+            conversation_id
+        ):
             return None
         reasoning = (
             await db_context.message_history.get_latest_model_selection_reasoning(

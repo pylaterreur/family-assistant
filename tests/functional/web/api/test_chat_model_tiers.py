@@ -291,6 +291,50 @@ async def test_a_reopened_conversation_reports_the_tier_it_is_on(
     assert response.json()["conversation_model_tier"] == "deep"
 
 
+async def _designate_home(db_engine: AsyncEngine) -> str:
+    db = Database(engine=db_engine)
+    return await db.conversation_threads.designate_home(
+        user_id=f"home-owner-{uuid.uuid4()}",
+        interface_type="web",
+        conversation_id=f"tier-home-{uuid.uuid4()}",
+        now=datetime.now(UTC),
+    )
+
+
+@pytest.mark.usefixtures("tiered_app")
+async def test_a_tier_chosen_in_home_is_for_that_turn_only(
+    api_test_client: AsyncClient,
+    db_engine: AsyncEngine,
+) -> None:
+    """Home is everlasting: a sticky tier would apply to every later quick question."""
+    home = await _designate_home(db_engine)
+    assert await _send(api_test_client, home, "deep") == "deep served this"
+
+    reply = await _send(api_test_client, home)
+
+    assert reply == "standard served this"
+    reasoning = await _assistant_reasoning_info(db_engine, home)
+    assert reasoning.get("model_tier") == "standard"
+    assert reasoning.get("model_tier_source") == "default"
+
+
+@pytest.mark.usefixtures("tiered_app")
+async def test_home_reports_no_tier_after_a_chosen_one(
+    api_test_client: AsyncClient,
+    db_engine: AsyncEngine,
+) -> None:
+    home = await _designate_home(db_engine)
+    await _send(api_test_client, home, "deep")
+
+    response = await api_test_client.get(
+        f"/api/v1/chat/conversations/{home}/messages",
+        params={"include_conversation_profile": "true"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["conversation_model_tier"] is None
+
+
 @pytest.mark.usefixtures("tiered_app")
 async def test_a_person_may_choose_a_tier_no_model_is_allowed_to(
     api_test_client: AsyncClient,

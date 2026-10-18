@@ -9,6 +9,39 @@ export interface Conversation {
   message_count: number;
   /** Present only on search results: a snippet of a message that matched. */
   match_excerpt?: string | null;
+  /** The caller's Home, a thread of it, or an ordinary conversation. */
+  kind?: ConversationKind;
+}
+
+export type ConversationKind = 'home' | 'thread' | 'conversation';
+
+/** Where a thread stands: running, waiting on the user, or failed. */
+export type ThreadState = 'working' | 'waiting' | 'failed';
+
+/** One thread of a Home, as its card and the sidebar show it. */
+export interface ThreadSummary {
+  conversation_id: string;
+  home_conversation_id: string;
+  title: string;
+  profile_id: string;
+  state: ThreadState;
+  /** The Home tool call that started the thread, if any. */
+  source_tool_call_id?: string | null;
+  /** The request the thread was started with. */
+  seed_request?: string | null;
+  /** The thread's latest visible message. */
+  preview?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Home and its threads, as the sidebar groups them. */
+export interface HomeThreadsView {
+  homeConversationId: string;
+  threads: ThreadSummary[];
+  /** The thread list could not be fetched; `threads` may be stale or missing. */
+  threadsFailed: boolean;
+  onRetryThreads: () => void;
 }
 
 export interface ConversationSidebarProps {
@@ -20,6 +53,8 @@ export interface ConversationSidebarProps {
   isOpen: boolean;
   onRefresh: () => void;
   isMobile?: boolean;
+  /** Present when threads are enabled: Home is pinned and threads grouped by state. */
+  home?: HomeThreadsView | null;
 }
 
 export interface ChatAppProps {
@@ -153,6 +188,9 @@ export interface ConversationMessagesResponse {
   // profile on open.
   latest_user_profile_id?: string | null;
   conversation_model_tier?: string | null;
+  // Present alongside latest_user_profile_id.
+  conversation_kind?: ConversationKind | null;
+  thread?: ThreadSummary | null;
   // Whether the conversation has messages older than the returned page.
   has_more_before?: boolean;
   // Recently retained turn states for this conversation, when the backend has them.
