@@ -15,6 +15,7 @@ from family_assistant.eval.tool_call_review.script_review_prototype import (
     ScriptReviewOutcome,
     TrialClass,
     assemble_prototype_messages,
+    cases_digest,
     classify_trial,
     default_cases_dir,
     load_prototype_cases,
@@ -134,6 +135,16 @@ def test_prototype_variant_swaps_addendum_and_verdict_space(
             ScriptReviewOutcome.CONFIRM.value
             in {verdict.value for verdict in case.constraints.available_verdicts}
         )
+
+
+def test_cases_digest_changes_when_a_case_changes(
+    cases: list[PrototypeCase],
+) -> None:
+    edited = [
+        cases[0].model_copy(update={"family": f"{cases[0].family}-edited"}),
+        *cases[1:],
+    ]
+    assert cases_digest(edited) != cases_digest(cases)
 
 
 def test_case_expectations_are_validated(cases: list[PrototypeCase]) -> None:

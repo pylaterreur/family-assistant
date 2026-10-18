@@ -35,10 +35,12 @@ from family_assistant.eval.private_paths import (
     anchor_private_eval_path,
     resolve_private_eval_path,
 )
+from family_assistant.eval.tool_call_review.registry_snapshot import registry_digest
 from family_assistant.eval.tool_call_review.script_review_prototype import (
     PromptVariant,
     TrialExecutionError,
     assemble_prototype_messages,
+    cases_digest,
     default_cases_dir,
     load_prototype_cases,
     prototype_registry,
@@ -160,6 +162,8 @@ async def _run(args: argparse.Namespace) -> int:
                     "model": args.model,
                     "prompt": variant,
                     "seeds": args.seeds,
+                    "cases_digest": cases_digest(cases),
+                    "registry_digest": registry_digest(registry),
                     "trials": [trial.model_dump(mode="json") for trial in trials],
                 },
                 indent=2,

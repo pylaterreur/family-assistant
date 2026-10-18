@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import hashlib
 import json
 from collections import Counter
 from dataclasses import replace
@@ -384,6 +385,16 @@ class PrototypeCase(BaseModel):
 def default_cases_dir() -> Path:
     """The committed prototype cases."""
     return Path(__file__).parent / "script_review_cases"
+
+
+def cases_digest(cases: Sequence[PrototypeCase]) -> str:
+    """Short digest identifying the cases a run evaluated, in the order run."""
+    serialized = json.dumps(
+        [case.model_dump(mode="json") for case in cases],
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
 
 def load_prototype_cases(path: Path) -> list[PrototypeCase]:
