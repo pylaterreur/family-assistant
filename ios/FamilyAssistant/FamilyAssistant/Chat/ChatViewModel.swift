@@ -1109,6 +1109,11 @@ final class ChatViewModel {
     /// left). Without this a reopened thread would show the default while its
     /// turns still ran at the chosen tier.
     private func adoptConversationModelTier() {
+        // A tier chosen in Home held for its own turn only (see
+        // `modelTierForSend`), so reopening Home starts on the default.
+        guard role != .home else {
+            return
+        }
         let latest = messages.last {
             $0.role == .assistant
                 && $0.processingProfileID == selectedProfileID
@@ -1305,7 +1310,17 @@ final class ChatViewModel {
     ///
     /// Called once the turn is being built, so a submission rejected before that
     /// point (an empty draft, an attachment still uploading) changes nothing.
+    ///
+    /// In Home a choice applies to the one turn it was made for and then goes
+    /// back to the profile's default: Home is everlasting, so a sticky tier
+    /// would quietly carry one deep request onto every later quick question.
+    /// Naming nothing afterwards is how Home leaves it, so nothing is named.
     private func modelTierForSend() -> String? {
+        if role == .home {
+            let tier = modelTierChoice
+            modelTierChoice = nil
+            return tier
+        }
         let tier = modelTierChoice ?? (namesModelTier ? defaultModelTierID : nil)
         namesModelTier = namesModelTier || modelTierChoice != nil
         return tier

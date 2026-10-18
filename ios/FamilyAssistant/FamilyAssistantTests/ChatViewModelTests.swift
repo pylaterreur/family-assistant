@@ -12231,7 +12231,8 @@ final class ChatViewModelTests: XCTestCase {
         maxConsecutiveStreamResumes: Int = 5,
         streamResumeLivenessSeconds: Double = 2,
         streamTextFlushInterval: Duration = .milliseconds(50),
-        pathMonitor: PathMonitoring? = nil
+        pathMonitor: PathMonitoring? = nil,
+        role: ChatViewModel.Role = .standalone
     ) -> ChatViewModel {
         let authManager = AuthManager()
         authManager.serverURL = serverURL
@@ -12240,6 +12241,7 @@ final class ChatViewModelTests: XCTestCase {
             conversationID: conversationID,
             initialPrompt: initialPrompt,
             startsNewConversation: startsNewConversation,
+            role: role,
             liveReconnectInitialDelaySeconds: liveReconnectInitialDelaySeconds,
             liveReconnectMaxDelaySeconds: liveReconnectMaxDelaySeconds,
             maxConsecutiveStreamResumes: maxConsecutiveStreamResumes,
@@ -12438,6 +12440,46 @@ final class ChatViewModelTests: XCTestCase {
         await model.sendDraft()
         try await waitUntil { !model.isStreaming }
 
+        XCTAssertEqual(recorder.tiers, ["deep", "deep"])
+    }
+
+    func testHomeTierAppliesToItsTurnOnly() async throws {
+        let recorder = respondRecordingModelTiers(conversationID: "web_conv_home_tier")
+        let model = makeViewModel(conversationID: "web_conv_home_tier", role: .home)
+        model.profiles = [Self.tieredProfile()]
+        model.selectModelTier("deep")
+
+        model.draftText = "Think hard about this"
+        await model.sendDraft()
+        try await waitUntil { !model.isStreaming }
+
+        XCTAssertNil(model.modelTierChoice, "In Home the picker goes back to the default after the send.")
+
+        model.draftText = "Quick question"
+        await model.sendDraft()
+        try await waitUntil { !model.isStreaming }
+
+        XCTAssertEqual(
+            recorder.tiers,
+            ["deep", nil],
+            "A tier chosen in Home is for that turn; the next Home request names none."
+        )
+    }
+
+    func testThreadKeepsItsChosenTier() async throws {
+        let recorder = respondRecordingModelTiers(conversationID: "web_conv_thread_tier")
+        let model = makeViewModel(conversationID: "web_conv_thread_tier", role: .pushed)
+        model.profiles = [Self.tieredProfile()]
+        model.selectModelTier("deep")
+
+        model.draftText = "First"
+        await model.sendDraft()
+        try await waitUntil { !model.isStreaming }
+        model.draftText = "Second"
+        await model.sendDraft()
+        try await waitUntil { !model.isStreaming }
+
+        XCTAssertEqual(model.modelTierChoice, "deep")
         XCTAssertEqual(recorder.tiers, ["deep", "deep"])
     }
 
