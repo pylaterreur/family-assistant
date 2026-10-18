@@ -37,6 +37,7 @@ conversation_threads_table = Table(
     Column("conversation_id", String(255), primary_key=True),
     Column("home_conversation_id", String(255), nullable=False, index=True),
     Column("interface_type", String(50), nullable=False),
+    # Canonical, like conversation_homes.user_id.
     Column("owner_user_id", String(255), nullable=False),
     Column("profile_id", String(100), nullable=False),
     Column("title", Text, nullable=False),
@@ -49,6 +50,9 @@ conversation_threads_table = Table(
     # The row that opened the thread, so clients can render an
     # assistant-written request as "Assistant asked: ...".
     Column("seed_message_id", Integer, nullable=True),
+    # The Home tool call that started the thread, so a client rendering that
+    # call can find the thread it made. Null for a thread the user started.
+    Column("source_tool_call_id", String(255), nullable=True),
     # The run that executes the thread's first turn.
     Column("delegation_id", String(100), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),

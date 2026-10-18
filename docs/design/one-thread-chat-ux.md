@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved. Milestone 1 (threads exist, backend) implemented. Mockups:
+Approved. Milestone 1 (threads exist) and the backend of milestone 2 implemented. Mockups:
 [one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered: [iOS](one-thread-ux/ios.png),
 [web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
 
@@ -94,7 +94,8 @@ need a new dimension. Under this model they work unchanged.
 
 ### The three kinds of conversation
 
-- **Home** is one designated conversation per user per surface. Web and iOS already share an
+- **Home** is one designated conversation per user per surface, keyed on the user's canonical
+  identity so every way one person signs in reaches the same Home. Web and iOS already share an
   interface type and a conversation namespace, so they share one Home. A user's Telegram private
   chat is their Telegram Home. Unifying the two is out of scope (see Deliberate simplifications).
 - **A thread** is an ordinary conversation plus a link record. Every thread has one, whether or not
@@ -123,10 +124,12 @@ has a target conversation distinct from its source (Home), no subconversation, a
 is recorded without a wake, because the user talks to the thread directly from then on. With no
 subconversation, the run is a browser scope of its own rather than inheriting its source's tab.
 
-**A message sent before the first turn starts steers it.** The common case is the user opening a
-fresh card and typing straight away. Between enqueue and start there is no active turn to steer, so
-a thread with a queued run treats the user's message as steering for that run, the same way it would
-once the run is going. It must not start a competing turn.
+**The first turn runs where the user can watch it, and the user can always join in.** On a surface
+that streams turns live, the worker registers the thread's first turn there before claiming the run,
+so the thread shows it as it happens and a message sent meanwhile steers it, like any turn in
+progress. A message sent before the turn has started becomes the turn itself: the queued run is
+retired in the same transaction as the message, and the user's turn answers the request already in
+the thread. Either way there is never a competing turn.
 
 **It is admitted exactly like a delegation.** Home's model picks the profile and writes the request,
 so the target must accept it under the same `allowed_delegation_sources` check and the same
@@ -257,6 +260,9 @@ and each path is governed:
   because history is scoped by interface type. A household that uses both sees two Homes. Unifying
   them means lifting interface scoping from history, which is a separate project.
 - **No nested threads.** One level covers the household use cases.
+- **Only the streaming turn endpoint absorbs a queued run.** A non-streaming message sent into a
+  thread whose first turn hasn't started holds the conversation until it is answered; the first turn
+  then runs after it rather than being absorbed. Clients use the streaming endpoint.
 - **The seed is a snapshot.** A Home message edited after the thread started is not reflected in the
   thread.
 - **Cards do not re-post.** A card that has scrolled out of view in Home stays where it is. "Waiting
@@ -285,10 +291,13 @@ and each path is governed:
    - Moving a Home turn into a coder or browser thread is refused.
    - An assistant-written request is not a user row, and doesn't make memory review due.
    - An assistant-started seed holds only the request.
-2. **Home on web.** Add Home as the landing view, thread cards, the grouped sidebar and the
-   right-hand panel, and steer a thread's queued first turn with a message sent before it starts. A
-   client is the first thing that can send one. Verified by Playwright tests of card state
-   transitions, answering from a card, and panel navigation.
+2. **Home on web.** In three steps.
+   - The API (Home, the thread list and its derived state, thread metadata, the server-side profile
+     pin), the live first turn and absorbing a queued run. Verified by API tests.
+   - Home as the landing view, thread cards and the grouped sidebar, with a thread opening in place
+     of Home behind a breadcrumb. Verified by Playwright tests of card state transitions and
+     navigation.
+   - The right-hand panel, once the chat view is split into a pane that can be shown twice.
 3. **State and echo.** Add derived working, waiting and failed states, explicit done, per-viewer
    unread counts, the echo, and Home's view of thread facts. Verified by tests that Home answers a
    status question from thread facts, that an echo keeps its taint, that a thread ending on a

@@ -24,7 +24,7 @@ from family_assistant.storage.delegation_runs import (
 from family_assistant.storage.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
 
     from family_assistant.llm.content_parts import ContentPartDict
     from family_assistant.processing.protocol import RemoteObservationMetadata
@@ -187,6 +187,38 @@ class DelegationRunsRepository(BaseRepository):
         if row is None:
             return None
         return self._row_to_dict(row)
+
+    async def get_by_delegation_ids(
+        self, delegation_ids: Collection[str]
+    ) -> dict[str, DelegationRunDict]:
+        """Runs by public reference ID; ids with no run are absent."""
+        if not delegation_ids:
+            return {}
+        rows = await self._db.fetch_all(
+            select(delegation_runs_table).where(
+                delegation_runs_table.c.delegation_id.in_(list(delegation_ids))
+            )
+        )
+        runs = [self._row_to_dict(row) for row in rows]
+        return {run["delegation_id"]: run for run in runs}
+
+    async def conversations_with_active_runs(
+        self, conversation_ids: Collection[str]
+    ) -> set[str]:
+        """Which of ``conversation_ids`` have a run not yet finished, of any kind."""
+        if not conversation_ids:
+            return set()
+        rows = await self._db.fetch_all(
+            select(delegation_runs_table.c.conversation_id)
+            .where(delegation_runs_table.c.conversation_id.in_(list(conversation_ids)))
+            .where(
+                delegation_runs_table.c.status.not_in(
+                    list(TERMINAL_DELEGATION_STATUSES)
+                )
+            )
+            .distinct()
+        )
+        return {row["conversation_id"] for row in rows}
 
     async def get_by_subconversation_id(
         self, subconversation_id: str
@@ -382,6 +414,31 @@ class DelegationRunsRepository(BaseRepository):
         result = await self._execute_with_logging("mark_delegation_run_running", stmt)
         row = result.one_or_none()
         return self._row_to_dict(dict(row)) if row is not None else None
+
+    async def absorb_queued_thread_run(
+        self, conversation_id: str, now: datetime
+    ) -> bool:
+        """Retire a thread's first run that has not started, for a user's turn.
+
+        A message the user sends into a fresh thread becomes the thread's first
+        turn: the request the run would have answered is already in the thread's
+        history, so the user's turn answers it. Only a run still ``queued`` is
+        absorbed -- one the worker has claimed is in progress and is steered
+        instead. Returns whether a run was absorbed.
+        """
+        result = await self._db.execute(
+            update(delegation_runs_table)
+            .where(delegation_runs_table.c.conversation_id == conversation_id)
+            .where(delegation_runs_table.c.run_kind == "thread")
+            .where(delegation_runs_table.c.status == "queued")
+            .values(
+                status="completed",
+                completed_at=now,
+                notified_at=now,
+                updated_at=now,
+            )
+        )
+        return result.rowcount > 0
 
     async def mark_awaiting_children(
         self, delegation_id: str

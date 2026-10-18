@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -16,7 +16,7 @@ from family_assistant.storage.conversation_threads import (
 from family_assistant.storage.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
     from datetime import datetime
 
     from family_assistant.security.taint import TaintMetadata
@@ -35,6 +35,7 @@ class ConversationThread:
     title_taint: TaintMetadata | None
     anchor_message_id: int | None
     seed_message_id: int | None
+    source_tool_call_id: str | None
     delegation_id: str | None
     created_at: datetime
     updated_at: datetime
@@ -51,6 +52,7 @@ def _thread_from_row(row: Mapping[str, Any]) -> ConversationThread:
         title_taint=row["title_taint_json"],
         anchor_message_id=row["anchor_message_id"],
         seed_message_id=row["seed_message_id"],
+        source_tool_call_id=row["source_tool_call_id"],
         delegation_id=row["delegation_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -69,6 +71,23 @@ class ConversationThreadsRepository(BaseRepository):
             )
         )
         return row["conversation_id"] if row is not None else None
+
+    async def find_home_among(
+        self, user_ids: Collection[str], interface_type: str
+    ) -> str | None:
+        """A Home stored under any of ``user_ids`` on this interface, if one exists."""
+        if not user_ids:
+            return None
+        rows = await self._db.fetch_all(
+            select(conversation_homes_table.c.conversation_id)
+            .where(
+                conversation_homes_table.c.user_id.in_(list(user_ids)),
+                conversation_homes_table.c.interface_type == interface_type,
+            )
+            .order_by(conversation_homes_table.c.created_at)
+            .limit(1)
+        )
+        return rows[0]["conversation_id"] if rows else None
 
     async def designate_home(
         self,
@@ -113,6 +132,29 @@ class ConversationThreadsRepository(BaseRepository):
         )
         return row is not None
 
+    async def kinds_for(
+        self, conversation_ids: Collection[str]
+    ) -> dict[str, Literal["home", "thread"]]:
+        """Which of ``conversation_ids`` are Homes or threads; others are absent."""
+        if not conversation_ids:
+            return {}
+        ids = list(conversation_ids)
+        homes = await self._db.fetch_all(
+            select(conversation_homes_table.c.conversation_id).where(
+                conversation_homes_table.c.conversation_id.in_(ids)
+            )
+        )
+        threads = await self._db.fetch_all(
+            select(conversation_threads_table.c.conversation_id).where(
+                conversation_threads_table.c.conversation_id.in_(ids)
+            )
+        )
+        kinds: dict[str, Literal["home", "thread"]] = {
+            row["conversation_id"]: "thread" for row in threads
+        }
+        kinds.update({row["conversation_id"]: "home" for row in homes})
+        return kinds
+
     async def create_thread(
         self,
         *,
@@ -126,6 +168,7 @@ class ConversationThreadsRepository(BaseRepository):
         anchor_message_id: int | None,
         delegation_id: str | None,
         now: datetime,
+        source_tool_call_id: str | None = None,
     ) -> None:
         """Record a new thread of ``home_conversation_id``."""
         await self._db.execute(
@@ -139,6 +182,7 @@ class ConversationThreadsRepository(BaseRepository):
                 title_taint_json=title_taint,
                 anchor_message_id=anchor_message_id,
                 seed_message_id=None,
+                source_tool_call_id=source_tool_call_id,
                 delegation_id=delegation_id,
                 created_at=now,
                 updated_at=now,

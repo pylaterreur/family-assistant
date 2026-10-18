@@ -201,6 +201,7 @@ from family_assistant.weather import WeatherService
 from family_assistant.web.app_creator import configure_app_auth, create_app
 from family_assistant.web.auth import AUTH_ENABLED
 from family_assistant.web.mcp_adapter.config import require_authentication_for_adapter
+from family_assistant.web.thread_turns import WebThreadTurnRunner
 from family_assistant.web.web_confirmation_ui_manager import WebConfirmationUIManager
 
 from .services.turn_resumption import TURN_RESUME_TASK_TYPE, TurnLeaseRegistry
@@ -2780,6 +2781,9 @@ class Assistant:
             notification_dispatcher=self.notification_dispatcher,
             stream_hub=self.fastapi_app.state.conversation_stream_hub,
             min_priority=min_priority,
+            # Web threads stream their first turn live; other surfaces' threads
+            # run in the worker itself.
+            thread_turn_runner=WebThreadTurnRunner(self.fastapi_app.state),
         )
         worker.register_task_handler("log_message", task_wrapper_handle_log_message)
         if self.document_indexer:

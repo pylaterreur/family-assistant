@@ -139,6 +139,7 @@ if TYPE_CHECKING:
         TaskDict,
     )
     from family_assistant.telegram.protocols import ConfirmationUIManager
+    from family_assistant.threads.turns import ThreadTurnRunner
     from family_assistant.tools import ToolsProvider
     from family_assistant.tools.authenticated_sites import AuthenticatedRunSettlement
     from family_assistant.web.conversation_stream_hub import ConversationStreamHub
@@ -154,6 +155,7 @@ from family_assistant.indexing.tasks import (
 )
 from family_assistant.interfaces import ChatDeliveryError, HistoryBackedChatInterface
 from family_assistant.processing.quiet_turn import QUIET_END_TRIGGER_HINT
+from family_assistant.processing.types import ChatInteractionStatus
 from family_assistant.processing.utils import get_file_extension_from_mime_type
 from family_assistant.services.deferred_tool_confirmation import (
     build_deferred_confirmation_callback,
@@ -1052,6 +1054,10 @@ class ConfirmationNotificationError(RuntimeError):
     """Raised when a confirmation result notification cannot be delivered."""
 
 
+THREAD_TURN_DEFER_SECONDS = 5.0
+"""How long a thread run waits before trying again when its thread is busy."""
+
+
 class DelegationNotificationError(RuntimeError):
     """Raised when a terminal delegation notification cannot be delivered.
 
@@ -1884,6 +1890,7 @@ class TaskWorker:
         notification_dispatcher: Notifier | None = None,
         stream_hub: ConversationStreamHub | None = None,
         min_priority: TaskPriority | None = None,
+        thread_turn_runner: ThreadTurnRunner | None = None,
     ) -> None:
         """Initializes the TaskWorker with its dependencies.
 
@@ -1901,6 +1908,7 @@ class TaskWorker:
         self.confirmation_ui_managers = confirmation_ui_managers
         self.notification_dispatcher = notification_dispatcher
         self.stream_hub = stream_hub
+        self.thread_turn_runner = thread_turn_runner
         # Strong references to in-flight stream-hub publish tasks scheduled from
         # on_commit hooks, so the event loop doesn't garbage-collect them mid-flight.
         self._hub_publish_tasks: set[asyncio.Task[object]] = set()
@@ -2104,6 +2112,17 @@ class TaskWorker:
                 )
             return
 
+        if (
+            run["run_kind"] == "thread"
+            and not payload.get("continuation")
+            and self.thread_turn_runner is not None
+            and self.thread_turn_runner.handles(run)
+        ):
+            await self._run_thread_first_turn(
+                exec_context, run, cast("ProcessingService", target_service)
+            )
+            return
+
         started = await exec_context.db_context.delegation_runs.mark_running(
             delegation_id,
             clock.now(),
@@ -2192,6 +2211,102 @@ class TaskWorker:
                 payload_present=False,
             ),
             model_selection=_frozen_model_selection(run, local_target),
+        )
+
+    async def _run_thread_first_turn(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        target: ProcessingService,
+    ) -> None:
+        """Hand a thread's first turn to the surface its user watches it on.
+
+        The run is claimed only once the turn is registered there, so a turn the
+        user sent into the thread first -- which absorbs the queued run -- and
+        this one never both run. A turn already in progress in the thread leaves
+        the run queued, and the task retries it.
+        """
+        assert self.thread_turn_runner is not None
+        clock = exec_context.clock or self.clock
+        delegation_id = run["delegation_id"]
+        # Filled by claim(), which the runner calls once the turn is visible.
+        claimed: list[DelegationRunDict] = []
+
+        async def claim() -> bool:
+            started = await exec_context.db_context.delegation_runs.mark_running(
+                delegation_id, clock.now()
+            )
+            if started is not None:
+                claimed.append(started)
+            return started is not None
+
+        try:
+            outcome = await self.thread_turn_runner.run_first_turn(
+                run,
+                target=target,
+                model_selection=_frozen_model_selection(run, target),
+                tool_call_review_trigger=await _delegation_run_review_trigger(
+                    exec_context,
+                    run,
+                    trigger_type="delegation_request",
+                    active_request_role="user",
+                    payload_present=False,
+                ),
+                claim=claim,
+            )
+        except Exception:
+            if not claimed:
+                raise
+            logger.exception("Thread run %s raised during its turn.", delegation_id)
+            await self._fail_delegation_run(
+                exec_context, delegation_id=delegation_id, error=traceback.format_exc()
+            )
+            return
+        if outcome is None:
+            if claimed:
+                return
+            current = (
+                await exec_context.db_context.delegation_runs.get_by_delegation_id(
+                    delegation_id
+                )
+            )
+            if current is not None and current["status"] == "queued":
+                # Rescheduled as a fresh task rather than retried: the turn in
+                # the way can outlast the run's bounded retries, and running out
+                # of them would strand the run queued.
+                await exec_context.db_context.tasks.enqueue(
+                    task_id=f"{DELEGATED_PROFILE_RUN_TASK_TYPE}_{uuid.uuid4().hex}",
+                    task_type=DELEGATED_PROFILE_RUN_TASK_TYPE,
+                    payload={
+                        "delegation_id": delegation_id,
+                        "interface_type": run["interface_type"],
+                        "conversation_id": run["conversation_id"],
+                        "user_name": run["user_name"] or "",
+                    },
+                    scheduled_at=clock.now()
+                    + timedelta(seconds=THREAD_TURN_DEFER_SECONDS),
+                    max_retries_override=1,
+                    priority=exec_context.inherited_task_priority(),
+                )
+                logger.info(
+                    "Thread run %s is waiting for the turn in progress in its "
+                    "conversation; rescheduled.",
+                    delegation_id,
+                )
+            return
+        await self._settle_delegated_turn(
+            exec_context,
+            claimed[0],
+            ChatInteractionResult(
+                status=ChatInteractionStatus.SUCCESS,
+                text_reply=outcome.reply_text,
+            )
+            if outcome.succeeded
+            else ChatInteractionResult(
+                status=ChatInteractionStatus.ERROR,
+                text_reply="The thread's first turn did not complete.",
+                error_traceback=outcome.error,
+            ),
         )
 
     async def _run_delegation_continuation(
@@ -3339,6 +3454,10 @@ class TaskWorker:
                     delegation_id=run["delegation_id"],
                     result_message_internal_id=None,
                     notified_at=clock.now(),
+                )
+                # The thread's state changed: open threads and Home lists refetch.
+                self._tickle_stream_hub_on_commit(
+                    run["conversation_id"], run["user_id"]
                 )
             return
         while True:

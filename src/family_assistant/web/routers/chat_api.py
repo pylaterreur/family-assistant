@@ -7,7 +7,7 @@ import logging
 import mimetypes
 import secrets
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -66,7 +66,11 @@ from family_assistant.services.user_identity import (
 )
 from family_assistant.storage.database import Database
 from family_assistant.storage.repositories.conversation_shares import ConversationShare
+from family_assistant.storage.repositories.conversation_threads import (
+    ConversationThread,
+)
 from family_assistant.storage.types import MessageHistoryRow
+from family_assistant.threads.listing import ThreadSummary, summarize_threads
 from family_assistant.tools import MCPToolsProvider, find_provider_by_type
 from family_assistant.tools.confirmation import render_tool_confirmation
 from family_assistant.tools.infrastructure import ToolDescriptorProvider
@@ -489,6 +493,10 @@ class ConversationSummary(BaseModel):
         None,
         description="When the list was searched, a snippet of a message that matched",
     )
+    kind: Literal["home", "thread", "conversation"] = Field(
+        "conversation",
+        description="The caller's Home, a thread of it, or an ordinary conversation",
+    )
 
 
 class ConversationListResponse(BaseModel):
@@ -542,6 +550,63 @@ class ConversationMessage(BaseModel):
     metadata: dict | None = Field(None, description="Additional message metadata")
 
 
+class ThreadSummaryResponse(BaseModel):
+    """One thread of a Home, as its card shows it."""
+
+    conversation_id: str
+    home_conversation_id: str
+    title: str
+    profile_id: str
+    state: Literal["working", "waiting", "failed"] = Field(
+        ...,
+        description=(
+            "working while a turn or the starting run is in progress; failed "
+            "when the starting run failed and nothing has been said since; "
+            "waiting otherwise"
+        ),
+    )
+    source_tool_call_id: str | None = Field(
+        default=None, description="The Home tool call that started the thread, if any"
+    )
+    seed_request: str | None = Field(
+        default=None, description="The request the thread was started with"
+    )
+    preview: str | None = Field(
+        default=None, description="The thread's latest visible message"
+    )
+    created_at: datetime
+    updated_at: datetime
+
+
+def thread_summary_response(
+    summary: ThreadSummary, home_conversation_id: str
+) -> ThreadSummaryResponse:
+    """The API shape of a thread summary."""
+    return ThreadSummaryResponse(
+        conversation_id=summary.conversation_id,
+        home_conversation_id=home_conversation_id,
+        title=summary.title,
+        profile_id=summary.profile_id,
+        state=summary.state,
+        source_tool_call_id=summary.source_tool_call_id,
+        seed_request=summary.seed_request,
+        preview=summary.preview,
+        created_at=summary.created_at,
+        updated_at=summary.updated_at,
+    )
+
+
+def turn_running_in(hub: ConversationStreamHub) -> Callable[[str], bool]:
+    """Whether the hub has a turn in progress in a conversation."""
+
+    def running(conversation_id: str) -> bool:
+        return any(
+            turn.status == "running" for turn in hub.active_turns(conversation_id)
+        )
+
+    return running
+
+
 class ConversationMessagesResponse(BaseModel):
     """Response containing messages for a specific conversation."""
 
@@ -577,6 +642,21 @@ class ConversationMessagesResponse(BaseModel):
             "Null when the conversation is on the profile's default. Populated "
             "only alongside latest_user_profile_id. A client shows it as the "
             "current selection, and sends the profile's default tier to leave it."
+        ),
+    )
+    conversation_kind: Literal["home", "thread", "conversation"] | None = Field(
+        default=None,
+        description=(
+            "Whether this is the caller's Home, a thread of it, or an ordinary "
+            "conversation. Populated only alongside latest_user_profile_id."
+        ),
+    )
+    thread: ThreadSummaryResponse | None = Field(
+        default=None,
+        description=(
+            "When the conversation is a thread, what its card shows. A thread "
+            "always runs on its own profile, which latest_user_profile_id "
+            "reports. Populated only alongside latest_user_profile_id."
         ),
     )
     active_turns: list["ActiveTurnInfo"] = Field(
@@ -800,7 +880,7 @@ class ChatTurnSteerResponse(BaseModel):
 # ----------------------------------------------------------------------- #
 
 
-def _get_hub(request: Request) -> ConversationStreamHub:
+def get_stream_hub(request: Request) -> ConversationStreamHub:
     """Return the per-app ConversationStreamHub, creating one if needed.
 
     The hub holds in-flight turn state and producer task strong references.
@@ -1208,7 +1288,7 @@ async def _ensure_user_owns_conversation(
     # conversation owned by the caller, they own it — no DB hit needed. The
     # subscribe/ack path needs the full owner set for the sole-owner check, so
     # it always queries below.
-    hub = _get_hub(request)
+    hub = get_stream_hub(request)
     caller_owns_hub_turn = any(
         turn.user_id == raw_user_id for turn in hub.active_turns(conversation_id)
     )
@@ -1303,9 +1383,14 @@ async def api_chat_create_turn(
     new producer is started.
     """
     conversation_id = payload.conversation_id or str(uuid.uuid4())
-    interface_type = payload.interface_type or "api"
+    pinned_thread = await _thread_for(request, conversation_id)
+    interface_type = (
+        pinned_thread.interface_type
+        if pinned_thread is not None
+        else payload.interface_type or "api"
+    )
     user_name = _user_name_for_chat(current_user)
-    hub = _get_hub(request)
+    hub = get_stream_hub(request)
 
     # Enforce ownership before persisting anything: a brand-new conversation is
     # allowed through, but posting into a conversation that already belongs to
@@ -1395,8 +1480,12 @@ async def api_chat_create_turn(
         raise _running_turn_conflict(conversation_id, payload.turn_id, running_turn)
 
     # Resolve processing service profile.
-    selected_processing_service: ProcessingService = default_processing_service
-    if payload.profile_id:
+    selected_processing_service: ProcessingService = (
+        _thread_profile(request, pinned_thread)
+        if pinned_thread is not None
+        else default_processing_service
+    )
+    if pinned_thread is None and payload.profile_id:
         registry = getattr(request.app.state, "processing_services", {})
         candidate = registry.get(payload.profile_id)
         if candidate and candidate.kind == "remote":
@@ -1521,6 +1610,14 @@ async def api_chat_create_turn(
         # durable can always be resumed if this process goes away mid-turn.
         lease: TurnLease | None = None
         async with user_msg_db.transaction() as txn:
+            # A message sent into a thread before its first turn has started
+            # becomes that turn, so the queued run must not run as well. This
+            # turn already holds the conversation in the hub, so the worker
+            # cannot claim the run in the meantime.
+            if pinned_thread is not None:
+                await txn.delegation_runs.absorb_queued_thread_run(
+                    conversation_id, datetime.now(UTC)
+                )
             await txn.message_history.add_message(
                 UserMessage(
                     content=payload.prompt,
@@ -1684,7 +1781,7 @@ async def api_chat_conversation_stream(
     user_id = await _ensure_user_owns_conversation(
         request, current_user, conversation_id, allow_new=False
     )
-    hub = _get_hub(request)
+    hub = get_stream_hub(request)
     allowed_event_types = _parse_event_types(event_types)
     shutdown_event = _get_shutdown_event(request)
     heartbeat_interval = _get_heartbeat_interval(request)
@@ -1867,7 +1964,7 @@ async def api_chat_activity_stream(
     if not isinstance(raw_user_id, str) or not raw_user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
 
-    hub = _get_hub(request)
+    hub = get_stream_hub(request)
     shutdown_event = _get_shutdown_event(request)
     heartbeat_interval = _get_heartbeat_interval(request)
     handle = hub.subscribe_activity(raw_user_id)
@@ -1966,7 +2063,7 @@ async def api_chat_ack(
     await _ensure_user_owns_conversation(
         request, current_user, payload.conversation_id, allow_new=False
     )
-    hub = _get_hub(request)
+    hub = get_stream_hub(request)
     await hub.ack_conversation(payload.conversation_id, payload.ack_seq)
     return AckResponse(ok=True)
 
@@ -1989,7 +2086,7 @@ async def api_chat_cancel_turn(
     await _ensure_user_owns_conversation(
         request, current_user, payload.conversation_id, allow_new=False
     )
-    hub = _get_hub(request)
+    hub = get_stream_hub(request)
     turn = hub.get_turn(payload.conversation_id, turn_id)
     if turn is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
@@ -2123,7 +2220,7 @@ async def api_chat_steer_turn(
     await _ensure_user_owns_conversation(
         request, current_user, payload.conversation_id, allow_new=False
     )
-    hub = _get_hub(request)
+    hub = get_stream_hub(request)
     turn = hub.get_turn(payload.conversation_id, turn_id)
     if turn is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
@@ -2347,6 +2444,36 @@ class ProfilesResponse(BaseModel):
     default_profile_id: str = Field(..., description="ID of the default profile")
 
 
+async def _thread_for(
+    request: Request, conversation_id: str
+) -> ConversationThread | None:
+    """The thread record for a conversation, or None if it is not a thread."""
+    db_context = Database(request.app.state.database_engine)
+    return await db_context.conversation_threads.get_thread(conversation_id)
+
+
+def _thread_profile(request: Request, thread: ConversationThread) -> ProcessingService:
+    """The profile a thread runs on, whatever the request names.
+
+    A turn in a thread runs on the thread's profile and under its interface:
+    history is partitioned by both, so a turn under any other would not see the
+    request the thread was started with. Callers resolve this before looking at
+    the requested profile at all, so a stale selection on the client can
+    neither redirect nor refuse a thread's turn.
+    """
+    registry = getattr(request.app.state, "processing_services", {})
+    pinned = registry.get(thread.profile_id)
+    if not isinstance(pinned, ProcessingService):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This thread runs on profile '{thread.profile_id}', which is "
+                "not available."
+            ),
+        )
+    return pinned
+
+
 def _select_processing_service(
     request: Request,
     payload: ChatPromptRequest,
@@ -2492,7 +2619,7 @@ async def run_non_streaming_turn(
     # the idempotency record: it is discarded when the send ends, so a turn that
     # produced a reply is recognised from the database rather than from memory.
     response_turn_id = payload.turn_id or str(uuid.uuid4())
-    hub = _get_hub(request)
+    hub = get_stream_hub(request)
     if payload.turn_id is not None:
         existing_turn = hub.get_turn(conversation_id, payload.turn_id)
         if existing_turn is not None and existing_turn.user_id != user_id:
@@ -2685,10 +2812,20 @@ async def api_chat_send_message(
     ProcessingService, and returns the assistant's reply.
     """
     conversation_id = payload.conversation_id or str(uuid.uuid4())
-    selected_processing_service = _select_processing_service(
-        request, payload, default_processing_service, conversation_id
-    )
-    payload = payload.model_copy(update={"conversation_id": conversation_id})
+    thread = await _thread_for(request, conversation_id)
+    if thread is not None:
+        selected_processing_service = _thread_profile(request, thread)
+        payload = payload.model_copy(
+            update={
+                "conversation_id": conversation_id,
+                "interface_type": thread.interface_type,
+            }
+        )
+    else:
+        selected_processing_service = _select_processing_service(
+            request, payload, default_processing_service, conversation_id
+        )
+        payload = payload.model_copy(update={"conversation_id": conversation_id})
     return await run_non_streaming_turn(
         request,
         current_user,
@@ -2711,6 +2848,7 @@ async def get_conversations(
     date_from: str | None = None,  # Expected as YYYY-MM-DD string
     date_to: str | None = None,  # Expected as YYYY-MM-DD string
     q: str | None = None,
+    kind: Literal["ordinary"] | None = None,
 ) -> ConversationListResponse:
     """
     Get a list of chat conversations for the web interface.
@@ -2728,6 +2866,8 @@ async def get_conversations(
         conversation_id: Filter by specific conversation ID
         date_from: Filter conversations with messages after this date (YYYY-MM-DD)
         date_to: Filter conversations with messages before this date (YYYY-MM-DD)
+        kind: ``ordinary`` leaves out Homes and threads, which a client lists
+            separately
 
     Returns:
         List of conversation summaries the caller owns, with metadata
@@ -2798,7 +2938,11 @@ async def get_conversations(
         include_subconversations=False,
         owner_user_ids=owner_user_ids,
         search_query=q,
+        ordinary_only=kind == "ordinary",
     )
+    kinds = await db_context.conversation_threads.kinds_for([
+        summary["conversation_id"] for summary in summaries
+    ])
 
     conversations = [
         ConversationSummary(
@@ -2808,6 +2952,7 @@ async def get_conversations(
             last_timestamp=summary["last_timestamp"],
             message_count=summary["message_count"],
             match_excerpt=summary["match_excerpt"],
+            kind=kinds.get(summary["conversation_id"], "conversation"),
         )
         for summary in summaries
     ]
@@ -3027,13 +3172,30 @@ async def get_conversation_messages(
         )
     )
 
-    hub = _get_hub(request)
+    hub = get_stream_hub(request)
     active_turns = _owned_turns(hub, conversation_id, user_id)
 
     latest_user_profile_id = None
+    conversation_kind: Literal["home", "thread", "conversation"] | None = None
+    thread_response: ThreadSummaryResponse | None = None
     if include_conversation_profile:
+        thread = await db_context.conversation_threads.get_thread(conversation_id)
+        if thread is not None:
+            [summary] = await summarize_threads(
+                db_context, [thread], turn_running=turn_running_in(hub)
+            )
+            thread_response = thread_summary_response(
+                summary, thread.home_conversation_id
+            )
+            conversation_kind = "thread"
+        elif await db_context.conversation_threads.is_home(conversation_id):
+            conversation_kind = "home"
+        else:
+            conversation_kind = "conversation"
         latest_user_profile_id = (
-            await db_context.message_history.get_latest_user_profile_id(
+            thread.profile_id
+            if thread is not None
+            else await db_context.message_history.get_latest_user_profile_id(
                 conversation_id, include_subconversations=False
             )
         )
@@ -3069,6 +3231,8 @@ async def get_conversation_messages(
         has_more_after=has_more_after,
         latest_user_profile_id=latest_user_profile_id,
         conversation_model_tier=conversation_model_tier,
+        conversation_kind=conversation_kind,
+        thread=thread_response,
         active_turns=active_turns,
     )
 
