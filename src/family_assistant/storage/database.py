@@ -65,6 +65,7 @@ if TYPE_CHECKING:
         ConfirmationRequestsRepository,
         ConversationSharesRepository,
         ConversationSummariesRepository,
+        ConversationThreadsRepository,
         DelegationRunsRepository,
         EmailRepository,
         ErrorLogsRepository,
@@ -611,6 +612,15 @@ class DatabaseExecutor(ABC):
         )
 
         return self._repository(ConversationSummariesRepository)
+
+    @property
+    def conversation_threads(self) -> ConversationThreadsRepository:
+        """Get the conversation threads repository instance."""
+        from family_assistant.storage.repositories import (  # noqa: PLC0415
+            ConversationThreadsRepository,
+        )
+
+        return self._repository(ConversationThreadsRepository)
 
     @property
     def error_logs(self) -> ErrorLogsRepository:

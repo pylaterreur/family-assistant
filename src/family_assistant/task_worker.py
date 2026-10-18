@@ -2064,6 +2064,19 @@ class TaskWorker:
             )
             return
 
+        if run["run_kind"] == "thread" and isinstance(
+            target_service, PollableDelegationService
+        ):
+            await self._fail_delegation_run(
+                exec_context,
+                delegation_id=delegation_id,
+                error=(
+                    f"Profile '{run['target_service_id']}' runs remotely, and a "
+                    "thread can only run on a local profile."
+                ),
+            )
+            return
+
         if isinstance(target_service, PollableDelegationService):
             # Remote (pollable) target: submit without blocking and hand off to
             # the self-rescheduling poll task instead of running the turn inline.
@@ -2166,6 +2179,10 @@ class TaskWorker:
             confirmation_ui_managers=exec_context.confirmation_ui_managers,
             request_confirmation_callback=request_confirmation_callback,
             subconversation_id=run["subconversation_id"],
+            # A thread run's request was written into the thread when it was
+            # started, under the turn it runs as.
+            turn_id=run["turn_id"],
+            reuse_existing_user_row=run["run_kind"] == "thread",
             initial_taint_sources=_taint_sources_from_delegation_run(run),
             tool_call_review_trigger=await _delegation_run_review_trigger(
                 exec_context,
@@ -3309,7 +3326,21 @@ class TaskWorker:
         A transient failure is raised instead: retrying the same text is the
         right answer, and each caller already has its own way of arranging that
         (the task retries, the cleanup leaves the run for a later pass).
+
+        A thread run reports to nobody: its turn's reply is already in the
+        thread, where the user reads it, so it is recorded as delivered without
+        waking its source. Every path that ends a run comes through here, which
+        is what keeps the hourly cleanup from waking Home for one.
         """
+        if run["run_kind"] == "thread":
+            if run["notified_at"] is None:
+                clock = exec_context.clock or self.clock
+                await exec_context.db_context.delegation_runs.mark_notified(
+                    delegation_id=run["delegation_id"],
+                    result_message_internal_id=None,
+                    notified_at=clock.now(),
+                )
+            return
         while True:
             try:
                 await self._notify_delegation_if_needed(exec_context, run, force=force)

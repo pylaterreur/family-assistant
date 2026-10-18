@@ -1,0 +1,340 @@
+"""Starting a conversation thread from a user's Home.
+
+A thread is an ordinary conversation, spun off Home for work that outlives the
+turn, running on whichever profile suits the work. Starting one is a delegation
+whose result is delivered differently: the first turn runs on the delegation
+machinery, admitted by the same policy, but it runs at the top level of the
+thread's own conversation and wakes nobody when it ends -- the user talks to
+the thread directly from then on. See docs/design/one-thread-chat-ux.md.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import TYPE_CHECKING
+
+from family_assistant.llm.messages import MessageAttachmentMetadata
+from family_assistant.llm.model_selection import (
+    ModelSelectionRequest,
+    ModelTierNotPermitted,
+    resolve_model_selection,
+)
+from family_assistant.storage.tasks import TaskPriority
+from family_assistant.threads.boundary import (
+    AssistantRequest,
+    BoundaryDestination,
+    copy_across_boundary,
+)
+from family_assistant.tools.services import (
+    DELEGATED_PROFILE_RUN_TASK_TYPE,
+    current_taint_metadata,
+    delegation_content_parts,
+    delegation_interface_type,
+    delegation_tools_config,
+    resolve_delegation_target,
+)
+from family_assistant.tools.types import ToolResult
+from family_assistant.utils.clock import SystemClock
+
+if TYPE_CHECKING:
+    from family_assistant.config_models import AppConfig
+    from family_assistant.storage.database import (
+        DatabaseExecutor,
+        DatabaseTransaction,
+    )
+    from family_assistant.tools.types import ToolDefinition, ToolExecutionContext
+
+logger = logging.getLogger(__name__)
+
+TOOL_NAME = "start_thread"
+
+THREAD_TOOLS_DEFINITION: list[ToolDefinition] = [
+    {
+        "type": "function",
+        "function": {
+            "name": TOOL_NAME,
+            "description": (
+                "Moves a piece of work out of the user's Home conversation into a "
+                "thread of its own, run by the profile best suited to it. Use it "
+                "for work that outlives this turn: anything that runs in the "
+                "background (browsing, research, delegated jobs), waits on "
+                "someone, takes several steps the user will want to follow, or "
+                "is a project they will come back to. Answer quick questions, "
+                "small edits and reminders here in Home instead.\n\n"
+                "The thread starts with your request and nothing else from this "
+                "conversation, so write a request that stands on its own. It "
+                "returns at once: tell the user you have started a thread and "
+                "end your turn. The thread's progress and answers appear in the "
+                "thread, not here, so do not wait for it or report back on it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_service_id": {
+                        "type": "string",
+                        "description": "The profile that runs the thread, from those listed in your system prompt (e.g. 'browser_profile', 'complex_tasks').",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "A short title for the thread, a few words naming the job (e.g. 'Hot water system quotes').",
+                    },
+                    "request": {
+                        "type": "string",
+                        "description": "The complete, self-contained request the thread starts from.",
+                    },
+                    "attachment_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional attachment UUIDs from this conversation to pass to the thread with the request.",
+                    },
+                    "model_tier": {
+                        "type": "string",
+                        "description": "Optional. Run the thread on a specific model tier, as listed with the target profile in your system prompt. Omit to use the profile's default.",
+                    },
+                },
+                "required": ["target_service_id", "title", "request"],
+            },
+        },
+    },
+]
+
+
+def _error(text: str) -> ToolResult:
+    return ToolResult(text=f"Error: {text}", attachments=None)
+
+
+def _app_config(exec_context: ToolExecutionContext) -> AppConfig | None:
+    service = exec_context.processing_service
+    return getattr(service, "app_config", None) if service is not None else None
+
+
+def _new_thread_conversation_id(interface_type: str) -> str:
+    if interface_type == "web":
+        return f"web_conv_{uuid.uuid4()}"
+    return f"thread_{uuid.uuid4().hex}"
+
+
+async def thread_start_refusal(
+    db: DatabaseExecutor,
+    *,
+    app_config: AppConfig | None,
+    async_delegation_enabled: bool,
+    in_script: bool,
+    interface_type: str,
+    conversation_id: str,
+    subconversation_id: str | None,
+    user_id: str | None,
+) -> str | None:
+    """Why a turn cannot start a thread, or None if it can.
+
+    Threads hang off Home and do not nest, so the turn must be running at the
+    top level of the acting user's Home. Starting one is a background run, so
+    it needs the asynchronous delegation machinery. The model loop asks this
+    too, and does not advertise the tool on a turn it would refuse: a tool that
+    refuses every call is a dead end advertised as a capability.
+    """
+    if app_config is None or not app_config.conversation_threads.enabled:
+        return "Threads are not enabled."
+    if in_script or not async_delegation_enabled:
+        return "Threads need asynchronous delegation, which is not available here."
+    if subconversation_id is not None or not user_id:
+        return "A thread can only be started from the user's Home."
+    home = await db.conversation_threads.get_home(
+        user_id, "web" if interface_type == "voice" else interface_type
+    )
+    if home != conversation_id:
+        return "A thread can only be started from the user's Home."
+    return None
+
+
+async def start_thread_tool(
+    exec_context: ToolExecutionContext,
+    target_service_id: str,
+    title: str,
+    request: str,
+    attachment_ids: list[str] | None = None,
+    model_tier: str | None = None,
+) -> ToolResult:
+    """Start a thread of the user's Home on ``target_service_id``."""
+    interface_type = delegation_interface_type(exec_context)
+    refusal = await thread_start_refusal(
+        exec_context.db_context,
+        app_config=_app_config(exec_context),
+        async_delegation_enabled=delegation_tools_config(
+            exec_context
+        ).async_delegation_enabled,
+        in_script=exec_context.in_script,
+        interface_type=exec_context.interface_type,
+        conversation_id=exec_context.conversation_id,
+        subconversation_id=exec_context.subconversation_id,
+        user_id=exec_context.user_id,
+    )
+    if refusal is not None:
+        return _error(refusal)
+    title = title.strip()
+    request = request.strip()
+    if not title or not request:
+        return _error("A thread needs a title and a request.")
+
+    target_service, source_service_id, target_error = resolve_delegation_target(
+        exec_context, target_service_id, tool_name=TOOL_NAME
+    )
+    if target_error is not None:
+        return target_error
+    assert target_service is not None and source_service_id is not None
+    # Local imports: the processing package imports the tools package.
+    from family_assistant.processing.protocol import (  # noqa: PLC0415
+        PollableDelegationService,
+    )
+    from family_assistant.processing.types import (  # noqa: PLC0415
+        ProcessingServiceConfig,
+    )
+
+    target_config = target_service.service_config
+    if isinstance(target_service, PollableDelegationService) or not isinstance(
+        target_config, ProcessingServiceConfig
+    ):
+        return _error(
+            f"Profile '{target_service_id}' runs remotely; a thread can only run "
+            "on a local profile."
+        )
+
+    try:
+        model_selection = resolve_model_selection(
+            target_config.tier_eligibility,
+            ModelSelectionRequest(tier=model_tier, source="model")
+            if model_tier is not None
+            else None,
+            profile_id=target_config.id,
+        )
+    except ModelTierNotPermitted as refusal_reason:
+        return _error(str(refusal_reason))
+
+    content_parts, attachment_error = await delegation_content_parts(
+        exec_context,
+        target_service_id=target_service_id,
+        user_request=request,
+        attachment_ids=attachment_ids,
+    )
+    if attachment_error is not None:
+        return attachment_error
+
+    thread_conversation_id = _new_thread_conversation_id(interface_type)
+    model_selection = await target_service.resolve_model_selection_for_run(
+        model_selection,
+        db_context=exec_context.db_context,
+        interface_type=interface_type,
+        conversation_id=thread_conversation_id,
+        subconversation_id=None,
+        trigger_content_parts=content_parts,
+        acting_user_id=exec_context.user_id,
+    )
+
+    owner = exec_context.user_id
+    assert owner is not None
+    home_conversation_id = exec_context.conversation_id
+    taint = current_taint_metadata(exec_context)
+    delegation_id = f"delegation_{uuid.uuid4().hex}"
+    task_id = f"{DELEGATED_PROFILE_RUN_TASK_TYPE}_{uuid.uuid4().hex}"
+    turn_id = str(uuid.uuid4())
+    now = (exec_context.clock or SystemClock()).now()
+
+    # Recorded on the seed so the files stay part of the thread's history after
+    # its first turn, as an uploaded file does.
+    seed_attachments = [
+        MessageAttachmentMetadata(
+            type="attachment_reference", attachment_id=part["attachment_id"]
+        )
+        for part in content_parts
+        if part["type"] == "attachment"
+    ]
+
+    async def _create(txn: DatabaseTransaction) -> None:
+        await txn.conversation_threads.create_thread(
+            conversation_id=thread_conversation_id,
+            home_conversation_id=home_conversation_id,
+            interface_type=interface_type,
+            owner_user_id=owner,
+            profile_id=target_config.id,
+            title=title,
+            title_taint=taint,
+            anchor_message_id=None,
+            delegation_id=delegation_id,
+            now=now,
+        )
+        [seed_message_id] = await copy_across_boundary(
+            txn,
+            destination=BoundaryDestination(
+                interface_type=interface_type,
+                conversation_id=thread_conversation_id,
+                profile=target_config,
+                user_id=owner,
+            ),
+            payload=AssistantRequest(
+                text=request,
+                taint=taint,
+                attachments=seed_attachments,
+            ),
+            turn_id=turn_id,
+            now=now,
+        )
+        await txn.conversation_threads.set_seed_message(
+            thread_conversation_id, seed_message_id, now
+        )
+        await txn.delegation_runs.create_run({
+            "delegation_id": delegation_id,
+            "task_id": task_id,
+            "source_profile_id": source_service_id,
+            "target_service_id": target_service_id,
+            "interface_type": interface_type,
+            "origin_interface_type": exec_context.interface_type,
+            "conversation_id": thread_conversation_id,
+            "user_id": owner,
+            "user_name": exec_context.user_name,
+            "source_turn_id": exec_context.turn_id,
+            "source_subconversation_id": None,
+            "subconversation_id": None,
+            "run_kind": "thread",
+            "turn_id": turn_id,
+            "request_text": request,
+            "content_parts_json": content_parts,
+            "taint_state_json": taint,
+            "model_selection_json": model_selection.to_json(),
+        })
+        await txn.tasks.enqueue(
+            task_id=task_id,
+            task_type=DELEGATED_PROFILE_RUN_TASK_TYPE,
+            payload={
+                "delegation_id": delegation_id,
+                "interface_type": interface_type,
+                "conversation_id": thread_conversation_id,
+                "user_name": exec_context.user_name,
+            },
+            max_retries_override=1,
+            priority=TaskPriority.INTERACTIVE,
+        )
+
+    await exec_context.db_context.atomic(_create)
+    logger.info(
+        "Started thread %s of Home %s on profile %s (delegation_id=%s)",
+        thread_conversation_id,
+        home_conversation_id,
+        target_service_id,
+        delegation_id,
+    )
+    return ToolResult(
+        text=(
+            f"Started the thread '{title}' on '{target_service_id}'. Tell the user "
+            "you have started a thread for it and end your turn; its progress "
+            "and answers appear in the thread."
+        ),
+        attachments=None,
+        data={
+            "thread_conversation_id": thread_conversation_id,
+            "delegation_id": delegation_id,
+            "target_service_id": target_service_id,
+            "title": title,
+            "status": "queued",
+        },
+    )

@@ -6,7 +6,7 @@ import random
 import re
 import uuid
 from collections import OrderedDict
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, NotRequired, TypedDict, cast
@@ -2074,6 +2074,72 @@ class MessageHistoryRepository(BaseRepository):
 
         row = await self._db.fetch_one(stmt)
         return cast("MessageHistoryRow", dict(row)) if row else None
+
+    async def copy_turns(
+        self,
+        *,
+        source_interface_type: str,
+        source_conversation_id: str,
+        turn_ids: Sequence[str],
+        destination_conversation_id: str,
+        destination_profile_id: str,
+    ) -> list[int]:
+        """Copy whole top-level turns into another conversation, verbatim.
+
+        Each row keeps its role, content, tool linkage, internal flag and taint
+        exactly. Only where it lives changes: the destination conversation, at
+        its top level, stamped with the destination's profile (history windows
+        are scoped by profile, so an unstamped row would be invisible there),
+        under a fresh turn id per source turn. Interface message ids and thread
+        roots point into the source conversation, so they are not carried.
+
+        Callers go through ``family_assistant.threads.boundary``, which decides
+        whether the copy is allowed at all.
+        """
+        if not turn_ids:
+            return []
+        rows = await self._db.fetch_all(
+            select(message_history_table)
+            .where(
+                message_history_table.c.interface_type == source_interface_type,
+                message_history_table.c.conversation_id == source_conversation_id,
+                message_history_table.c.subconversation_id.is_(None),
+                message_history_table.c.turn_id.in_(list(turn_ids)),
+            )
+            .order_by(message_history_table.c.internal_id.asc())
+        )
+        new_turn_ids = {turn_id: str(uuid.uuid4()) for turn_id in turn_ids}
+
+        async def _copy(txn: DatabaseTransaction) -> list[int]:
+            copied: list[int] = []
+            for row in rows:
+                values = {
+                    column.name: row[column.name]
+                    for column in message_history_table.columns
+                    if column.name != "internal_id"
+                }
+                new_turn_id = new_turn_ids[row["turn_id"]]
+                values.update(
+                    conversation_id=destination_conversation_id,
+                    processing_profile_id=destination_profile_id,
+                    subconversation_id=None,
+                    turn_id=new_turn_id,
+                    interface_message_id=None,
+                    thread_root_id=None,
+                )
+                result = await txn.execute(
+                    insert(message_history_table)
+                    .values(**values)
+                    .returning(message_history_table.c.internal_id)
+                )
+                internal_id = cast("int", result.scalar_one())
+                await self._enqueue_message_history_indexing_task(
+                    internal_id=internal_id, turn_id=new_turn_id, db=txn
+                )
+                copied.append(internal_id)
+            return copied
+
+        return await self._db.atomic(_copy)
 
     async def has_terminal_reply_for_turn(self, turn_id: str) -> bool:
         """Whether the turn has a TERMINAL assistant row — a final reply, stopped

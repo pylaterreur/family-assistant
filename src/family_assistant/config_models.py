@@ -334,6 +334,17 @@ class ConversationSummaryConfig(BaseModel):
     timeout_seconds: float = Field(default=20.0, gt=0)
 
 
+class ConversationThreadsConfig(BaseModel):
+    """Threads: work that outlives a turn, spun off a user's Home conversation.
+
+    See docs/design/one-thread-chat-ux.md.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+
+
 class ToolCallReviewEscalationConfig(BaseModel):
     """Turn-local thresholds used by tool-call review escalation."""
 
@@ -605,6 +616,20 @@ class ProcessingConfig(BaseModel):
             )
             raise ValueError(msg)
         return v
+
+    @property
+    def receives_household_context(self) -> bool:
+        """Whether the household's own data reaches this profile at all.
+
+        Judged from the master switch and the exclusions together, failing
+        closed: a profile that drops any household provider was configured to
+        be kept apart from household data, so it counts as receiving none.
+        Content copied out of a Home conversation may enter only a profile for
+        which this is true.
+        """
+        return self.include_aggregated_context and not (
+            CONTEXT_PROVIDER_NAMES & set(self.excluded_context_providers)
+        )
 
     # Only read when llm_model is the Antigravity managed agent; a profile
     # pointing anywhere else is rejected at startup rather than silently
@@ -2263,6 +2288,10 @@ class AppConfig(BaseSettings):
 
     conversation_summaries: ConversationSummaryConfig = Field(
         default_factory=ConversationSummaryConfig
+    )
+
+    conversation_threads: ConversationThreadsConfig = Field(
+        default_factory=ConversationThreadsConfig
     )
 
     @model_validator(mode="after")

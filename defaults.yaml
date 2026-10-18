@@ -339,6 +339,12 @@ conversation_summaries:
   batch_size: 10
   timeout_seconds: 20
 
+# Threads: the assistant spins long-running or multi-step work off a user's Home
+# conversation into a thread of its own, on the profile best suited to it. See
+# docs/design/one-thread-chat-ux.md.
+conversation_threads:
+  enabled: false
+
 # Gemini Live Voice API Configuration
 # See: https://ai.google.dev/gemini-api/docs/live
 gemini_live_config:
@@ -996,6 +1002,9 @@ default_profile_settings:
             - "delegate_to_service"
             - "get_delegation_status"
             - "list_delegations"
+            # Refused outside a user's Home, and while conversation_threads is
+            # off; admitted per target by the delegation rules below.
+            - "start_thread"
             - "query_recent_events"
             - "get_home_status"
             - "render_home_assistant_template"
@@ -1049,38 +1058,38 @@ default_profile_settings:
             - "google-maps"
         decision: "allow"
         priority: 10
+      # Per-target delegation rules match the delegation tag rather than a tool
+      # name, so delegate_to_service and start_thread -- both of which hand a
+      # turn to target_service_id -- always get the same decision. The status
+      # tools carry the tag too but take no target_service_id, so these never
+      # match them.
       - match:
-          names:
-            - "delegate_to_service"
+          tags_all: ["delegation"]
           argument_equals:
             target_service_id: "reminder"
         decision: "deny"
         priority: 99
       - match:
-          names:
-            - "delegate_to_service"
+          tags_all: ["delegation"]
           argument_equals:
             target_service_id: "event_handler"
         decision: "deny"
         priority: 99
       - match:
-          names:
-            - "delegate_to_service"
+          tags_all: ["delegation"]
           argument_equals:
             target_service_id: "telephone_external"
         decision: "deny"
         priority: 99
       - match:
-          names:
-            - "delegate_to_service"
+          tags_all: ["delegation"]
           argument_equals:
             target_service_id: "engineer"
         decision: "review"
         priority: 99
         description: "Delegating to the read-only engineer profile is allowed when approved by tool-call review."
       - match:
-          names:
-            - "delegate_to_service"
+          tags_all: ["delegation"]
           argument_equals:
             target_service_id: "ops_automation"
         decision: "confirm"

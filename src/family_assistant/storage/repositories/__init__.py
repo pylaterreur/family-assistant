@@ -8,6 +8,7 @@ from .calendar_provenance import CalendarProvenanceRepository
 from .confirmation_requests import ConfirmationRequestsRepository
 from .conversation_shares import ConversationSharesRepository
 from .conversation_summaries import ConversationSummariesRepository
+from .conversation_threads import ConversationThreadsRepository
 from .delegation_runs import DelegationRunsRepository
 from .email import EmailRepository
 from .error_logs import ErrorLogsRepository
@@ -37,6 +38,7 @@ __all__ = [
     "ConfirmationRequestsRepository",
     "ConversationSharesRepository",
     "ConversationSummariesRepository",
+    "ConversationThreadsRepository",
     "DelegationRunsRepository",
     "EmailRepository",
     "ErrorLogsRepository",

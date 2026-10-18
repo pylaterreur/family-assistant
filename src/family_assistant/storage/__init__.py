@@ -34,6 +34,10 @@ from family_assistant.storage.conversation_shares import conversation_shares_tab
 from family_assistant.storage.conversation_summaries import (
     conversation_summaries_table,
 )
+from family_assistant.storage.conversation_threads import (
+    conversation_homes_table,
+    conversation_threads_table,
+)
 from family_assistant.storage.database import Database
 from family_assistant.storage.delegation_runs import delegation_runs_table
 from family_assistant.storage.email import received_emails_table
@@ -362,8 +366,10 @@ __all__ = [
     "InterfaceType",
     "calendar_event_provenance_table",
     "confirmation_requests_table",
+    "conversation_homes_table",
     "conversation_shares_table",
     "conversation_summaries_table",
+    "conversation_threads_table",
     "create_engine_with_sqlite_optimizations",
     "delegation_runs_table",
     "error_logs_table",
