@@ -43,10 +43,12 @@ from family_assistant.security.taint import (
 )
 from family_assistant.security.taint_audit import taint_audit_sources
 from family_assistant.services.tool_call_review import (
+    ACTION_REVIEW_VERDICTS,
     BrowserActionReviewDecision,
     BrowserActionReviewInput,
     DelegatingPolicyContext,
     HumanConfirmationDecision,
+    ProgramReviewResponse,
     ToolCallReviewConstraints,
     ToolCallReviewer,
     ToolCallReviewInput,
@@ -60,6 +62,7 @@ from family_assistant.services.tool_call_review import (
     build_delegation_review_trigger,
     compute_trusted_destination_echo,
     human_decision_from_confirmation,
+    program_review_constraints,
     resolve_originating_request,
     review_prompt_revision,
 )
@@ -176,7 +179,7 @@ def _constraints(
 ) -> ToolCallReviewConstraints:
     return ToolCallReviewConstraints(
         fallback_verdict=fallback,
-        available_verdicts=available or frozenset(ToolCallReviewVerdict),
+        available_verdicts=available or frozenset(ACTION_REVIEW_VERDICTS),
     )
 
 
@@ -2462,3 +2465,291 @@ def test_a_pre_split_stamp_is_never_read_as_a_relayed_request() -> None:
 
     assert agent_request_source(legacy) is None
     assert agent_request_source(_relayed_metadata()) is not None
+
+
+def _execute_script_descriptor() -> ToolDescriptor:
+    return ToolDescriptor(
+        name="execute_script",
+        definition={
+            "type": "function",
+            "function": {
+                "name": "execute_script",
+                "description": "Run a script.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        tags=frozenset(),
+        origin="local",
+    )
+
+
+_PROGRAM_SOURCE = 'send_email(to="friend@example.test", body=llm("summarise"))'
+
+
+def _program_review_input(
+    *, program_approval_requested: bool = False
+) -> ToolCallReviewInput:
+    return replace(
+        _review_input(descriptor=_execute_script_descriptor()),
+        arguments={"script": _PROGRAM_SOURCE},
+        script=ScriptReviewContext(
+            source=_PROGRAM_SOURCE,
+            inputs={},
+            tools=(_descriptor().definition,),
+            external_functions=("llm", "json_*", "keychute_http_request"),
+        ),
+        program_approval_requested=program_approval_requested,
+    )
+
+
+def _watching_constraints(
+    available: frozenset[ToolCallReviewVerdict] | None = None,
+) -> ToolCallReviewConstraints:
+    return program_review_constraints(
+        _program_review_input(), _constraints(available=available)
+    )
+
+
+class _ProgramFake:
+    def __init__(self, response: ProgramReviewResponse) -> None:
+        self.response = response
+        self.response_models: list[type[object]] = []
+
+    async def generate_structured(
+        self,
+        messages: Sequence[LLMMessage],
+        response_model: type[object],
+        max_retries: int = 2,
+    ) -> object:
+        del messages, max_retries
+        self.response_models.append(response_model)
+        return self.response
+
+
+async def _review_program(
+    response: ProgramReviewResponse,
+    review_input: ToolCallReviewInput | None = None,
+    constraints: ToolCallReviewConstraints | None = None,
+) -> tuple[ToolCallReviewResult, _ProgramFake]:
+    fake = _ProgramFake(response)
+    reviewer = ToolCallReviewer(
+        cast("LLMInterface", fake), ToolCallReviewConfig(timeout_seconds=1)
+    )
+    result = await reviewer.review_tool_call(
+        review_input or _program_review_input(),
+        constraints or _watching_constraints(),
+    )
+    return result, fake
+
+
+@pytest.mark.no_db
+def test_program_review_is_offered_allow_watched() -> None:
+    assert ToolCallReviewVerdict.ALLOW_WATCHED in (
+        _watching_constraints().available_verdicts
+    )
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize(
+    ("review_input", "available"),
+    [
+        # Not a program review.
+        (_review_input(), None),
+        # A review that also decides an enclosing program.
+        (_program_review_input(program_approval_requested=True), None),
+        # Allow is not offered, so neither is a watched allow.
+        (
+            _program_review_input(),
+            frozenset({ToolCallReviewVerdict.CONFIRM, ToolCallReviewVerdict.DENY}),
+        ),
+    ],
+)
+def test_allow_watched_is_offered_only_where_a_program_may_be_allowed(
+    review_input: ToolCallReviewInput,
+    available: frozenset[ToolCallReviewVerdict] | None,
+) -> None:
+    constraints = program_review_constraints(
+        review_input, _constraints(available=available)
+    )
+    assert ToolCallReviewVerdict.ALLOW_WATCHED not in constraints.available_verdicts
+
+
+@pytest.mark.no_db
+def test_action_review_schema_does_not_offer_allow_watched() -> None:
+    schema = json.dumps(ToolCallReviewResponse.model_json_schema())
+    assert "allow_watched" not in schema
+    assert "watched_tools" not in schema
+
+
+@pytest.mark.no_db
+async def test_allow_watched_is_parsed_with_its_watched_tools() -> None:
+    result, fake = await _review_program(
+        ProgramReviewResponse(
+            reason="The summary is model text sent outside the household.",
+            verdict=ToolCallReviewVerdict.ALLOW_WATCHED,
+            watched_tools=["send_email", "keychute_http_request", "send_email"],
+        )
+    )
+    assert fake.response_models == [ProgramReviewResponse]
+    assert result.status is ToolCallReviewStatus.MODEL_VERDICT
+    assert result.verdict is ToolCallReviewVerdict.ALLOW_WATCHED
+    assert result.watched_tools == ("send_email", "keychute_http_request")
+
+
+@pytest.mark.no_db
+async def test_program_review_allow_carries_no_watched_tools() -> None:
+    result, _ = await _review_program(
+        ProgramReviewResponse(
+            reason="Aligned.", verdict=ToolCallReviewVerdict.ALLOW, watched_tools=[]
+        )
+    )
+    assert result.status is ToolCallReviewStatus.MODEL_VERDICT
+    assert result.verdict is ToolCallReviewVerdict.ALLOW
+    assert result.watched_tools == ()
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize(
+    ("verdict", "watched", "error"),
+    [
+        (ToolCallReviewVerdict.ALLOW_WATCHED, ["forward_email"], "cannot call"),
+        # A name, not a pattern: it must match exactly one capability.
+        (ToolCallReviewVerdict.ALLOW_WATCHED, ["json_*"], "cannot call"),
+        (ToolCallReviewVerdict.ALLOW_WATCHED, [], "without any watched tool"),
+        (ToolCallReviewVerdict.ALLOW, ["send_email"], "other than allow_watched"),
+        (ToolCallReviewVerdict.DENY, ["send_email"], "other than allow_watched"),
+    ],
+)
+async def test_unusable_watched_list_takes_the_caller_fallback(
+    verdict: ToolCallReviewVerdict, watched: list[str], error: str
+) -> None:
+    result, _ = await _review_program(
+        ProgramReviewResponse(reason="r", verdict=verdict, watched_tools=watched)
+    )
+    assert result.status is ToolCallReviewStatus.MALFORMED_FALLBACK
+    assert result.used_fallback is True
+    assert result.verdict is ToolCallReviewVerdict.CONFIRM
+    assert error in result.reason
+
+
+@pytest.mark.no_db
+async def test_external_function_pattern_match_may_be_watched() -> None:
+    result, _ = await _review_program(
+        ProgramReviewResponse(
+            reason="r",
+            verdict=ToolCallReviewVerdict.ALLOW_WATCHED,
+            watched_tools=["json_parse"],
+        )
+    )
+    assert result.status is ToolCallReviewStatus.MODEL_VERDICT
+    assert result.watched_tools == ("json_parse",)
+
+
+@pytest.mark.no_db
+async def test_verdict_not_offered_takes_the_caller_fallback() -> None:
+    # An unattended program review offers no confirm.
+    constraints = program_review_constraints(
+        _program_review_input(),
+        ToolCallReviewConstraints(
+            available_verdicts=frozenset({
+                ToolCallReviewVerdict.ALLOW,
+                ToolCallReviewVerdict.DENY,
+            }),
+            fallback_verdict=ToolCallReviewVerdict.DENY,
+        ),
+    )
+    result, _ = await _review_program(
+        ProgramReviewResponse(
+            reason="r", verdict=ToolCallReviewVerdict.CONFIRM, watched_tools=[]
+        ),
+        constraints=constraints,
+    )
+    assert result.status is ToolCallReviewStatus.MALFORMED_FALLBACK
+    assert result.verdict is ToolCallReviewVerdict.DENY
+
+
+@pytest.mark.no_db
+async def test_allow_watched_from_an_action_review_takes_the_caller_fallback() -> None:
+    # Not offered, the action schema cannot carry it; a client that returns
+    # the program response anyway is still not acted on.
+    result, fake = await _review_program(
+        ProgramReviewResponse(
+            reason="r",
+            verdict=ToolCallReviewVerdict.ALLOW_WATCHED,
+            watched_tools=["send_email"],
+        ),
+        review_input=_review_input(),
+        constraints=_constraints(),
+    )
+    assert fake.response_models == [ToolCallReviewResponse]
+    assert result.status is ToolCallReviewStatus.MALFORMED_FALLBACK
+
+
+@pytest.mark.no_db
+async def test_allow_watched_offered_outside_a_program_review_fails_closed() -> None:
+    result, fake = await _review_program(
+        ProgramReviewResponse(
+            reason="r",
+            verdict=ToolCallReviewVerdict.ALLOW_WATCHED,
+            watched_tools=["send_email"],
+        ),
+        review_input=_review_input(),
+        constraints=_watching_constraints(),
+    )
+    assert fake.response_models == []
+    assert result.status is ToolCallReviewStatus.MALFORMED_FALLBACK
+    assert "outside a program review" in result.reason
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize(
+    ("verdict", "watched"),
+    [
+        (ToolCallReviewVerdict.ALLOW_WATCHED, ()),
+        (ToolCallReviewVerdict.ALLOW, ("send_email",)),
+    ],
+)
+def test_result_watched_tools_must_fit_the_verdict(
+    verdict: ToolCallReviewVerdict, watched: tuple[str, ...]
+) -> None:
+    with pytest.raises(ValidationError, match="watched_tools"):
+        ToolCallReviewResult(
+            verdict=verdict,
+            reason="r",
+            status=ToolCallReviewStatus.MODEL_VERDICT,
+            latency_ms=0,
+            used_fallback=False,
+            watched_tools=watched,
+        )
+
+
+@pytest.mark.no_db
+def test_fallback_can_never_be_allow_watched() -> None:
+    with pytest.raises(ValidationError, match="never be allow"):
+        ToolCallReviewConstraints(
+            available_verdicts=frozenset(ToolCallReviewVerdict),
+            fallback_verdict=ToolCallReviewVerdict.ALLOW_WATCHED,
+        )
+
+
+@pytest.mark.no_db
+def test_program_review_prompt_offers_and_explains_watching() -> None:
+    system, user = assemble_tool_call_review_messages(
+        _program_review_input(), _watching_constraints()
+    )
+    system_text = str(system.content)
+    assert "- allow_watched:" in system_text
+    assert "Code the source spells out" in system_text
+    assert "program_approval_requested" not in system_text
+    assert '"allow_watched"' in _prompt([user])
+
+
+@pytest.mark.no_db
+def test_nested_program_decision_keeps_the_script_addendum() -> None:
+    review_input = _program_review_input(program_approval_requested=True)
+    system, _ = assemble_tool_call_review_messages(
+        review_input, program_review_constraints(review_input, _constraints())
+    )
+    system_text = str(system.content)
+    assert "program_approval_requested" in system_text
+    assert "allow_watched" not in system_text

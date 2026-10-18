@@ -207,9 +207,7 @@ def test_script_boundary_context_reaches_review_prompt(
             payload.script.external_functions
         )
         messages = assemble_tool_call_review_messages(review_input, constraints)
-        assert "assess the complete program, effective inputs" in str(
-            messages[0].content
-        )
+        assert "The tool call under review runs a program." in str(messages[0].content)
         prompt = str(messages[1].content)
         assert "<script_execution_context>" in prompt
         assert '"source":' in prompt

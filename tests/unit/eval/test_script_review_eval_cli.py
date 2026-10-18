@@ -1,4 +1,4 @@
-"""Argument handling of ``scripts/script_review_prototype_eval.py``.
+"""Argument handling of ``scripts/script_review_eval.py``.
 
 The script is loaded by path, as ``scripts/`` is not an importable package.
 """
@@ -21,14 +21,14 @@ if TYPE_CHECKING:
 _SCRIPT_PATH = (
     Path(tool_call_review_eval.__file__).parents[3].parent
     / "scripts"
-    / "script_review_prototype_eval.py"
+    / "script_review_eval.py"
 )
 
 
 @pytest.fixture(scope="module")
 def cli() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
-        "script_review_prototype_eval_cli", _SCRIPT_PATH
+        "script_review_eval_cli", _SCRIPT_PATH
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

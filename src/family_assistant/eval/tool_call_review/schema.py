@@ -30,6 +30,7 @@ from family_assistant.security.definition_records import (
 )
 from family_assistant.security.taint import SinkClass, SourceTrustTier, TurnTaintState
 from family_assistant.services.tool_call_review import (
+    ACTION_REVIEW_VERDICTS,
     BrowserActionReviewInput,
     DelegatingPolicyContext,
     ToolCallReviewConstraints,
@@ -166,6 +167,12 @@ class CaseConstraints(BaseModel):
         """
         if not self.available_verdicts:
             raise ValueError("available_verdicts must not be empty")
+        if not {*self.available_verdicts, self.fallback_verdict} <= set(
+            ACTION_REVIEW_VERDICTS
+        ):
+            # allow_watched is added by program_review_constraints for a
+            # program review, never stated by a case.
+            raise ValueError("a case may name only allow, confirm and deny")
         if self.fallback_verdict is ToolCallReviewVerdict.ALLOW:
             raise ValueError("review fallback must never be allow")
         if self.fallback_verdict not in self.available_verdicts:

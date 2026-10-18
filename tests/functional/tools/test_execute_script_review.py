@@ -113,9 +113,11 @@ class _RecordingReviewer:
         self,
         *verdicts: ToolCallReviewVerdict,
         block_call: int | None = None,
+        watched_tools: tuple[str, ...] = (),
     ) -> None:
         self._verdicts = list(verdicts)
         self.block_call = block_call
+        self.watched_tools = watched_tools
         self.calls: list[_ReviewCall] = []
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
@@ -147,6 +149,9 @@ class _RecordingReviewer:
             status=ToolCallReviewStatus.MODEL_VERDICT,
             latency_ms=0,
             used_fallback=False,
+            watched_tools=self.watched_tools
+            if verdict is ToolCallReviewVerdict.ALLOW_WATCHED
+            else (),
         )
 
 
@@ -1335,6 +1340,93 @@ async def test_rejected_program_runs_no_effects(db_engine: AsyncEngine) -> None:
     assert effects == []
     assert isinstance(result, ToolResult)
     assert "blocked by automatic review" in result.get_text().lower()
+
+
+def _watched_program_provider(
+    effects: list[str],
+) -> tuple[TaintTrackingToolsProvider, _RecordingReviewer]:
+    async def ordinary_effect(value: str) -> str:
+        effects.append(value)
+        return "ran"
+
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.ALLOW_WATCHED, watched_tools=("ordinary_effect",)
+    )
+    provider = _provider(
+        [
+            _real_registration("execute_script"),
+            _registration(
+                "ordinary_effect",
+                cast("ToolImplementation", ordinary_effect),
+                tags=(ToolTag.STATE_CHANGING, ToolTag.OUTPUT_TRUSTED),
+                properties={"value": {"type": "string"}},
+            ),
+        ],
+        reviewer=reviewer,
+        rules=[_review_rule("execute_script", ToolPolicyDecision.REVIEW)],
+    )
+    return provider, reviewer
+
+
+@pytest.mark.asyncio
+async def test_watched_program_runs_only_after_a_human_confirms_it(
+    db_engine: AsyncEngine,
+) -> None:
+    # Until per-call review of watched tools exists, a watched allow stands in
+    # as a confirm of the whole program rather than running unwatched.
+    effects: list[str] = []
+    provider, reviewer = _watched_program_provider(effects)
+    confirmation = _ConfirmationRecorder()
+    context = _context(db_engine, provider, confirmation=confirmation)
+
+    await _execute_script(provider, context, script='ordinary_effect(value="approved")')
+
+    assert ToolCallReviewVerdict.ALLOW_WATCHED in (
+        reviewer.calls[0].constraints.available_verdicts
+    )
+    assert [call[0] for call in confirmation.calls] == ["execute_script"]
+    assert effects == ["approved"]
+
+
+@pytest.mark.asyncio
+async def test_unattended_watched_program_runs_no_effects(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    provider, _ = _watched_program_provider(effects)
+    context = _context(db_engine, provider)
+
+    result = await _execute_script(
+        provider, context, script='ordinary_effect(value="blocked")'
+    )
+
+    assert effects == []
+    assert isinstance(result, ToolResult)
+    assert "confirmation is required but unavailable" in result.get_text().lower()
+
+
+@pytest.mark.asyncio
+async def test_watched_program_audit_records_the_reviewers_own_verdict(
+    db_engine: AsyncEngine,
+) -> None:
+    provider, _ = _watched_program_provider([])
+    context = _context(db_engine, provider)
+
+    await _execute_script(provider, context, script='ordinary_effect(value="x")')
+
+    events = await context.db_context.taint_audit_events.list_for_turn(
+        "script-review-turn"
+    )
+    review = next(
+        event
+        for event in events
+        if event["tool_name"] == "execute_script"
+        and event["event_type"] == "tool_call_review"
+    )
+    assert review["review_verdict"] == ToolCallReviewVerdict.ALLOW_WATCHED.value
+    review_context = review["review_context_json"]
+    assert review_context is not None
+    assert review_context.get("watched_tools") == ["ordinary_effect"]
 
 
 @pytest.mark.asyncio

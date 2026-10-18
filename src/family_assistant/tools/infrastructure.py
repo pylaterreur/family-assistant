@@ -75,6 +75,7 @@ from family_assistant.security.taint import (
 )
 from family_assistant.security.taint_audit import taint_audit_sources
 from family_assistant.services.tool_call_review import (
+    ACTION_REVIEW_VERDICTS,
     DelegatingPolicyContext,
     HumanConfirmationDecision,
     ToolCallReviewConstraints,
@@ -85,6 +86,7 @@ from family_assistant.services.tool_call_review import (
     ToolCallReviewVerdict,
     compute_trusted_destination_echo,
     human_decision_from_confirmation,
+    program_review_constraints,
     review_prompt_revision,
 )
 from family_assistant.storage.database import spawn_detached
@@ -1771,7 +1773,33 @@ def _review_verdict_space(
             ToolCallReviewVerdict.CONFIRM,
             ToolCallReviewVerdict.DENY,
         })
-    return frozenset(ToolCallReviewVerdict)
+    return frozenset(ACTION_REVIEW_VERDICTS)
+
+
+def _interim_watched_program_confirmation(
+    result: ToolCallReviewResult,
+) -> ToolCallReviewResult:
+    """Stand an ``allow_watched`` program verdict in as ``confirm``.
+
+    Per-call review of watched tools does not exist yet, and running the
+    program unwatched would turn the reviewer's watch into a plain allow.
+    Confirm is the fail-safe verdict every caller already handles: a human
+    approves the whole program when one can be asked, and an unattended call
+    is blocked. The audit row keeps the reviewer's own verdict and watched list.
+    """
+    watched = ", ".join(result.watched_tools)
+    return ToolCallReviewResult(
+        verdict=ToolCallReviewVerdict.CONFIRM,
+        reason=(
+            f"{result.reason} The reviewer asked for every call to {watched} to "
+            "be reviewed on its own; per-call review of watched tools is not "
+            "available yet, so the whole program needs confirmation."
+        ),
+        status=result.status,
+        latency_ms=result.latency_ms,
+        used_fallback=result.used_fallback,
+        audit_event_id=result.audit_event_id,
+    )
 
 
 def _is_escalatable_review_denial(
@@ -3439,6 +3467,11 @@ class TaintTrackingToolsProvider(ToolsProvider):
             program_approval_requested=program_scope is not None,
             human_decisions=human_decisions,
         )
+        constraints = program_review_constraints(review_input, constraints)
+        if enforce_constraints is not None:
+            enforce_constraints = program_review_constraints(
+                review_input, enforce_constraints
+            )
         if self._tool_call_reviewer is None:
             delegating_reason = " ".join(
                 item.description for item in policy_contexts if item.description
@@ -3477,6 +3510,8 @@ class TaintTrackingToolsProvider(ToolsProvider):
             enforce_constraints=enforce_constraints,
         )
         result = result.model_copy(update={"audit_event_id": audit_event_id})
+        if result.verdict is ToolCallReviewVerdict.ALLOW_WATCHED:
+            result = _interim_watched_program_confirmation(result)
         if program_scope is not None:
             if (
                 result.verdict is ToolCallReviewVerdict.ALLOW
@@ -3958,6 +3993,8 @@ class TaintTrackingToolsProvider(ToolsProvider):
             "used_fallback": result.used_fallback,
             "destination_echo": destination_echo,
         }
+        if result.watched_tools:
+            review_context["watched_tools"] = list(result.watched_tools)
         if enforce_constraints is not None:
             # A live review in observe mode leaves out the taint cell's
             # constraints; enforce would not, so a forecast reads its verdict

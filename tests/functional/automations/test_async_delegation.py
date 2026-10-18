@@ -52,6 +52,7 @@ from family_assistant.security.taint import (
 )
 from family_assistant.services.attachment_registry import AttachmentRegistry
 from family_assistant.services.tool_call_review import (
+    ACTION_REVIEW_VERDICTS,
     ToolCallReviewConstraints,
     ToolCallReviewInput,
     ToolCallReviewVerdict,
@@ -4931,7 +4932,7 @@ def _review_prompt_for(trigger: TriggerReviewInput) -> str:
             trigger=trigger,
         ),
         ToolCallReviewConstraints(
-            available_verdicts=frozenset(ToolCallReviewVerdict),
+            available_verdicts=frozenset(ACTION_REVIEW_VERDICTS),
             fallback_verdict=ToolCallReviewVerdict.CONFIRM,
         ),
     )
