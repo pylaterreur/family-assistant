@@ -71,9 +71,11 @@ from family_assistant.tools.metadata import ToolDescriptor, ToolTag
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+    from family_assistant.json_schema import JsonSchema
     from family_assistant.llm import LLMInterface
     from family_assistant.llm.messages import LLMMessage
     from family_assistant.services.tool_call_review import ToolCallReviewConstraints
+    from family_assistant.tools.types import ToolDefinition
 
 __all__ = [
     "PROTOTYPE_MCP_DESCRIPTORS",
@@ -193,7 +195,9 @@ _RUNTIME_CONTROLS = (
 )
 
 
-def _definition(name: str, description: str, properties: dict[str, object]) -> dict:
+def _definition(
+    name: str, description: str, properties: dict[str, JsonSchema]
+) -> ToolDefinition:
     return {
         "type": "function",
         "function": {
@@ -212,13 +216,13 @@ def _mcp(
     name: str,
     server: str,
     description: str,
-    properties: dict[str, object],
+    properties: dict[str, JsonSchema],
     tags: frozenset[ToolTag],
     destination_argument_paths: tuple[str, ...] = (),
 ) -> ToolDescriptor:
     return ToolDescriptor(
         name=name,
-        definition=_definition(name, description, properties),  # pyright: ignore[reportArgumentType]
+        definition=_definition(name, description, properties),
         tags=tags,
         origin="mcp",
         mcp_server_id=server,
@@ -226,7 +230,7 @@ def _mcp(
     )
 
 
-_STRING = {"type": "string"}
+_STRING: JsonSchema = {"type": "string"}
 _SANDBOX_FILE_TAGS = frozenset({
     ToolTag.SCRIPT_DETERMINISTIC,
     ToolTag.FILE_SYSTEM,
