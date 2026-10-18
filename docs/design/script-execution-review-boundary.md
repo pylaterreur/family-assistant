@@ -3,10 +3,11 @@
 Status: the program boundary (resolution, binding, scoped approval) is implemented. **Who reviews
 what inside a program** ("Review model output once" through "Work plan") is proposed, 2026-10-16. It
 replaces the shipped model-result rule, code-execution literal rule and first-nested-review program
-decision, which remain the behaviour until milestone 4 lands. Milestones 2, 3a and 3b are
-implemented: the production program reviewer returns `allow_watched`, each call to a watched tool is
-reviewed on its own real arguments, and a submitted program that can reach a gated action is
-reviewed before it runs. The evaluation behind the proposal is in the appendix.
+decision, which remain the behaviour until milestone 4 lands. Milestones 2 and 3 are implemented:
+the production program reviewer returns `allow_watched`, each call to a watched tool is reviewed on
+its own real arguments, a submitted program that can reach a gated action is reviewed before it
+runs, and a firing runs as an approved program when its definition resolves and is reviewed once at
+start when it does not. The evaluation behind the proposal is in the appendix.
 
 ## Goal
 
@@ -183,6 +184,16 @@ design unless the program reviewer chose to watch it.
 - **Cured definitions carry no watched set.** Their creation gate judged the program's flows.
   Storing a watched set with the definition waits for evidence of a cured definition doing harm that
   watching would have caught.
+- **"Cured" at firing time means the closure resolves.** A firing runs as an approved program when
+  its definition closure may render as trusted intent: cured by `human_confirmed` or
+  `judge_allowed`, amnestied, or stamped clean because it was written on a trusted turn. A
+  definition written on a trusted turn had nothing external to judge, so reviewing every firing of
+  it would spend reviews on the household's own automations.
+- **An unresolved firing that reaches no gated action runs unreviewed**, by the same reachability
+  judgment as a submission; its ungated steps were never going to be reviewed one by one.
+- **A firing's watched call cannot wait for its owner.** Where a confirmation would be deferred to
+  the automation's owner, a watched call's review is offered allow or deny only, so the program's
+  conditional approval is not stretched into a later prompt for one of its calls.
 - **An over-watched upload prompts.** When the reviewer watches a benign program's large upload, the
   oversize rule turns each watched call into a confirmation (attended) or a denial (unattended). The
   evaluation's watch-cost rate is the measure to tune against. Truncating instead would make watched

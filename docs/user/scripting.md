@@ -199,8 +199,11 @@ approval. If one is declined, that step does not happen and the script carries o
 to check automatically, such as uploading a big file, asks you to confirm it, or is declined when
 nobody can be asked.
 
-A scheduled or event-triggered script is reviewed the same way: the first step that needs a review
-gets one covering the whole script, and the steps after it do not ask again.
+A scheduled or event-triggered script that was set up from your own request, or that you or a review
+approved when it was saved, runs without being reviewed again. One that was saved from content
+outside the household and never approved is reviewed once when it fires, before it starts, if it can
+do any of the steps that need review. Nobody is there to confirm a step when a script fires on its
+own, so if that review does not approve it, the script does not run.
 
 Approval does not grant extra permissions: the tools a script can use and their normal safeguards
 still apply. Saving or running code outside that reviewed set, choosing a child dynamically,
