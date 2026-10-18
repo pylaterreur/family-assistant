@@ -3,8 +3,9 @@
 Status: the program boundary (resolution, binding, scoped approval) is implemented. **Who reviews
 what inside a program** ("Review model output once" through "Work plan") is proposed, 2026-10-16. It
 replaces the shipped model-result rule, code-execution literal rule and first-nested-review program
-decision, which remain the behaviour until milestone 4 lands. The evaluation behind the proposal is
-in the appendix.
+decision, which remain the behaviour until milestone 4 lands. Milestone 2 is implemented: the
+production program reviewer returns `allow_watched`, which runs as a confirmation until milestone 3
+(see "Deliberate simplifications"). The evaluation behind the proposal is in the appendix.
 
 ## Goal
 
@@ -174,6 +175,16 @@ reviewer under this design unless the program reviewer chose to watch it.
   reviews blind for every program.
 - **Externally chosen code in an empty sandbox runs unreviewed**, including `curl … | bash`. This is
   the sandbox's purpose.
+- **Until milestone 3, a watched program is a confirmed one.** The production reviewer can return
+  `allow_watched` before anything can review a watched call, and running the program unwatched would
+  make the watch a plain allow. The tool-call gate therefore treats it as `confirm`: a human
+  approves the whole program when one can be asked, and an unattended call is blocked. The audit row
+  keeps the reviewer's own verdict and watched list, so the interim cost is measurable. Milestone 3
+  replaces this one conversion.
+- **Until milestone 4, the program prompt says more than the runtime does.** It tells the reviewer
+  that a program's calls run without further review, while the old rules still re-review some of
+  them. That errs towards stricter verdicts, and the policy text beside it still describes the old
+  rules accurately until milestone 4 updates both together.
 
 ## Work plan
 
@@ -203,16 +214,16 @@ reviewer under this design unless the program reviewer chose to watch it.
 
 ## Appendix: evaluation
 
-**Approach.** `family_assistant.eval.tool_call_review.script_review_prototype` replays program
-reviews without changing production. Cases reuse the eval harness's conversation payload. Each
-review input is rebuilt by the harness and rendered by the production assembly, with the
-capabilities' tags attached as production attaches them at preparation. The `prototype` variant
-swaps the system prompt's script addendum for a prototype one, adds `allow_watched` to the rendered
-verdict space and asks for a response carrying `watched_tools`. The `production` variant sends
-today's prompt unchanged as a baseline, with production's policy block (runtime controls, model
-boundaries, resource limits) taken from the same constants production uses. The code-execution
+**Approach.** `family_assistant.eval.tool_call_review.script_review_eval` replays program reviews
+through the production reviewer. Cases reuse the eval harness's conversation payload. Each review
+input is rebuilt by the harness, given production's policy block (capability tags, runtime controls,
+model boundaries, resource limits) from the constants production uses at preparation, has its
+verdict space widened by production's `allow_watched` offer rule, and is judged by
+`ToolCallReviewer` itself, so its fail-closed validation decides what is invalid. The code-execution
 sandbox and a mail forward/send tool are MCP tools in a deployment, so the module supplies synthetic
-descriptors for them. The CLI is `scripts/script_review_prototype_eval.py`.
+descriptors for them. The CLI is `scripts/script_review_eval.py`. The milestone 1 runs below used an
+eval-only prototype of the prompt and verdict, since removed; milestone 2 carried it into
+production.
 
 There are 30 cases in 10 families of benign/evil twins, written as realistic Monty scripts that pass
 the script validator. Benign cases expect plain allow: an allow-watched there is a **watch cost**

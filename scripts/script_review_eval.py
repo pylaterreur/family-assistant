@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
-"""Run the eval-only ``allow_watched`` script-review prototype against a judge.
+"""Run the program-review cases through the production tool-call reviewer.
 
-Measures the program-review outcome proposed in
-docs/design/script-execution-review-boundary.md without changing production:
-see ``family_assistant.eval.tool_call_review.script_review_prototype``.
-
-``--prompt prototype`` (default) sends the prototype script-review prompt with
-the four-outcome verdict space; ``--prompt production`` sends today's prompt
-unchanged as a baseline. Prints totals and a per-case table as Markdown, and
-with ``--out`` writes every trial, reasons included, as JSON.
+Measures how the reviewer decides ``execute_script`` programs, including the
+``allow_watched`` outcome of docs/design/script-execution-review-boundary.md:
+see ``family_assistant.eval.tool_call_review.script_review_eval``. Prints totals
+and a per-case table as Markdown, and with ``--out`` writes every trial, reasons
+included, as JSON.
 
 Usage:
 
     # Validate and render the cases, no network:
-    python scripts/script_review_prototype_eval.py --dry-run
+    python scripts/script_review_eval.py --dry-run
 
-    # Measure the deployed judge model on the prototype prompt:
-    python scripts/script_review_prototype_eval.py \
-        --provider anthropic --model claude-haiku-5-5 --seeds 5 \
-        --out .review-eval-local/runs/script-review-prototype.json
+    # Measure the deployed judge model:
+    python scripts/script_review_eval.py \
+        --provider anthropic --model claude-haiku-5-5 --seeds 10 \
+        --out .review-eval-local/runs/script-review.json
 """
 
 from __future__ import annotations
@@ -37,19 +34,22 @@ from family_assistant.eval.private_paths import (
     resolve_private_eval_path,
 )
 from family_assistant.eval.tool_call_review.registry_snapshot import registry_digest
-from family_assistant.eval.tool_call_review.script_review_prototype import (
-    PromptVariant,
+from family_assistant.eval.tool_call_review.script_review_eval import (
     TrialExecutionError,
-    assemble_prototype_messages,
     cases_digest,
     default_cases_dir,
-    load_prototype_cases,
-    prototype_registry,
+    eval_registry,
+    load_script_review_cases,
     render_markdown_summary,
-    run_prototype_eval,
+    review_request,
+    run_script_review_eval,
     validate_case_scripts,
 )
 from family_assistant.llm.factory import LLMClientFactory
+from family_assistant.services.tool_call_review import (
+    assemble_tool_call_review_messages,
+    review_prompt_revision,
+)
 
 
 def _positive_int(raw: str) -> int:
@@ -62,9 +62,6 @@ def _positive_int(raw: str) -> int:
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", type=Path, default=default_cases_dir())
-    parser.add_argument(
-        "--prompt", choices=("prototype", "production"), default="prototype"
-    )
     parser.add_argument("--provider", default="anthropic")
     parser.add_argument("--model", default="claude-haiku-5-5")
     parser.add_argument("--seeds", type=_positive_int, default=5)
@@ -118,10 +115,9 @@ async def _run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    variant: PromptVariant = args.prompt
     source_revision = _source_revision()
-    registry = prototype_registry()
-    cases = load_prototype_cases(args.cases)
+    registry = eval_registry()
+    cases = load_script_review_cases(args.cases)
     if args.case:
         wanted = set(args.case)
         cases = [case for case in cases if case.id in wanted]
@@ -135,8 +131,8 @@ async def _run(args: argparse.Namespace) -> int:
         print(exc, file=sys.stderr)
         return 1
     for case in cases:
-        assemble_prototype_messages(case, variant, registry)
-    print(f"Loaded {len(cases)} case(s); prompt={variant}")
+        assemble_tool_call_review_messages(*review_request(case, registry))
+    print(f"Loaded {len(cases)} case(s); prompt revision {review_prompt_revision()}")
     if args.dry_run:
         for case in cases:
             print(f"  {case.id} [{case.family}/{case.label}]")
@@ -148,10 +144,9 @@ async def _run(args: argparse.Namespace) -> int:
         "model_parameters": {},
     })
     try:
-        trials = await run_prototype_eval(
+        trials = await run_script_review_eval(
             cases,
             client,
-            variant=variant,
             seeds=args.seeds,
             registry=registry,
             concurrency=args.concurrency,
@@ -168,7 +163,7 @@ async def _run(args: argparse.Namespace) -> int:
                 {
                     "provider": args.provider,
                     "model": args.model,
-                    "prompt": variant,
+                    "prompt_revision": review_prompt_revision(),
                     "seeds": args.seeds,
                     "source_revision": source_revision,
                     "cases_digest": cases_digest(cases),
