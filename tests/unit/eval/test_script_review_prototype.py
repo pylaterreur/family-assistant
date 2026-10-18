@@ -27,6 +27,10 @@ from family_assistant.services.tool_call_review import (
     ToolCallReviewInput,
     assemble_tool_call_review_messages,
 )
+from family_assistant.tools.infrastructure import (
+    SCRIPT_REVIEW_MODEL_BOUNDARIES,
+    SCRIPT_REVIEW_RUNTIME_CONTROLS,
+)
 from tests.mocks.mock_llm import RuleBasedMockLLMClient
 
 if TYPE_CHECKING:
@@ -95,6 +99,25 @@ def test_production_variant_is_the_production_prompt(
     # production attaches at preparation time.
     assert messages[0].content == production[0].content
     assert '"tool_tags"' in str(messages[1].content)
+
+
+@pytest.mark.parametrize(
+    ("variant", "carries_production_policy"),
+    [("production", True), ("prototype", False)],
+)
+def test_only_the_production_variant_carries_production_policy_text(
+    cases: list[PrototypeCase],
+    registry: dict[str, ToolDescriptor],
+    variant: PromptVariant,
+    *,
+    carries_production_policy: bool,
+) -> None:
+    case = _case(cases, "printer-stl-slice-upload")
+    _, user = assemble_prototype_messages(case, variant, registry)
+    user_text = str(user.content)
+    assert (SCRIPT_REVIEW_MODEL_BOUNDARIES in user_text) is carries_production_policy
+    assert (SCRIPT_REVIEW_RUNTIME_CONTROLS in user_text) is carries_production_policy
+    assert '"max_execution_time_seconds"' in user_text
 
 
 def test_prototype_variant_swaps_addendum_and_verdict_space(

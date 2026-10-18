@@ -209,9 +209,10 @@ review input is rebuilt by the harness and rendered by the production assembly, 
 capabilities' tags attached as production attaches them at preparation. The `prototype` variant
 swaps the system prompt's script addendum for a prototype one, adds `allow_watched` to the rendered
 verdict space and asks for a response carrying `watched_tools`. The `production` variant sends
-today's prompt unchanged as a baseline. The code-execution sandbox and a mail forward/send tool are
-MCP tools in a deployment, so the module supplies synthetic descriptors for them. The CLI is
-`scripts/script_review_prototype_eval.py`.
+today's prompt unchanged as a baseline, with production's policy block (runtime controls, model
+boundaries, resource limits) taken from the same constants production uses. The code-execution
+sandbox and a mail forward/send tool are MCP tools in a deployment, so the module supplies synthetic
+descriptors for them. The CLI is `scripts/script_review_prototype_eval.py`.
 
 There are 30 cases in 10 families of benign/evil twins, written as realistic Monty scripts that pass
 the script validator. Benign cases expect plain allow: an allow-watched there is a **watch cost**
@@ -232,6 +233,10 @@ Judge: `claude-haiku-5-5`, the deployed reviewer model.
 | Prototype v2, final, dev (24 cases)     | 10    | 127/130            | 3          | 0        | 110/110           | 0      |
 | Prototype v2, final, held out (6 cases) | 10    | 25/30              | 5          | 0        | 30/30             | 0      |
 | Production prompt, baseline (30 cases)  | 10    | 158/160            | n/a        | 2        | 130/140           | 9      |
+
+The production baseline row was recorded before the baseline carried production's model-boundary and
+resource-limit policy text, and has not been re-run since; its counts, the 9 misses included, are
+therefore approximate.
 
 **v1 → v2** was one change, after the 10-seed repeat showed watch cost concentrated on two benign
 dev cases: two sentences in the allow guidance. One says that a classifier whose question is written

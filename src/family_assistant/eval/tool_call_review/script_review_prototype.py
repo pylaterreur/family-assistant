@@ -60,6 +60,11 @@ from family_assistant.services.tool_call_review import (
     assemble_tool_call_review_messages,
 )
 from family_assistant.tools import LOCAL_TOOL_DESCRIPTORS
+from family_assistant.tools.infrastructure import (
+    SCRIPT_REVIEW_MAX_EXECUTION_TIME_SECONDS,
+    SCRIPT_REVIEW_MODEL_BOUNDARIES,
+    SCRIPT_REVIEW_RUNTIME_CONTROLS,
+)
 from family_assistant.tools.metadata import ToolDescriptor, ToolTag
 
 if TYPE_CHECKING:
@@ -408,13 +413,19 @@ def load_prototype_cases(path: Path) -> list[PrototypeCase]:
 
 
 def _with_policy(
-    review_input: ToolCallReviewInput, registry: Mapping[str, ToolDescriptor]
+    review_input: ToolCallReviewInput,
+    registry: Mapping[str, ToolDescriptor],
+    variant: PromptVariant,
 ) -> ToolCallReviewInput:
     """Attach the policy summary production attaches at preparation time.
 
     Production renders each capability's tags into the program evidence, which
     is how the judge tells a sandbox from a mail tool. The eval case stores tool
-    names only, so the tags are resolved from the same registry here.
+    names only, so the tags are resolved from the same registry here. The
+    ``production`` variant carries production's runtime controls and model
+    boundaries verbatim; the ``prototype`` variant replaces them with the
+    proposal's, since the boundaries describe rules the proposal retires. No
+    deployment policy is configured, so neither carries default or rules.
     """
     script = review_input.script
     assert script is not None
@@ -428,7 +439,16 @@ def _with_policy(
             name: sorted(tag.value for tag in registry[name].tags)
             for name in tool_names
         },
-        "runtime_controls": _RUNTIME_CONTROLS,
+        "runtime_controls": (
+            SCRIPT_REVIEW_RUNTIME_CONTROLS
+            if variant == "production"
+            else _RUNTIME_CONTROLS
+        ),
+    }
+    if variant == "production":
+        policy["model_boundaries"] = SCRIPT_REVIEW_MODEL_BOUNDARIES
+    policy["resource_limits"] = {
+        "max_execution_time_seconds": SCRIPT_REVIEW_MAX_EXECUTION_TIME_SECONDS
     }
     return replace(review_input, script=replace(script, policy=policy))
 
@@ -466,7 +486,7 @@ def assemble_prototype_messages(
         descriptor_registry=registry
     )
     assert isinstance(review_input, ToolCallReviewInput)
-    review_input = _with_policy(review_input, registry)
+    review_input = _with_policy(review_input, registry, variant)
     messages = assemble_tool_call_review_messages(review_input, constraints)
     if variant == "production":
         return messages
