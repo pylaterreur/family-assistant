@@ -1,11 +1,15 @@
-import { MessageSquarePlusIcon, SearchIcon } from 'lucide-react';
+import { HomeIcon, MessageSquarePlusIcon, SearchIcon } from 'lucide-react';
 import React, { useEffect, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Conversation, ConversationSidebarProps } from './types';
+import { THREAD_STATE_LABELS, ThreadStateDot } from './ThreadStateDot';
+import { Conversation, ConversationSidebarProps, ThreadState } from './types';
 
 const SEARCH_DEBOUNCE_MS = 300;
+
+// Threads that need the user come first.
+const THREAD_GROUPS: ThreadState[] = ['waiting', 'working', 'failed'];
 
 interface SearchResults {
   query: string;
@@ -21,6 +25,7 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
   isOpen,
   onRefresh: _onRefresh,
   isMobile = false,
+  home = null,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResults | null>(null);
@@ -76,7 +81,16 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
   // While a refined query is in flight, the previous query's matches stay on
   // screen (dimmed) rather than blanking the list on every keystroke. Once the
   // query has its own answer — results or a failure — only that is shown.
-  let displayedConversations: Conversation[] = conversations;
+  // Home and its threads have rows of their own above, so "Earlier" holds
+  // only ordinary conversations, including one optimistically inserted on send.
+  let displayedConversations: Conversation[] = home
+    ? conversations.filter(
+        (conv) =>
+          (conv.kind ?? 'conversation') === 'conversation' &&
+          conv.conversation_id !== home.homeConversationId &&
+          !home.threads.some((thread) => thread.conversation_id === conv.conversation_id)
+      )
+    : conversations;
   if (trimmedQuery) {
     displayedConversations =
       searchResults?.query === trimmedQuery || isAwaitingSearch
@@ -108,6 +122,116 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
     }
     return date.toLocaleDateString();
   };
+
+  const renderConversation = (conv: Conversation) => {
+    const isActive = conv.conversation_id === currentConversationId;
+    return (
+      <button
+        key={conv.conversation_id}
+        className={`w-full text-left px-3 py-2.5 rounded-lg transition-all duration-150 ${
+          isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted/60 text-foreground'
+        }`}
+        onClick={() => onConversationSelect(conv.conversation_id)}
+        data-testid={`conversation-item-${conv.conversation_id}`}
+        data-conversation-id={conv.conversation_id}
+      >
+        <div className="text-sm leading-snug line-clamp-2 break-words mb-1">
+          {conv.summary || conv.last_message}
+        </div>
+        {conv.match_excerpt && (
+          <div
+            className="text-xs leading-snug text-muted-foreground line-clamp-2 break-words mb-1"
+            data-testid="conversation-match-excerpt"
+          >
+            {conv.match_excerpt}
+          </div>
+        )}
+        <div className="flex justify-between items-center">
+          <span className="text-[11px] text-muted-foreground/70">
+            {formatTimestamp(conv.last_timestamp)}
+          </span>
+          {conv.message_count > 1 && (
+            <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 font-normal">
+              {conv.message_count}
+            </Badge>
+          )}
+        </div>
+      </button>
+    );
+  };
+
+  const homeContent = home && (
+    <div className="space-y-3" data-testid="home-sidebar">
+      <button
+        className={`flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm font-medium transition-all duration-150 ${
+          home.homeConversationId === currentConversationId
+            ? 'bg-primary/10 text-primary'
+            : 'hover:bg-muted/60 text-foreground'
+        }`}
+        onClick={() => onConversationSelect(home.homeConversationId)}
+        data-testid="home-item"
+        data-conversation-id={home.homeConversationId}
+      >
+        <HomeIcon size={14} aria-hidden="true" />
+        Home
+      </button>
+      {home.threadsFailed && (
+        <div
+          role="alert"
+          className="flex items-center gap-2 px-3 text-xs text-destructive"
+          data-testid="threads-load-failed"
+        >
+          <span className="flex-1">Couldn't load threads.</span>
+          <Button variant="outline" size="sm" className="h-6 px-2" onClick={home.onRetryThreads}>
+            Retry
+          </Button>
+        </div>
+      )}
+      {THREAD_GROUPS.map((state) => {
+        const threads = home.threads.filter((thread) => thread.state === state);
+        if (threads.length === 0) {
+          return null;
+        }
+        return (
+          <section key={state} data-testid={`thread-group-${state}`}>
+            <h3 className="flex items-center justify-between px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+              <span>{THREAD_STATE_LABELS[state]}</span>
+              <span>{threads.length}</span>
+            </h3>
+            <div className="space-y-0.5">
+              {threads.map((thread) => (
+                <button
+                  key={thread.conversation_id}
+                  className={`w-full rounded-lg px-3 py-2 text-left transition-all duration-150 ${
+                    thread.conversation_id === currentConversationId
+                      ? 'bg-primary/10 text-primary'
+                      : 'hover:bg-muted/60 text-foreground'
+                  }`}
+                  onClick={() => onConversationSelect(thread.conversation_id)}
+                  data-testid={`thread-item-${thread.conversation_id}`}
+                  data-conversation-id={thread.conversation_id}
+                  data-thread-state={thread.state}
+                >
+                  <span className="flex min-w-0 items-center gap-2 text-sm">
+                    <ThreadStateDot state={thread.state} />
+                    <span className="min-w-0 truncate">{thread.title}</span>
+                  </span>
+                  {thread.preview && (
+                    <span className="mt-0.5 block truncate pl-4 text-xs text-muted-foreground">
+                      {thread.preview}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </section>
+        );
+      })}
+      <h3 className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Earlier
+      </h3>
+    </div>
+  );
 
   const sidebarContent = (
     <div className="flex h-full flex-col min-h-0">
@@ -154,6 +278,7 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
               Search failed. Try again.
             </div>
           )}
+          {!trimmedQuery && homeContent}
           {(conversationsLoading && !trimmedQuery) || showSearchingPlaceholder ? (
             <div
               className="py-8 text-center text-sm text-muted-foreground/60"
@@ -164,7 +289,11 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
           ) : displayedConversations.length === 0 ? (
             !searchFailed && (
               <div className="py-8 text-center text-sm text-muted-foreground/60">
-                {trimmedQuery ? 'No matches' : 'No conversations yet'}
+                {trimmedQuery
+                  ? 'No matches'
+                  : home
+                    ? 'No earlier conversations'
+                    : 'No conversations yet'}
               </div>
             )
           ) : (
@@ -172,45 +301,7 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
               className={`space-y-0.5 transition-opacity ${isAwaitingSearch ? 'opacity-60' : ''}`}
               aria-busy={isAwaitingSearch}
             >
-              {displayedConversations.map((conv: Conversation) => {
-                const isActive = conv.conversation_id === currentConversationId;
-                return (
-                  <button
-                    key={conv.conversation_id}
-                    className={`w-full text-left px-3 py-2.5 rounded-lg transition-all duration-150 ${
-                      isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted/60 text-foreground'
-                    }`}
-                    onClick={() => onConversationSelect(conv.conversation_id)}
-                    data-testid={`conversation-item-${conv.conversation_id}`}
-                    data-conversation-id={conv.conversation_id}
-                  >
-                    <div className="text-sm leading-snug line-clamp-2 break-words mb-1">
-                      {conv.summary || conv.last_message}
-                    </div>
-                    {conv.match_excerpt && (
-                      <div
-                        className="text-xs leading-snug text-muted-foreground line-clamp-2 break-words mb-1"
-                        data-testid="conversation-match-excerpt"
-                      >
-                        {conv.match_excerpt}
-                      </div>
-                    )}
-                    <div className="flex justify-between items-center">
-                      <span className="text-[11px] text-muted-foreground/70">
-                        {formatTimestamp(conv.last_timestamp)}
-                      </span>
-                      {conv.message_count > 1 && (
-                        <Badge
-                          variant="secondary"
-                          className="text-[10px] px-1.5 py-0 h-4 font-normal"
-                        >
-                          {conv.message_count}
-                        </Badge>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
+              {displayedConversations.map(renderConversation)}
             </div>
           )}
         </div>

@@ -117,6 +117,15 @@ export const handlers = [
     });
   }),
 
+  // Threads are off unless a test turns them on, so the chat lists conversations.
+  http.get('/api/v1/chat/home', () => {
+    return HttpResponse.json({ enabled: false, conversation_id: null });
+  }),
+
+  http.get('/api/v1/chat/home/threads', () => {
+    return HttpResponse.json({ home_conversation_id: null, threads: [] });
+  }),
+
   http.get('/api/v1/chat/conversations/:conversationId/share', () => {
     return HttpResponse.json({ active: false });
   }),

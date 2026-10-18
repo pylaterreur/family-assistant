@@ -614,10 +614,6 @@ async def _prepare_script_call(
         tools=tuple(copy.deepcopy(item.definition) for item in inventory),
         policy=policy_context,
     )
-    if policy is not None:
-        invocation.policy_gated = frozenset(
-            item.name for item in inventory if policy.may_gate(item)
-        )
     context.prepared_script = invocation
     return invocation.arguments()
 
@@ -645,6 +641,21 @@ class _ProgramGate:
     static: bool
     """Static policy enforces in every taint mode, so its review is never a forecast."""
 
+
+_FIRING_PROGRAM_DESCRIPTOR = ToolDescriptor(
+    name="execute_script",
+    definition={
+        "type": "function",
+        "function": {
+            "name": "execute_script",
+            "description": "A stored definition's script, run by its trigger.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    tags=frozenset({ToolTag.CODE_EXECUTION}),
+    origin="local",
+)
+"""What a firing's program review presents as the call under review."""
 
 _ALLOWING_VERDICTS = frozenset({
     ToolCallReviewVerdict.ALLOW,
@@ -1834,6 +1845,28 @@ def _review_verdict_space(
     return frozenset(ACTION_REVIEW_VERDICTS)
 
 
+def _without_confirm(
+    constraints: ToolCallReviewConstraints,
+) -> ToolCallReviewConstraints:
+    """The verdict space of a review nobody is present to answer a confirm for."""
+    return ToolCallReviewConstraints(
+        available_verdicts=(
+            constraints.available_verdicts - {ToolCallReviewVerdict.CONFIRM}
+        )
+        or frozenset({ToolCallReviewVerdict.DENY}),
+        fallback_verdict=ToolCallReviewVerdict.DENY,
+    )
+
+
+def _confirmation_is_deferred(context: ToolExecutionContext) -> bool:
+    """Whether a confirmation here would be answered later, not in this run."""
+    callback = context.request_confirmation_callback
+    return (
+        isinstance(callback, DeferredConfirmationCallback)
+        and callback.is_deferred_confirmation()
+    )
+
+
 def _is_escalatable_review_denial(
     result: ToolCallReviewResult,
     constraints: ToolCallReviewConstraints,
@@ -2161,6 +2194,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
                     taint_evaluation=evaluation,
                     static_evaluation=None,
                     watched=watched,
+                    unattended=watched and _confirmation_is_deferred(context),
                 )
                 return
             # A review that also decides the running program is awaited in
@@ -2180,6 +2214,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 forecast=forecast,
                 program_scope=program_scope,
                 watched=watched,
+                unattended=watched and _confirmation_is_deferred(context),
             )
             if forecast:
                 return
@@ -2901,6 +2936,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 pending=pending_definition_review,
                 escalates=True,
                 watched=watched,
+                unattended=watched and _confirmation_is_deferred(context),
             )
         elif (
             static_review
@@ -2943,6 +2979,9 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 program_scope=_program_scope_awaiting_review(context),
                 watched=watched,
                 gated_capability=gated_capability,
+                # A watched call is held to the program's own review: where
+                # its confirmation would only be answered later, it is denied.
+                unattended=watched and _confirmation_is_deferred(context),
             )
 
         if review_result is not None:
@@ -3371,14 +3410,79 @@ class TaintTrackingToolsProvider(ToolsProvider):
             fallback_verdict=fallback,
         )
 
+    async def review_firing_program(self, context: ToolExecutionContext) -> str | None:
+        """Review an unresolved definition's firing once, before it runs.
+
+        Returns ``None`` when the program may run, or why it may not. A program
+        that reaches no gated action runs without a review. Nobody can confirm
+        a firing, so the verdict is allow (plainly or watched) or deny; an
+        allow approves the running program. Observe records the verdict and
+        never stops the firing.
+        """
+        scope = context.script_execution
+        if scope is None:
+            raise ValueError("a firing review needs the firing's running program")
+        prepared = scope.invocation
+        state = (
+            context.taint_tracker.snapshot()
+            if context.taint_tracker is not None
+            else TurnTaintState.empty()
+        )
+        gate = await self._gated_program_capability(prepared, state)
+        if gate is None:
+            return None
+        evaluation = self._taint_evaluator.evaluate(
+            state=state, sink_class=SinkClass.SANDBOX_NETWORK
+        )
+        # Static policy enforces in every mode, so only a taint-asked review
+        # is a forecast.
+        forecast = evaluation.mode is TaintPolicyMode.OBSERVE and not gate.static
+        result = await self._review_tool_call(
+            descriptor=_FIRING_PROGRAM_DESCRIPTOR,
+            arguments={
+                "script": prepared.review.source,
+                "globals": dict(prepared.review.inputs),
+            },
+            context=replace(context, script_execution=None, prepared_script=prepared),
+            call_id=None,
+            state=state,
+            sink_class=SinkClass.SANDBOX_NETWORK,
+            taint_evaluation=evaluation,
+            static_evaluation=None,
+            include_observe_taint_constraints=forecast,
+            forecast=forecast,
+            gated_capability=gate.name,
+            unattended=True,
+        )
+        if (
+            result.verdict in _ALLOWING_VERDICTS
+            and result.status is ToolCallReviewStatus.MODEL_VERDICT
+            and not result.used_fallback
+        ):
+            prepared.approved = True
+            prepared.watched_tools = frozenset(result.watched_tools)
+            prepared.review = replace(
+                prepared.review,
+                decision=result.verdict.value,
+                review_id=result.audit_event_id,
+            )
+            return None
+        scope.record_program_decision(
+            f"{result.verdict.value}:{result.status.value}", result.audit_event_id
+        )
+        if forecast:
+            return None
+        return result.reason
+
     async def _gated_program_capability(
         self, prepared: PreparedScriptInvocation, state: TurnTaintState
     ) -> _ProgramGate | None:
         """A gated action the program can reach, judged as if it read untrusted data.
 
-        Uses the evaluations its calls will face: static policy, decided at
-        preparation, and the taint cell each capability's sink resolves to once
-        the program has read external content. Over-inclusion costs one review.
+        Uses the evaluations its calls will face: the static policy this
+        provider wraps, and the taint cell each capability's sink resolves to
+        once the program has read external content. Over-inclusion costs one
+        review.
         """
         reachable = prepared.reachable_capabilities()
         if not reachable:
@@ -3401,8 +3505,15 @@ class TaintTrackingToolsProvider(ToolsProvider):
             TaintPolicyOutcome.CONFIRM,
             TaintPolicyOutcome.DENY,
         }
+        policy = find_provider_by_type(
+            self.wrapped_provider, PolicyEnforcingToolsProvider
+        )
         for name in sorted(reachable):
-            if name in prepared.policy_gated:
+            if (
+                policy is not None
+                and name in descriptors
+                and policy.policy_engine.may_gate(descriptors[name])
+            ):
                 return _ProgramGate(name=name, static=True)
             if name in GATED_EXTERNAL_FUNCTIONS:
                 sink_class = SinkClass.SANDBOX_NETWORK
@@ -3524,6 +3635,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
         program_scope: ScriptExecutionScope | None = None,
         watched: bool = False,
         gated_capability: str | None = None,
+        unattended: bool = False,
     ) -> ToolCallReviewResult:
         """Run one review; ``program_scope`` makes its verdict the program's too.
 
@@ -3532,6 +3644,8 @@ class TaintTrackingToolsProvider(ToolsProvider):
         call the running program's review asked to see on its own; its verdict
         decides this call only. ``gated_capability`` names a gated action the
         program under review can reach, when that alone asked for the review.
+        ``unattended`` withholds ``confirm``: nobody can answer one, so a
+        verdict that is not an allow is a denial.
         """
         constraints = self._review_constraints(
             taint_evaluation=taint_evaluation,
@@ -3549,6 +3663,10 @@ class TaintTrackingToolsProvider(ToolsProvider):
             and not include_observe_taint_constraints
             else None
         )
+        if unattended:
+            constraints = _without_confirm(constraints)
+            if enforce_constraints is not None:
+                enforce_constraints = _without_confirm(enforce_constraints)
         config = self._review_config
         budget_exhausted = (
             config is not None
@@ -3755,6 +3873,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
         pending: PendingDefinitionReview | None = None,
         escalates: bool = False,
         watched: bool = False,
+        unattended: bool = False,
     ) -> None:
         """Review off the critical path; ``escalates`` forecasts a denial escalation.
 
@@ -3783,6 +3902,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
             count_reserved=not budget_exhausted,
             forecast=True,
             watched=watched,
+            unattended=unattended,
         )
         if escalates:
             review = self._forecast_escalation_after(
