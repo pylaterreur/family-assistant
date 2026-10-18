@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -9,13 +10,17 @@ import pytest
 
 from family_assistant.config_models import AppConfig, ConversationThreadsConfig
 from family_assistant.llm.messages import AssistantMessage, UserMessage
+from family_assistant.processing import ProcessingService
 from family_assistant.storage.database import Database
 from family_assistant.web.dependencies import get_current_user
+from tests.mocks.mock_llm import LLMOutput, MatcherArgs, RuleBasedMockLLMClient
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
     from httpx import AsyncClient
     from sqlalchemy.ext.asyncio import AsyncEngine
+
+    from family_assistant.llm.messages import LLMMessage
 
 NOW = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
 CALLER = "test_user"
@@ -162,3 +167,87 @@ async def test_threads_never_list_another_users_home(
         app_fixture.dependency_overrides.pop(get_current_user, None)
 
     assert response.json()["threads"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_a_thread_reports_its_kind_and_card(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(Database(engine=db_engine), home)
+
+    body = (
+        await api_test_client.get(
+            f"/api/v1/chat/conversations/{thread}/messages",
+            params={"include_conversation_profile": "true"},
+        )
+    ).json()
+
+    assert (
+        body["conversation_kind"],
+        body["latest_user_profile_id"],
+        body["thread"]["home_conversation_id"],
+        body["thread"]["title"],
+    ) == ("thread", "browser_profile", home, "Hot water system quotes")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_home_reports_its_kind(api_test_client: AsyncClient) -> None:
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+
+    body = (
+        await api_test_client.get(
+            f"/api/v1/chat/conversations/{home}/messages",
+            params={"include_conversation_profile": "true"},
+        )
+    ).json()
+
+    assert body["conversation_kind"] == "home"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_a_turn_in_a_thread_runs_on_the_threads_profile(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+    api_test_processing_service: ProcessingService,
+    db_engine: AsyncEngine,
+) -> None:
+    seen: list[list[LLMMessage]] = []
+
+    def thread_reply(kwargs: MatcherArgs) -> LLMOutput:
+        seen.append(list(kwargs.get("messages", [])))
+        return LLMOutput(content="the thread's profile answered")
+
+    thread_service = ProcessingService(
+        llm_client=RuleBasedMockLLMClient(rules=[(lambda _kwargs: True, thread_reply)]),
+        tools_provider=api_test_processing_service.tools_provider,
+        service_config=replace(
+            api_test_processing_service.service_config, id="browser_profile"
+        ),
+        context_providers=[],
+        server_url="http://testserver",
+        app_config=api_test_processing_service.app_config,
+    )
+    default_id = api_test_processing_service.service_config.id
+    app_fixture.state.processing_services = {
+        default_id: api_test_processing_service,
+        "browser_profile": thread_service,
+    }
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(Database(engine=db_engine), home)
+
+    response = await api_test_client.post(
+        "/api/v1/chat/send_message",
+        json={
+            "prompt": "Gas, please.",
+            "conversation_id": thread,
+            "profile_id": default_id,
+            "interface_type": "web",
+        },
+    )
+
+    assert response.json()["reply"] == "the thread's profile answered"
+    assert any("Find three plumbers." in str(m.content) for m in seen[0])

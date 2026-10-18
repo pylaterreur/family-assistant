@@ -12,9 +12,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from family_assistant.storage.database import DatabaseExecutor
+    from family_assistant.storage.repositories.conversation_threads import (
+        ConversationThread,
+    )
 
 ThreadState = Literal["working", "waiting", "failed"]
 
@@ -81,6 +84,16 @@ async def list_home_threads(
     only the live stream hub knows.
     """
     threads = await db.conversation_threads.list_for_home(home_conversation_id)
+    return await summarize_threads(db, threads, turn_running=turn_running)
+
+
+async def summarize_threads(
+    db: DatabaseExecutor,
+    threads: Sequence[ConversationThread],
+    *,
+    turn_running: Callable[[str], bool],
+) -> list[ThreadSummary]:
+    """What a card shows about each of ``threads``, in the same order."""
     if not threads:
         return []
     runs = await db.delegation_runs.get_by_delegation_ids([
