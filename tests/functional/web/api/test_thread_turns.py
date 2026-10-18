@@ -25,7 +25,7 @@ from sqlalchemy import select
 from family_assistant.config_models import AppConfig, ConversationThreadsConfig
 from family_assistant.interfaces import ChatInterface
 from family_assistant.processing import ProcessingService
-from family_assistant.storage import delegation_runs_table
+from family_assistant.storage import delegation_runs_table, tasks_table
 from family_assistant.storage.database import Database
 from family_assistant.storage.tasks import TaskPriority
 from family_assistant.task_worker import TaskWorker
@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
     from httpx import AsyncClient
     from sqlalchemy.ext.asyncio import AsyncEngine
+
+    from family_assistant.web.conversation_stream_hub import ConversationStreamHub
 
 TARGET = "complex_tasks"
 OWNER = "test_user"
@@ -134,6 +136,7 @@ class QueuedThread:
     turn_id: str
     worker: TaskWorker
     context: ToolExecutionContext
+    hub: ConversationStreamHub
 
     async def run_worker(self) -> None:
         await self.worker.handle_delegated_profile_run(
@@ -217,6 +220,7 @@ async def queued_thread(
         turn_id=turn_id,
         worker=worker,
         context=context,
+        hub=app_fixture.state.conversation_stream_hub,
     )
 
 
@@ -361,3 +365,30 @@ async def test_the_first_turn_is_reviewed_against_the_threads_request(
     await queued_thread.run_worker()
 
     assert [trigger is not None for trigger in triggers] == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_run_waiting_on_a_busy_thread_is_rescheduled(
+    queued_thread: QueuedThread,
+) -> None:
+    await queued_thread.hub.start_turn(
+        THREAD,
+        turn_id="another-turn",
+        user_id=OWNER,
+        started_at=datetime.now(UTC),
+        reject_if_running=True,
+    )
+
+    await queued_thread.run_worker()
+
+    [run] = await queued_thread.db.fetch_all(
+        select(delegation_runs_table.c.status).where(
+            delegation_runs_table.c.run_kind == "thread"
+        )
+    )
+    rescheduled = await queued_thread.db.fetch_all(
+        select(tasks_table.c.task_id).where(
+            tasks_table.c.task_type == "delegated_profile_run"
+        )
+    )
+    assert (run["status"], len(rescheduled)) == ("queued", 1)

@@ -1054,11 +1054,8 @@ class ConfirmationNotificationError(RuntimeError):
     """Raised when a confirmation result notification cannot be delivered."""
 
 
-class ThreadTurnDeferredError(RuntimeError):
-    """A thread run cannot start yet: a turn is in progress in its thread.
-
-    Raised so the task queue retries the run once that turn has ended.
-    """
+THREAD_TURN_DEFER_SECONDS = 5.0
+"""How long a thread run waits before trying again when its thread is busy."""
 
 
 class DelegationNotificationError(RuntimeError):
@@ -2273,9 +2270,27 @@ class TaskWorker:
                 )
             )
             if current is not None and current["status"] == "queued":
-                raise ThreadTurnDeferredError(
-                    f"Thread run {delegation_id} is waiting for the turn in progress "
-                    "in its conversation to end."
+                # Rescheduled as a fresh task rather than retried: the turn in
+                # the way can outlast the run's bounded retries, and running out
+                # of them would strand the run queued.
+                await exec_context.db_context.tasks.enqueue(
+                    task_id=f"{DELEGATED_PROFILE_RUN_TASK_TYPE}_{uuid.uuid4().hex}",
+                    task_type=DELEGATED_PROFILE_RUN_TASK_TYPE,
+                    payload={
+                        "delegation_id": delegation_id,
+                        "interface_type": run["interface_type"],
+                        "conversation_id": run["conversation_id"],
+                        "user_name": run["user_name"] or "",
+                    },
+                    scheduled_at=clock.now()
+                    + timedelta(seconds=THREAD_TURN_DEFER_SECONDS),
+                    max_retries_override=1,
+                    priority=exec_context.inherited_task_priority(),
+                )
+                logger.info(
+                    "Thread run %s is waiting for the turn in progress in its "
+                    "conversation; rescheduled.",
+                    delegation_id,
                 )
             return
         await self._settle_delegated_turn(
