@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>One-thread hybrid chat — mockups</title>
+<style>
+  :root {
+    --ios-bg: #f2f2f7; --ios-card: #fff; --ios-sep: #e5e5ea; --ios-text: #000; --ios-sub: #8e8e93;
+    --ios-blue: #007aff; --bubble-user: #dbeafe;
+    --dot-run: #f5b83d; --dot-you: #7c5cff; --dot-done: #1f8f4e; --dot-fail: #e5484d;
+    --slate-900: #0f172a; --slate-700: #334155; --slate-500: #64748b; --slate-300: #cbd5e1;
+    --slate-200: #e2e8f0; --slate-100: #f1f5f9; --slate-50: #f8fafc;
+    --chip: #ece8ff; --chip-text: #4b3bb5;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, sans-serif; background: #d9dce3; color: var(--slate-900); }
+  h1, h2 { font-weight: 700; letter-spacing: -0.01em; }
+  .page { max-width: 1560px; margin: 0 auto; padding: 32px 32px 64px; }
+  .intro { max-width: 980px; }
+  .intro p, .notes li { color: var(--slate-700); }
+  section.board { margin-top: 40px; }
+  section.board > h2 { margin: 0 0 4px; font-size: 22px; }
+  section.board > p.caption { margin: 0 0 20px; color: var(--slate-500); max-width: 980px; }
+  .row { display: flex; gap: 36px; flex-wrap: wrap; align-items: flex-start; }
+  .frame-label { font-size: 13px; font-weight: 600; color: var(--slate-700); margin: 0 0 8px 4px; }
+
+  /* ---------- iPhone frame ---------- */
+  .phone { width: 390px; height: 844px; background: var(--ios-bg); border-radius: 54px; border: 12px solid #111; position: relative; overflow: hidden; box-shadow: 0 30px 60px -20px rgba(0,0,0,.35); }
+  .phone .status { height: 50px; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 34px 6px; font-weight: 600; font-size: 16px; }
+  .phone .island { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); width: 120px; height: 34px; background: #000; border-radius: 20px; }
+  .nav { display: flex; align-items: center; justify-content: space-between; padding: 6px 14px 10px; }
+  .circ { width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,.9); box-shadow: 0 1px 6px rgba(0,0,0,.08); display: grid; place-items: center; font-size: 18px; position: relative; }
+  .circ .badge { position: absolute; top: -3px; right: -3px; min-width: 19px; height: 19px; padding: 0 5px; border-radius: 10px; background: var(--dot-you); color: #fff; font-size: 11px; font-weight: 700; display: grid; place-items: center; }
+  .pill { height: 44px; border-radius: 22px; background: rgba(255,255,255,.9); box-shadow: 0 1px 6px rgba(0,0,0,.08); display: flex; align-items: center; gap: 8px; padding: 0 16px 0 8px; font-weight: 600; }
+  .pill .ico { width: 30px; height: 30px; border-radius: 50%; background: #eef0f3; display: grid; place-items: center; font-size: 15px; }
+  .pill small { display: block; font-weight: 500; font-size: 11px; color: var(--ios-sub); margin-top: -2px; }
+  .scroll { position: absolute; top: 110px; bottom: 96px; left: 0; right: 0; overflow: hidden; padding: 0 14px; }
+  .composer { position: absolute; bottom: 22px; left: 12px; right: 12px; height: 58px; background: #fff; border-radius: 29px; box-shadow: 0 2px 10px rgba(0,0,0,.08); display: flex; align-items: center; gap: 10px; padding: 0 8px; }
+  .composer .plus, .composer .send, .composer .mic { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; background: #f1f1f4; font-size: 20px; color: #333; flex: none; }
+  .composer .send { background: #e9a08f; color: #fff; }
+  .composer .ph { flex: 1; color: #a0a0a8; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .composer .ph b { color: var(--chip-text); font-weight: 600; }
+
+  .day { text-align: center; font-size: 12px; color: var(--ios-sub); margin: 6px 0 10px; font-weight: 600; }
+  .u { margin: 10px 0 10px 48px; background: #ececef; border-radius: 22px; padding: 11px 15px; font-size: 15.5px; }
+  .a { margin: 8px 6px 12px 4px; font-size: 15.5px; }
+  .a .meta { font-size: 12px; color: var(--ios-sub); margin-top: 4px; }
+  .quiet { color: var(--ios-sub); font-size: 13px; margin: 2px 4px 10px; }
+
+  /* thread card (main stream) */
+  .tcard { background: #fff; border: 1px solid #e3e3e8; border-radius: 18px; padding: 12px 14px; margin: 8px 0 12px; }
+  .tcard .top { display: flex; align-items: center; gap: 10px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  .dot.run { background: var(--dot-run); box-shadow: 0 0 0 4px rgba(245,184,61,.18); }
+  .dot.you { background: var(--dot-you); box-shadow: 0 0 0 4px rgba(124,92,255,.18); }
+  .dot.done { background: var(--dot-done); }
+  .dot.fail { background: var(--dot-fail); }
+  .check { width: 20px; height: 20px; border-radius: 50%; background: var(--dot-done); color: #fff; font-size: 12px; display: grid; place-items: center; flex: none; }
+  .tcard .title { font-weight: 600; flex: 1; font-size: 15.5px; }
+  .tcard .chip, .chip { background: var(--chip); color: var(--chip-text); font-size: 12.5px; font-weight: 600; border-radius: 12px; padding: 3px 9px; white-space: nowrap; }
+  .chip.grey { background: #eef0f3; color: #555; }
+  .tcard .line { color: #555; font-size: 13.5px; margin: 6px 0 0 20px; }
+  .tcard .line .ago { color: var(--ios-sub); }
+  .tcard .actions { display: flex; gap: 8px; margin: 10px 0 2px 20px; }
+  .btn { border-radius: 14px; padding: 7px 12px; font-size: 14px; font-weight: 600; background: #f1f1f4; color: #222; border: none; }
+  .btn.primary { background: var(--slate-900); color: #fff; }
+  .btn.ios { background: var(--ios-blue); color: #fff; }
+  .unread { background: var(--dot-you); color: #fff; font-size: 11px; font-weight: 700; border-radius: 10px; padding: 1px 7px; }
+  .progress { height: 4px; background: #f0f0f3; border-radius: 2px; margin: 9px 0 0 20px; overflow: hidden; }
+  .progress i { display: block; height: 100%; width: 45%; background: var(--dot-run); border-radius: 2px; }
+
+  /* thread-finished echo in main stream */
+  .echo { margin: 6px 0 12px; padding: 2px 0 2px 12px; border-left: 3px solid var(--dot-done); font-size: 15px; }
+  .echo .from { font-size: 12px; color: var(--ios-sub); font-weight: 600; margin-bottom: 2px; }
+
+  /* thread view */
+  .origin { background: #fff; border-radius: 16px; padding: 10px 12px; margin: 4px 0 12px; font-size: 13.5px; color: #555; border: 1px dashed #d4d4da; }
+  .origin b { color: #222; }
+  .tool { background: #fff; border-radius: 14px; padding: 9px 12px; margin: 6px 0; font-size: 13.5px; display: flex; gap: 8px; align-items: center; border: 1px solid #ececf0; }
+  .tool .t { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+  .tool .st { margin-left: auto; color: var(--ios-sub); font-size: 12px; }
+  .ask { background: #f4f1ff; border: 1px solid #ddd5ff; border-radius: 16px; padding: 11px 13px; margin: 8px 0; }
+  .ask .q { font-weight: 600; margin-bottom: 8px; }
+  table.mini { width: 100%; border-collapse: collapse; font-size: 13.5px; background: #fff; border-radius: 12px; overflow: hidden; margin-top: 6px; }
+  table.mini td, table.mini th { padding: 7px 9px; border-bottom: 1px solid #eee; text-align: left; }
+  table.mini th { font-size: 12px; color: var(--ios-sub); font-weight: 600; }
+
+  /* threads sheet */
+  .sheet { position: absolute; left: 0; right: 0; bottom: 0; top: 64px; background: var(--ios-bg); border-radius: 22px 22px 0 0; box-shadow: 0 -10px 40px rgba(0,0,0,.18); padding: 8px 16px; }
+  .grabber { width: 38px; height: 5px; background: #c7c7cc; border-radius: 3px; margin: 0 auto 12px; }
+  .sheet h3 { margin: 0 0 10px; font-size: 26px; }
+  .seg { display: flex; background: #e3e3e8; border-radius: 9px; padding: 2px; margin-bottom: 14px; font-size: 13px; font-weight: 600; }
+  .seg span { flex: 1; text-align: center; padding: 6px 0; border-radius: 7px; color: #444; }
+  .seg span.on { background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.1); color: #000; }
+  .group-h { font-size: 13px; font-weight: 600; color: var(--ios-sub); text-transform: uppercase; letter-spacing: .03em; margin: 14px 4px 6px; }
+  .list { background: #fff; border-radius: 16px; overflow: hidden; }
+  .li { display: flex; gap: 11px; padding: 11px 14px; border-bottom: 1px solid var(--ios-sep); align-items: flex-start; }
+  .li:last-child { border-bottom: none; }
+  .li .dot { margin-top: 6px; }
+  .li .body { flex: 1; min-width: 0; }
+  .li .t { font-weight: 600; font-size: 15px; display: flex; gap: 8px; align-items: center; }
+  .li .t .when { margin-left: auto; color: var(--ios-sub); font-weight: 400; font-size: 13px; }
+  .li .s { color: #666; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .li.home .ico { width: 30px; height: 30px; border-radius: 9px; background: var(--slate-900); color: #fff; display: grid; place-items: center; font-size: 15px; flex: none; }
+
+  /* context menu */
+  .dim { position: absolute; inset: 0; background: rgba(240,240,245,.55); backdrop-filter: blur(6px); }
+  .lifted { position: absolute; left: 62px; right: 14px; top: 300px; background: #ececef; border-radius: 22px; padding: 11px 15px; font-size: 15.5px; box-shadow: 0 10px 30px rgba(0,0,0,.18); }
+  .menu { position: absolute; right: 14px; top: 410px; width: 270px; background: rgba(250,250,252,.97); border-radius: 14px; box-shadow: 0 12px 40px rgba(0,0,0,.22); overflow: hidden; font-size: 16px; }
+  .menu div { padding: 12px 16px; border-bottom: 1px solid #e5e5ea; display: flex; justify-content: space-between; }
+  .menu div.sep { border-bottom: 7px solid #e5e5ea; }
+  .menu div.hl { background: #f0edff; color: var(--chip-text); font-weight: 600; }
+  .menu div:last-child { border-bottom: none; }
+
+  /* ---------- Web frame ---------- */
+  .browser { width: 1440px; height: 860px; border-radius: 12px; overflow: hidden; background: #fff; box-shadow: 0 30px 60px -20px rgba(0,0,0,.35); border: 1px solid #c9ccd3; display: flex; flex-direction: column; }
+  .chrome { height: 38px; background: #e8eaed; display: flex; align-items: center; gap: 8px; padding: 0 14px; flex: none; }
+  .chrome i { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+  .chrome .url { margin-left: 18px; background: #fff; border-radius: 14px; padding: 4px 14px; font-size: 12.5px; color: #555; width: 460px; }
+  .app { flex: 1; display: grid; grid-template-columns: 272px 1fr 440px; min-height: 0; }
+  .app.nopanel { grid-template-columns: 272px 1fr; }
+  .side { background: var(--slate-50); border-right: 1px solid var(--slate-200); padding: 14px 12px; overflow: hidden; }
+  .side .brand { font-weight: 700; display: flex; gap: 8px; align-items: center; margin: 2px 6px 16px; }
+  .side .brand .ico { width: 26px; height: 26px; border-radius: 7px; background: var(--slate-900); color: #fff; display: grid; place-items: center; font-size: 13px; }
+  .snav { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; font-size: 14px; color: var(--slate-700); }
+  .snav.on { background: #fff; box-shadow: 0 0 0 1px var(--slate-200); color: var(--slate-900); font-weight: 600; }
+  .snav .n { margin-left: auto; }
+  .snav .dot { width: 8px; height: 8px; }
+  .snav .dot.run, .snav .dot.you { box-shadow: none; }
+  .side h4 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--slate-500); margin: 18px 10px 6px; display: flex; justify-content: space-between; }
+  .side .sub { font-size: 12px; color: var(--slate-500); margin: -2px 10px 0 28px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .main { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--slate-200); }
+  .main .hdr, .panel .hdr { height: 56px; border-bottom: 1px solid var(--slate-200); display: flex; align-items: center; gap: 10px; padding: 0 20px; flex: none; }
+  .hdr .t { font-weight: 700; font-size: 16px; }
+  .hdr .muted { color: var(--slate-500); font-size: 13px; }
+  .hdr .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .sel { border: 1px solid var(--slate-200); border-radius: 8px; padding: 5px 10px; font-size: 13px; color: var(--slate-700); background: #fff; }
+  .stream { flex: 1; overflow: hidden; padding: 18px 0; }
+  .col { max-width: 720px; margin: 0 auto; padding: 0 24px; }
+  .w-u { margin: 12px 0 12px auto; max-width: 75%; width: fit-content; background: var(--slate-100); border-radius: 18px; padding: 10px 14px; }
+  .w-a { margin: 8px 0 14px; }
+  .w-a .meta, .w-meta { font-size: 12px; color: var(--slate-500); margin-top: 3px; }
+  .w-card { border: 1px solid var(--slate-200); border-radius: 12px; padding: 11px 14px; margin: 10px 0 14px; background: #fff; }
+  .w-card.sel-card { border-color: #b8abff; box-shadow: 0 0 0 3px #efebff; }
+  .w-card .top { display: flex; align-items: center; gap: 10px; }
+  .w-card .title { font-weight: 600; flex: 1; }
+  .w-card .line { font-size: 13.5px; color: var(--slate-500); margin: 4px 0 0 20px; }
+  .w-card .actions { display: flex; gap: 8px; margin: 10px 0 0 20px; }
+  .w-btn { border: 1px solid var(--slate-200); border-radius: 8px; padding: 5px 11px; font-size: 13px; font-weight: 600; background: #fff; }
+  .w-btn.primary { background: var(--slate-900); color: #fff; border-color: var(--slate-900); }
+  .w-comp { margin: 0 auto 18px; max-width: 720px; width: calc(100% - 48px); border: 1px solid var(--slate-200); border-radius: 16px; padding: 12px 14px; box-shadow: 0 2px 8px rgba(15,23,42,.05); }
+  .w-comp .ph { color: var(--slate-500); font-size: 14.5px; }
+  .w-comp .bar { display: flex; gap: 8px; align-items: center; margin-top: 12px; font-size: 12.5px; color: var(--slate-500); }
+  .w-comp .bar .send { margin-left: auto; width: 32px; height: 32px; border-radius: 8px; background: var(--slate-900); color: #fff; display: grid; place-items: center; }
+  .kbd { border: 1px solid var(--slate-300); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 11px; font-family: ui-monospace, monospace; }
+  .panel { display: flex; flex-direction: column; min-width: 0; background: #fff; }
+  .panel .stream { padding: 14px 18px; }
+  .panel .w-u { max-width: 85%; }
+  .hover-actions { position: relative; }
+  .hover-actions .bar { position: absolute; right: 0; top: -16px; background: #fff; border: 1px solid var(--slate-200); border-radius: 8px; box-shadow: 0 4px 12px rgba(15,23,42,.08); display: flex; font-size: 12.5px; }
+  .hover-actions .bar span { padding: 5px 9px; border-right: 1px solid var(--slate-200); color: var(--slate-700); }
+  .hover-actions .bar span:last-child { border-right: none; }
+  .hover-actions .bar span.hl { color: var(--chip-text); font-weight: 600; background: #f5f2ff; }
+
+  /* notes */
+  .notes { background: #fff; border-radius: 14px; padding: 18px 26px; margin-top: 18px; max-width: 1380px; }
+  .notes h3 { margin: 10px 0 6px; font-size: 16px; }
+  .notes ul { margin: 4px 0 10px; padding-left: 20px; }
+  .notes li { margin: 3px 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 40px; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--slate-700); margin: 6px 0 0; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<div class="intro">
+  <h1>One thread, with threads where they earn it</h1>
+  <p>Family Assistant opens on a single <b>Home</b> stream, like a Telegram DM with the assistant. Quick
+  questions and answers stay inline. Work that is long-running, multi-step, or that the user will
+  come back to gets spun off into a <b>thread</b>. In Home, a thread is one live card. Its detail lives
+  behind the card. When it finishes, its outcome is echoed back into Home, so Home reads as the full
+  story at headline level.</p>
+  <div class="legend">
+    <span><i class="dot run"></i> Working</span>
+    <span><i class="dot you"></i> Needs you</span>
+    <span><span class="check" style="width:14px;height:14px;font-size:9px">✓</span> Done</span>
+    <span><i class="dot fail"></i> Failed / stalled</span>
+  </div>
+</div>
+
+<!-- ======================= iOS ======================= -->
+<section class="board">
+  <h2>iOS</h2>
+  <p class="caption">Home replaces today's chat list as the landing screen. The list is now the thread
+  switcher, reached from the top-right button, whose badge counts threads that need you. Every
+  thread card in Home, and every row in the switcher, pushes into the thread.</p>
+  <div class="row">
+
+    <!-- 1. Home stream -->
+    <div>
+      <div class="frame-label">1 · Home: mixed stream</div>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span>9:41</span><span style="font-size:13px">5G ▰ 71%</span></div>
+        <div class="nav">
+          <div class="circ">☰</div>
+          <div class="pill"><span class="ico">⌂</span><div>Family Assistant<small>Home</small></div></div>
+          <div class="circ">☷<span class="badge">1</span></div>
+        </div>
+        <div class="scroll">
+          <div class="day">TODAY</div>
+          <div class="a">Morning! Bin night tonight, and Ella has swimming at 4:30. Rain from 2pm, so
+            I've moved the washing reminder to tomorrow.<div class="meta">7:30 · morning brief</div></div>
+
+          <div class="u">Is Teija driving Ella to swimming?</div>
+          <div class="a">Yes, it's on her calendar for 4:10. Pickup is with you at 5:15.</div>
+
+          <div class="u">Hot water system is leaking again. Can you find a plumber and get a couple of quotes?</div>
+          <div class="a" style="margin-bottom:4px">On it. This will take a few minutes, so I've started a thread for it.</div>
+          <div class="tcard">
+            <div class="top"><i class="dot you"></i><span class="title">Hot water system quotes</span><span class="unread">2</span></div>
+            <div class="line">Gas or electric heat pump? <span class="ago">· 2m</span></div>
+            <div class="actions"><button class="btn">Gas</button><button class="btn">Heat pump</button><button class="btn">Either</button></div>
+          </div>
+
+          <div class="u">Add milk and coffee pods to the shopping list</div>
+          <div class="a">Added both. ✓</div>
+
+          <div class="tcard">
+            <div class="top"><i class="dot run"></i><span class="title">Melbourne flights, Sept holidays</span><span class="chip grey">browser</span></div>
+            <div class="line">Checking Qantas · 2 of 4 airlines <span class="ago">· now</span></div>
+            <div class="progress"><i></i></div>
+          </div>
+        </div>
+        <div class="composer"><span class="plus">+</span><span class="ph">Message Home…</span><span class="mic">🎙</span><span class="send">↑</span></div>
+      </div>
+    </div>
+
+    <!-- 2. Thread view -->
+    <div>
+      <div class="frame-label">2 · Inside a thread (pushed)</div>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span>9:43</span><span style="font-size:13px">5G ▰ 71%</span></div>
+        <div class="nav">
+          <div class="circ">‹</div>
+          <div class="pill" style="padding-left:14px"><div>Hot water system quotes<small>Thread · from Home 9:14</small></div></div>
+          <div class="circ">⋯</div>
+        </div>
+        <div class="scroll">
+          <div class="origin">↳ Started from <b>“Hot water system is leaking again. Can you find a plumber…”</b></div>
+          <div class="a">I'll check hipages and the two plumbers you've used before, then ask for quotes.</div>
+          <div class="tool">🔧 <span class="t">search_notes</span> “plumber” <span class="st">2 found</span></div>
+          <div class="tool">🌐 <span class="t">browser</span> hipages.com.au <span class="st">done</span></div>
+          <div class="ask"><div class="q">Gas or electric heat pump? Heat pumps qualify for the NSW rebate (~$900).</div>
+            <div style="display:flex;gap:8px"><button class="btn">Gas</button><button class="btn">Heat pump</button><button class="btn">Either</button></div></div>
+          <div class="u">Either, but flag the rebate</div>
+          <div class="a">Three quotes so far:
+            <table class="mini">
+              <tr><th>Plumber</th><th>Quote</th><th>Earliest</th></tr>
+              <tr><td>Dave's Plumbing</td><td>$1,850</td><td>Thu</td></tr>
+              <tr><td>Northside Hot Water</td><td>$2,240*</td><td>Mon</td></tr>
+              <tr><td>Rapid Plumb</td><td>$2,050</td><td>Fri</td></tr>
+            </table>
+            <div class="meta">* heat pump, $1,340 after rebate</div></div>
+        </div>
+        <div class="composer"><span class="plus">+</span><span class="ph">Reply in <b>Hot water…</b></span><span class="mic">🎙</span><span class="send">↑</span></div>
+      </div>
+    </div>
+
+    <!-- 3. Thread switcher -->
+    <div>
+      <div class="frame-label">3 · Thread switcher (sheet from ☷)</div>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span>9:44</span><span style="font-size:13px">5G ▰ 71%</span></div>
+        <div class="scroll" style="top:50px;opacity:.5"><div class="day">TODAY</div><div class="a">Morning! Bin night tonight…</div></div>
+        <div class="sheet">
+          <div class="grabber"></div>
+          <h3>Threads</h3>
+          <div class="seg"><span class="on">Active</span><span>All</span><span>Archived</span></div>
+          <div class="list">
+            <div class="li home"><span class="ico">⌂</span><div class="body"><div class="t">Home<span class="when">9:42</span></div><div class="s">Added both. ✓</div></div></div>
+          </div>
+          <div class="group-h">Needs you</div>
+          <div class="list">
+            <div class="li"><i class="dot you"></i><div class="body"><div class="t">Hot water system quotes <span class="unread">2</span><span class="when">2m</span></div><div class="s">Gas or electric heat pump?</div></div></div>
+          </div>
+          <div class="group-h">Working</div>
+          <div class="list">
+            <div class="li"><i class="dot run"></i><div class="body"><div class="t">Melbourne flights, Sept holidays<span class="when">now</span></div><div class="s">Checking Qantas · 2 of 4 airlines</div></div></div>
+            <div class="li"><i class="dot run"></i><div class="body"><div class="t">Term 4 activity schedule<span class="when">8m</span></div><div class="s">Reading the school newsletter PDF</div></div></div>
+          </div>
+          <div class="group-h">Done today</div>
+          <div class="list">
+            <div class="li"><span class="check">✓</span><div class="body"><div class="t">Renew car rego<span class="when">8:05</span></div><div class="s">Paid $812 · receipt saved to Documents</div></div></div>
+            <div class="li"><span class="check">✓</span><div class="body"><div class="t">Why didn't the daily brief fire?<span class="when">7:51</span></div><div class="s">Timezone bug, filed as an issue</div></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. Long-press promote -->
+    <div>
+      <div class="frame-label">4 · Promote: long-press any message</div>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span>9:50</span><span style="font-size:13px">5G ▰ 71%</span></div>
+        <div class="nav">
+          <div class="circ">☰</div>
+          <div class="pill"><span class="ico">⌂</span><div>Family Assistant<small>Home</small></div></div>
+          <div class="circ">☷<span class="badge">1</span></div>
+        </div>
+        <div class="scroll">
+          <div class="u">What's a good birthday present for Mum? She's into gardening lately</div>
+          <div class="a">A few ideas: a Japanese hori-hori knife, a raised bed kit, or a subscription box…</div>
+        </div>
+        <div class="dim"></div>
+        <div class="lifted">What's a good birthday present for Mum? She's into gardening lately</div>
+        <div class="menu">
+          <div class="hl">Continue in a thread <span>⤷</span></div>
+          <div>Move to thread… <span>→</span></div>
+          <div class="sep">Reply <span>↩</span></div>
+          <div>Copy <span>⧉</span></div>
+          <div>Delete <span>🗑</span></div>
+        </div>
+        <div class="composer"><span class="plus">+</span><span class="ph">Message Home…</span><span class="mic">🎙</span><span class="send">↑</span></div>
+      </div>
+    </div>
+
+    <!-- 5. Completion echo -->
+    <div>
+      <div class="frame-label">5 · Home after threads finish</div>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span>10:20</span><span style="font-size:13px">5G ▰ 71%</span></div>
+        <div class="nav">
+          <div class="circ">☰</div>
+          <div class="pill"><span class="ico">⌂</span><div>Family Assistant<small>Home</small></div></div>
+          <div class="circ">☷</div>
+        </div>
+        <div class="scroll">
+          <div class="u">Add milk and coffee pods to the shopping list</div>
+          <div class="a">Added both. ✓</div>
+          <div class="tcard">
+            <div class="top"><span class="check">✓</span><span class="title">Hot water system quotes</span><span class="chip">3 quotes</span></div>
+            <div class="line">Dave's Plumbing booked Thu 8am</div>
+          </div>
+          <div class="echo"><div class="from">↳ from Melbourne flights, Sept holidays</div>
+            Best option is Jetstar, Sat 27 → Sat 4, $612 for four with bags. Qantas is $890.
+            Want me to hold it? <div style="display:flex;gap:8px;margin-top:8px"><button class="btn ios">Hold Jetstar</button><button class="btn">Open thread</button></div></div>
+          <div class="u">Yes hold it</div>
+          <div class="a">Hold placed until 6pm tonight. I'll remind you at 4.</div>
+          <div class="quiet">“Term 4 activity schedule” is still working · 12m</div>
+        </div>
+        <div class="composer"><span class="plus">+</span><span class="ph">Message Home…</span><span class="mic">🎙</span><span class="send">↑</span></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ======================= Web ======================= -->
+<section class="board">
+  <h2>Web</h2>
+  <p class="caption">Three panes. The sidebar has Home pinned with threads below it, grouped by state.
+  Home stays in the centre. Opening a thread puts it in a right-hand panel, so Home stays visible
+  while you work in it. ⤢ expands the thread to the centre pane, and on narrow windows the panel
+  takes over the screen, as on iOS.</p>
+
+  <div class="frame-label">6 · Home with a thread open in the side panel</div>
+  <div class="browser">
+    <div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">assistant.family/chat</span></div>
+    <div class="app">
+      <aside class="side">
+        <div class="brand"><span class="ico">⌂</span>Family Assistant</div>
+        <div class="snav on">⌂ Home <span class="n muted" style="font-weight:400;color:var(--slate-500);font-size:12px">9:42</span></div>
+        <h4>Needs you <span>1</span></h4>
+        <div class="snav" style="background:#f2efff"><i class="dot you"></i>Hot water system quotes <span class="n unread">2</span></div>
+        <h4>Working <span>2</span></h4>
+        <div class="snav"><i class="dot run"></i>Melbourne flights</div>
+        <div class="sub">Checking Qantas · 2 of 4</div>
+        <div class="snav"><i class="dot run"></i>Term 4 activity schedule</div>
+        <div class="sub">Reading newsletter PDF</div>
+        <h4>Done today</h4>
+        <div class="snav"><span class="check" style="width:14px;height:14px;font-size:9px">✓</span>Renew car rego</div>
+        <div class="snav"><span class="check" style="width:14px;height:14px;font-size:9px">✓</span>Daily brief didn't fire</div>
+        <h4>Earlier</h4>
+        <div class="snav" style="color:var(--slate-500)">Kitchen reno budget</div>
+        <div class="snav" style="color:var(--slate-500)">Japan trip 2027</div>
+        <div class="snav" style="color:var(--slate-500)">School fees tax deduction</div>
+        <div class="snav" style="color:var(--slate-500)">All threads →</div>
+        <div style="position:absolute"></div>
+      </aside>
+
+      <main class="main">
+        <div class="hdr"><span class="t">Home</span><span class="muted">One-off questions stay here; bigger jobs become threads</span>
+          <div class="right"><span class="sel">Auto ▾</span></div></div>
+        <div class="stream"><div class="col">
+          <div class="w-a">Morning! Bin night tonight, and Ella has swimming at 4:30. Rain from 2pm, so I've moved the washing reminder to tomorrow.<div class="meta">7:30 · morning brief</div></div>
+          <div class="w-u">Is Teija driving Ella to swimming?</div>
+          <div class="w-a">Yes, it's on her calendar for 4:10. Pickup is with you at 5:15.</div>
+          <div class="w-u">Hot water system is leaking again. Can you find a plumber and get a couple of quotes?</div>
+          <div class="w-a" style="margin-bottom:4px">On it. This will take a few minutes, so I've started a thread for it.</div>
+          <div class="w-card sel-card">
+            <div class="top"><i class="dot you"></i><span class="title">Hot water system quotes</span><span class="unread">2</span><span class="w-meta" style="margin:0">open ▸</span></div>
+            <div class="line">Gas or electric heat pump? · 2m</div>
+          </div>
+          <div class="w-u">Add milk and coffee pods to the shopping list</div>
+          <div class="w-a">Added both. ✓</div>
+          <div class="w-card">
+            <div class="top"><i class="dot run"></i><span class="title">Melbourne flights, Sept holidays</span><span class="chip grey">browser</span></div>
+            <div class="line">Checking Qantas · 2 of 4 airlines · now</div>
+          </div>
+          <div class="hover-actions" style="margin-top:28px">
+            <div class="bar"><span>↩ Reply</span><span class="hl">⤷ Continue in thread</span><span>→ Move to…</span><span>⋯</span></div>
+            <div class="w-u" style="margin-top:0">Also, what's a good birthday present for Mum? She's into gardening lately</div>
+          </div>
+        </div></div>
+        <div class="w-comp"><div class="ph">Message Home…</div>
+          <div class="bar">📎 <span>Attach</span> <span style="margin-left:10px"><span class="kbd">⌘</span> <span class="kbd">⇧</span> <span class="kbd">↵</span> send as new thread</span><span class="send">↑</span></div></div>
+      </main>
+
+      <section class="panel">
+        <div class="hdr"><i class="dot you"></i><span class="t">Hot water system quotes</span>
+          <div class="right"><span class="chip grey">browser · deep</span><span class="muted">⤢</span><span class="muted">✕</span></div></div>
+        <div class="stream">
+          <div class="origin" style="border-radius:10px">↳ From Home 9:14 · <b>“Hot water system is leaking again…”</b></div>
+          <div class="w-a">I'll check hipages and the two plumbers you've used before, then ask for quotes.</div>
+          <div class="tool">🔧 <span class="t">search_notes</span> “plumber” <span class="st">2 found</span></div>
+          <div class="tool">🌐 <span class="t">browser</span> hipages.com.au <span class="st">done</span></div>
+          <div class="tool">🌐 <span class="t">browser</span> davesplumbing.com.au/quote <span class="st">done</span></div>
+          <div class="ask" style="border-radius:10px"><div class="q">Gas or electric heat pump? Heat pumps qualify for the NSW rebate (~$900).</div>
+            <div style="display:flex;gap:8px"><button class="w-btn">Gas</button><button class="w-btn">Heat pump</button><button class="w-btn">Either</button></div></div>
+        </div>
+        <div class="w-comp" style="width:calc(100% - 32px)"><div class="ph">Reply in Hot water system quotes…</div>
+          <div class="bar"><label><input type="checkbox"> Also post to Home</label><span class="send">↑</span></div></div>
+      </section>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= Notes ======================= -->
+<section class="board">
+  <h2>How it behaves</h2>
+  <div class="notes grid2">
+    <div>
+      <h3>When does something become a thread?</h3>
+      <ul>
+        <li><b>The assistant decides, and says so.</b> It starts a thread when the work will outlive the
+          turn: delegations, browser runs, research, anything that waits on someone else, or a
+          multi-turn project like "plan the Japan trip". The reply in Home says "I've started a
+          thread", so it's never a surprise.</li>
+        <li><b>One-off questions stay in Home.</b> Lookups, quick edits, reminders, small talk.</li>
+        <li><b>The user can always override.</b> On any message: "Continue in a thread" (branches
+          from it and carries the context), or "Move to thread…" to file it into an existing one. On
+          web, <span class="kbd">⌘⇧↵</span> sends as a new thread. In a thread, "Back to Home" posts
+          the outcome and archives it.</li>
+        <li><b>Two parallel jobs means two threads.</b> Each thread is its own sub-conversation, which
+          is also the natural key for per-run state such as the browser tab. That fixes "two browser
+          runs share a tab" by construction.</li>
+      </ul>
+      <h3>What Home shows</h3>
+      <ul>
+        <li>One <b>live card per thread</b>, updated in place, never a stream of progress messages.
+          The dot shows state, and the line shows the latest step or question.</li>
+        <li><b>Simple decisions can be answered from the card</b> (Gas / Heat pump) without opening the
+          thread, the way Muse uses approval cards. Anything richer opens the thread.</li>
+        <li>On completion, the thread's <b>final message is echoed into Home</b>, the way Slack's "also
+          send to channel" works. It's the thread's own reply rather than a generated summary, so taint
+          and provenance carry over unchanged.</li>
+        <li>A card that has scrolled off doesn't re-post. The switcher badge, sidebar and push
+          notifications carry "needs you".</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Navigation</h3>
+      <ul>
+        <li><b>iOS:</b> Home is the landing screen. ☷ opens the thread switcher, which replaces today's
+          chat list and is grouped as Needs you / Working / Done today. Tapping a card pushes into the
+          thread, and Back returns to the same scroll position in Home.</li>
+        <li><b>Web:</b> the sidebar is Home plus threads grouped by state. A thread opens in a right
+          panel, so Home stays readable, which is the fix Grok Bot users asked for. ⤢ expands it, and
+          below ~1100px the panel becomes full-screen.</li>
+        <li><b>Telegram:</b> the same model maps onto the private chat. Thread cards become messages
+          that are edited in place, and replying to a card routes into its thread. Native Telegram
+          topics (Bot API 9.4 <code>createForumTopic</code>) are a later option.</li>
+        <li><b>Voice:</b> always talks to Home. A job started by voice that turns into a thread is
+          announced ("I've started a thread for the quotes").</li>
+      </ul>
+      <h3>What the assistant sees</h3>
+      <ul>
+        <li><b>Home</b> sees its own history, plus each thread's title, state and final message. Asking
+          "how are the quotes going?" in Home is answered from the thread's state, without merging
+          histories.</li>
+        <li><b>A thread</b> sees the message it started from, the Home context leading up to it, and
+          its own history. It doesn't see sibling threads.</li>
+        <li><b>Each thread keeps its own profile and model tier</b>, which fits history being
+          partitioned by profile today. A browser thread can run on the browser profile while Home
+          stays on the default.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="notes">
+    <h3>How this maps onto what exists today</h3>
+    <ul>
+      <li><b>A thread is a subconversation that's been made visible.</b> <code>message_history</code> already
+        partitions history by <code>(conversation_id, processing_profile_id, subconversation_id)</code>, and every
+        <code>delegate_to_service</code> call already creates one, tracked in <code>delegation_runs</code> with parent
+        and child links. Today they're hidden model scratch space. A thread adds a title, a state, an anchor message
+        in Home and user visibility. Home is the <code>subconversation_id IS NULL</code> scope of one long-lived
+        conversation.</li>
+      <li><b>The thread card grows out of <code>PendingDelegationsChip</code></b>, which already shows
+        Queued / Working / N of M on both clients. The difference is that a card stays after the work finishes and
+        opens a transcript.</li>
+      <li><b>A finished thread's echo replaces the delegation wake turn.</b> Today an async result is written into
+        the source scope, and the source profile then runs again to restate it. Echoing the thread's own final
+        message is cheaper and keeps provenance.</li>
+      <li><b>Gaps to close:</b> streams, active turns, cancel/steer and activity pings are keyed by
+        <code>conversation_id</code> only and need a thread dimension. <code>worker_tasks</code> has no
+        subconversation link. <code>/messages</code> and summaries exclude subconversation rows by design, which
+        brings in the taint and internal-row filtering. Telegram's reply-chain routing
+        (<code>thread_root_id</code>) is the closest existing analogue, and a reply to a thread card routes there.</li>
+      <li><b>Profile switching stops forcing a new conversation.</b> Switching profile in Home starts a thread on
+        that profile, rather than silently mixing profiles in one transcript where each model sees only its
+        own rows.</li>
+    </ul>
+    <h3>Open questions</h3>
+    <ul>
+      <li>Should the assistant auto-thread by default, or propose ("Start a thread for this?") until it's trusted?</li>
+      <li>Is there one Home per person, or per household member on shared devices? (One per user is assumed above.)</li>
+      <li>Do existing conversations migrate in as archived threads, or stay a legacy list?</li>
+      <li>Does a thread ever un-archive itself, for example when a booked plumber's day arrives?</li>
+    </ul>
+  </div>
+</section>
+
+</div>
+</body>
+</html>
