@@ -2829,6 +2829,11 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       return;
     }
     prevConversationIdRef.current = conversationId;
+    // Nothing was open yet: whatever the user typed while the landing view was
+    // still being decided was written for the conversation that opens.
+    if (outgoingId === null) {
+      return;
+    }
     if (preserveComposerOnConversationSwitchRef.current) {
       preserveComposerOnConversationSwitchRef.current = false;
       return;
