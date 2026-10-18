@@ -97,8 +97,9 @@ need a new dimension. Under this model they work unchanged.
 - **Home** is one designated conversation per user per surface. Web and iOS already share an
   interface type and a conversation namespace, so they share one Home. A user's Telegram private
   chat is their Telegram Home. Unifying the two is out of scope (see Deliberate simplifications).
-- **A thread** is an ordinary conversation plus a link record. The record holds the parent Home, the
-  anchor turn the thread grew from (if any) and the thread's state.
+- **A thread** is an ordinary conversation plus a link record. Every thread has one, whether or not
+  it grew from an anchor, and the record is what tells a thread from a legacy conversation. It holds
+  the parent Home, the anchor turn (if any) and the thread's state.
 - **Legacy conversations** have neither a Home role nor a parent. They appear under "Earlier" in the
   switcher, open and continue as they do today, and are never migrated.
 
@@ -115,10 +116,17 @@ for the long run is a thread, and the tier sticks there.
 
 **Starting a thread is a delegation whose result is delivered differently.** The assistant starts
 one with a Home-only tool. The tool creates the child conversation and enqueues its first turn on
-the existing delegation machinery: `delegation_runs` plus the task worker. That gives it durable
-queueing, retries, and correct behaviour when the user types into the thread while the first turn is
-still running. The run targets the thread's own top-level conversation instead of a subconversation.
-It never wakes Home, because the user talks to the thread directly from then on.
+the existing delegation machinery, `delegation_runs` plus the task worker, which gives it durable
+queueing and retries. This extends the run model rather than parameterising it. Today a run's rows
+live in a subconversation of its source conversation, and completion wakes that source. A thread run
+has a target conversation distinct from its source (Home), no subconversation, and a completion that
+is recorded without a wake, because the user talks to the thread directly from then on. With no
+subconversation, the run is a browser scope of its own rather than inheriting its source's tab.
+
+**A message sent before the first turn starts steers it.** The common case is the user opening a
+fresh card and typing straight away. Between enqueue and start there is no active turn to steer, so
+a thread with a queued run treats the user's message as steering for that run, the same way it would
+once the run is going. It must not start a competing turn.
 
 **It is admitted exactly like a delegation.** Home's model picks the profile and writes the request,
 so the target must accept it under the same `allowed_delegation_sources` and
@@ -156,9 +164,9 @@ by profile and an unstamped row would be invisible there.
 
 ### State
 
-- **Working:** the thread has an active turn, a pending delegation or a pending worker.
-- **Waiting on you:** the thread's last turn asked the user something or is awaiting a confirmation.
-  The assistant marks this explicitly when it ends a turn with a question.
+- **Working:** the thread has a queued or active turn, a pending delegation or a pending worker.
+- **Waiting on you:** the thread is neither working nor done, so the next move is the user's. This
+  is derived by code, not marked by the model, so every thread is always in exactly one state.
 - **Done or failed:** the thread's assistant ends the job with a tool call, or the user marks it
   done.
 - **Unread is a separate per-viewer count.** In a household, one person reading a thread does not
@@ -224,18 +232,20 @@ and each path is governed:
 ## Work plan
 
 1. **Threads exist.** Add Home designation, the link record, the start-thread tool on delegation
-   machinery, and seeding under the copy rule, behind a profile setting.
+   machinery, and seeding under the copy rule, behind a single global setting. Threads hang off
+   Home, which is per user, not per profile.
    - Verified by functional tests: a started thread runs on its own profile.
    - The target's delegation policy is enforced.
    - Seeded rows are visible to the thread's history window and keep their taint.
    - Coder receives no seed.
+   - A message sent before the first turn starts steers it.
 2. **Home on web.** Add Home as the landing view, thread cards, the grouped sidebar and the
    right-hand panel. Verified by Playwright tests of card state transitions, answering from a card,
    and panel navigation.
-3. **State and echo.** Add explicit waiting, done and failed states, per-viewer unread counts, the
-   echo, and Home's view of thread facts. Verified by tests that Home answers a status question from
-   thread facts, that an echo keeps its taint, and that a thread ending on a question is waiting
-   rather than done.
+3. **State and echo.** Add derived working and waiting states, explicit done and failed, per-viewer
+   unread counts, the echo, and Home's view of thread facts. Verified by tests that Home answers a
+   status question from thread facts, that an echo keeps its taint, and that a thread ending on a
+   question is waiting rather than done.
 4. **Home on iOS.** Add the landing view, the switcher, cards and push navigation. Verified by unit
    tests on card state and UI tests on navigation.
 5. **User overrides.** Add "Continue in a thread", "Move to thread…" (moves a turn), send-as-thread
