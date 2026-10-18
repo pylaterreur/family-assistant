@@ -477,7 +477,8 @@
           pump, Hold Jetstar) go into the thread, where its profile, tools and browser tab are. Home's
           assistant never acts on a thread's behalf.</li>
         <li>When a thread is <b>done</b>, its final message is <b>echoed into Home</b>, the way Slack's
-          "also send to channel" works. A thread that ends on a question is waiting, not done.</li>
+          "also send to channel" works. A thread that ends on a question is waiting, not done. A done thread reopens when something new
+          arrives in it, such as a reminder it set, and it echoes again when it finishes.</li>
         <li>A card that has scrolled out of view doesn't re-post. The switcher badge, the sidebar and
           push notifications carry "waiting on you".</li>
       </ul>
@@ -502,9 +503,10 @@
         <li><b>Home</b> sees its own history plus each thread's facts: the title written when the thread
           was created, its state, and the echoed final message. It never sees the generated summary,
           which carries no taint.</li>
-        <li><b>A thread</b> starts with a copy of the turn it grew from and the Home turns leading up to
-          it, keeping their taint, then builds its own history. Coder and media analyst get the request
-          only, never household context. A thread doesn't see its siblings.</li>
+        <li><b>A thread</b> started by the assistant carries what a delegation does today: the request and
+          the turn it grew from, never the surrounding Home transcript. Only the user's "Continue in a
+          thread" brings earlier Home turns along, and never into coder or media analyst. Copies keep
+          their taint. A thread doesn't see its siblings.</li>
         <li><b>Each thread keeps its own profile and tier.</b> Home stays on the default profile, and a
           tier picked in Home applies to that turn only.</li>
       </ul>
@@ -534,14 +536,12 @@
       <li><b>Telegram needs a per-conversation turn slot.</b> Otherwise a Home message sent during a thread turn
         would steer that turn.</li>
     </ul>
-    <h3>Open questions</h3>
+    <h3>Decisions</h3>
     <ul>
-      <li>Should the assistant thread on its own from day one, or propose ("Start a thread for this?") until the
-        guidance is tuned?</li>
-      <li>Can a done thread reopen on a later event, such as the day the plumber comes, or does that start a new
-        one?</li>
-      <li>Should card quick replies come from a general suggested-replies mechanism, or only from explicit
-        questions the thread asks?</li>
+      <li>The assistant starts threads on its own from day one.</li>
+      <li>Done threads reopen on later events (the day the plumber comes is the same thread).</li>
+      <li>Card quick replies come only from explicit questions the thread asks. A general suggested-replies
+        mechanism may come later.</li>
     </ul>
     <p style="color:var(--slate-500)">Full design: <code>docs/design/one-thread-chat-ux.md</code></p>
   </div>

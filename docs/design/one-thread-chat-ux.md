@@ -149,11 +149,16 @@ Three paths move rows between conversations: the seed copied into a new thread, 
 their taint and are re-stamped to the destination's profile**, because the history window is scoped
 by profile and an unstamped row would be invisible there.
 
-- **The seed** is the anchor turn and the Home turns leading up to it, **unless the target profile
-  excludes household context.** `coder` and `media_analyst` (via `excluded_context_providers`) get
-  the request only, because seeding would hand household history to a profile designed to hold none.
-  A seed is copied rather than read across conversations at every turn, so the thread's history
-  doesn't depend on Home's later compaction or edits.
+- **The seed follows the delegation boundary.** An assistant-started thread carries what a
+  delegation carries today: the request its starting turn wrote, plus the anchor turn. It never
+  carries the Home transcript around them. That matters most for profiles that read untrusted
+  content and can act, such as `browser_profile`, where a page could try to exfiltrate whatever the
+  seed contains. Only the user's own "Continue in a thread" carries the Home turns leading up to the
+  anchor, as a deliberate choice to bring that context along, and only into a profile that already
+  receives household context. A profile that excludes it (`coder`, `media_analyst`, via
+  `excluded_context_providers`) gets the request only, whoever starts the thread. A seed is copied
+  rather than read across conversations at every turn, so the thread's history doesn't depend on
+  Home's later compaction or edits.
 - **Home sees its threads as facts, not transcripts.** Home's assistant sees each live thread's
   title, state and, once it finishes, the echoed final message. That is enough to answer "how are
   the quotes going?" without merging histories. **Generated conversation summaries are never used
@@ -169,6 +174,10 @@ by profile and an unstamped row would be invisible there.
   is derived by code, not marked by the model, so every thread is always in exactly one state.
 - **Done or failed:** the thread's assistant ends the job with a tool call, or the user marks it
   done.
+- **A done thread reopens when something new arrives in it.** That could be a reminder or callback
+  it scheduled, a late delegation result, or a user message. The day the plumber comes is the same
+  thread, not a new one. The thread goes back to working or waiting, its card and switcher row
+  update, and finishing again writes a new echo.
 - **Unread is a separate per-viewer count.** In a household, one person reading a thread does not
   clear another person's badge. Legacy conversations have no state.
 
@@ -200,7 +209,9 @@ and each path is governed:
 
 - **Starting a thread** is admitted by the target profile's delegation policy, and the request
   carries delegation taint.
-- **Copied rows** keep their taint. A profile that excludes household context receives no seed.
+- **Copied rows** keep their taint. An assistant-started thread is seeded with no more than a
+  delegation carries: the request and the anchor turn. Wider Home context goes only where the user
+  chose to bring it, and never to a profile that excludes household context.
 - **Home's view of a thread** is a title (carrying its creating turn's taint), a code-derived or
   explicitly set state, and echoes (carrying their source's taint). Generated summaries never reach
   a prompt.
@@ -220,14 +231,13 @@ and each path is governed:
 - **Tier choices don't stick in Home.** Home is everlasting, so a sticky tier would quietly apply to
   every later quick question.
 
-## Open questions
+## Decisions
 
-- Should the assistant start threads on its own from day one, or propose them ("Start a thread for
-  this?") until the guidance has been tuned on real use?
-- Can a done thread reopen on a later event, such as a reminder on the day the plumber comes, or
-  does that start a new thread?
-- Should card quick replies come from a general suggested-replies mechanism, or only from explicit
-  questions the thread asks?
+- **The assistant starts threads on its own from day one.** It doesn't propose them first. User
+  overrides are one action away in both directions.
+- **Done threads reopen** on later events, as described under State.
+- **Card quick replies come only from explicit questions the thread asks.** A general
+  suggested-replies mechanism may come later.
 
 ## Work plan
 
