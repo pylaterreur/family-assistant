@@ -2114,6 +2114,7 @@ class TaskWorker:
 
         if (
             run["run_kind"] == "thread"
+            and not payload.get("continuation")
             and self.thread_turn_runner is not None
             and self.thread_turn_runner.handles(run)
         ):

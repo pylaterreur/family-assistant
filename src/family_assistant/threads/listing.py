@@ -37,16 +37,17 @@ def derive_state(
     *,
     run_status: str | None,
     run_completed_at: datetime | None,
-    turn_running: bool,
+    work_in_progress: bool,
     latest_visible_at: datetime | None,
 ) -> ThreadState:
     """A thread's state from what is known about it.
 
-    Working while anything is running in it: its starting run, or a turn the
-    user started. Failed when the starting run failed and nothing has been said
-    in the thread since. Anything else leaves the next move with the user.
+    Working while anything is in progress in it: its starting run, a turn, or
+    background work a turn handed off. Failed when the starting run failed and
+    nothing has been said in the thread since. Anything else leaves the next
+    move with the user.
     """
-    if turn_running or run_status in _ACTIVE_RUN_STATUSES:
+    if work_in_progress or run_status in _ACTIVE_RUN_STATUSES:
         return "working"
     if run_status == "failed" and (
         latest_visible_at is None
@@ -102,6 +103,9 @@ async def summarize_threads(
     latest = await db.message_history.latest_visible_messages([
         thread.conversation_id for thread in threads
     ])
+    active = await db.delegation_runs.conversations_with_active_runs([
+        thread.conversation_id for thread in threads
+    ])
     seeds = await db.message_history.get_contents_by_internal_ids([
         thread.seed_message_id for thread in threads if thread.seed_message_id
     ])
@@ -117,7 +121,8 @@ async def summarize_threads(
                 state=derive_state(
                     run_status=run["status"] if run else None,
                     run_completed_at=run["completed_at"] if run else None,
-                    turn_running=turn_running(thread.conversation_id),
+                    work_in_progress=thread.conversation_id in active
+                    or turn_running(thread.conversation_id),
                     latest_visible_at=message.timestamp if message else None,
                 ),
                 source_tool_call_id=thread.source_tool_call_id,

@@ -1475,8 +1475,11 @@ async def api_chat_create_turn(
         raise _running_turn_conflict(conversation_id, payload.turn_id, running_turn)
 
     # Resolve processing service profile.
-    selected_processing_service: ProcessingService = default_processing_service
-    if payload.profile_id:
+    pinned_service, pinned_thread = await _thread_profile(request, conversation_id)
+    selected_processing_service: ProcessingService = (
+        pinned_service or default_processing_service
+    )
+    if pinned_service is None and payload.profile_id:
         registry = getattr(request.app.state, "processing_services", {})
         candidate = registry.get(payload.profile_id)
         if candidate and candidate.kind == "remote":
@@ -1489,9 +1492,6 @@ async def api_chat_create_turn(
             )
         if candidate:
             selected_processing_service = candidate
-    selected_processing_service, pinned_thread = await _pin_thread_profile(
-        request, conversation_id, selected_processing_service
-    )
 
     # Resolved here rather than inside the producer: the producer's refusals
     # can only reach the client as a stream error, and a tier the profile does
@@ -2438,21 +2438,21 @@ class ProfilesResponse(BaseModel):
     default_profile_id: str = Field(..., description="ID of the default profile")
 
 
-async def _pin_thread_profile(
-    request: Request,
-    conversation_id: str,
-    selected: ProcessingService,
-) -> tuple[ProcessingService, ConversationThread | None]:
-    """A thread always runs on its own profile, whatever the request named.
+async def _thread_profile(
+    request: Request, conversation_id: str
+) -> tuple[ProcessingService | None, ConversationThread | None]:
+    """The profile a thread runs on, and the thread, when the conversation is one.
 
-    History is partitioned by profile, so a turn on any other profile would not
-    see the request the thread was started with. Returns the service to run on,
-    and the thread when the conversation is one.
+    A thread always runs on its own profile, whatever the request names:
+    history is partitioned by profile, so a turn on any other profile would not
+    see the request the thread was started with. Callers resolve this before
+    looking at the requested profile at all, so a stale selection on the client
+    can neither redirect nor refuse a thread's turn.
     """
     db_context = Database(request.app.state.database_engine)
     thread = await db_context.conversation_threads.get_thread(conversation_id)
     if thread is None:
-        return selected, None
+        return None, None
     registry = getattr(request.app.state, "processing_services", {})
     pinned = registry.get(thread.profile_id)
     if not isinstance(pinned, ProcessingService):
@@ -2804,12 +2804,9 @@ async def api_chat_send_message(
     ProcessingService, and returns the assistant's reply.
     """
     conversation_id = payload.conversation_id or str(uuid.uuid4())
-    selected_processing_service, _thread = await _pin_thread_profile(
-        request,
-        conversation_id,
-        _select_processing_service(
-            request, payload, default_processing_service, conversation_id
-        ),
+    pinned_service, _thread = await _thread_profile(request, conversation_id)
+    selected_processing_service = pinned_service or _select_processing_service(
+        request, payload, default_processing_service, conversation_id
     )
     payload = payload.model_copy(update={"conversation_id": conversation_id})
     return await run_non_streaming_turn(

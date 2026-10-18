@@ -14,7 +14,7 @@ FAILED_AT = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
-    ("run_status", "turn_running", "latest_visible_at", "expected"),
+    ("run_status", "work_in_progress", "latest_visible_at", "expected"),
     [
         ("queued", False, None, "working"),
         ("running", False, None, "working"),
@@ -30,7 +30,7 @@ FAILED_AT = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
 )
 def test_derive_state(
     run_status: str | None,
-    turn_running: bool,
+    work_in_progress: bool,
     latest_visible_at: datetime | None,
     expected: ThreadState,
 ) -> None:
@@ -38,7 +38,7 @@ def test_derive_state(
         derive_state(
             run_status=run_status,
             run_completed_at=FAILED_AT if run_status == "failed" else None,
-            turn_running=turn_running,
+            work_in_progress=work_in_progress,
             latest_visible_at=latest_visible_at,
         )
         == expected

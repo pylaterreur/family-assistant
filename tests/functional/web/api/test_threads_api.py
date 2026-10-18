@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -216,6 +217,34 @@ async def test_a_turn_in_a_thread_runs_on_the_threads_profile(
     db_engine: AsyncEngine,
 ) -> None:
     seen: list[list[LLMMessage]] = []
+    thread = await _thread_on_its_own_profile(
+        app_fixture, api_test_client, api_test_processing_service, db_engine, seen
+    )
+    default_id = api_test_processing_service.service_config.id
+
+    response = await api_test_client.post(
+        "/api/v1/chat/send_message",
+        json={
+            "prompt": "Gas, please.",
+            "conversation_id": thread,
+            "profile_id": default_id,
+            "interface_type": "web",
+        },
+    )
+
+    assert response.json()["reply"] == "the thread's profile answered"
+    assert any("Find three plumbers." in str(m.content) for m in seen[0])
+
+
+async def _thread_on_its_own_profile(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+    api_test_processing_service: ProcessingService,
+    db_engine: AsyncEngine,
+    seen: list[list[LLMMessage]] | None = None,
+) -> str:
+    """A thread on browser_profile, whose model answers and records its input."""
+    seen = seen if seen is not None else []
 
     def thread_reply(kwargs: MatcherArgs) -> LLMOutput:
         seen.append(list(kwargs.get("messages", [])))
@@ -235,22 +264,36 @@ async def test_a_turn_in_a_thread_runs_on_the_threads_profile(
     app_fixture.state.processing_services = {
         default_id: api_test_processing_service,
         "browser_profile": thread_service,
+        # A delegation-only profile, which direct chat refuses by name.
+        "remote_only": SimpleNamespace(kind="remote"),
     }
     home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
-    thread = await _add_thread(Database(engine=db_engine), home)
+    return await _add_thread(Database(engine=db_engine), home)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_a_thread_ignores_a_requested_profile_it_would_refuse(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+    api_test_processing_service: ProcessingService,
+    db_engine: AsyncEngine,
+) -> None:
+    thread = await _thread_on_its_own_profile(
+        app_fixture, api_test_client, api_test_processing_service, db_engine
+    )
 
     response = await api_test_client.post(
         "/api/v1/chat/send_message",
         json={
             "prompt": "Gas, please.",
             "conversation_id": thread,
-            "profile_id": default_id,
+            "profile_id": "remote_only",
             "interface_type": "web",
         },
     )
 
     assert response.json()["reply"] == "the thread's profile answered"
-    assert any("Find three plumbers." in str(m.content) for m in seen[0])
 
 
 async def _say(db: Database, conversation_id: str) -> None:
@@ -306,3 +349,28 @@ async def test_the_ordinary_filter_leaves_out_homes_and_threads(
         [entry["conversation_id"] for entry in body["conversations"]],
         body["count"],
     ) == (["web_conv_ordinary"], 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_background_work_a_thread_handed_off_keeps_it_working(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(db, home)
+    await db.delegation_runs.create_run({
+        "delegation_id": "delegation_background",
+        "task_id": "task_background",
+        "source_profile_id": "browser_profile",
+        "target_service_id": "research",
+        "interface_type": "web",
+        "conversation_id": thread,
+        "subconversation_id": "sub-background",
+        "request_text": "Compare the quotes.",
+        "content_parts_json": [{"type": "text", "text": "Compare the quotes."}],
+    })
+
+    body = (await api_test_client.get("/api/v1/chat/home/threads")).json()
+
+    assert [entry["state"] for entry in body["threads"]] == ["working"]

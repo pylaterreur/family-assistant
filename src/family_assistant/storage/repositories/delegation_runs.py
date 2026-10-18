@@ -202,6 +202,24 @@ class DelegationRunsRepository(BaseRepository):
         runs = [self._row_to_dict(row) for row in rows]
         return {run["delegation_id"]: run for run in runs}
 
+    async def conversations_with_active_runs(
+        self, conversation_ids: Collection[str]
+    ) -> set[str]:
+        """Which of ``conversation_ids`` have a run not yet finished, of any kind."""
+        if not conversation_ids:
+            return set()
+        rows = await self._db.fetch_all(
+            select(delegation_runs_table.c.conversation_id)
+            .where(delegation_runs_table.c.conversation_id.in_(list(conversation_ids)))
+            .where(
+                delegation_runs_table.c.status.not_in(
+                    list(TERMINAL_DELEGATION_STATUSES)
+                )
+            )
+            .distinct()
+        )
+        return {row["conversation_id"] for row in rows}
+
     async def get_by_subconversation_id(
         self, subconversation_id: str
     ) -> DelegationRunDict | None:
