@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed, awaiting approval. Revised after design review. Mockups:
+Approved. Milestone 1 (threads exist, backend) implemented. Mockups:
 [one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered: [iOS](one-thread-ux/ios.png),
 [web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
 
@@ -129,9 +129,11 @@ a thread with a queued run treats the user's message as steering for that run, t
 once the run is going. It must not start a competing turn.
 
 **It is admitted exactly like a delegation.** Home's model picks the profile and writes the request,
-so the target must accept it under the same `allowed_delegation_sources` and
-`delegation_security_level` checks, and the request carries the same taint sources. A user starting
-a thread from the client is a user choice, like picking a profile today.
+so the target must accept it under the same `allowed_delegation_sources` check and the same
+per-target `tools_policy` rules, and the request carries the same taint sources. Those rules match
+the `delegation` tool tag and the `target_service_id` argument rather than a tool name, so the two
+tools cannot drift apart. A user starting a thread from the client is a user choice, like picking a
+profile today.
 
 **User actions use the same path.** "Continue in a thread" and "New thread" go through the same
 creation path, with a user-written opening message. "Move to thread…" moves a whole turn (the user
@@ -159,10 +161,11 @@ one chokepoint**, so a path added later can't skip a rule. It applies three rule
    so they accept request text only. Any path that would carry Home turns into such a profile is
    refused. That means "Continue in a thread" with context, and "Move to thread…". The client offers
    only compatible destinations.
-3. **Authorship.** Only text the user typed is stored as a user row. A request the assistant wrote
-   to open a thread is stored as an assistant-authored request, shown in the thread as "Assistant
-   asked: …". It therefore neither counts as user activity for memory review nor serves as evidence
-   of what the user said.
+3. **Authorship.** Only text the user typed is stored as the user's words. A request the assistant
+   wrote to open a thread is stored as machine-authored data, as delegation results already are, and
+   the link record points at it so clients can show it as "Assistant asked: …". It therefore neither
+   counts as user activity for memory review nor serves as evidence of what the user said, while
+   still recording who owns the thread.
 
 - **The seed follows the delegation boundary.** An assistant-started thread carries exactly what a
   delegation carries today: the request its starting turn wrote, plus any attachments it passed
@@ -282,10 +285,10 @@ and each path is governed:
    - Moving a Home turn into a coder or browser thread is refused.
    - An assistant-written request is not a user row, and doesn't make memory review due.
    - An assistant-started seed holds only the request.
-   - A message sent before the first turn starts steers it.
 2. **Home on web.** Add Home as the landing view, thread cards, the grouped sidebar and the
-   right-hand panel. Verified by Playwright tests of card state transitions, answering from a card,
-   and panel navigation.
+   right-hand panel, and steer a thread's queued first turn with a message sent before it starts. A
+   client is the first thing that can send one. Verified by Playwright tests of card state
+   transitions, answering from a card, and panel navigation.
 3. **State and echo.** Add derived working, waiting and failed states, explicit done, per-viewer
    unread counts, the echo, and Home's view of thread facts. Verified by tests that Home answers a
    status question from thread facts, that an echo keeps its taint, that a thread ending on a
