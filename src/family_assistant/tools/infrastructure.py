@@ -782,14 +782,15 @@ def _approve_prepared_script(
         )
 
 
-def _approve_confirmed_script(
+def _confirmation_authorizes_script(
     context: ToolExecutionContext,
     name: str,
     arguments: Mapping[str, object],
     call_id: str | None,
-) -> None:
+) -> bool:
+    """Whether a human's unconsumed confirmation covers this exact program call."""
     authorization = context.tool_confirmation_authorization
-    if (
+    return (
         context.prepared_script is not None
         and authorization is not None
         and not authorization.consumed
@@ -798,6 +799,18 @@ def _approve_confirmed_script(
             and authorization.call_id == (call_id or "")
             and authorization.tool_args == arguments
         )
+    )
+
+
+def _approve_confirmed_script(
+    context: ToolExecutionContext,
+    name: str,
+    arguments: Mapping[str, object],
+    call_id: str | None,
+) -> None:
+    authorization = context.tool_confirmation_authorization
+    if authorization is not None and _confirmation_authorizes_script(
+        context, name, arguments, call_id
     ):
         authorization.consumed = True
         _approve_prepared_script(context, "human_confirmed")
@@ -2765,6 +2778,8 @@ class TaintTrackingToolsProvider(ToolsProvider):
             and not inherited
             and not static_review
             and not taint_review
+            # A human already confirmed this exact program.
+            and not _confirmation_authorizes_script(context, name, arguments, call_id)
             else None
         )
         capability_review = gated_capability is not None
