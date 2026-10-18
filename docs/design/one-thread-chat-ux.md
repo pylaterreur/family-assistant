@@ -152,11 +152,13 @@ one chokepoint**, so a path added later can't skip a rule. It applies three rule
 1. **Taint and profile.** Copied rows keep their taint and are re-stamped to the destination's
    profile, because the history window is scoped by profile and an unstamped row would be invisible
    there.
-2. **The context gate.** A destination whose profile excludes household context (`coder`,
-   `media_analyst`, via `excluded_context_providers`) accepts only request text. Any path that would
-   carry Home turns, their tool output included, into such a profile is refused. That means
-   "Continue in a thread" with context, and "Move to thread…". The client offers only compatible
-   destinations.
+2. **The context gate.** Home turns, their tool output included, may only enter a profile that
+   receives household context today. That is judged by the profile's *effective* context, the
+   aggregated-context switch and its provider exclusions together, not by any single setting. Most
+   acting or untrusted-reading profiles (`browser_profile`, `coder`, `media_analyst`) receive none,
+   so they accept request text only. Any path that would carry Home turns into such a profile is
+   refused. That means "Continue in a thread" with context, and "Move to thread…". The client offers
+   only compatible destinations.
 3. **Authorship.** Only text the user typed is stored as a user row. A request the assistant wrote
    to open a thread is stored as an assistant-authored request, shown in the thread as "Assistant
    asked: …". It therefore neither counts as user activity for memory review nor serves as evidence
@@ -198,10 +200,13 @@ one chokepoint**, so a path added later can't skip a rule. It applies three rule
 - **Unread is a separate per-viewer count.** In a household, one person reading a thread does not
   clear another person's badge. Legacy conversations have no state.
 
-**Finishing writes the echo.** The thread's final message is copied into Home as a row attributed to
-the thread (see the rule above). It pings Home's stream and updates the card. The echo is a copy,
-not a model turn, so finishing a thread never wakes Home's assistant. Delegations *inside* a thread
-wake the thread's profile in the thread's conversation, as today.
+**An assistant-finished job writes the echo.** When the thread's assistant ends the job, its final
+message is copied into Home as a row attributed to the thread (see the rule above). When the user
+marks a thread done, there may be no outcome to report: the last message could be a question or a
+progress update. So nothing is echoed, and the card just shows that the user closed it. It pings
+Home's stream and updates the card. The echo is a copy, not a model turn, so finishing a thread
+never wakes Home's assistant. Delegations *inside* a thread wake the thread's profile in the
+thread's conversation, as today.
 
 ### Telegram
 
@@ -227,10 +232,10 @@ and each path is governed:
 - **Starting a thread** is admitted by the target profile's delegation policy, and the request
   carries delegation taint.
 - **Everything crossing a conversation boundary passes one chokepoint.** Copied rows keep their
-  taint. A profile that excludes household context accepts request text only, and moves into it are
-  refused. An assistant-started seed holds no more than a delegation carries, which is the request
-  and its explicit attachments. Assistant-written text is never stored as the user's words, so it
-  can't become memory evidence.
+  taint. A profile that doesn't receive household context today accepts request text only, and moves
+  into it are refused. An assistant-started seed holds no more than a delegation carries, which is
+  the request and its explicit attachments. Assistant-written text is never stored as the user's
+  words, so it can't become memory evidence.
 - **Home's view of a thread** is a title (carrying its creating turn's taint), a code-derived or
   explicitly set state, and echoes (carrying their source's taint). Generated summaries never reach
   a prompt.
@@ -266,8 +271,8 @@ and each path is governed:
    - Verified by functional tests: a started thread runs on its own profile.
    - The target's delegation policy is enforced.
    - Seeded rows are visible to the thread's history window and keep their taint.
-   - Coder receives no seed.
-   - Moving a Home turn into a coder thread is refused.
+   - Coder and browser receive no seed.
+   - Moving a Home turn into a coder or browser thread is refused.
    - An assistant-written request is not a user row, and doesn't make memory review due.
    - An assistant-started seed holds only the request.
    - A message sent before the first turn starts steers it.

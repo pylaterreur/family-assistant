@@ -477,7 +477,7 @@
         <li><b>Answering a thread always reaches the thread.</b> Quick replies on a card (Gas / Heat
           pump, Hold Jetstar) go into the thread, where its profile, tools and browser tab are. Home's
           assistant never acts on a thread's behalf.</li>
-        <li>When a thread is <b>done</b>, its final message is <b>echoed into Home</b>, the way Slack's
+        <li>When the assistant finishes a job, its final message is <b>echoed into Home</b>, the way Slack's
           "also send to channel" works. A thread that ends on a question is waiting, not done. A done thread reopens when something new
           arrives in it, such as a reminder it set, and it echoes again when it finishes.</li>
         <li>A card that has scrolled out of view doesn't re-post. The switcher badge, the sidebar and
@@ -506,7 +506,7 @@
           which carries no taint.</li>
         <li><b>A thread</b> started by the assistant carries what a delegation does today: the request it
           was given, never the anchor turn or the Home transcript. The "Started from" quote is display-only. Only the user's "Continue in a
-          thread" brings earlier Home turns along, and never into coder or media analyst. Copies keep
+          thread" brings earlier Home turns along, and never into a profile that gets no household context today (browser, coder, media analyst). Copies keep
           their taint. A thread doesn't see its siblings.</li>
         <li><b>Each thread keeps its own profile and tier.</b> Home stays on the default profile, and a
           tier picked in Home applies to that turn only.</li>
@@ -531,7 +531,7 @@
         It's admitted by the target profile's delegation policy and carries delegation taint.</li>
       <li><b>Everything that crosses between conversations goes through one chokepoint.</b> That covers the
         seed, "Continue in a thread", a moved turn and the echo. It applies three rules. Rows keep their taint and
-        are re-stamped to the destination's profile. Coder and media analyst accept request text only, and moves
+        are re-stamped to the destination's profile. Profiles that get no household context today (browser, coder, media analyst) accept request text only, and moves
         into them are refused. Only text the user typed is stored as a user row, so an assistant-written request
         never counts as the user's words for memory.</li>
       <li><b>The echo replaces the wake.</b> Finishing a thread copies its final message into Home. Home's assistant
