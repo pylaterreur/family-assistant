@@ -2575,6 +2575,60 @@ async def test_unresolved_firing_gated_only_by_static_policy_is_reviewed_at_star
 
 
 @pytest.mark.asyncio
+async def test_observe_keeps_a_statically_gated_firing_review_live(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.DENY)
+    provider = _provider(
+        [_ordinary_effect_registration(effects)],
+        reviewer=reviewer,
+        rules=[_review_rule("ordinary_effect", ToolPolicyDecision.REVIEW)],
+        taint_policy=TaintPolicyConfig(mode=TaintPolicyMode.OBSERVE),
+    )
+
+    note = await _fire_stored_script(
+        db_engine,
+        provider,
+        'ordinary_effect(value="first")\nordinary_effect(value="second")',
+        resolved=False,
+    )
+    await provider.close()
+
+    assert effects == []
+    assert note is not None
+    assert note.startswith("Script was not run")
+
+
+@pytest.mark.asyncio
+async def test_observe_forecasts_a_firings_watched_calls_without_confirm(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.ALLOW_WATCHED,
+        ToolCallReviewVerdict.DENY,
+        ToolCallReviewVerdict.DENY,
+        ToolCallReviewVerdict.DENY,
+        watched_tools=("run_sandbox",),
+    )
+    provider = _eink_provider(
+        effects, reviewer, taint_policy=TaintPolicyConfig(mode=TaintPolicyMode.OBSERVE)
+    )
+
+    await _fire_stored_script(db_engine, provider, _EINK_FIRING, resolved=False)
+    await provider.close()
+
+    assert len(effects) == 3
+    watched = reviewer.calls[1:]
+    assert len(watched) == 3
+    assert all(
+        ToolCallReviewVerdict.CONFIRM not in call.constraints.available_verdicts
+        for call in watched
+    )
+
+
+@pytest.mark.asyncio
 async def test_watched_keychute_request_in_a_firing_cannot_be_confirmed_later(
     db_engine: AsyncEngine,
 ) -> None:

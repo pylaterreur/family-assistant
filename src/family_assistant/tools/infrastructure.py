@@ -2194,6 +2194,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
                     taint_evaluation=evaluation,
                     static_evaluation=None,
                     watched=watched,
+                    unattended=watched and _confirmation_is_deferred(context),
                 )
                 return
             # A review that also decides the running program is awaited in
@@ -2935,6 +2936,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 pending=pending_definition_review,
                 escalates=True,
                 watched=watched,
+                unattended=watched and _confirmation_is_deferred(context),
             )
         elif (
             static_review
@@ -3871,6 +3873,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
         pending: PendingDefinitionReview | None = None,
         escalates: bool = False,
         watched: bool = False,
+        unattended: bool = False,
     ) -> None:
         """Review off the critical path; ``escalates`` forecasts a denial escalation.
 
@@ -3899,6 +3902,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
             count_reserved=not budget_exhausted,
             forecast=True,
             watched=watched,
+            unattended=unattended,
         )
         if escalates:
             review = self._forecast_escalation_after(
