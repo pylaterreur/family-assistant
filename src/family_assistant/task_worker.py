@@ -2247,6 +2247,13 @@ class TaskWorker:
                 run,
                 target=target,
                 model_selection=_frozen_model_selection(run, target),
+                tool_call_review_trigger=await _delegation_run_review_trigger(
+                    exec_context,
+                    run,
+                    trigger_type="delegation_request",
+                    active_request_role="user",
+                    payload_present=False,
+                ),
                 claim=claim,
             )
         except Exception:
@@ -2281,6 +2288,7 @@ class TaskWorker:
             if outcome.succeeded
             else ChatInteractionResult(
                 status=ChatInteractionStatus.ERROR,
+                text_reply="The thread's first turn did not complete.",
                 error_traceback=outcome.error,
             ),
         )

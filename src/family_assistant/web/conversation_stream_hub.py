@@ -159,6 +159,10 @@ class TurnRecord:
     # resume it. A suspended turn is deliberately left open: the done-callback
     # safety net must not close it as failed.
     suspended: bool = False
+    # Set when the turn's stream reported an error. The turn can still end
+    # ``complete`` -- the client has shown the error and the turn is over -- so a
+    # caller that needs to know whether the turn achieved anything reads this.
+    error_reported: bool = False
 
 
 @dataclass(slots=True)

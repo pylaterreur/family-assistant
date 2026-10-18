@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from family_assistant.llm.model_selection import ResolvedModelSelection
     from family_assistant.processing import ProcessingService
+    from family_assistant.services.tool_call_review import TriggerReviewInput
     from family_assistant.storage.repositories.delegation_runs import (
         DelegationRunDict,
     )
@@ -45,9 +46,13 @@ class ThreadTurnRunner(Protocol):
         *,
         target: ProcessingService,
         model_selection: ResolvedModelSelection,
+        tool_call_review_trigger: TriggerReviewInput | None,
         claim: Callable[[], Awaitable[bool]],
     ) -> ThreadTurnOutcome | None:
         """Run the turn, or return None if it could not start.
+
+        ``tool_call_review_trigger`` is the request the run was started for, as
+        the tool-call reviewer judges the turn's actions against it.
 
         ``claim`` marks the run running; it is called once the turn is
         registered where its user can see it, and the turn runs only if it

@@ -41,7 +41,7 @@ from tests.helpers import wait_for_condition
 from tests.mocks.mock_llm import LLMOutput, RuleBasedMockLLMClient
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from fastapi import FastAPI
     from httpx import AsyncClient
@@ -129,6 +129,7 @@ class QueuedThread:
     db: Database
     target_gate: asyncio.Event
     target_llm: RuleBasedMockLLMClient
+    target_service: ProcessingService
     delegation_id: str
     turn_id: str
     worker: TaskWorker
@@ -211,6 +212,7 @@ async def queued_thread(
         db=db,
         target_gate=target_gate,
         target_llm=target_llm,
+        target_service=target_service,
         delegation_id=delegation_id,
         turn_id=turn_id,
         worker=worker,
@@ -312,3 +314,50 @@ async def test_the_absorbed_run_does_not_run_afterwards(
     await queued_thread.run_worker()
 
     assert len(queued_thread.target_llm.get_calls()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_first_turn_that_errors_fails_the_run(
+    queued_thread: QueuedThread, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        async def stream() -> AsyncIterator[object]:
+            raise RuntimeError("provider unavailable")
+            yield  # pragma: no cover - makes this an async generator
+
+        return stream()
+
+    monkeypatch.setattr(
+        queued_thread.target_llm, "generate_response_stream", failing_stream
+    )
+    queued_thread.target_gate.set()
+
+    await queued_thread.run_worker()
+
+    [run] = await queued_thread.db.fetch_all(
+        select(delegation_runs_table.c.status).where(
+            delegation_runs_table.c.run_kind == "thread"
+        )
+    )
+    assert run["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_the_first_turn_is_reviewed_against_the_threads_request(
+    queued_thread: QueuedThread, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    triggers: list[object] = []
+    original = queued_thread.target_service.handle_chat_interaction_stream
+
+    def spy(*args: object, **kwargs: object) -> AsyncIterator[object]:
+        triggers.append(kwargs.get("tool_call_review_trigger"))
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        queued_thread.target_service, "handle_chat_interaction_stream", spy
+    )
+    queued_thread.target_gate.set()
+
+    await queued_thread.run_worker()
+
+    assert [trigger is not None for trigger in triggers] == [True]

@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
     from family_assistant.llm.model_selection import ResolvedModelSelection
     from family_assistant.processing import ProcessingService
+    from family_assistant.services.tool_call_review import TriggerReviewInput
     from family_assistant.storage.repositories.delegation_runs import (
         DelegationRunDict,
     )
@@ -57,6 +58,7 @@ class WebThreadTurnRunner:
         *,
         target: ProcessingService,
         model_selection: ResolvedModelSelection,
+        tool_call_review_trigger: TriggerReviewInput | None,
         claim: Callable[[], Awaitable[bool]],
     ) -> ThreadTurnOutcome | None:
         state = self._app_state
@@ -135,10 +137,17 @@ class WebThreadTurnRunner:
             on_orphan_cancel=None,
             lease_registry=None,
             lease=None,
+            tool_call_review_trigger=tool_call_review_trigger,
         )
         await producer
         record = hub.get_turn(conversation_id, turn_id)
-        if record is not None and record.status == "complete":
+        # The stream reports a provider error or a refusal as an event and still
+        # ends the turn complete, so completion alone is not success.
+        if (
+            record is not None
+            and record.status == "complete"
+            and not record.error_reported
+        ):
             return ThreadTurnOutcome(
                 succeeded=True,
                 reply_text=await self._reply_text(db, turn_id),
@@ -148,9 +157,11 @@ class WebThreadTurnRunner:
             succeeded=False,
             reply_text="",
             error=(
-                f"The thread's first turn ended {record.status}"
-                if record is not None
-                else "The thread's first turn ended without a record."
+                "The thread's first turn ended without a record."
+                if record is None
+                else "The thread's first turn reported an error."
+                if record.error_reported
+                else f"The thread's first turn ended {record.status}."
             ),
         )
 

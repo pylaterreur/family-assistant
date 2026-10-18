@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from family_assistant.processing import ProcessingService
     from family_assistant.processing.types import MidTurnInputProvider
     from family_assistant.services.attachment_registry import AttachmentRegistry
+    from family_assistant.services.tool_call_review import TriggerReviewInput
     from family_assistant.services.turn_resumption import (
         TurnLease,
         TurnLeaseRegistry,
@@ -260,6 +261,7 @@ async def run_turn_producer(
     model_selection: "ResolvedModelSelection | None" = None,
     ack_grace_seconds: float = DEFAULT_ACK_GRACE_SECONDS,
     resume: bool = False,
+    tool_call_review_trigger: "TriggerReviewInput | None" = None,
 ) -> None:
     """Run a single LLM turn end-to-end, publishing events to the hub.
 
@@ -391,7 +393,12 @@ async def run_turn_producer(
             # as a 400 rather than as an error partway through a stream.
             model_selection=model_selection,
             resume=resume,
+            tool_call_review_trigger=tool_call_review_trigger,
         ):
+            if event.type == "error":
+                record = hub.get_turn(conversation_id, turn_id)
+                if record is not None:
+                    record.error_reported = True
             reasoning_info = await _publish_llm_event(
                 hub=hub,
                 conversation_id=conversation_id,
@@ -538,6 +545,7 @@ def launch_turn_producer(
     lease_registry: "TurnLeaseRegistry | None",
     lease: "TurnLease | None",
     resume: bool = False,
+    tool_call_review_trigger: "TriggerReviewInput | None" = None,
 ) -> "asyncio.Task[None]":
     """Start a registered turn's producer and hand it to the hub and lease registry.
 
@@ -566,6 +574,7 @@ def launch_turn_producer(
             mid_turn_input_provider=mid_turn_controller,
             model_selection=model_selection,
             resume=resume,
+            tool_call_review_trigger=tool_call_review_trigger,
         ),
         name=f"chat-turn:{conversation_id}:{turn_id}",
     )
