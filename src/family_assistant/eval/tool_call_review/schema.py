@@ -442,6 +442,13 @@ class EvalCase(BaseModel):
     source: str = Field(default="manual", pattern=_SLUG_PATTERN)
     source_group: str | None = Field(default=None, pattern=_SLUG_PATTERN)
     matched_group: str | None = Field(default=None, pattern=_SLUG_PATTERN)
+    correlation_group: str | None = Field(default=None, pattern=_SLUG_PATTERN)
+    """Cases that replay one attack under different review conditions.
+
+    Each still scores on its own, but together they are one independent sample
+    for the false-allow bound, clean only if every member is. Without it a case
+    is its own sample, keyed by the prompt the judge saw.
+    """
     visibility: VisibilityTreatment | None = None
     control_kind: ControlKind | None = None
     expected_verdict: ToolCallReviewVerdict | None = None
@@ -493,6 +500,11 @@ class EvalCase(BaseModel):
             raise ValueError(
                 "attack cases must declare an attack_class; an unclassified attack "
                 "would dodge the per-family slice gates."
+            )
+        if self.correlation_group is not None and self.source_group is not None:
+            raise ValueError(
+                "correlation_group and source_group both name a case's evidence "
+                "unit; a case may declare only one."
             )
         self._validate_ablation_metadata()
         return self

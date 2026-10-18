@@ -11,21 +11,43 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from family_assistant.config_models import ToolCallReviewConfig
 from family_assistant.eval.tool_call_review.loader import load_cases
+from family_assistant.eval.tool_call_review.runner import run_eval
 from family_assistant.eval.tool_call_review.schema import (
     ConversationPayload,
     EvalCase,
 )
 from family_assistant.scripting.validator import ScriptValidator
+from family_assistant.security.taint import (
+    SinkClass,
+    TaintPolicyConfig,
+    TaintPolicyMode,
+    TurnTaintState,
+)
 from family_assistant.services.tool_call_review import (
     ToolCallReviewConstraints,
+    ToolCallReviewer,
     ToolCallReviewInput,
+    ToolCallReviewResponse,
+    ToolCallReviewVerdict,
     assemble_tool_call_review_messages,
 )
 from family_assistant.tools import LOCAL_TOOL_DESCRIPTORS
+from family_assistant.tools.infrastructure import (
+    LocalToolsProvider,
+    TaintTrackingToolsProvider,
+)
+from tests.mocks.mock_llm import (  # pylint: disable=no-name-in-module
+    RuleBasedMockLLMClient,
+)
+
+if TYPE_CHECKING:
+    from family_assistant.llm import LLMInterface
 
 _EIGHT_ATTACK_CLASSES = frozenset({
     "tool_result_injection",
@@ -38,7 +60,7 @@ _EIGHT_ATTACK_CLASSES = frozenset({
     "unattended_context",
 })
 
-_EXPECTED_CASE_COUNT = 69
+_EXPECTED_CASE_COUNT = 81
 
 
 def _manual_dataset_dir() -> Path:
@@ -214,6 +236,113 @@ def test_script_context_preserves_effective_inputs(
     assert review_input.script.inputs == {"plan_title": "School plan"}
     messages = assemble_tool_call_review_messages(review_input, constraints)
     assert '"plan_title": "School plan"' in str(messages[1].content)
+
+
+_ENFORCE_SUFFIX = "-enforce"
+
+
+def _ambient_cases(manual_cases: list[EvalCase]) -> list[EvalCase]:
+    return [case for case in manual_cases if case.id.startswith("manual-ambient-")]
+
+
+def _runtime_admission_review(
+    mode: TaintPolicyMode, taint_state: TurnTaintState
+) -> tuple[ToolCallReviewConstraints, list[dict[str, object]]]:
+    """Return the verdict space and policy contexts the admission gate hands the judge."""
+    provider = TaintTrackingToolsProvider(
+        LocalToolsProvider(registrations=[]),
+        taint_policy=TaintPolicyConfig(mode=mode),
+    )
+    evaluation = provider._taint_evaluator.evaluate(
+        state=taint_state, sink_class=SinkClass.AMBIENT_PROMPT_WRITE
+    )
+    constraints = provider._review_constraints(
+        taint_evaluation=evaluation,
+        static_evaluation=None,
+        include_observe_taint_constraints=True,
+    )
+    contexts = provider._review_policy_contexts(
+        state=taint_state, taint_evaluation=evaluation, static_evaluation=None
+    )
+    return constraints, [context.model_dump(mode="json") for context in contexts]
+
+
+def test_ambient_cases_replay_the_runtime_review_for_their_mode(
+    manual_cases: list[EvalCase],
+) -> None:
+    # A case's verdict space and policy context are stored, so a runtime change
+    # to either would otherwise leave the slice measuring a judge nobody runs.
+    ambient = _ambient_cases(manual_cases)
+    assert ambient
+    for case in ambient:
+        payload = case.payload
+        assert isinstance(payload, ConversationPayload)
+        mode = (
+            TaintPolicyMode.ENFORCE
+            if case.id.endswith(_ENFORCE_SUFFIX)
+            else TaintPolicyMode.OBSERVE
+        )
+        constraints, contexts = _runtime_admission_review(
+            mode, TurnTaintState.from_metadata(payload.taint_state)
+        )
+        assert case.constraints.to_constraints() == constraints, case.id
+        assert payload.policy_contexts == contexts, case.id
+
+
+def test_every_ambient_case_has_an_enforce_twin(
+    manual_cases: list[EvalCase],
+) -> None:
+    ambient = {case.id: case for case in _ambient_cases(manual_cases)}
+    observe_ids = [
+        case_id for case_id in ambient if not case_id.endswith(_ENFORCE_SUFFIX)
+    ]
+    assert len(observe_ids) * 2 == len(ambient)
+    for case_id in observe_ids:
+        observe = ambient[case_id]
+        enforce = ambient[case_id + _ENFORCE_SUFFIX]
+        assert (enforce.label, enforce.attack_class) == (
+            observe.label,
+            observe.attack_class,
+        )
+        assert observe.correlation_group is not None
+        assert enforce.correlation_group == observe.correlation_group
+        assert enforce.payload.model_dump(
+            exclude={"policy_contexts"}
+        ) == observe.payload.model_dump(exclude={"policy_contexts"})
+        # An attack is stopped by confirm or deny alike, and the scoring is
+        # label-based; a benign candidate that draws a confirm is a needless
+        # prompt, so it must say allow.
+        expected = ToolCallReviewVerdict.ALLOW if observe.label == "benign" else None
+        assert enforce.expected_verdict is expected, enforce.id
+
+
+async def test_enforce_twins_do_not_inflate_the_false_allow_bound(
+    manual_cases: list[EvalCase],
+) -> None:
+    ambient = _ambient_cases(manual_cases)
+    judge = RuleBasedMockLLMClient(
+        rules=[],
+        structured_rules=[
+            (
+                lambda _args: True,
+                ToolCallReviewResponse(
+                    verdict=ToolCallReviewVerdict.DENY, reason="Planted directive."
+                ),
+            )
+        ],
+    )
+    reviewer = ToolCallReviewer(
+        cast("LLMInterface", judge), ToolCallReviewConfig(timeout_seconds=5)
+    )
+
+    report = await run_eval(ambient, reviewer, seeds=1)
+
+    attacks = [case for case in ambient if case.label == "attack"]
+    observe_attacks = [
+        case for case in attacks if not case.id.endswith(_ENFORCE_SUFFIX)
+    ]
+    assert len(attacks) == 2 * len(observe_attacks)
+    assert report.clean_attack_cases() == len(observe_attacks)
 
 
 def test_conversation_cases_round_trip(manual_cases: list[EvalCase]) -> None:
