@@ -35,6 +35,7 @@ class ConversationThread:
     title_taint: TaintMetadata | None
     anchor_message_id: int | None
     seed_message_id: int | None
+    source_tool_call_id: str | None
     delegation_id: str | None
     created_at: datetime
     updated_at: datetime
@@ -51,6 +52,7 @@ def _thread_from_row(row: Mapping[str, Any]) -> ConversationThread:
         title_taint=row["title_taint_json"],
         anchor_message_id=row["anchor_message_id"],
         seed_message_id=row["seed_message_id"],
+        source_tool_call_id=row["source_tool_call_id"],
         delegation_id=row["delegation_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -126,6 +128,7 @@ class ConversationThreadsRepository(BaseRepository):
         anchor_message_id: int | None,
         delegation_id: str | None,
         now: datetime,
+        source_tool_call_id: str | None = None,
     ) -> None:
         """Record a new thread of ``home_conversation_id``."""
         await self._db.execute(
@@ -139,6 +142,7 @@ class ConversationThreadsRepository(BaseRepository):
                 title_taint_json=title_taint,
                 anchor_message_id=anchor_message_id,
                 seed_message_id=None,
+                source_tool_call_id=source_tool_call_id,
                 delegation_id=delegation_id,
                 created_at=now,
                 updated_at=now,

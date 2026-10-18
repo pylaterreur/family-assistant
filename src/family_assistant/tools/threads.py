@@ -26,6 +26,7 @@ from family_assistant.threads.boundary import (
     BoundaryDestination,
     copy_across_boundary,
 )
+from family_assistant.threads.home import find_home, home_owner_id
 from family_assistant.tools.services import (
     DELEGATED_PROFILE_RUN_TASK_TYPE,
     current_taint_metadata,
@@ -140,8 +141,8 @@ async def thread_start_refusal(
         return "Threads need asynchronous delegation, which is not available here."
     if subconversation_id is not None or not user_id:
         return "A thread can only be started from the user's Home."
-    home = await db.conversation_threads.get_home(
-        user_id, "web" if interface_type == "voice" else interface_type
+    home = await find_home(
+        db, app_config, user_id=user_id, interface_type=interface_type
     )
     if home != conversation_id:
         return "A thread can only be started from the user's Home."
@@ -232,7 +233,8 @@ async def start_thread_tool(
     )
 
     owner = exec_context.user_id
-    assert owner is not None
+    app_config = _app_config(exec_context)
+    assert owner is not None and app_config is not None
     home_conversation_id = exec_context.conversation_id
     taint = current_taint_metadata(exec_context)
     delegation_id = f"delegation_{uuid.uuid4().hex}"
@@ -255,8 +257,9 @@ async def start_thread_tool(
             conversation_id=thread_conversation_id,
             home_conversation_id=home_conversation_id,
             interface_type=interface_type,
-            owner_user_id=owner,
+            owner_user_id=home_owner_id(app_config, owner),
             profile_id=target_config.id,
+            source_tool_call_id=exec_context.tool_call_id,
             title=title,
             title_taint=taint,
             anchor_message_id=None,

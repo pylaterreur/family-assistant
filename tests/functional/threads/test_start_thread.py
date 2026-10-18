@@ -363,3 +363,21 @@ async def test_attachments_passed_to_a_thread_stay_in_its_history(
     assert [row["attachments"] for row in seed_rows] == [
         [{"type": "attachment_reference", "attachment_id": attachment_id}]
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_thread_records_the_tool_call_that_started_it(
+    world: ThreadWorld,
+) -> None:
+    await world.say_in(HOME, "please start a thread for the quotes")
+
+    [thread_id] = await world.thread_ids()
+    thread = await world.db.conversation_threads.get_thread(thread_id)
+    tool_call_ids = [
+        call["id"]
+        for row in await world.rows(HOME)
+        if row["role"] == "assistant" and row["tool_calls"]
+        for call in cast("list[Mapping[str, object]]", row["tool_calls"])
+    ]
+    assert thread is not None
+    assert [thread.source_tool_call_id] == tool_call_ids
