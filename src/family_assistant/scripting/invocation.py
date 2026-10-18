@@ -97,8 +97,6 @@ class PreparedScriptInvocation:
     bound_child: bool = False
     watched_tools: frozenset[str] = frozenset()
     """Tools whose every call the approving review asked to see on its own."""
-    policy_gated: frozenset[str] = frozenset()
-    """Capabilities static policy could route to review or confirmation."""
 
     def reachable_capabilities(self) -> frozenset[str]:
         """Tools and external functions the program can call, conservatively.
