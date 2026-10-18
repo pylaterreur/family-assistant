@@ -125,6 +125,22 @@ def test_a_case_calling_an_undeclared_tool_is_rejected(
         validate_case_scripts([broken], registry)
 
 
+def test_a_case_declaring_execute_script_is_rejected(
+    cases: list[PrototypeCase], registry: dict[str, ToolDescriptor]
+) -> None:
+    case = _case(cases, "printer-stl-slice-upload")
+    script = case.payload.script
+    assert script is not None
+    nesting = script.model_copy(
+        update={"tool_names": (*script.tool_names, "execute_script")}
+    )
+    broken = case.model_copy(
+        update={"payload": case.payload.model_copy(update={"script": nesting})}
+    )
+    with pytest.raises(ValueError, match="nested execute_script"):
+        validate_case_scripts([broken], registry)
+
+
 def test_production_variant_is_the_production_prompt(
     cases: list[PrototypeCase], registry: dict[str, ToolDescriptor]
 ) -> None:
