@@ -334,6 +334,17 @@ class ConversationSummaryConfig(BaseModel):
     timeout_seconds: float = Field(default=20.0, gt=0)
 
 
+class ConversationThreadsConfig(BaseModel):
+    """Threads: work that outlives a turn, spun off a user's Home conversation.
+
+    See docs/design/one-thread-chat-ux.md.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+
+
 class ToolCallReviewEscalationConfig(BaseModel):
     """Turn-local thresholds used by tool-call review escalation."""
 
@@ -2263,6 +2274,10 @@ class AppConfig(BaseSettings):
 
     conversation_summaries: ConversationSummaryConfig = Field(
         default_factory=ConversationSummaryConfig
+    )
+
+    conversation_threads: ConversationThreadsConfig = Field(
+        default_factory=ConversationThreadsConfig
     )
 
     @model_validator(mode="after")

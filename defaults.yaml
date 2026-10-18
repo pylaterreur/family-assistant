@@ -339,6 +339,12 @@ conversation_summaries:
   batch_size: 10
   timeout_seconds: 20
 
+# Threads: the assistant spins long-running or multi-step work off a user's Home
+# conversation into a thread of its own, on the profile best suited to it. See
+# docs/design/one-thread-chat-ux.md.
+conversation_threads:
+  enabled: false
+
 # Gemini Live Voice API Configuration
 # See: https://ai.google.dev/gemini-api/docs/live
 gemini_live_config:

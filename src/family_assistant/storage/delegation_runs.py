@@ -154,7 +154,15 @@ delegation_runs_table = Table(
     Column("user_name", String(255), nullable=True),
     Column("source_turn_id", String(100), nullable=True),
     Column("source_subconversation_id", String(36), nullable=True),
-    Column("subconversation_id", String(36), nullable=False),
+    # Null for a thread run, whose rows live at the top level of its own
+    # conversation (``conversation_id``) rather than in a subconversation.
+    Column("subconversation_id", String(36), nullable=True),
+    # "delegation", or "thread" for the first turn of a conversation thread,
+    # which records completion without waking the source.
+    Column("run_kind", String(20), nullable=False, server_default="delegation"),
+    # The turn a thread run's first turn writes under, allocated up front so
+    # the seed row and the turn's own rows share it.
+    Column("turn_id", String(36), nullable=True),
     Column("request_text", Text, nullable=False),
     Column(
         "content_parts_json", JSON().with_variant(JSONB, "postgresql"), nullable=False

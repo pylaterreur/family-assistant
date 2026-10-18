@@ -1382,6 +1382,20 @@ The summarizer has no tools, and its output is only displayed to the conversatio
 never put into a prompt. See
 [conversation-list-summaries.md](../design/conversation-list-summaries.md).
 
+### conversation_threads
+
+Threads let the assistant move long-running or multi-step work out of a user's Home conversation
+into a conversation of its own, running on the profile that suits it. A thread is admitted by the
+same `tools_policy` rules as `delegate_to_service`, matched on the `delegation` tool tag and the
+`target_service_id` argument. It is seeded with the request only, and a profile that doesn't receive
+household context never receives Home's messages.
+
+| Key       | Default (shipped) | Meaning                                                      |
+| --------- | ----------------- | ------------------------------------------------------------ |
+| `enabled` | `false`           | `true` lets the assistant start threads with `start_thread`. |
+
+See [one-thread-chat-ux.md](../design/one-thread-chat-ux.md).
+
 ______________________________________________________________________
 
 ## Calendar Integration
