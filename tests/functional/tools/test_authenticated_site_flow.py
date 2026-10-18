@@ -32,6 +32,7 @@ from family_assistant.llm import LLMOutput, ToolCallFunction, ToolCallItem
 from family_assistant.processing import ProcessingService, ProcessingServiceConfig
 from family_assistant.processing.types import DelegationSecurityLevel
 from family_assistant.storage.database import Database
+from family_assistant.storage.delegation_runs import delegated_subconversation_id
 from family_assistant.tools import (
     LOCAL_TOOL_REGISTRATIONS,
     LocalToolsProvider,
@@ -668,7 +669,7 @@ async def test_resume_after_losing_the_binding_fails_closed(
     )
     assert run is not None
     if failure in {"binding", "binding_with_other"}:
-        release_authenticated_session(run["subconversation_id"])
+        release_authenticated_session(delegated_subconversation_id(run))
         if failure == "binding_with_other":
             authenticated_sites_module._active_runs[run["conversation_id"]] = (
                 "other-run"

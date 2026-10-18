@@ -37,7 +37,10 @@ from family_assistant.services.tool_call_review import (
     TriggerReviewInput,
     build_delegation_review_trigger,
 )
-from family_assistant.storage.delegation_runs import TERMINAL_DELEGATION_STATUSES
+from family_assistant.storage.delegation_runs import (
+    TERMINAL_DELEGATION_STATUSES,
+    delegated_subconversation_id,
+)
 from family_assistant.storage.tasks import TaskPriority
 from family_assistant.tools.browser_session import delegated_browser_scope
 from family_assistant.tools.outcomes import ACTION_DECLINED_PREFIX
@@ -118,7 +121,7 @@ def _now(exec_context: ToolExecutionContext) -> datetime:
     return (exec_context.clock or SystemClock()).now()
 
 
-def _tools_config(exec_context: ToolExecutionContext) -> ToolsConfig:
+def delegation_tools_config(exec_context: ToolExecutionContext) -> ToolsConfig:
     service = exec_context.processing_service
     if service is not None:
         return service.service_config.tools_config
@@ -132,7 +135,7 @@ def _resolve_handoff_wait_seconds(
     handoff_after_seconds: float | None,
     delivery_hint: Literal["auto", "background"],
 ) -> float:
-    tools_config = _tools_config(exec_context)
+    tools_config = delegation_tools_config(exec_context)
     requested_wait = tools_config.delegate_handoff_after_seconds
     if handoff_after_seconds is not None:
         requested_wait = handoff_after_seconds
@@ -144,10 +147,10 @@ def _resolve_handoff_wait_seconds(
 
 
 def _delegation_status_poll_seconds(exec_context: ToolExecutionContext) -> float:
-    return max(0.05, _tools_config(exec_context).delegate_status_poll_seconds)
+    return max(0.05, delegation_tools_config(exec_context).delegate_status_poll_seconds)
 
 
-def _current_taint_metadata(exec_context: ToolExecutionContext) -> TaintMetadata | None:
+def current_taint_metadata(exec_context: ToolExecutionContext) -> TaintMetadata | None:
     if exec_context.taint_tracker is None:
         return None
     return exec_context.taint_tracker.snapshot().to_metadata()
@@ -185,7 +188,7 @@ async def _delegation_review_trigger(
         trigger_type="delegation_request",
         active_request_role="user",
         definition=definition,
-        definition_taint_metadata=_current_taint_metadata(exec_context),
+        definition_taint_metadata=current_taint_metadata(exec_context),
         payload_present=False,
         source_turn_id=exec_context.turn_id,
         # An unattended turn -- a delegated run, a delegation-completion wake, an
@@ -230,14 +233,14 @@ def delegation_belongs_to_caller(
     """Whether the caller owns this delegated history, including its parent task."""
     return (
         run["conversation_id"] == exec_context.conversation_id
-        and run["interface_type"] == _delegation_interface_type(exec_context)
+        and run["interface_type"] == delegation_interface_type(exec_context)
         and run["user_id"] == exec_context.user_id
         and run["source_profile_id"] == source_service_id
         and run["source_subconversation_id"] == exec_context.subconversation_id
     )
 
 
-def _delegation_interface_type(exec_context: ToolExecutionContext) -> str:
+def delegation_interface_type(exec_context: ToolExecutionContext) -> str:
     return (
         "web" if exec_context.interface_type == "voice" else exec_context.interface_type
     )
@@ -309,7 +312,7 @@ async def _resolve_resume_subconversation(
             ),
             attachments=None,
         )
-    resumed_subconversation_id = prior_run["subconversation_id"]
+    resumed_subconversation_id = delegated_subconversation_id(prior_run)
     # Serialize resumes: two runs sharing a subconversation would interleave
     # messages and tool side effects in the same delegated history. This preflight
     # gives a clean early error for the common sequential case; the unique
@@ -512,7 +515,7 @@ async def _run_synchronous_delegation(
     try:
         result = await target_service.handle_chat_interaction(
             db_context=exec_context.db_context,
-            interface_type=_delegation_interface_type(exec_context),
+            interface_type=delegation_interface_type(exec_context),
             conversation_id=exec_context.conversation_id,
             trigger_content_parts=content_parts,
             trigger_interface_message_id=None,
@@ -530,7 +533,7 @@ async def _run_synchronous_delegation(
             request_confirmation_callback=exec_context.request_confirmation_callback,
             subconversation_id=subconversation_id,
             initial_taint_sources=_taint_sources_from_metadata(
-                _current_taint_metadata(exec_context)
+                current_taint_metadata(exec_context)
             ),
             tool_call_review_trigger=await _delegation_review_trigger(
                 exec_context,
@@ -662,7 +665,7 @@ async def delegation_run_result_taint_metadata(
         target_service_id=run["target_service_id"],
         interface_type=run["interface_type"],
         conversation_id=run["conversation_id"],
-        subconversation_id=run["subconversation_id"],
+        subconversation_id=delegated_subconversation_id(run),
         parent_taint_metadata=run["taint_state_json"],
     )
 
@@ -710,7 +713,7 @@ async def _merge_delegated_result_taint(
     metadata = await delegated_result_taint_metadata(
         exec_context.db_context,
         target_service_id=target_service_id,
-        interface_type=_delegation_interface_type(exec_context),
+        interface_type=delegation_interface_type(exec_context),
         conversation_id=exec_context.conversation_id,
         subconversation_id=subconversation_id,
         parent_taint_metadata=parent_taint_metadata,
@@ -808,7 +811,7 @@ async def _inline_delegation_result(
     await _merge_delegated_result_taint(
         exec_context,
         target_service_id=target_service_id,
-        subconversation_id=run["subconversation_id"],
+        subconversation_id=delegated_subconversation_id(run),
         parent_taint_metadata=run["taint_state_json"],
     )
     await _mark_delegation_delivered_inline(
@@ -901,9 +904,11 @@ class StartedDelegation:
     wait_seconds: float
 
 
-def _resolve_delegation_target(
+def resolve_delegation_target(
     exec_context: ToolExecutionContext,
     target_service_id: str,
+    *,
+    tool_name: str = "delegate_to_service",
 ) -> tuple[DelegatableService | None, str | None, ToolResult | None]:
     """Resolve the target and enforce its source-profile delegation boundary."""
     processing_service = exec_context.processing_service
@@ -954,7 +959,7 @@ def _resolve_delegation_target(
             None,
             ToolResult(
                 text=(
-                    "Error: Tool 'delegate_to_service' is not allowed. "
+                    f"Error: Tool '{tool_name}' is not allowed. "
                     f"Profile '{source_service_id}' is not permitted to delegate "
                     f"to '{target_service_id}'."
                 ),
@@ -1053,7 +1058,9 @@ async def _request_delegation_confirmation(
             tool_name="delegate_to_service",
             call_id=call_id,
             tool_args=tool_args,
-            timeout_seconds=_tools_config(exec_context).confirmation_timeout_seconds,
+            timeout_seconds=delegation_tools_config(
+                exec_context
+            ).confirmation_timeout_seconds,
             context=exec_context,
         )
     except TimeoutError:
@@ -1186,7 +1193,7 @@ def _merge_confirmed_delegation_taint(
     )
 
 
-async def _delegation_content_parts(
+async def delegation_content_parts(
     exec_context: ToolExecutionContext,
     *,
     target_service_id: str,
@@ -1248,7 +1255,7 @@ async def _synchronous_result_if_required(
     """Run inline when async delivery cannot be used, rejecting unsafe resumes."""
     if not (
         exec_context.in_script
-        or not _tools_config(exec_context).async_delegation_enabled
+        or not delegation_tools_config(exec_context).async_delegation_enabled
     ):
         return None
     if resumed_subconversation_id is not None:
@@ -1299,7 +1306,7 @@ async def _enqueue_delegation(
         handoff_after_seconds,
         delivery_hint,
     )
-    taint_state_json = _current_taint_metadata(exec_context)
+    taint_state_json = current_taint_metadata(exec_context)
 
     logger.info(
         "Enqueuing delegated request to service profile '%s' with %d content parts "
@@ -1317,7 +1324,7 @@ async def _enqueue_delegation(
             "task_id": task_id,
             "source_profile_id": source_service_id,
             "target_service_id": target_service_id,
-            "interface_type": _delegation_interface_type(exec_context),
+            "interface_type": delegation_interface_type(exec_context),
             "origin_interface_type": exec_context.interface_type,
             "conversation_id": exec_context.conversation_id,
             "user_id": exec_context.user_id,
@@ -1340,7 +1347,7 @@ async def _enqueue_delegation(
             task_type=DELEGATED_PROFILE_RUN_TASK_TYPE,
             payload={
                 "delegation_id": delegation_id,
-                "interface_type": _delegation_interface_type(exec_context),
+                "interface_type": delegation_interface_type(exec_context),
                 "conversation_id": exec_context.conversation_id,
                 "user_name": exec_context.user_name,
             },
@@ -1616,7 +1623,7 @@ async def delegate_to_service_tool(
         f"Executing delegate_to_service_tool: target='{target_service_id}', request='{user_request[:50]}...', confirm={confirm_delegation}"
     )
 
-    target_service, source_service_id, target_error = _resolve_delegation_target(
+    target_service, source_service_id, target_error = resolve_delegation_target(
         exec_context,
         target_service_id,
     )
@@ -1673,7 +1680,7 @@ async def delegate_to_service_tool(
     if confirmation_error is not None:
         return confirmation_error
 
-    content_parts, attachment_error = await _delegation_content_parts(
+    content_parts, attachment_error = await delegation_content_parts(
         exec_context,
         target_service_id=target_service_id,
         user_request=user_request,
@@ -1716,7 +1723,7 @@ async def delegate_to_service_tool(
     model_selection = await target_service.resolve_model_selection_for_run(
         model_selection,
         db_context=exec_context.db_context,
-        interface_type=_delegation_interface_type(exec_context),
+        interface_type=delegation_interface_type(exec_context),
         conversation_id=exec_context.conversation_id,
         subconversation_id=subconversation_id,
         trigger_content_parts=content_parts,
@@ -1758,7 +1765,7 @@ async def start_delegation(
     itself from configuration. Returns a :class:`ToolResult` describing the
     refusal when the run cannot be created.
     """
-    target_service, source_service_id, target_error = _resolve_delegation_target(
+    target_service, source_service_id, target_error = resolve_delegation_target(
         exec_context,
         target_service_id,
     )
@@ -1791,7 +1798,7 @@ async def start_delegation(
     model_selection = await target_service.resolve_model_selection_for_run(
         model_selection,
         db_context=exec_context.db_context,
-        interface_type=_delegation_interface_type(exec_context),
+        interface_type=delegation_interface_type(exec_context),
         conversation_id=exec_context.conversation_id,
         subconversation_id=subconversation_id,
         trigger_content_parts=content_parts,
@@ -1841,7 +1848,7 @@ async def get_delegation_status_tool(
     delegation_id: str,
 ) -> ToolResult:
     """Return status for an asynchronous profile delegation."""
-    if not _tools_config(exec_context).async_delegation_enabled:
+    if not delegation_tools_config(exec_context).async_delegation_enabled:
         return ToolResult(
             text=(
                 "Async profile delegation is disabled; delegations run synchronously "
@@ -1855,7 +1862,7 @@ async def get_delegation_status_tool(
     )
     if run is None or (
         run["conversation_id"] != exec_context.conversation_id
-        or run["interface_type"] != _delegation_interface_type(exec_context)
+        or run["interface_type"] != delegation_interface_type(exec_context)
     ):
         return ToolResult(
             text=f"Error: Delegation '{delegation_id}' not found in this conversation.",
@@ -1879,7 +1886,7 @@ async def list_delegations_tool(
     limit: int = 10,
 ) -> ToolResult:
     """List recent asynchronous profile delegations for the current conversation."""
-    if not _tools_config(exec_context).async_delegation_enabled:
+    if not delegation_tools_config(exec_context).async_delegation_enabled:
         return ToolResult(
             text=(
                 "Async profile delegation is disabled; delegations run synchronously "
@@ -1889,7 +1896,7 @@ async def list_delegations_tool(
         )
     runs = await exec_context.db_context.delegation_runs.list_for_conversation(
         conversation_id=exec_context.conversation_id,
-        interface_type=_delegation_interface_type(exec_context),
+        interface_type=delegation_interface_type(exec_context),
         status=status,
         limit=limit,
     )

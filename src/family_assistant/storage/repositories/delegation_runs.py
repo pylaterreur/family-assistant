@@ -16,7 +16,9 @@ from family_assistant.storage.delegation_runs import (
     AuthenticatedSiteEnvelope,
     DelegationLocalFailureKind,
     DelegationNotifyStage,
+    DelegationRunKind,
     DelegationRunStatus,
+    delegated_subconversation_id,
     delegation_runs_table,
 )
 from family_assistant.storage.repositories.base import BaseRepository
@@ -49,7 +51,10 @@ class DelegationRunCreate(TypedDict, total=False):
     interface_type: Required[str]
     origin_interface_type: str | None
     conversation_id: Required[str]
-    subconversation_id: Required[str]
+    # None only for a thread run; see delegation_runs_table.
+    subconversation_id: Required[str | None]
+    run_kind: DelegationRunKind
+    turn_id: str | None
     request_text: Required[str]
     content_parts_json: Required[list[ContentPartDict]]
     taint_state_json: TaintMetadata | None
@@ -76,7 +81,9 @@ class DelegationRunDict(TypedDict):
     user_name: str | None
     source_turn_id: str | None
     source_subconversation_id: str | None
-    subconversation_id: str
+    subconversation_id: str | None
+    run_kind: DelegationRunKind
+    turn_id: str | None
     request_text: str
     content_parts_json: list[ContentPartDict]
     taint_state_json: TaintMetadata | None
@@ -220,6 +227,9 @@ class DelegationRunsRepository(BaseRepository):
         stmt = (
             select(delegation_runs_table)
             .where(delegation_runs_table.c.conversation_id == conversation_id)
+            # A thread run is the thread's own first turn, not something the
+            # conversation delegated.
+            .where(delegation_runs_table.c.run_kind == "delegation")
             .order_by(delegation_runs_table.c.created_at.desc())
             .limit(bounded_limit)
         )
@@ -266,7 +276,7 @@ class DelegationRunsRepository(BaseRepository):
             runs_table.c.status,
         ).where(
             runs_table.c.source_subconversation_id.in_([
-                run["subconversation_id"] for run in runs
+                delegated_subconversation_id(run) for run in runs
             ])
         )
         children: dict[str, list[str]] = {}
@@ -277,7 +287,7 @@ class DelegationRunsRepository(BaseRepository):
 
         summaries: list[PendingDelegationSummary] = []
         for run in runs:
-            child_statuses = children.get(run["subconversation_id"], [])
+            child_statuses = children.get(delegated_subconversation_id(run), [])
             summaries.append(
                 PendingDelegationSummary(
                     run=run,
@@ -447,7 +457,13 @@ class DelegationRunsRepository(BaseRepository):
         returned inline was never handed off, and its result already reached
         the turn that started it. A resumed run shares its history with the
         run before it, so only children created since this run count.
+
+        A thread run has no history of its own to start runs from: what it
+        delegates belongs to the thread's conversation, whose own wakes deliver
+        it, so it never waits on children.
         """
+        if parent["subconversation_id"] is None:
+            return []
         stmt = (
             select(delegation_runs_table)
             .where(delegation_runs_table.c.conversation_id == parent["conversation_id"])
@@ -1047,6 +1063,8 @@ class DelegationRunsRepository(BaseRepository):
             source_turn_id=row.get("source_turn_id"),
             source_subconversation_id=row.get("source_subconversation_id"),
             subconversation_id=row["subconversation_id"],
+            run_kind=row["run_kind"],
+            turn_id=row.get("turn_id"),
             request_text=row["request_text"],
             content_parts_json=self._json_list(row["content_parts_json"]),
             taint_state_json=self._json_mapping(row.get("taint_state_json")),

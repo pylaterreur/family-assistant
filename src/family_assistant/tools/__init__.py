@@ -268,6 +268,10 @@ from family_assistant.tools.tasks import (
     schedule_future_callback_tool,
     schedule_reminder_tool,
 )
+from family_assistant.tools.threads import (
+    THREAD_TOOLS_DEFINITION,
+    start_thread_tool,
+)
 from family_assistant.tools.types import (
     MCPServerConfig,
     ToolDefinition,
@@ -482,6 +486,7 @@ __all__ = [
     "search_source_code",
     "send_message_to_user_tool",
     "send_to_my_chat_tool",
+    "start_thread_tool",
     "storage",
     "test_event_listener_tool",
     "test_script_with_simulated_tools_tool",
@@ -537,6 +542,7 @@ _LOCAL_TOOL_DEFINITIONS: list[ToolDefinition] = (
     NOTE_TOOLS_DEFINITION
     + MEMORY_TOOLS_DEFINITION
     + SERVICE_TOOLS_DEFINITION
+    + THREAD_TOOLS_DEFINITION
     + TASK_TOOLS_DEFINITION
     + DOCUMENT_TOOLS_DEFINITION
     + EVENT_TOOLS_DEFINITION
@@ -592,6 +598,7 @@ _LOCAL_TOOL_IMPLEMENTATIONS: dict[str, ToolImplementation] = {
     "modify_calendar_event": modify_calendar_event_tool,
     "delete_calendar_event": delete_calendar_event_tool,
     "delegate_to_service": delegate_to_service_tool,
+    "start_thread": start_thread_tool,
     "get_delegation_status": get_delegation_status_tool,
     "list_delegations": list_delegations_tool,
     "list_pending_callbacks": list_pending_callbacks_tool,
@@ -754,6 +761,13 @@ _CORE_TOOL_METADATA_BY_NAME: dict[str, LocalToolMetadata] = {
     # OUTPUT_TRUSTED: the tool adds a delegated result's own taint to the turn
     # itself, so the static tag must not add a blanket source on top.
     "delegate_to_service": _metadata(
+        ToolTag.DELEGATION,
+        ToolTag.OUTPUT_TRUSTED,
+    ),
+    # Starting a thread is a delegation: tagged so, with the same
+    # target_service_id argument, the policy rules and sink classification
+    # that govern delegate_to_service govern it too.
+    "start_thread": _metadata(
         ToolTag.DELEGATION,
         ToolTag.OUTPUT_TRUSTED,
     ),

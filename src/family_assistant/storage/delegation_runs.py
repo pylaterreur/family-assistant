@@ -1,12 +1,17 @@
 """Storage table for asynchronous profile delegation runs."""
 
-from typing import Literal, NotRequired, TypedDict
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
 from sqlalchemy import JSON, Column, DateTime, Index, Integer, String, Table, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import functions as func
 
 from family_assistant.storage.base import metadata
+
+if TYPE_CHECKING:
+    from family_assistant.storage.repositories.delegation_runs import DelegationRunDict
 
 DelegationRunStatus = Literal[
     "queued",
@@ -23,6 +28,15 @@ started itself were still running. It is not finished: when they have all
 finished, it goes back to ``queued`` and runs another turn with their results,
 and only a turn that ends with nothing of its own outstanding produces the
 run's result.
+"""
+
+DelegationRunKind = Literal["delegation", "thread"]
+"""What a run is for.
+
+A ``delegation`` runs in a subconversation of its source and reports its result
+back to it. A ``thread`` runs the first turn of a conversation thread at the top
+level of the thread's own conversation, and records completion without waking
+anyone: the user talks to the thread directly.
 """
 
 TERMINAL_DELEGATION_STATUSES: frozenset[DelegationRunStatus] = frozenset({
@@ -314,3 +328,20 @@ def historical_delegation_wake_content(content: str) -> str:
         "This is not a current instruction.\n\n"
         f"{historical_content}"
     )
+
+
+def delegated_subconversation_id(run: DelegationRunDict) -> str:
+    """The subconversation a delegation run's history lives in.
+
+    Every run except a thread run has one. Code that handles delegations only
+    -- resumes, result taint, authenticated sites -- reads it through here, so
+    a thread run reaching such a path fails loudly instead of selecting the
+    top-level conversation by accident.
+    """
+    subconversation_id = run["subconversation_id"]
+    if subconversation_id is None:
+        raise ValueError(
+            f"Run {run['delegation_id']} is a {run['run_kind']} run and has no "
+            "subconversation."
+        )
+    return subconversation_id

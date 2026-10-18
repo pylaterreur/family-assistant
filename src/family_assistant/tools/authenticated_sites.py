@@ -21,6 +21,7 @@ from family_assistant.storage.delegation_runs import (
     PARKED_AUTHENTICATED_STATUSES,
     TERMINAL_DELEGATION_STATUSES,
     AuthenticatedSiteEnvelope,
+    delegated_subconversation_id,
 )
 from family_assistant.tools.authenticated_site_results import authenticated_site_result
 from family_assistant.tools.browser_backend import (
@@ -328,7 +329,7 @@ async def prepare_authenticated_run(
         if not parked:
             if binding is not None:
                 await _close_session(binding.backend)
-            release_authenticated_session(run["subconversation_id"])
+            release_authenticated_session(delegated_subconversation_id(run))
             if _active_runs.get(run["conversation_id"]) == run["delegation_id"]:
                 _active_runs.pop(run["conversation_id"], None)
         logger.info(
@@ -399,7 +400,7 @@ async def _discard_parked_session(
         backend = _new_backend(exec_context, config, None)
         backend.adopt_session(session_id)
         await _close_session(backend)
-    release_authenticated_session(run["subconversation_id"])
+    release_authenticated_session(delegated_subconversation_id(run))
     if _active_runs.get(run["conversation_id"]) == run["delegation_id"]:
         _active_runs.pop(run["conversation_id"], None)
     await exec_context.db_context.delegation_runs.set_authenticated_site_state(
@@ -428,7 +429,7 @@ async def _persist_resume_verdict(
     await exec_context.db_context.delegation_runs.set_authenticated_site_state(
         run["delegation_id"], settled
     )
-    release_authenticated_session(run["subconversation_id"])
+    release_authenticated_session(delegated_subconversation_id(run))
     if _active_runs.get(run["conversation_id"]) == run["delegation_id"]:
         _active_runs.pop(run["conversation_id"], None)
 
