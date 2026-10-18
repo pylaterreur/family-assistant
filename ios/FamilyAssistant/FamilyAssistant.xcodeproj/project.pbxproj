@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A3T0001 /* HomeThreadsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3T0001 /* HomeThreadsUITests.swift */; };
+		A2T0001 /* HomeThreadsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2T0001 /* HomeThreadsTests.swift */; };
 		A1T0004 /* HomeViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1T0003 /* HomeViews.swift */; };
 		A1T0003 /* HomeThreadsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1T0002 /* HomeThreadsStore.swift */; };
 		A1T0001 /* ThreadModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1T0001 /* ThreadModels.swift */; };
@@ -218,6 +220,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B3T0001 /* HomeThreadsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeThreadsUITests.swift; sourceTree = "<group>"; };
+		B2T0001 /* HomeThreadsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeThreadsTests.swift; sourceTree = "<group>"; };
 		B1T0003 /* HomeViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViews.swift; sourceTree = "<group>"; };
 		B1T0002 /* HomeThreadsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeThreadsStore.swift; sourceTree = "<group>"; };
 		B1T0001 /* ThreadModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadModels.swift; sourceTree = "<group>"; };
@@ -636,6 +640,7 @@
 				B20007 /* ChatAPIClientTests.swift */,
 				B20008 /* SSEParserTests.swift */,
 				B20009 /* ChatViewModelTests.swift */,
+				B2T0001 /* HomeThreadsTests.swift */,
 				B20010 /* MarkdownRendererTests.swift */,
 				B20011 /* ToolRenderingTests.swift */,
 				B20013 /* AppIntentsTests.swift */,
@@ -667,6 +672,7 @@
 			children = (
 				B30002 /* FamilyAssistantUITests.swift */,
 				B30010 /* ChatSceneWiringUITests.swift */,
+				B3T0001 /* HomeThreadsUITests.swift */,
 			);
 			path = FamilyAssistantUITests;
 			sourceTree = "<group>";
@@ -996,6 +1002,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A2T0001 /* HomeThreadsTests.swift in Sources */,
 				A20001 /* RouteTests.swift in Sources */,
 				A20002 /* NotesModelTests.swift in Sources */,
 				A20003 /* NotesAPIClientTests.swift in Sources */,
@@ -1034,6 +1041,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A3T0001 /* HomeThreadsUITests.swift in Sources */,
 				A30001 /* FamilyAssistantUITests.swift in Sources */,
 				A30010 /* ChatSceneWiringUITests.swift in Sources */,
 			);
