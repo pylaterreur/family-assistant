@@ -110,7 +110,22 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertEqual(sections.groups[0].threads.map(\.conversationID), ["q1", "q2", "u1"])
         XCTAssertEqual(sections.groups[1].threads.map(\.conversationID), ["w1"])
         XCTAssertEqual(sections.groups[2].threads.map(\.conversationID), ["f1"])
-        XCTAssertEqual(ThreadSwitcherSections.waitingCount(in: threads), 2)
+        XCTAssertEqual(ThreadSwitcherSections.waitingCount(in: threads), 3)
+    }
+
+    func testUnknownStateIsWaitingOnCardSectionAndBadge() {
+        let unknown = thread("u1", .unknown("needs_review"))
+
+        XCTAssertEqual(unknown.presentationState, .waiting)
+        XCTAssertEqual(ThreadPresentationState.label(for: unknown.presentationState), "Waiting on you")
+        let sections = ThreadSwitcherSections(threads: [unknown], conversations: [], homeConversationID: "home")
+        XCTAssertEqual(sections.groups.map(\.title), ["Waiting on you"])
+        XCTAssertEqual(ThreadSwitcherSections.waitingCount(in: [unknown]), 1)
+        XCTAssertEqual(
+            ThreadPresentationState.label(for: nil),
+            "Starting",
+            "Only a card whose thread has not loaded yet reads as starting."
+        )
     }
 
     func testSwitcherOmitsEmptyGroups() {

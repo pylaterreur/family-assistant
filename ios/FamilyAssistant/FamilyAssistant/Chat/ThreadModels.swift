@@ -36,6 +36,37 @@ enum ChatThreadState: Equatable, Decodable {
     }
 }
 
+/// How a thread's state is presented: the one mapping the card, the switcher's
+/// grouping and the threads button's badge all use, so they cannot disagree.
+/// A state this client does not know is presented as waiting, the server's own
+/// catch-all, so a thread that may need the user is never hidden.
+enum ThreadPresentationState: Equatable {
+    case waiting
+    case working
+    case failed
+    case done
+
+    init(_ state: ChatThreadState) {
+        switch state {
+        case .working: self = .working
+        case .failed: self = .failed
+        case .done: self = .done
+        case .waiting, .unknown: self = .waiting
+        }
+    }
+
+    /// What a card says about a thread; nil is a thread not loaded yet.
+    static func label(for state: Self?) -> String {
+        switch state {
+        case .waiting: "Waiting on you"
+        case .working: "Working"
+        case .failed: "Failed"
+        case .done: "Done"
+        case nil: "Starting"
+        }
+    }
+}
+
 /// One thread of a Home: what its card and switcher row show.
 struct ChatThreadSummary: Decodable, Equatable, Identifiable {
     let conversationID: String
@@ -50,6 +81,10 @@ struct ChatThreadSummary: Decodable, Equatable, Identifiable {
     let updatedAt: Date
 
     var id: String { conversationID }
+
+    var presentationState: ThreadPresentationState {
+        ThreadPresentationState(state)
+    }
 
     /// The line under the title: the thread's latest message, or what it was
     /// asked to do before it has said anything.
@@ -180,15 +215,14 @@ struct ThreadSwitcherSections: Equatable {
     let groups: [Group]
     let earlier: [ChatConversationSummary]
 
-    static let waitingTitle = "Waiting on you"
-    static let workingTitle = "Working"
-    static let failedTitle = "Failed"
-    static let doneTitle = "Done"
+    static let waitingTitle = ThreadPresentationState.label(for: .waiting)
+    static let workingTitle = ThreadPresentationState.label(for: .working)
+    static let failedTitle = ThreadPresentationState.label(for: .failed)
+    static let doneTitle = ThreadPresentationState.label(for: .done)
 
-    /// Threads keep the server's order (newest first) within their group. A
-    /// thread in a state this client does not know is shown as waiting, the
-    /// server's own catch-all, so it is never hidden. Earlier holds only
-    /// conversations that are neither Home nor one of its threads.
+    /// Threads keep the server's order (newest first) within their group,
+    /// grouped by `ThreadPresentationState`. Earlier holds only conversations
+    /// that are neither Home nor one of its threads.
     init(
         threads: [ChatThreadSummary],
         conversations: [ChatConversationSummary],
@@ -199,11 +233,11 @@ struct ThreadSwitcherSections: Equatable {
         var failed: [ChatThreadSummary] = []
         var done: [ChatThreadSummary] = []
         for thread in threads {
-            switch thread.state {
+            switch thread.presentationState {
             case .working: working.append(thread)
             case .failed: failed.append(thread)
             case .done: done.append(thread)
-            case .waiting, .unknown: waiting.append(thread)
+            case .waiting: waiting.append(thread)
             }
         }
         groups = [
@@ -221,6 +255,6 @@ struct ThreadSwitcherSections: Equatable {
 
     /// Threads waiting on the user, which the threads button badges.
     static func waitingCount(in threads: [ChatThreadSummary]) -> Int {
-        threads.filter { $0.state == .waiting }.count
+        threads.filter { $0.presentationState == .waiting }.count
     }
 }

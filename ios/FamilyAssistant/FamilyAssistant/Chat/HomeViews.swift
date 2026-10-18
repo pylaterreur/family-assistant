@@ -453,33 +453,24 @@ struct ThreadOriginBanner: View {
     }
 }
 
+/// Colours for `ThreadPresentationState`; nil is a thread not loaded yet.
 enum ThreadStateStyle {
     static let waitingColor = Color(red: 0.49, green: 0.36, blue: 1.0)
     static let workingColor = Color(red: 0.96, green: 0.72, blue: 0.24)
 
-    static func color(for state: ChatThreadState?) -> Color {
+    static func color(for state: ThreadPresentationState?) -> Color {
         switch state {
         case .waiting: waitingColor
         case .working: workingColor
         case .failed: .red
         case .done: .green
-        case .unknown, nil: .secondary
-        }
-    }
-
-    static func label(for state: ChatThreadState?) -> String {
-        switch state {
-        case .waiting: "Waiting on you"
-        case .working: "Working"
-        case .failed: "Failed"
-        case .done: "Done"
-        case .unknown, nil: "Starting"
+        case nil: .secondary
         }
     }
 }
 
 struct ThreadStateDot: View {
-    let state: ChatThreadState?
+    let state: ThreadPresentationState?
 
     var body: some View {
         Group {
@@ -516,15 +507,15 @@ struct ThreadCardView: View {
         } label: {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    ThreadStateDot(state: thread?.state)
+                    ThreadStateDot(state: thread?.presentationState)
                     Text(title)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(ThreadStateStyle.label(for: thread?.state))
+                    Text(ThreadPresentationState.label(for: thread?.presentationState))
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(ThreadStateStyle.color(for: thread?.state))
+                        .foregroundStyle(ThreadStateStyle.color(for: thread?.presentationState))
                         .lineLimit(1)
                         .fixedSize()
                 }
@@ -547,7 +538,7 @@ struct ThreadCardView: View {
         .buttonStyle(.plain)
         .disabled(thread == nil)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title), \(ThreadStateStyle.label(for: thread?.state))")
+        .accessibilityLabel("\(title), \(ThreadPresentationState.label(for: thread?.presentationState))")
         .accessibilityIdentifier("thread-card-\(call.id)")
     }
 }
@@ -739,7 +730,7 @@ private struct ThreadSwitcherRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 11) {
-            ThreadStateDot(state: thread.state)
+            ThreadStateDot(state: thread.presentationState)
                 .padding(.top, 3)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline) {
