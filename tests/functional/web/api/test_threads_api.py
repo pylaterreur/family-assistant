@@ -251,3 +251,58 @@ async def test_a_turn_in_a_thread_runs_on_the_threads_profile(
 
     assert response.json()["reply"] == "the thread's profile answered"
     assert any("Find three plumbers." in str(m.content) for m in seen[0])
+
+
+async def _say(db: Database, conversation_id: str) -> None:
+    await db.message_history.add_message(
+        UserMessage.from_trusted_user(content="hello"),
+        interface_type="web",
+        conversation_id=conversation_id,
+        timestamp=NOW,
+        user_id=CALLER,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_the_conversation_list_marks_homes_and_threads(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    await _say(db, home)
+    thread = await _add_thread(db, home)
+    await _say(db, "web_conv_ordinary")
+
+    body = (await api_test_client.get("/api/v1/chat/conversations")).json()
+
+    assert {
+        entry["conversation_id"]: entry["kind"] for entry in body["conversations"]
+    } == {
+        home: "home",
+        thread: "thread",
+        "web_conv_ordinary": "conversation",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_the_ordinary_filter_leaves_out_homes_and_threads(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    await _say(db, home)
+    await _add_thread(db, home)
+    await _say(db, "web_conv_ordinary")
+
+    body = (
+        await api_test_client.get(
+            "/api/v1/chat/conversations", params={"kind": "ordinary"}
+        )
+    ).json()
+
+    assert (
+        [entry["conversation_id"] for entry in body["conversations"]],
+        body["count"],
+    ) == (["web_conv_ordinary"], 1)

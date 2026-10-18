@@ -490,6 +490,10 @@ class ConversationSummary(BaseModel):
         None,
         description="When the list was searched, a snippet of a message that matched",
     )
+    kind: Literal["home", "thread", "conversation"] = Field(
+        "conversation",
+        description="The caller's Home, a thread of it, or an ordinary conversation",
+    )
 
 
 class ConversationListResponse(BaseModel):
@@ -2818,6 +2822,7 @@ async def get_conversations(
     date_from: str | None = None,  # Expected as YYYY-MM-DD string
     date_to: str | None = None,  # Expected as YYYY-MM-DD string
     q: str | None = None,
+    kind: Literal["ordinary"] | None = None,
 ) -> ConversationListResponse:
     """
     Get a list of chat conversations for the web interface.
@@ -2835,6 +2840,8 @@ async def get_conversations(
         conversation_id: Filter by specific conversation ID
         date_from: Filter conversations with messages after this date (YYYY-MM-DD)
         date_to: Filter conversations with messages before this date (YYYY-MM-DD)
+        kind: ``ordinary`` leaves out Homes and threads, which a client lists
+            separately
 
     Returns:
         List of conversation summaries the caller owns, with metadata
@@ -2905,7 +2912,11 @@ async def get_conversations(
         include_subconversations=False,
         owner_user_ids=owner_user_ids,
         search_query=q,
+        ordinary_only=kind == "ordinary",
     )
+    kinds = await db_context.conversation_threads.kinds_for([
+        summary["conversation_id"] for summary in summaries
+    ])
 
     conversations = [
         ConversationSummary(
@@ -2915,6 +2926,7 @@ async def get_conversations(
             last_timestamp=summary["last_timestamp"],
             message_count=summary["message_count"],
             match_excerpt=summary["match_excerpt"],
+            kind=kinds.get(summary["conversation_id"], "conversation"),
         )
         for summary in summaries
     ]

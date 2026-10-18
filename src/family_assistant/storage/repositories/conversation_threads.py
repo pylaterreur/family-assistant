@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -16,7 +16,7 @@ from family_assistant.storage.conversation_threads import (
 from family_assistant.storage.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
     from datetime import datetime
 
     from family_assistant.security.taint import TaintMetadata
@@ -114,6 +114,29 @@ class ConversationThreadsRepository(BaseRepository):
             )
         )
         return row is not None
+
+    async def kinds_for(
+        self, conversation_ids: Collection[str]
+    ) -> dict[str, Literal["home", "thread"]]:
+        """Which of ``conversation_ids`` are Homes or threads; others are absent."""
+        if not conversation_ids:
+            return {}
+        ids = list(conversation_ids)
+        homes = await self._db.fetch_all(
+            select(conversation_homes_table.c.conversation_id).where(
+                conversation_homes_table.c.conversation_id.in_(ids)
+            )
+        )
+        threads = await self._db.fetch_all(
+            select(conversation_threads_table.c.conversation_id).where(
+                conversation_threads_table.c.conversation_id.in_(ids)
+            )
+        )
+        kinds: dict[str, Literal["home", "thread"]] = {
+            row["conversation_id"]: "thread" for row in threads
+        }
+        kinds.update({row["conversation_id"]: "home" for row in homes})
+        return kinds
 
     async def create_thread(
         self,
