@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1T0001 /* ThreadModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1T0001 /* ThreadModels.swift */; };
+		A1T0002 /* ThreadModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1T0001 /* ThreadModels.swift */; };
 		CE000020 /* IntentHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE000010 /* IntentHandler.swift */; };
 		CE000021 /* StartCallIntentHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE000011 /* StartCallIntentHandler.swift */; };
 		CE000022 /* AssistantCallHandle.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE000014 /* AssistantCallHandle.swift */; };
@@ -214,6 +216,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B1T0001 /* ThreadModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadModels.swift; sourceTree = "<group>"; };
 		AA000003 /* WatchAuthentication.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchAuthentication.swift; sourceTree = "<group>"; };
 		0352FE40C799700EBD09C620 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		03E11DABDDB4EA90D97100D9 /* VoiceTranscript.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VoiceTranscript.swift; sourceTree = "<group>"; };
@@ -578,6 +581,7 @@
 			isa = PBXGroup;
 			children = (
 				B10022 /* ChatModels.swift */,
+				B1T0001 /* ThreadModels.swift */,
 				B10023 /* ChatAPIClient.swift */,
 				B10024 /* SSEParser.swift */,
 				B10025 /* ChatViewModel.swift */,
@@ -916,6 +920,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1T0001 /* ThreadModels.swift in Sources */,
 				CE000023 /* AssistantCallHandle.swift in Sources */,
 				A10001 /* FamilyAssistantApp.swift in Sources */,
 				AA000001 /* WatchAuthentication.swift in Sources */,
@@ -1030,6 +1035,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1T0002 /* ThreadModels.swift in Sources */,
 				EC7941766A2B06553B0F745C /* WatchVoiceApp.swift in Sources */,
 				AA000002 /* WatchAuthentication.swift in Sources */,
 				3F7C16D73246C8539945CC09 /* WatchVoiceView.swift in Sources */,

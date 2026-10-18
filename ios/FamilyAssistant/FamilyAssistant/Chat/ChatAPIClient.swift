@@ -16,7 +16,35 @@ struct ChatAPIClient {
         try await listAllConversationPages(query: nil)
     }
 
-    private func listAllConversationPages(query: String?) async throws -> [ChatConversationSummary] {
+    /// Every conversation that is neither a Home nor a thread, most recent first:
+    /// what the thread switcher lists under "Earlier".
+    func listOrdinaryConversations() async throws -> [ChatConversationSummary] {
+        try await listAllConversationPages(query: nil, ordinaryOnly: true)
+    }
+
+    /// The caller's Home, designated by the server the first time it is asked
+    /// for. A server that predates threads has no such route, which is the same
+    /// as threads being off.
+    func getHome() async throws -> ChatHomeResponse {
+        let (data, response) = try await authorizedGETWithAuthRetry(url: apiURL("/api/v1/chat/home"))
+        if let http = response as? HTTPURLResponse, http.statusCode == 404 {
+            return ChatHomeResponse(enabled: false, conversationID: nil)
+        }
+        try validate(response: response, data: data)
+        return try JSONDecoder.chatDecoder.decode(ChatHomeResponse.self, from: data)
+    }
+
+    /// The threads of the caller's Home, newest first.
+    func listHomeThreads() async throws -> ChatHomeThreadsResponse {
+        let (data, response) = try await authorizedGETWithAuthRetry(url: apiURL("/api/v1/chat/home/threads"))
+        try validate(response: response, data: data)
+        return try JSONDecoder.chatDecoder.decode(ChatHomeThreadsResponse.self, from: data)
+    }
+
+    private func listAllConversationPages(
+        query: String?,
+        ordinaryOnly: Bool = false
+    ) async throws -> [ChatConversationSummary] {
         var conversations: [ChatConversationSummary] = []
         var offset = 0
 
@@ -24,7 +52,8 @@ struct ChatAPIClient {
             let response = try await listConversationPage(
                 limit: Self.conversationPageSize,
                 offset: offset,
-                query: query
+                query: query,
+                ordinaryOnly: ordinaryOnly
             )
             conversations.append(contentsOf: response.conversations)
 
@@ -53,10 +82,11 @@ struct ChatAPIClient {
     private func listConversationPage(
         limit: Int,
         offset: Int,
-        query: String? = nil
+        query: String? = nil,
+        ordinaryOnly: Bool = false
     ) async throws -> ChatConversationListResponse {
         let (data, response) = try await authorizedGETWithAuthRetry(
-            url: conversationListURL(limit: limit, offset: offset, query: query)
+            url: conversationListURL(limit: limit, offset: offset, query: query, ordinaryOnly: ordinaryOnly)
         )
         try validate(response: response, data: data)
         return try JSONDecoder.chatDecoder.decode(ChatConversationListResponse.self, from: data)
@@ -65,8 +95,19 @@ struct ChatAPIClient {
     /// Load a conversation's full persisted history (oldest → newest) together
     /// with the server-reported `active_turns`, so the caller can tail-attach to a
     /// turn already running server-side (e.g. started on another device).
-    func getMessages(conversationID: String) async throws -> ChatConversationMessagesResponse {
-        try await getMessagesPage(conversationID: conversationID, after: nil, limit: 0)
+    ///
+    /// `includeConversationProfile` also asks which kind of conversation this is
+    /// and which profile its history is under (for a thread, its own).
+    func getMessages(
+        conversationID: String,
+        includeConversationProfile: Bool = false
+    ) async throws -> ChatConversationMessagesResponse {
+        try await getMessagesPage(
+            conversationID: conversationID,
+            after: nil,
+            limit: 0,
+            includeConversationProfile: includeConversationProfile
+        )
     }
 
     /// Load the authenticated, read-only transcript addressed by a share token.
@@ -141,7 +182,8 @@ struct ChatAPIClient {
     func getMessagesPage(
         conversationID: String,
         after: Date?,
-        limit: Int
+        limit: Int,
+        includeConversationProfile: Bool = false
     ) async throws -> ChatConversationMessagesResponse {
         let encodedID = Self.encodedPathComponent(conversationID)
         var components = URLComponents(
@@ -151,6 +193,9 @@ struct ChatAPIClient {
         var queryItems = [URLQueryItem(name: "limit", value: String(limit))]
         if let after {
             queryItems.append(URLQueryItem(name: "after", value: Self.iso8601Formatter.string(from: after)))
+        }
+        if includeConversationProfile {
+            queryItems.append(URLQueryItem(name: "include_conversation_profile", value: "true"))
         }
         components?.queryItems = queryItems
         guard let url = components?.url else {
@@ -717,7 +762,7 @@ struct ChatAPIClient {
         return UTType(filenameExtension: ext)?.preferredMIMEType ?? "application/octet-stream"
     }
 
-    private func conversationListURL(limit: Int, offset: Int, query: String?) throws -> URL {
+    private func conversationListURL(limit: Int, offset: Int, query: String?, ordinaryOnly: Bool) throws -> URL {
         var components = URLComponents(url: try apiURL("/api/v1/chat/conversations"), resolvingAgainstBaseURL: false)
         var queryItems = [
             URLQueryItem(name: "interface_type", value: ChatConstants.interfaceType),
@@ -726,6 +771,9 @@ struct ChatAPIClient {
         ]
         if let query {
             queryItems.append(URLQueryItem(name: "q", value: query))
+        }
+        if ordinaryOnly {
+            queryItems.append(URLQueryItem(name: "kind", value: "ordinary"))
         }
         components?.queryItems = queryItems
         guard let url = components?.url else {
