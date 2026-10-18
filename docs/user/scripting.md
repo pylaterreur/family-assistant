@@ -183,11 +183,14 @@ result = tools_execute_json("send_email", args_json)
 ### Automatic review of a script
 
 When a script needs approval, one approval can cover the script as a whole, including ordinary
-intermediate steps such as reading information and saving the requested result. The approval is for
-the exact source and inputs that were shown. If a saved script changes while an approval is pending,
-the approved run still uses the earlier source. Calls to saved child scripts with literal names are
-included recursively in that review. If a child changes or disappears before it runs, prepare and
-approve the script again.
+intermediate steps such as reading information and saving the requested result. A script that can
+send something outside the household, run code in a sandbox, or save something that runs or loads
+later is reviewed before it starts, even if nothing it has read so far is from outside the
+household, because it may read such content as it runs. The approval is for the exact source and
+inputs that were shown. If a saved script changes while an approval is pending, the approved run
+still uses the earlier source. Calls to saved child scripts with literal names are included
+recursively in that review. If a child changes or disappears before it runs, prepare and approve the
+script again.
 
 A review can also approve a script on condition that one kind of step in it is checked each time it
 happens, for example every email it forwards when the recipient comes from the data it reads. Each

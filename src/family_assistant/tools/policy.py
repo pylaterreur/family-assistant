@@ -249,6 +249,29 @@ class PolicyEngine:
             reason="no matching rule (default)",
         )
 
+    def may_gate(self, descriptor: ToolDescriptor) -> bool:
+        """Whether some call to this tool could be routed to review or confirmation.
+
+        Asked of a program's capabilities before it runs, when their arguments
+        are unknown, so an argument-pinned rule counts as possibly matching. The
+        first rule that matches every call decides the rest, as in
+        :meth:`evaluate`.
+        """
+        gated = {ToolPolicyDecision.REVIEW, ToolPolicyDecision.CONFIRM}
+        for resolved_rule in self._policy.rules:
+            matcher = resolved_rule.match
+            if not matcher.argument_equals:
+                if matcher.matches(descriptor):
+                    return resolved_rule.decision in gated
+                continue
+            bare = matcher.model_copy(update={"argument_equals": None})
+            criteria = (bare.names, bare.tags_all, bare.tags_any, bare.mcp_server_ids)
+            if (not any(criteria) or bare.matches(descriptor)) and (
+                resolved_rule.decision in gated
+            ):
+                return True
+        return self._policy.default_decision in gated
+
     def evaluate_for_advertisement(
         self,
         descriptor: ToolDescriptor,

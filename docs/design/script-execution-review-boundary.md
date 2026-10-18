@@ -3,9 +3,10 @@
 Status: the program boundary (resolution, binding, scoped approval) is implemented. **Who reviews
 what inside a program** ("Review model output once" through "Work plan") is proposed, 2026-10-16. It
 replaces the shipped model-result rule, code-execution literal rule and first-nested-review program
-decision, which remain the behaviour until milestone 4 lands. Milestones 2 and 3a are implemented:
-the production program reviewer returns `allow_watched`, and each call to a watched tool is reviewed
-on its own real arguments. The evaluation behind the proposal is in the appendix.
+decision, which remain the behaviour until milestone 4 lands. Milestones 2, 3a and 3b are
+implemented: the production program reviewer returns `allow_watched`, each call to a watched tool is
+reviewed on its own real arguments, and a submitted program that can reach a gated action is
+reviewed before it runs. The evaluation behind the proposal is in the appendix.
 
 ## Goal
 
@@ -170,6 +171,13 @@ design unless the program reviewer chose to watch it.
   items prompts per item when attended and stops when not.
 - **Capability-triggered submission review** spends a review on scripts that never touch untrusted
   data, in exchange for not missing scripts that read it after submission.
+- **Reachability is read off the source, conservatively.** A program reaches every tool or gated
+  external function its source or a bound child mentions by name, called or not, and every offered
+  tool once it dispatches by name (`tools_execute`); a source that does not parse reaches
+  everything. Each reachable capability is judged with unknown arguments: an argument-pinned review
+  or confirm rule counts as applying, and its sink class comes from its tags alone. Its taint cell
+  is the one it faces after the program reads external content. Each error in this approximation
+  spends a review rather than skipping one.
 - **A confirmed program runs unwatched.** The person approving saw the whole program; asking the
   reviewer for a watched list alongside a confirmation adds a second decision to the one prompt.
 - **Cured definitions carry no watched set.** Their creation gate judged the program's flows.
