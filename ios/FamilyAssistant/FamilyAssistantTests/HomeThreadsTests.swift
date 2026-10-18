@@ -419,7 +419,7 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertTrue(queries.values[1].contains("include_conversation_profile=true"))
     }
 
-    func testHomeKeepsNoConversationListAndForwardsActivity() async {
+    func testHomeKeepsNoConversationListAndForwardsActivityAndResync() async {
         let listRequests = LockedStrings()
         ChatMockBackendURLProtocol.respond { request in
             if request.url?.path == "/api/v1/chat/conversations" {
@@ -429,14 +429,20 @@ final class HomeThreadsTests: XCTestCase {
         }
         let model = makeViewModel(conversationID: "home", role: .home)
         var activitySignals = 0
-        model.onActivity = { activitySignals += 1 }
+        model.onListRefresh = { activitySignals += 1 }
 
         let refreshed = await model.refreshConversations()
         await model.activityStreamDidSignal(generation: model.syncCoordinator.activityGeneration)
+        XCTAssertEqual(activitySignals, 1)
+
+        // A resync catches up on pings the activity stream missed while it was down.
+        let snapshotApplied = await model.applyListSnapshot()
+        await model.applyRecentListSnapshot()
 
         XCTAssertTrue(refreshed)
+        XCTAssertTrue(snapshotApplied)
         XCTAssertTrue(listRequests.values.isEmpty)
-        XCTAssertEqual(activitySignals, 1)
+        XCTAssertEqual(activitySignals, 3)
     }
 
     func testHomeDoesNotBecomeTheRestoredConversation() {

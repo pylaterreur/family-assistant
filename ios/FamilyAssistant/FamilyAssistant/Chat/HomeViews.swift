@@ -145,8 +145,15 @@ struct HomeRootView: View {
             )
         }
         .task {
-            store.openConversation = { open($0) }
-            viewModel.onActivity = { [weak store] in
+            // Only the path binding and Home's id are captured: the store holds
+            // this callback, so capturing the view would keep the store and
+            // Home's model alive after Home is removed.
+            let path = $path
+            let homeConversationID = store.homeConversationID
+            store.openConversation = { conversationID in
+                Self.open(conversationID, homeConversationID: homeConversationID, path: path)
+            }
+            viewModel.onListRefresh = { [weak store] in
                 await store?.refreshForActivity()
             }
             async let threads: Void = store.refreshThreads()
@@ -212,10 +219,18 @@ struct HomeRootView: View {
     }
 
     private func open(_ conversationID: String) {
-        if conversationID == store.homeConversationID {
-            path = []
-        } else if path.last != .conversation(conversationID) {
-            path = [.conversation(conversationID)]
+        Self.open(conversationID, homeConversationID: store.homeConversationID, path: $path)
+    }
+
+    private static func open(
+        _ conversationID: String,
+        homeConversationID: String,
+        path: Binding<[HomeDestination]>
+    ) {
+        if conversationID == homeConversationID {
+            path.wrappedValue = []
+        } else if path.wrappedValue.last != .conversation(conversationID) {
+            path.wrappedValue = [.conversation(conversationID)]
         }
     }
 

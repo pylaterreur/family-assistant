@@ -27,9 +27,11 @@ final class ChatViewModel {
     private(set) var threadSummary: ChatThreadSummary?
     /// The profile the server says the open conversation's history is under.
     @ObservationIgnored private var serverConversationProfileID: String?
-    /// Called on every activity-stream ping, after the model's own refresh, so
-    /// the owner can refresh what it shows alongside (the thread list).
-    @ObservationIgnored var onActivity: (@MainActor () async -> Void)?
+    /// Called whenever the model refreshes its conversation list for an
+    /// activity ping or a resync, after its own refresh, so the owner can
+    /// refresh what it shows alongside (the thread list). A resync matters as
+    /// much as a ping: the activity stream does not replay what it missed.
+    @ObservationIgnored var onListRefresh: (@MainActor () async -> Void)?
     var messages: [ChatMessage] = []
     // Fixed upper bound on how many grouped bubbles are realized into the chat
     // view at once. The full thread is still loaded into `messages`; only a
@@ -5635,7 +5637,7 @@ extension ChatViewModel: SyncStreamDelegate {
         // buffered resync drain silent (finding 10): the drain routes through this
         // same handler.
         await refreshRecentConversations()
-        await onActivity?()
+        await onListRefresh?()
     }
 
     func presentFollowStreamAuthWall(_ error: Error, generation: Int) {
@@ -5806,7 +5808,9 @@ extension ChatViewModel: ResyncHost {
     func applyListSnapshot() async -> Bool {
         // Advisory (§4.4 step 4): a failed resume-time snapshot degrades from
         // per-channel health and breadcrumbs, but must never modal.
-        return await refreshConversations()
+        let refreshed = await refreshConversations()
+        await onListRefresh?()
+        return refreshed
     }
 
     func applyRecentListSnapshot() async {
@@ -5814,6 +5818,7 @@ extension ChatViewModel: ResyncHost {
         // This post-handoff fallback only closes the activity no-replay window, so
         // merge the bounded recent page instead of paginating the full history again.
         await refreshRecentConversations()
+        await onListRefresh?()
     }
 
     func applyMessagesSnapshot(conversationID: String) async {
