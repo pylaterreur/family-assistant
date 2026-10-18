@@ -175,6 +175,18 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
         <HomeIcon size={14} aria-hidden="true" />
         Home
       </button>
+      {home.threadsFailed && (
+        <div
+          role="alert"
+          className="flex items-center gap-2 px-3 text-xs text-destructive"
+          data-testid="threads-load-failed"
+        >
+          <span className="flex-1">Couldn't load threads.</span>
+          <Button variant="outline" size="sm" className="h-6 px-2" onClick={home.onRetryThreads}>
+            Retry
+          </Button>
+        </div>
+      )}
       {THREAD_GROUPS.map((state) => {
         const threads = home.threads.filter((thread) => thread.state === state);
         if (threads.length === 0) {

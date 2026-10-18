@@ -39,6 +39,9 @@ export interface ThreadSummary {
 export interface HomeThreadsView {
   homeConversationId: string;
   threads: ThreadSummary[];
+  /** The thread list could not be fetched; `threads` may be stale or missing. */
+  threadsFailed: boolean;
+  onRetryThreads: () => void;
 }
 
 export interface ConversationSidebarProps {

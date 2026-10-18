@@ -12,9 +12,12 @@ const NO_THREADS: ThreadSummary[] = [];
  */
 export function useHomeThreads(homeConversationId: string | null): {
   threads: ThreadSummary[];
+  /** Whether the latest fetch failed, leaving `threads` as they were. */
+  failed: boolean;
   refresh: () => void;
 } {
   const [threads, setThreads] = useState<ThreadSummary[]>(NO_THREADS);
+  const [failed, setFailed] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const homeRef = useRef(homeConversationId);
   homeRef.current = homeConversationId;
@@ -34,9 +37,11 @@ export function useHomeThreads(homeConversationId: string | null): {
           return;
         }
         setThreads(data.threads);
+        setFailed(false);
       } catch (error) {
-        if (!controller.signal.aborted) {
+        if (!controller.signal.aborted && homeRef.current === home) {
           console.error('Error fetching threads:', error);
+          setFailed(true);
         }
       }
     })();
@@ -45,11 +50,12 @@ export function useHomeThreads(homeConversationId: string | null): {
   useEffect(() => {
     if (!homeConversationId) {
       setThreads(NO_THREADS);
+      setFailed(false);
       return undefined;
     }
     refresh();
     return () => abortRef.current?.abort();
   }, [homeConversationId, refresh]);
 
-  return { threads, refresh };
+  return { threads, failed, refresh };
 }

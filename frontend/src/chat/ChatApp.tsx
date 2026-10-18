@@ -573,7 +573,11 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   const [homeConversationId, setHomeConversationId] = useState<string | null>(null);
   const homeConversationIdRef = useRef<string | null>(null);
   homeConversationIdRef.current = homeConversationId;
-  const { threads: homeThreads, refresh: refreshHomeThreads } = useHomeThreads(homeConversationId);
+  const {
+    threads: homeThreads,
+    failed: homeThreadsFailed,
+    refresh: refreshHomeThreads,
+  } = useHomeThreads(homeConversationId);
   // The thread a foreground load reported the open conversation to be, for a
   // thread that is not (yet) in Home's list.
   const [openedThread, setOpenedThread] = useState<{
@@ -2992,8 +2996,16 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   }, [homeConversationId, homeThreads, handleConversationSelect]);
 
   const homeSidebar = useMemo(
-    () => (homeConversationId ? { homeConversationId, threads: homeThreads } : null),
-    [homeConversationId, homeThreads]
+    () =>
+      homeConversationId
+        ? {
+            homeConversationId,
+            threads: homeThreads,
+            threadsFailed: homeThreadsFailed,
+            onRetryThreads: refreshHomeThreads,
+          }
+        : null,
+    [homeConversationId, homeThreads, homeThreadsFailed, refreshHomeThreads]
   );
 
   const conversationTitle = isHome ? 'Home' : (currentThread?.title ?? null);

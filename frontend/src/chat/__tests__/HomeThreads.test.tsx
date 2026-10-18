@@ -326,6 +326,30 @@ describe('Home and threads', () => {
     consoleError.mockRestore();
   });
 
+  it('says when the thread list could not be loaded, and shows it once a retry succeeds', async () => {
+    const user = userEvent.setup();
+    const threads = serveThreads();
+    let threadsAvailable = false;
+    server.use(
+      http.get('/api/v1/chat/home/threads', () =>
+        threadsAvailable
+          ? HttpResponse.json({ home_conversation_id: HOME, threads: threads.threads })
+          : new HttpResponse(null, { status: 500 })
+      )
+    );
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await renderChatApp({ waitForReady: true });
+
+    const alert = await screen.findByTestId('threads-load-failed');
+    threadsAvailable = true;
+    await user.click(within(alert).getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByTestId('thread-item-web_conv_quotes')).toBeInTheDocument();
+    expect(screen.queryByTestId('threads-load-failed')).not.toBeInTheDocument();
+    consoleError.mockRestore();
+  });
+
   it('moves a thread between groups when a turn ends and the list is refetched', async () => {
     const user = userEvent.setup();
     const threads = serveThreads();
