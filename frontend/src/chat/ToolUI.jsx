@@ -3,6 +3,7 @@ import React, { lazy, Suspense } from 'react';
 import { Button } from '@/components/ui/button';
 import { getAttachmentKey } from '../types/attachments';
 import { AttachToResponseTool } from './AttachToResponseTool';
+import { StartThreadCard } from './StartThreadCard';
 import {
   formatRawToolValue,
   humanizeToolName,
@@ -4132,12 +4133,17 @@ export const GetCameraRecordingsToolUI = ({ args, result, status }) => {
   );
 };
 
+export const StartThreadToolUI = (props) => (
+  <StartThreadCard toolCallId={props.toolCallId} fallback={<ToolFallback {...props} />} />
+);
+
 // Create a map of tool UIs by name for easier access
 export const toolUIsByName = {
   // Implemented tool UIs
   add_or_update_note: AddOrUpdateNoteToolUI,
   search_documents: SearchDocumentsToolUI,
   attach_to_response: AttachToResponseTool,
+  start_thread: StartThreadToolUI,
 
   // Placeholder tool UIs (using ToolFallback)
   get_note: GetNoteToolUI,

@@ -112,7 +112,7 @@ function useToolGroupCalls(startIndex: number, endIndex: number): ToolGroupCallS
   );
 }
 
-const ToolGroup: React.FC<ToolGroupProps> = ({ startIndex, endIndex, children }) => {
+const ToolGroupRun: React.FC<ToolGroupProps> = ({ startIndex, endIndex, children }) => {
   const context = useContext(ToolConfirmationContext);
   const snapshots = useToolGroupCalls(startIndex, endIndex);
   const pendingConfirmations = context?.pendingConfirmations;
@@ -150,6 +150,69 @@ const ToolGroup: React.FC<ToolGroupProps> = ({ startIndex, endIndex, children })
       {children}
     </ToolGroupShell>
   );
+};
+
+// Calls that render as a card of their own, which must stay in view rather than
+// fold away with the rest of a finished group.
+const STANDALONE_TOOL_NAMES = new Set(['start_thread']);
+
+// One character per part of the range, 's' for a standalone call: a string, so
+// the selector's value is stable across streamed tokens.
+function useStandaloneParts(startIndex: number, endIndex: number): string {
+  return useAuiState((s) => {
+    const parts = (s.optional.message?.parts ?? []) as readonly MessagePartLike[];
+    let flags = '';
+    for (let i = startIndex; i <= endIndex; i++) {
+      const part = parts[i];
+      flags +=
+        part?.type === 'tool-call' && STANDALONE_TOOL_NAMES.has(part.toolName ?? '') ? 's' : '-';
+    }
+    return flags;
+  });
+}
+
+const ToolGroup: React.FC<ToolGroupProps> = ({ startIndex, endIndex, children }) => {
+  const standalone = useStandaloneParts(startIndex, endIndex);
+  if (!standalone.includes('s')) {
+    return (
+      <ToolGroupRun startIndex={startIndex} endIndex={endIndex}>
+        {children}
+      </ToolGroupRun>
+    );
+  }
+  // The rest of the range still groups, split around each standalone call.
+  const items = React.Children.toArray(children);
+  const rendered: React.ReactNode[] = [];
+  let runStart: number | null = null;
+  const closeRun = (end: number) => {
+    if (runStart === null) {
+      return;
+    }
+    rendered.push(
+      <ToolGroupRun
+        key={`run-${startIndex + runStart}`}
+        startIndex={startIndex + runStart}
+        endIndex={startIndex + end}
+      >
+        {items.slice(runStart, end + 1)}
+      </ToolGroupRun>
+    );
+    runStart = null;
+  };
+  items.forEach((item, offset) => {
+    if (standalone[offset] === 's') {
+      closeRun(offset - 1);
+      rendered.push(
+        <div key={`standalone-${startIndex + offset}`} data-testid="standalone-tool-call">
+          {item}
+        </div>
+      );
+    } else if (runStart === null) {
+      runStart = offset;
+    }
+  });
+  closeRun(items.length - 1);
+  return <>{rendered}</>;
 };
 
 export { ToolGroup };
