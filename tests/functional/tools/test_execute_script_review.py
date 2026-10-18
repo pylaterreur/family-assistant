@@ -355,7 +355,7 @@ async def _execute_script(
 
 
 @pytest.mark.asyncio
-async def test_unreviewed_outer_enriches_first_nested_review(
+async def test_program_reaching_a_gate_is_reviewed_before_it_runs(
     db_engine: AsyncEngine,
 ) -> None:
     effects: list[str] = []
@@ -385,12 +385,15 @@ async def test_unreviewed_outer_enriches_first_nested_review(
 
     assert effects == ["inside"]
     assert [call.review_input.descriptor.name for call in reviewer.calls] == [
-        "ordinary_effect"
+        "execute_script"
     ]
-    assert reviewer.calls[0].review_input.script is None
-    assert len(reviewer.calls[0].review_input.enclosing_scripts) == 1
-    assert reviewer.calls[0].review_input.program_approval_requested
-    _assert_program_source(reviewer.calls[0].review_input, source)
+    review = reviewer.calls[0].review_input
+    assert review.script is not None
+    assert review.script.source == source
+    assert not review.program_approval_requested
+    assert ("program_capability", "ordinary_effect") in {
+        (item.kind, item.identifier) for item in review.policy_contexts
+    }
 
 
 @pytest.mark.parametrize(
@@ -2141,8 +2144,95 @@ async def test_sandbox_without_opt_in_is_reviewed_per_call(
     ]
 
 
+def _send_external_registration(sent: list[str]) -> ToolRegistration:
+    async def send_external(to: str) -> str:
+        sent.append(to)
+        return "sent"
+
+    return _registration(
+        "send_external",
+        cast("ToolImplementation", send_external),
+        tags=(ToolTag.EXTERNAL_COMM, ToolTag.OUTPUT_TRUSTED),
+        properties={"to": {"type": "string"}},
+    )
+
+
 @pytest.mark.asyncio
-async def test_first_nested_review_approves_an_unreviewed_program_once(
+async def test_program_reaching_no_gated_action_is_not_reviewed(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer()
+    provider = _provider(
+        [
+            _real_registration("execute_script"),
+            _ordinary_effect_registration(effects),
+            _send_external_registration([]),
+        ],
+        reviewer=reviewer,
+        rules=[],
+    )
+    context = _context(db_engine, provider)
+
+    await _execute_script(provider, context, script='ordinary_effect(value="x")')
+
+    assert effects == ["x"]
+    assert reviewer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_program_reaching_an_external_send_is_reviewed_on_a_trusted_turn(
+    db_engine: AsyncEngine,
+) -> None:
+    # Nothing in the turn is tainted yet; the send's cell is gated once the
+    # program has read external content, which it may do after submission.
+    sent: list[str] = []
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
+    provider = _provider(
+        [_real_registration("execute_script"), _send_external_registration(sent)],
+        reviewer=reviewer,
+        rules=[],
+    )
+    context = _context(db_engine, provider)
+
+    await _execute_script(
+        provider, context, script='send_external(to="friend@example.test")'
+    )
+
+    assert sent == ["friend@example.test"]
+    (review,) = (call.review_input for call in reviewer.calls)
+    assert review.descriptor.name == "execute_script"
+    assert ("program_capability", "send_external") in {
+        (item.kind, item.identifier) for item in review.policy_contexts
+    }
+
+
+@pytest.mark.asyncio
+async def test_program_dispatching_tools_by_name_is_reviewed(
+    db_engine: AsyncEngine,
+) -> None:
+    sent: list[str] = []
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
+    provider = _provider(
+        [_real_registration("execute_script"), _send_external_registration(sent)],
+        reviewer=reviewer,
+        rules=[],
+    )
+    context = _context(db_engine, provider)
+
+    await _execute_script(
+        provider,
+        context,
+        script='tools_execute("send_external", to="friend@example.test")',
+    )
+
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_program_reading_untrusted_data_later_is_reviewed_once_up_front(
     db_engine: AsyncEngine,
 ) -> None:
     effects: list[str] = []
@@ -2180,13 +2270,13 @@ async def test_first_nested_review_approves_an_unreviewed_program_once(
     assert effects == ["first", "/work/ink: upload out.bmp", "second"]
     assert len(reviewer.calls) == 1
     first = reviewer.calls[0].review_input
-    assert first.descriptor.name == "ordinary_effect"
-    assert first.program_approval_requested
+    assert first.descriptor.name == "execute_script"
+    assert not first.program_approval_requested
     _assert_program_source(first, source)
 
 
 @pytest.mark.asyncio
-async def test_program_review_that_does_not_allow_is_not_repeated(
+async def test_confirmed_program_covers_its_gated_calls(
     db_engine: AsyncEngine,
 ) -> None:
     effects: list[str] = []
@@ -2219,11 +2309,10 @@ async def test_program_review_that_does_not_allow_is_not_repeated(
     await _execute_script(provider, context, script=source)
 
     assert effects == ["first", "second"]
-    assert [call[0] for call in confirmation.calls] == ["ordinary_effect"]
-    assert [
-        call.review_input.program_approval_requested for call in reviewer.calls
-    ] == [True, False]
-    assert not reviewer.calls[1].review_input.enclosing_scripts[-1].approval_active
+    assert [call[0] for call in confirmation.calls] == ["execute_script"]
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script"
+    ]
 
 
 @pytest.mark.asyncio
@@ -2602,7 +2691,7 @@ async def test_runtime_built_mapping_key_in_sandbox_call_is_reviewed(
 
 
 @pytest.mark.asyncio
-async def test_child_script_review_also_decides_an_unreviewed_caller(
+async def test_inline_child_in_a_reviewed_program_gets_its_own_review(
     db_engine: AsyncEngine,
 ) -> None:
     effects: list[str] = []
@@ -2617,7 +2706,9 @@ async def test_child_script_review_also_decides_an_unreviewed_caller(
         f"execute_script(script={nested_source!r})\n"
         'ordinary_effect(value="after")'
     )
-    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.ALLOW, ToolCallReviewVerdict.ALLOW
+    )
     provider = _provider(
         [
             _real_registration("execute_script"),
@@ -2648,15 +2739,17 @@ async def test_child_script_review_also_decides_an_unreviewed_caller(
     await _execute_script(provider, context, script=source)
 
     assert effects == ["nested", "after"]
-    assert len(reviewer.calls) == 1
-    child_review = reviewer.calls[0].review_input
-    assert child_review.descriptor.name == "execute_script"
-    assert child_review.program_approval_requested
-    assert child_review.enclosing_scripts[-1].source == source
+    outer, child = (call.review_input for call in reviewer.calls)
+    assert outer.script is not None
+    assert outer.script.source == source
+    assert child.script is not None
+    assert child.script.source == nested_source
+    assert child.enclosing_scripts[-1].source == source
+    assert not child.program_approval_requested
 
 
 @pytest.mark.asyncio
-async def test_review_inside_bound_child_decides_its_unreviewed_parent(
+async def test_bound_child_capabilities_are_reviewed_with_their_parent(
     db_engine: AsyncEngine,
 ) -> None:
     effects: list[str] = []
@@ -2693,23 +2786,25 @@ async def test_review_inside_bound_child_decides_its_unreviewed_parent(
     assert effects == ["in child", "again", "after"]
     assert len(reviewer.calls) == 1
     review = reviewer.calls[0].review_input
-    assert review.program_approval_requested
-    assert review.enclosing_scripts[0].source == source
+    assert review.descriptor.name == "execute_script"
+    assert review.script is not None
+    assert review.script.source == source
     events = await context.db_context.taint_audit_events.list_for_turn(
         "script-review-turn"
     )
     (approving_review,) = [
         event["event_id"]
         for event in events
-        if event["tool_name"] == "ordinary_effect"
+        if event["tool_name"] == "execute_script"
         and event["review_verdict"] == ToolCallReviewVerdict.ALLOW.value
     ]
     inherited = [
         event
         for event in events
         if event["event_type"] == "script_inherited_authorization"
+        and event["tool_name"] == "ordinary_effect"
     ]
-    assert len(inherited) == 2
+    assert len(inherited) == 3
     for event in inherited:
         review_context = event["review_context_json"]
         assert review_context is not None
@@ -3274,7 +3369,7 @@ async def test_observe_would_be_denied_program_keeps_nested_shadow_reviews(
 
 
 @pytest.mark.asyncio
-async def test_observe_first_keychute_review_decides_the_program(
+async def test_observe_program_reaching_keychute_is_reviewed_before_it_runs(
     db_engine: AsyncEngine,
 ) -> None:
     proxy_requests: list[httpx.Request] = []
@@ -3312,10 +3407,10 @@ async def test_observe_first_keychute_review_decides_the_program(
     assert result.data == 200
     assert len(proxy_requests) == 2
     assert [call.review_input.descriptor.name for call in reviewer.calls] == [
-        "keychute_http_request"
+        "execute_script"
     ]
-    assert reviewer.calls[0].review_input.program_approval_requested
-    assert await _inheritance_authorizations(context) == ["inherited"]
+    assert not reviewer.calls[0].review_input.program_approval_requested
+    assert await _inheritance_authorizations(context) == ["inherited"] * 3
 
 
 @pytest.mark.parametrize(

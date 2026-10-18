@@ -30,6 +30,8 @@ from family_assistant.security.taint import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from family_assistant.security.script_closure import ScriptArtifact, ScriptClosure
     from family_assistant.storage.repositories.scripts import ScriptRow
     from family_assistant.tools.types import ToolDefinition, ToolExecutionContext
@@ -95,6 +97,33 @@ class PreparedScriptInvocation:
     bound_child: bool = False
     watched_tools: frozenset[str] = frozenset()
     """Tools whose every call the approving review asked to see on its own."""
+    policy_gated: frozenset[str] = frozenset()
+    """Capabilities static policy could route to review or confirmation."""
+
+    def reachable_capabilities(self) -> frozenset[str]:
+        """Tools and external functions the program can call, conservatively.
+
+        Any name the source or a bound child mentions counts, called or not,
+        and a program that dispatches tools by name can reach every tool it
+        was offered.
+        """
+        sources = (
+            self.review.source,
+            *(
+                str(binding.get("script_code", ""))
+                for binding in self.review.script_bindings
+            ),
+        )
+        tools = {
+            str(tool["function"]["name"])
+            for tool in self.review.tools
+            if isinstance(tool.get("function"), dict)
+        }
+        referenced = _referenced_names(sources)
+        if referenced is None:
+            return frozenset(tools | set(self.review.external_functions))
+        reachable = tools if referenced & DYNAMIC_TOOL_FUNCTIONS else referenced & tools
+        return frozenset(reachable | (referenced & set(self.review.external_functions)))
 
     def arguments(self) -> dict[str, object]:
         """Return the inline payload used for review, confirmation and execution."""
@@ -250,6 +279,22 @@ class ScriptExecutionScope:
                 approval_active=self.approved and not self.approval_is_forecast,
             ),
         )
+
+
+DYNAMIC_TOOL_FUNCTIONS = frozenset({"tools_execute", "tools_execute_json"})
+"""Script functions that call a tool chosen by name at runtime."""
+
+
+def _referenced_names(sources: Iterable[str]) -> frozenset[str] | None:
+    """Every bare name the sources mention, or ``None`` if one does not parse."""
+    names: set[str] = set()
+    for source in sources:
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return None
+        names.update(node.id for node in ast.walk(tree) if isinstance(node, ast.Name))
+    return frozenset(names)
 
 
 def _complete_string_literals(source: str) -> set[str]:

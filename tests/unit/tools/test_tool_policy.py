@@ -704,3 +704,54 @@ def test_argument_pinned_global_grant_is_advertised() -> None:
         ).decision
         is ToolPolicyDecision.ALLOW
     )
+
+
+def _engine(
+    *rules: PolicyRule, default: ToolPolicyDecision = ToolPolicyDecision.ALLOW
+) -> PolicyEngine:
+    return PolicyEngine.from_policy_config(
+        ToolPolicyConfig(default_decision=default, rules=list(rules))
+    )
+
+
+def test_may_gate_follows_the_rule_that_matches_every_call() -> None:
+    send = make_descriptor(name="send_email", tags={ToolTag.EXTERNAL_COMM})
+    engine = _engine(
+        PolicyRule(
+            match=ToolMatcher(names=["send_email"]),
+            decision=ToolPolicyDecision.ALLOW,
+            priority=20,
+        ),
+        PolicyRule(
+            match=ToolMatcher(tags_any=[ToolTag.EXTERNAL_COMM]),
+            decision=ToolPolicyDecision.REVIEW,
+            priority=10,
+        ),
+    )
+
+    assert not engine.may_gate(send)
+
+
+def test_may_gate_counts_an_argument_pinned_review() -> None:
+    # The arguments are unknown before the program runs, so a review pinned
+    # to some of them may apply.
+    send = make_descriptor(name="send_email", tags={ToolTag.EXTERNAL_COMM})
+    engine = _engine(
+        PolicyRule(
+            match=ToolMatcher(
+                names=["send_email"], argument_equals={"to": "everyone@example.test"}
+            ),
+            decision=ToolPolicyDecision.REVIEW,
+            priority=20,
+        ),
+    )
+
+    assert engine.may_gate(send)
+    assert engine.evaluate(send).decision is ToolPolicyDecision.ALLOW
+
+
+def test_may_gate_falls_back_to_the_default() -> None:
+    read = make_descriptor(name="read_notes", tags={ToolTag.READ_ONLY})
+
+    assert _engine(default=ToolPolicyDecision.CONFIRM).may_gate(read)
+    assert not _engine().may_gate(read)

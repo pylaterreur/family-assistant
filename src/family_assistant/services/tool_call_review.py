@@ -271,7 +271,13 @@ class DelegatingPolicyContext(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    kind: Literal["taint_cell", "static_rule", "browser_action", "program_watch"]
+    kind: Literal[
+        "taint_cell",
+        "static_rule",
+        "browser_action",
+        "program_watch",
+        "program_capability",
+    ]
     identifier: str
     description: str = ""
 
