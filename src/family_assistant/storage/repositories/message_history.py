@@ -403,6 +403,15 @@ class ToolHistoryExample:
     tool_call_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class LatestVisibleMessage:
+    """A conversation's newest visible message."""
+
+    role: str
+    content: str
+    timestamp: datetime
+
+
 class MessageHistoryRepository(BaseRepository):
     """Repository for managing message history in the database."""
 
@@ -2409,6 +2418,61 @@ class MessageHistoryRepository(BaseRepository):
 
         rows = await self._db.fetch_all(stmt)
         return [self._process_message_row(row) for row in rows]
+
+    async def get_contents_by_internal_ids(
+        self, internal_ids: Collection[int]
+    ) -> dict[int, str | None]:
+        """The stored content of each row, keyed by internal id."""
+        if not internal_ids:
+            return {}
+        rows = await self._db.fetch_all(
+            select(
+                message_history_table.c.internal_id,
+                message_history_table.c.content,
+            ).where(message_history_table.c.internal_id.in_(list(internal_ids)))
+        )
+        return {row["internal_id"]: row["content"] for row in rows}
+
+    async def latest_visible_messages(
+        self, conversation_ids: Collection[str]
+    ) -> dict[str, LatestVisibleMessage]:
+        """Each conversation's newest message a reader of it would see.
+
+        Visible means what the conversation list shows: a non-internal user or
+        assistant row with content, at the top level of the conversation.
+        """
+        if not conversation_ids:
+            return {}
+        visible = (
+            message_history_table.c.conversation_id.in_(list(conversation_ids)),
+            message_history_table.c.is_internal.is_(False),
+            message_history_table.c.role.in_(["user", "assistant"]),
+            message_history_table.c.content.isnot(None),
+            message_history_table.c.subconversation_id.is_(None),
+        )
+        latest = (
+            select(
+                message_history_table.c.conversation_id,
+                func.max(message_history_table.c.internal_id).label("latest_id"),
+            )
+            .where(*visible)
+            .group_by(message_history_table.c.conversation_id)
+            .subquery()
+        )
+        rows = await self._db.fetch_all(
+            select(
+                message_history_table.c.conversation_id,
+                message_history_table.c.role,
+                message_history_table.c.content,
+                message_history_table.c.timestamp,
+            ).join(latest, message_history_table.c.internal_id == latest.c.latest_id)
+        )
+        return {
+            row["conversation_id"]: LatestVisibleMessage(
+                role=row["role"], content=row["content"], timestamp=row["timestamp"]
+            )
+            for row in rows
+        }
 
     async def get_by_thread_id(
         self,

@@ -24,7 +24,7 @@ from family_assistant.storage.delegation_runs import (
 from family_assistant.storage.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
 
     from family_assistant.llm.content_parts import ContentPartDict
     from family_assistant.processing.protocol import RemoteObservationMetadata
@@ -187,6 +187,20 @@ class DelegationRunsRepository(BaseRepository):
         if row is None:
             return None
         return self._row_to_dict(row)
+
+    async def get_by_delegation_ids(
+        self, delegation_ids: Collection[str]
+    ) -> dict[str, DelegationRunDict]:
+        """Runs by public reference ID; ids with no run are absent."""
+        if not delegation_ids:
+            return {}
+        rows = await self._db.fetch_all(
+            select(delegation_runs_table).where(
+                delegation_runs_table.c.delegation_id.in_(list(delegation_ids))
+            )
+        )
+        runs = [self._row_to_dict(row) for row in rows]
+        return {run["delegation_id"]: run for run in runs}
 
     async def get_by_subconversation_id(
         self, subconversation_id: str
