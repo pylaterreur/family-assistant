@@ -184,7 +184,7 @@
   story at headline level.</p>
   <div class="legend">
     <span><i class="dot run"></i> Working</span>
-    <span><i class="dot you"></i> Needs you</span>
+    <span><i class="dot you"></i> Waiting on you</span>
     <span><span class="check" style="width:14px;height:14px;font-size:9px">✓</span> Done</span>
     <span><i class="dot fail"></i> Failed / stalled</span>
   </div>
@@ -194,7 +194,7 @@
 <section class="board">
   <h2>iOS</h2>
   <p class="caption">Home replaces today's chat list as the landing screen. The list is now the thread
-  switcher, reached from the top-right button, whose badge counts threads that need you. Every
+  switcher, reached from the top-right button, whose badge counts threads waiting on you. Every
   thread card in Home, and every row in the switcher, pushes into the thread.</p>
   <div class="row">
 
@@ -284,7 +284,7 @@
           <div class="list">
             <div class="li home"><span class="ico">⌂</span><div class="body"><div class="t">Home<span class="when">9:42</span></div><div class="s">Added both. ✓</div></div></div>
           </div>
-          <div class="group-h">Needs you</div>
+          <div class="group-h">Waiting on you</div>
           <div class="list">
             <div class="li"><i class="dot you"></i><div class="body"><div class="t">Hot water system quotes <span class="unread">2</span><span class="when">2m</span></div><div class="s">Gas or electric heat pump?</div></div></div>
           </div>
@@ -332,7 +332,7 @@
 
     <!-- 5. Completion echo -->
     <div>
-      <div class="frame-label">5 · Home after threads finish</div>
+      <div class="frame-label">5 · Home later: one done, one waiting</div>
       <div class="phone">
         <div class="island"></div>
         <div class="status"><span>10:20</span><span style="font-size:13px">5G ▰ 71%</span></div>
@@ -346,14 +346,21 @@
           <div class="a">Added both. ✓</div>
           <div class="tcard">
             <div class="top"><span class="check">✓</span><span class="title">Hot water system quotes</span><span class="chip">3 quotes</span></div>
-            <div class="line">Dave's Plumbing booked Thu 8am</div>
           </div>
-          <div class="echo"><div class="from">↳ from Melbourne flights, Sept holidays</div>
-            Best option is Jetstar, Sat 27 → Sat 4, $612 for four with bags. Qantas is $890.
-            Want me to hold it? <div style="display:flex;gap:8px;margin-top:8px"><button class="btn ios">Hold Jetstar</button><button class="btn">Open thread</button></div></div>
-          <div class="u">Yes hold it</div>
-          <div class="a">Hold placed until 6pm tonight. I'll remind you at 4.</div>
-          <div class="quiet">“Term 4 activity schedule” is still working · 12m</div>
+          <div class="echo"><div class="from">↳ from Hot water system quotes · done</div>
+            Booked Dave's Plumbing for Thu 8am, $1,850 for a gas replacement. Confirmation is saved to Documents.</div>
+          <div class="u">Did Teija reply about Saturday?</div>
+          <div class="a">Not yet. Her last message was Thursday.</div>
+          <div class="tcard">
+            <div class="top"><i class="dot you"></i><span class="title">Melbourne flights, Sept holidays</span><span class="unread">1</span></div>
+            <div class="line">Jetstar Sat 27 → Sat 4, $612 for four with bags (Qantas $890). Hold it?</div>
+            <div class="actions"><button class="btn ios">Hold Jetstar</button><button class="btn">Open thread</button></div>
+          </div>
+          <div class="quiet">Tapping Hold Jetstar answers in the thread, where the flights tab is.</div>
+          <div class="tcard">
+            <div class="top"><i class="dot run"></i><span class="title">Term 4 activity schedule</span></div>
+            <div class="line">Reading the school newsletter PDF <span class="ago">· 12m</span></div>
+          </div>
         </div>
         <div class="composer"><span class="plus">+</span><span class="ph">Message Home…</span><span class="mic">🎙</span><span class="send">↑</span></div>
       </div>
@@ -377,7 +384,7 @@
       <aside class="side">
         <div class="brand"><span class="ico">⌂</span>Family Assistant</div>
         <div class="snav on">⌂ Home <span class="n muted" style="font-weight:400;color:var(--slate-500);font-size:12px">9:42</span></div>
-        <h4>Needs you <span>1</span></h4>
+        <h4>Waiting on you <span>1</span></h4>
         <div class="snav" style="background:#f2efff"><i class="dot you"></i>Hot water system quotes <span class="n unread">2</span></div>
         <h4>Working <span>2</span></h4>
         <div class="snav"><i class="dot run"></i>Melbourne flights</div>
@@ -436,7 +443,7 @@
             <div style="display:flex;gap:8px"><button class="w-btn">Gas</button><button class="w-btn">Heat pump</button><button class="w-btn">Either</button></div></div>
         </div>
         <div class="w-comp" style="width:calc(100% - 32px)"><div class="ph">Reply in Hot water system quotes…</div>
-          <div class="bar"><label><input type="checkbox"> Also post to Home</label><span class="send">↑</span></div></div>
+          <div class="bar"><span>Quick replies on the card land here too</span><span class="send">↑</span></div></div>
       </section>
     </div>
   </div>
@@ -454,86 +461,89 @@
           multi-turn project like "plan the Japan trip". The reply in Home says "I've started a
           thread", so it's never a surprise.</li>
         <li><b>One-off questions stay in Home.</b> Lookups, quick edits, reminders, small talk.</li>
-        <li><b>The user can always override.</b> On any message: "Continue in a thread" (branches
-          from it and carries the context), or "Move to thread…" to file it into an existing one. On
-          web, <span class="kbd">⌘⇧↵</span> sends as a new thread. In a thread, "Back to Home" posts
-          the outcome and archives it.</li>
-        <li><b>Two parallel jobs means two threads.</b> Each thread is its own sub-conversation, which
-          is also the natural key for per-run state such as the browser tab. That fixes "two browser
-          runs share a tab" by construction.</li>
+        <li><b>The user can always override.</b> On any message, "Continue in a thread" carries the
+          context with it, and "Move to thread…" files the whole turn into an existing thread. On web,
+          <span class="kbd">⌘⇧↵</span> sends as a new thread, and the switcher has "New thread".</li>
+        <li><b>Two parallel jobs means two threads.</b> Each thread is its own conversation, and the
+          browser scope is already keyed per conversation, so two jobs never share a tab.</li>
       </ul>
       <h3>What Home shows</h3>
       <ul>
-        <li>One <b>live card per thread</b>, updated in place, never a stream of progress messages.
-          The dot shows state, and the line shows the latest step or question.</li>
-        <li><b>Simple decisions can be answered from the card</b> (Gas / Heat pump) without opening the
-          thread, the way Muse uses approval cards. Anything richer opens the thread.</li>
-        <li>On completion, the thread's <b>final message is echoed into Home</b>, the way Slack's "also
-          send to channel" works. It's the thread's own reply rather than a generated summary, so taint
-          and provenance carry over unchanged.</li>
-        <li>A card that has scrolled off doesn't re-post. The switcher badge, sidebar and push
-          notifications carry "needs you".</li>
+        <li>One <b>live card per thread</b>, updated in place, never a stream of progress messages.</li>
+        <li><b>States:</b> working (an active turn, delegation or worker) · waiting on you (the thread
+          asked something) · done · failed. The unread count is separate and per person, so one
+          person reading a thread doesn't clear another's badge.</li>
+        <li><b>Answering a thread always reaches the thread.</b> Quick replies on a card (Gas / Heat
+          pump, Hold Jetstar) go into the thread, where its profile, tools and browser tab are. Home's
+          assistant never acts on a thread's behalf.</li>
+        <li>When a thread is <b>done</b>, its final message is <b>echoed into Home</b>, the way Slack's
+          "also send to channel" works. A thread that ends on a question is waiting, not done.</li>
+        <li>A card that has scrolled out of view doesn't re-post. The switcher badge, the sidebar and
+          push notifications carry "waiting on you".</li>
       </ul>
     </div>
     <div>
       <h3>Navigation</h3>
       <ul>
         <li><b>iOS:</b> Home is the landing screen. ☷ opens the thread switcher, which replaces today's
-          chat list and is grouped as Needs you / Working / Done today. Tapping a card pushes into the
-          thread, and Back returns to the same scroll position in Home.</li>
+          chat list and is grouped as Waiting on you / Working / Done today / Earlier. Tapping a card
+          pushes into the thread, and Back returns to the same place in Home.</li>
         <li><b>Web:</b> the sidebar is Home plus threads grouped by state. A thread opens in a right
-          panel, so Home stays readable, which is the fix Grok Bot users asked for. ⤢ expands it, and
-          below ~1100px the panel becomes full-screen.</li>
-        <li><b>Telegram:</b> the same model maps onto the private chat. Thread cards become messages
-          that are edited in place, and replying to a card routes into its thread. Native Telegram
-          topics (Bot API 9.4 <code>createForumTopic</code>) are a later option.</li>
-        <li><b>Voice:</b> always talks to Home. A job started by voice that turns into a thread is
-          announced ("I've started a thread for the quotes").</li>
+          panel so Home stays readable, which is the fix Grok Bot users asked for. ⤢ expands it, and on
+          narrow windows the panel takes over the screen.</li>
+        <li><b>Telegram:</b> the private chat is the Telegram Home. Thread cards are messages edited in
+          place, and replying to a card routes into its thread. Other reply chains work as they do
+          today.</li>
+        <li><b>Voice:</b> a voice session started from the app belongs to that app's Home. A job that
+          becomes a thread is announced, and its card appears in Home.</li>
       </ul>
       <h3>What the assistant sees</h3>
       <ul>
-        <li><b>Home</b> sees its own history, plus each thread's title, state and final message. Asking
-          "how are the quotes going?" in Home is answered from the thread's state, without merging
-          histories.</li>
-        <li><b>A thread</b> sees the message it started from, the Home context leading up to it, and
-          its own history. It doesn't see sibling threads.</li>
-        <li><b>Each thread keeps its own profile and model tier</b>, which fits history being
-          partitioned by profile today. A browser thread can run on the browser profile while Home
-          stays on the default.</li>
+        <li><b>Home</b> sees its own history plus each thread's facts: the title written when the thread
+          was created, its state, and the echoed final message. It never sees the generated summary,
+          which carries no taint.</li>
+        <li><b>A thread</b> starts with a copy of the turn it grew from and the Home turns leading up to
+          it, keeping their taint, then builds its own history. Coder and media analyst get the request
+          only, never household context. A thread doesn't see its siblings.</li>
+        <li><b>Each thread keeps its own profile and tier.</b> Home stays on the default profile, and a
+          tier picked in Home applies to that turn only.</li>
       </ul>
     </div>
   </div>
   <div class="notes">
-    <h3>How this maps onto what exists today</h3>
+    <h3>Model: a thread is a conversation with a parent</h3>
     <ul>
-      <li><b>A thread is a subconversation that's been made visible.</b> <code>message_history</code> already
-        partitions history by <code>(conversation_id, processing_profile_id, subconversation_id)</code>, and every
-        <code>delegate_to_service</code> call already creates one, tracked in <code>delegation_runs</code> with parent
-        and child links. Today they're hidden model scratch space. A thread adds a title, a state, an anchor message
-        in Home and user visibility. Home is the <code>subconversation_id IS NULL</code> scope of one long-lived
-        conversation.</li>
-      <li><b>The thread card grows out of <code>PendingDelegationsChip</code></b>, which already shows
-        Queued / Working / N of M on both clients. The difference is that a card stays after the work finishes and
-        opens a transcript.</li>
-      <li><b>A finished thread's echo replaces the delegation wake turn.</b> Today an async result is written into
-        the source scope, and the source profile then runs again to restate it. Echoing the thread's own final
-        message is cheaper and keeps provenance.</li>
-      <li><b>Gaps to close:</b> streams, active turns, cancel/steer and activity pings are keyed by
-        <code>conversation_id</code> only and need a thread dimension. <code>worker_tasks</code> has no
-        subconversation link. <code>/messages</code> and summaries exclude subconversation rows by design, which
-        brings in the taint and internal-row filtering. Telegram's reply-chain routing
-        (<code>thread_root_id</code>) is the closest existing analogue, and a reply to a thread card routes there.</li>
-      <li><b>Profile switching stops forcing a new conversation.</b> Switching profile in Home starts a thread on
-        that profile, rather than silently mixing profiles in one transcript where each model sees only its
-        own rows.</li>
+      <li><b>Home</b> is one designated conversation per user per surface. Web and iOS share one Home,
+        and Telegram's private chat is the Telegram Home. <b>A thread</b> is an ordinary conversation plus a
+        link record holding the parent Home, the anchor turn and the state. <b>Legacy conversations</b> are
+        neither: they sit under "Earlier" and are never migrated.</li>
+      <li><b>Why not surface subconversations?</b> They're a delegate's private working history: the request text
+        is written by a model, they allow one active run each, and they're excluded from <code>/messages</code>,
+        summaries and the list by design. Meanwhile streams and resume, active turns, cancel/steer, activity pings,
+        ownership, share links, the sticky tier, profile adoption, summaries and memory review are all keyed per
+        conversation already, so threads get all of that unchanged. Subconversations stay as they are, inside a
+        thread's conversation.</li>
+      <li><b>Starting a thread is a delegation that delivers differently.</b> It runs on the existing
+        <code>delegation_runs</code> machinery, targeting the thread's own conversation, with no wake back to Home.
+        It's admitted by the target profile's delegation policy and carries delegation taint.</li>
+      <li><b>Every row copied between conversations keeps its taint and is re-stamped to the destination's
+        profile.</b> That covers the seed, a moved turn and the echo. Without the re-stamp the profile-scoped
+        history window wouldn't see them.</li>
+      <li><b>The echo replaces the wake.</b> Finishing a thread copies its final message into Home. Home's assistant
+        isn't run again to restate it.</li>
+      <li><b>Telegram needs a per-conversation turn slot.</b> Otherwise a Home message sent during a thread turn
+        would steer that turn.</li>
     </ul>
     <h3>Open questions</h3>
     <ul>
-      <li>Should the assistant auto-thread by default, or propose ("Start a thread for this?") until it's trusted?</li>
-      <li>Is there one Home per person, or per household member on shared devices? (One per user is assumed above.)</li>
-      <li>Do existing conversations migrate in as archived threads, or stay a legacy list?</li>
-      <li>Does a thread ever un-archive itself, for example when a booked plumber's day arrives?</li>
+      <li>Should the assistant thread on its own from day one, or propose ("Start a thread for this?") until the
+        guidance is tuned?</li>
+      <li>Can a done thread reopen on a later event, such as the day the plumber comes, or does that start a new
+        one?</li>
+      <li>Should card quick replies come from a general suggested-replies mechanism, or only from explicit
+        questions the thread asks?</li>
     </ul>
+    <p style="color:var(--slate-500)">Full design: <code>docs/design/one-thread-chat-ux.md</code></p>
   </div>
 </section>
 
