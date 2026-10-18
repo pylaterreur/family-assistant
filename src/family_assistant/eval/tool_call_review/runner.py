@@ -220,6 +220,7 @@ async def run_eval(
                     source=case.source,
                     source_group=case.source_group,
                     matched_group=case.matched_group,
+                    correlation_group=case.correlation_group,
                     visibility=case.visibility,
                     control_kind=case.control_kind,
                     attack_class=case.attack_class,
