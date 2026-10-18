@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from family_assistant.config_models import AppConfig, ConversationThreadsConfig
 from family_assistant.interfaces import ChatInterface
@@ -392,3 +392,63 @@ async def test_a_run_waiting_on_a_busy_thread_is_rescheduled(
         )
     )
     assert (run["status"], len(rescheduled)) == ("queued", 1)
+
+
+@pytest.mark.asyncio
+async def test_stopping_the_first_turn_settles_the_run(
+    queued_thread: QueuedThread,
+) -> None:
+    handler = asyncio.create_task(queued_thread.run_worker())
+    live = LiveThread(
+        client=queued_thread.client,
+        db=queued_thread.db,
+        target_gate=queued_thread.target_gate,
+        turn_id=queued_thread.turn_id,
+    )
+    await live.wait_until_running()
+
+    await queued_thread.client.post(
+        f"/api/v1/chat/turns/{queued_thread.turn_id}/cancel",
+        json={"conversation_id": THREAD},
+    )
+    await handler
+
+    [run] = await queued_thread.db.fetch_all(
+        select(delegation_runs_table.c.status).where(
+            delegation_runs_table.c.run_kind == "thread"
+        )
+    )
+    assert run["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_the_first_turn_gets_the_attachments_it_was_started_with(
+    queued_thread: QueuedThread, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parts = [
+        {"type": "text", "text": "Find three plumbers."},
+        {"type": "attachment", "attachment_id": "attachment-1"},
+    ]
+    await queued_thread.db.execute(
+        update(delegation_runs_table)
+        .where(delegation_runs_table.c.delegation_id == queued_thread.delegation_id)
+        .values(content_parts_json=parts)
+    )
+    received: list[object] = []
+
+    def spy(*_args: object, **kwargs: object) -> AsyncIterator[object]:
+        received.append(kwargs.get("trigger_content_parts"))
+
+        async def nothing() -> AsyncIterator[object]:
+            return
+            yield  # pragma: no cover - makes this an async generator
+
+        return nothing()
+
+    monkeypatch.setattr(
+        queued_thread.target_service, "handle_chat_interaction_stream", spy
+    )
+
+    await queued_thread.run_worker()
+
+    assert received == [parts]

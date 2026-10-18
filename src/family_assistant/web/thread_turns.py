@@ -8,9 +8,10 @@ See ``family_assistant.threads.turns``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from family_assistant.storage.database import Database
 from family_assistant.threads.turns import ThreadTurnOutcome
@@ -24,7 +25,6 @@ from family_assistant.web.turn_producer import (
     confirmation_service_for_state,
     initial_turn_taint,
     launch_turn_producer,
-    trigger_content_parts_for,
 )
 from family_assistant.web.web_mid_turn_controller import WebMidTurnController
 
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
     from starlette.datastructures import State
 
+    from family_assistant.llm.content_parts import ContentPartDict
     from family_assistant.llm.model_selection import ResolvedModelSelection
     from family_assistant.processing import ProcessingService
     from family_assistant.services.tool_call_review import TriggerReviewInput
@@ -126,8 +127,10 @@ class WebThreadTurnRunner:
             user_id=user_id,
             user_name=run["user_name"] or "",
             interface_type=run["interface_type"],
-            trigger_content_parts=trigger_content_parts_for(
-                seed["content"] or "", seed["attachments"]
+            # The parts the run was created with: the seed records its
+            # attachments only by id, which is not enough to inject them.
+            trigger_content_parts=cast(
+                "list[ContentPartDict]", run["content_parts_json"]
             ),
             trigger_attachments=seed["attachments"],
             initial_history_taint_metadata=taint.history,
@@ -139,14 +142,17 @@ class WebThreadTurnRunner:
             lease=None,
             tool_call_review_trigger=tool_call_review_trigger,
         )
-        await producer
+        # Waited on rather than awaited: Stop cancels the producer, and that
+        # cancellation must end the turn, not propagate into the worker as if
+        # the worker itself were being shut down.
+        await asyncio.wait([producer])
         record = hub.get_turn(conversation_id, turn_id)
         # The stream reports a provider error or a refusal as an event and still
         # ends the turn complete, so completion alone is not success.
-        if (
-            record is not None
-            and record.status == "complete"
-            and not record.error_reported
+        if record is not None and (
+            (record.status == "complete" and not record.error_reported)
+            # Stopped by the user: the thread is theirs to continue.
+            or record.status == "cancelled"
         ):
             return ThreadTurnOutcome(
                 succeeded=True,
