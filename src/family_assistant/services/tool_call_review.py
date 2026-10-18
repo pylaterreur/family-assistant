@@ -1265,9 +1265,15 @@ tell what the call does.
 
 
 def estimated_argument_tokens(arguments: Mapping[str, object]) -> int:
-    """A rough token count of the arguments as the reviewer would render them."""
-    rendered = json.dumps(dict(arguments), ensure_ascii=False, default=str)
-    return -(-len(rendered) // 4)
+    """An upper-leaning estimate of the arguments' tokens as the prompt renders them.
+
+    Measured on the rendered argument block, indentation included, at three
+    characters a token: dense text such as base64 bodies tokenizes tighter than
+    prose, and the estimate should err towards not sending a call rather than
+    sending one too large to judge.
+    """
+    rendered = _render_fenced_data("tool_call_arguments", dict(arguments))
+    return -(-len(rendered) // 3)
 
 
 def is_program_review(review_input: ToolCallReviewInput) -> bool:

@@ -149,12 +149,13 @@ rate.
 A watched call is reviewed on its real arguments, because seeing the real arguments is the point of
 watching it. An argument too large to review sensibly fails closed: confirm when a human is present,
 deny when unattended. It is never truncated. "Too large" is about half a model's maximum output, 32k
-estimated tokens, so a tool call a model actually wrote fits; the limit is applied to every
-tool-call review, as the caller's fallback, and is a first estimate to tune. A preview and a digest
-tell the reviewer nothing about what the call does (closed
-[#1416](https://github.com/werdnum/family-assistant/pull/1416)). The case that produced 5.6M-token
-reviews, a reviewed program's deterministic upload, never reaches a reviewer under this design
-unless the program reviewer chose to watch it.
+tokens, so a tool call a model actually wrote fits. The size is estimated from the arguments as the
+prompt renders them, at three characters a token, which leans high for dense text such as base64
+bodies; it is an estimate to tune, not a token count. The limit applies to every tool-call review,
+as the caller's fallback. A preview and a digest tell the reviewer nothing about what the call does
+(closed [#1416](https://github.com/werdnum/family-assistant/pull/1416)). The case that produced
+5.6M-token reviews, a reviewed program's deterministic upload, never reaches a reviewer under this
+design unless the program reviewer chose to watch it.
 
 ## Deliberate simplifications
 

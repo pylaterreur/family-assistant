@@ -64,6 +64,7 @@ from family_assistant.services.tool_call_review import (
     assemble_tool_call_review_messages,
     build_delegation_review_trigger,
     compute_trusted_destination_echo,
+    estimated_argument_tokens,
     human_decision_from_confirmation,
     program_review_constraints,
     resolve_originating_request,
@@ -2714,8 +2715,14 @@ async def test_arguments_at_the_limit_are_reviewed() -> None:
     reviewer = ToolCallReviewer(
         cast("LLMInterface", fake), ToolCallReviewConfig(timeout_seconds=1)
     )
-    padding = 4 * MAX_REVIEWABLE_ARGUMENT_TOKENS - len('{"body": ""}')
+    overhead = len(
+        tool_call_review_module._render_fenced_data("tool_call_arguments", {"body": ""})
+    )
+    padding = 3 * MAX_REVIEWABLE_ARGUMENT_TOKENS - overhead
     at_limit = replace(_review_input(), arguments={"body": "x" * padding})
+    assert estimated_argument_tokens(at_limit.arguments) == (
+        MAX_REVIEWABLE_ARGUMENT_TOKENS
+    )
 
     result = await reviewer.review_tool_call(at_limit, _constraints())
 
