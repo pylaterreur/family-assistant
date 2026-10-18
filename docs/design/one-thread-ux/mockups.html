@@ -529,9 +529,11 @@
       <li><b>Starting a thread is a delegation that delivers differently.</b> It runs on the existing
         <code>delegation_runs</code> machinery, targeting the thread's own conversation, with no wake back to Home.
         It's admitted by the target profile's delegation policy and carries delegation taint.</li>
-      <li><b>Every row copied between conversations keeps its taint and is re-stamped to the destination's
-        profile.</b> That covers the seed, a moved turn and the echo. Without the re-stamp the profile-scoped
-        history window wouldn't see them.</li>
+      <li><b>Everything that crosses between conversations goes through one chokepoint.</b> That covers the
+        seed, "Continue in a thread", a moved turn and the echo. It applies three rules. Rows keep their taint and
+        are re-stamped to the destination's profile. Coder and media analyst accept request text only, and moves
+        into them are refused. Only text the user typed is stored as a user row, so an assistant-written request
+        never counts as the user's words for memory.</li>
       <li><b>The echo replaces the wake.</b> Finishing a thread copies its final message into Home. Home's assistant
         isn't run again to restate it.</li>
       <li><b>Telegram needs a per-conversation turn slot.</b> Otherwise a Home message sent during a thread turn

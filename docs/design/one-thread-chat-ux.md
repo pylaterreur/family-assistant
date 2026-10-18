@@ -135,7 +135,8 @@ a thread from the client is a user choice, like picking a profile today.
 
 **User actions use the same path.** "Continue in a thread" and "New thread" go through the same
 creation path, with a user-written opening message. "Move to thread…" moves a whole turn (the user
-message with its tool rows and reply), never a single row.
+message with its tool rows and reply), never a single row. All of them pass the chokepoint described
+under "Moving content across the boundary".
 
 **When to thread is guidance in the prompt, not code.** The default profile's prompt describes when
 a thread earns its place. The user's override is always one action away, so a wrong call is cheap.
@@ -144,10 +145,22 @@ Threads do not nest. A thread can delegate but cannot start threads.
 
 ### Moving content across the boundary
 
-Three paths move rows between conversations: the seed copied into a new thread, a turn moved with
-"Move to thread…", and the echo copied into Home. All three follow one rule. **Copied rows keep
-their taint and are re-stamped to the destination's profile**, because the history window is scoped
-by profile and an unstamped row would be invisible there.
+Four paths carry rows between conversations: an assistant-started seed, a user's "Continue in a
+thread", a turn moved with "Move to thread…", and the echo copied into Home. **All four go through
+one chokepoint**, so a path added later can't skip a rule. It applies three rules:
+
+1. **Taint and profile.** Copied rows keep their taint and are re-stamped to the destination's
+   profile, because the history window is scoped by profile and an unstamped row would be invisible
+   there.
+2. **The context gate.** A destination whose profile excludes household context (`coder`,
+   `media_analyst`, via `excluded_context_providers`) accepts only request text. Any path that would
+   carry Home turns, their tool output included, into such a profile is refused. That means
+   "Continue in a thread" with context, and "Move to thread…". The client offers only compatible
+   destinations.
+3. **Authorship.** Only text the user typed is stored as a user row. A request the assistant wrote
+   to open a thread is stored as an assistant-authored request, shown in the thread as "Assistant
+   asked: …". It therefore neither counts as user activity for memory review nor serves as evidence
+   of what the user said.
 
 - **The seed follows the delegation boundary.** An assistant-started thread carries exactly what a
   delegation carries today: the request its starting turn wrote, plus any attachments it passed
@@ -157,10 +170,9 @@ by profile and an unstamped row would be invisible there.
   contains. The thread's "Started from" quote is drawn by the client from the link record. It is
   never part of the thread's model history. Only the user's own "Continue in a thread" copies the
   anchor and the Home turns leading up to it, as a deliberate choice to bring that context along,
-  and only into a profile that already receives household context. A profile that excludes it
-  (`coder`, `media_analyst`, via `excluded_context_providers`) gets the request only, whoever starts
-  the thread. A seed is copied rather than read across conversations at every turn, so the thread's
-  history doesn't depend on Home's later compaction or edits.
+  and only into a profile that already receives household context (rule 2 above). A seed is copied
+  rather than read across conversations at every turn, so the thread's history doesn't depend on
+  Home's later compaction or edits.
 - **Home sees its threads as facts, not transcripts.** Home's assistant sees each live thread's
   title, state and, once it finishes, the echoed final message. That is enough to answer "how are
   the quotes going?" without merging histories. **Generated conversation summaries are never used
@@ -214,10 +226,11 @@ and each path is governed:
 
 - **Starting a thread** is admitted by the target profile's delegation policy, and the request
   carries delegation taint.
-- **Copied rows** keep their taint. An assistant-started thread is seeded with no more than a
-  delegation carries: the request and its explicit attachments. Home context goes only where the
-  user chose to bring it with "Continue in a thread", the same as pasting it into that profile's
-  chat today. It never goes to a profile that excludes household context.
+- **Everything crossing a conversation boundary passes one chokepoint.** Copied rows keep their
+  taint. A profile that excludes household context accepts request text only, and moves into it are
+  refused. An assistant-started seed holds no more than a delegation carries, which is the request
+  and its explicit attachments. Assistant-written text is never stored as the user's words, so it
+  can't become memory evidence.
 - **Home's view of a thread** is a title (carrying its creating turn's taint), a code-derived or
   explicitly set state, and echoes (carrying their source's taint). Generated summaries never reach
   a prompt.
@@ -254,6 +267,8 @@ and each path is governed:
    - The target's delegation policy is enforced.
    - Seeded rows are visible to the thread's history window and keep their taint.
    - Coder receives no seed.
+   - Moving a Home turn into a coder thread is refused.
+   - An assistant-written request is not a user row, and doesn't make memory review due.
    - An assistant-started seed holds only the request.
    - A message sent before the first turn starts steers it.
 2. **Home on web.** Add Home as the landing view, thread cards, the grouped sidebar and the
