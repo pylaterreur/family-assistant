@@ -25,6 +25,7 @@ from family_assistant.delegation_security import DelegationSecurityLevel
 from family_assistant.llm import LLMOutput
 from family_assistant.llm.messages import UserMessage
 from family_assistant.processing import ProcessingService, ProcessingServiceConfig
+from family_assistant.scripting.errors import ScriptExecutionError
 from family_assistant.security.definition_records import (
     CreationDisposition,
     definition_content_hash,
@@ -2377,6 +2378,7 @@ async def _fire_stored_script(
     source: str,
     *,
     resolved: bool,
+    app_config: AppConfig | None = None,
 ) -> str | None:
     """Fire ``source`` as a scheduled stored script, as the task worker does.
 
@@ -2408,7 +2410,7 @@ async def _fire_stored_script(
         payload["automation_id"] = str(automation_id)
         payload["automation_type"] = "schedule"
     return await handle_script_execution(
-        _script_firing_context(context, provider), payload
+        _script_firing_context(context, provider, app_config), payload
     )
 
 
@@ -2546,6 +2548,74 @@ async def test_unresolved_firing_reaching_no_gated_action_is_not_reviewed(
 
     assert effects == ["x"]
     assert reviewer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_unresolved_firing_gated_only_by_static_policy_is_reviewed_at_start(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.DENY)
+
+    await _fire_stored_script(
+        db_engine,
+        _provider(
+            [_ordinary_effect_registration(effects)],
+            reviewer=reviewer,
+            rules=[_review_rule("ordinary_effect", ToolPolicyDecision.REVIEW)],
+        ),
+        'ordinary_effect(value="first")\nordinary_effect(value="second")',
+        resolved=False,
+    )
+
+    assert effects == []
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_watched_keychute_request_in_a_firing_cannot_be_confirmed_later(
+    db_engine: AsyncEngine,
+) -> None:
+    proxy_requests: list[httpx.Request] = []
+    transport = _keychute_broker_handler("example.test", "/data", proxy_requests)
+    async_client_class = httpx.AsyncClient
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.ALLOW_WATCHED,
+        ToolCallReviewVerdict.DENY,
+        watched_tools=("keychute_http_request",),
+    )
+    app_config = AppConfig(
+        keychute_config=KeychuteConfig(
+            enabled=True,
+            url="https://keychute.test",
+            token=SecretStr("test-token"),
+        )
+    )
+
+    # A denied request fails the firing's script, as any denied step does.
+    with (
+        patch(
+            "family_assistant.scripting.apis.keychute.httpx.AsyncClient",
+            side_effect=lambda **kwargs: async_client_class(
+                transport=transport, **kwargs
+            ),
+        ),
+        pytest.raises(ScriptExecutionError, match="denied"),
+    ):
+        await _fire_stored_script(
+            db_engine,
+            _provider([], reviewer=reviewer, rules=[]),
+            'keychute_http_request("weather", "https://example.test/data")',
+            resolved=False,
+            app_config=app_config,
+        )
+
+    assert proxy_requests == []
+    watched = reviewer.calls[1]
+    assert watched.review_input.descriptor.name == "keychute_http_request"
+    assert ToolCallReviewVerdict.CONFIRM not in watched.constraints.available_verdicts
 
 
 @pytest.mark.asyncio
@@ -3046,7 +3116,9 @@ async def test_caller_literal_passed_to_bound_child_sandbox_inherits(
 
 
 def _script_firing_context(
-    context: ToolExecutionContext, provider: TaintTrackingToolsProvider
+    context: ToolExecutionContext,
+    provider: TaintTrackingToolsProvider,
+    app_config: AppConfig | None = None,
 ) -> ToolExecutionContext:
     """Return the context a task worker hands a script firing: a fresh tracker."""
     processing_service = ProcessingService(
@@ -3064,7 +3136,7 @@ def _script_firing_context(
             tools_config=ToolsConfig(),
             delegation_security_level=DelegationSecurityLevel.BLOCKED,
         ),
-        app_config=AppConfig(),
+        app_config=app_config or AppConfig(),
         context_providers=[],
         server_url=None,
     )

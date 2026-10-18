@@ -614,10 +614,6 @@ async def _prepare_script_call(
         tools=tuple(copy.deepcopy(item.definition) for item in inventory),
         policy=policy_context,
     )
-    if policy is not None:
-        invocation.policy_gated = frozenset(
-            item.name for item in inventory if policy.may_gate(item)
-        )
     context.prepared_script = invocation
     return invocation.arguments()
 
@@ -2217,6 +2213,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 forecast=forecast,
                 program_scope=program_scope,
                 watched=watched,
+                unattended=watched and _confirmation_is_deferred(context),
             )
             if forecast:
                 return
@@ -3480,9 +3477,10 @@ class TaintTrackingToolsProvider(ToolsProvider):
     ) -> _ProgramGate | None:
         """A gated action the program can reach, judged as if it read untrusted data.
 
-        Uses the evaluations its calls will face: static policy, decided at
-        preparation, and the taint cell each capability's sink resolves to once
-        the program has read external content. Over-inclusion costs one review.
+        Uses the evaluations its calls will face: the static policy this
+        provider wraps, and the taint cell each capability's sink resolves to
+        once the program has read external content. Over-inclusion costs one
+        review.
         """
         reachable = prepared.reachable_capabilities()
         if not reachable:
@@ -3505,8 +3503,15 @@ class TaintTrackingToolsProvider(ToolsProvider):
             TaintPolicyOutcome.CONFIRM,
             TaintPolicyOutcome.DENY,
         }
+        policy = find_provider_by_type(
+            self.wrapped_provider, PolicyEnforcingToolsProvider
+        )
         for name in sorted(reachable):
-            if name in prepared.policy_gated:
+            if (
+                policy is not None
+                and name in descriptors
+                and policy.policy_engine.may_gate(descriptors[name])
+            ):
                 return _ProgramGate(name=name, static=True)
             if name in GATED_EXTERNAL_FUNCTIONS:
                 sink_class = SinkClass.SANDBOX_NETWORK
