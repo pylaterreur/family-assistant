@@ -50,6 +50,7 @@ from family_assistant.services.deferred_tool_confirmation import (
     create_deferred_tool_confirmation,
 )
 from family_assistant.services.tool_call_review import (
+    ProgramReviewResponse,
     ToolCallReviewer,
     ToolCallReviewResponse,
     ToolCallReviewVerdict,
@@ -179,7 +180,7 @@ class CountingReviewLLM:
 
 
 class AllowingReviewLLM:
-    """Reviewer fake that records and allows nested calls requiring review."""
+    """Reviewer fake that records and allows every review, programs included."""
 
     def __init__(self) -> None:
         self.calls = 0
@@ -192,8 +193,17 @@ class AllowingReviewLLM:
     ) -> T:
         del messages
         self.calls += 1
-        assert response_model is ToolCallReviewResponse
         assert max_retries == 0
+        if response_model is ProgramReviewResponse:
+            return cast(
+                "T",
+                ProgramReviewResponse(
+                    verdict=ToolCallReviewVerdict.ALLOW,
+                    reason="The program is aligned with the request.",
+                    watched_tools=[],
+                ),
+            )
+        assert response_model is ToolCallReviewResponse
         return cast(
             "T",
             ToolCallReviewResponse(
@@ -960,13 +970,15 @@ async def test_stored_script_confirmation_replays_pinned_inline_invocation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("authorization_consumed", "expected_nested_reviews"),
+    ("authorization_consumed", "expected_reviews"),
+    # An unconsumed confirmation is the program's approval; a consumed one
+    # leaves the program to its own review, which its nested call inherits.
     [(False, 0), (True, 1)],
 )
 async def test_generic_confirmation_authorizes_script_only_once(
     db_engine: AsyncEngine,
     authorization_consumed: bool,
-    expected_nested_reviews: int,
+    expected_reviews: int,
 ) -> None:
     source = 'record_tool(value="nested-effect")'
     call_id = "generic-confirmed-script"
@@ -1051,7 +1063,7 @@ async def test_generic_confirmation_authorizes_script_only_once(
     )
 
     assert authorization.consumed is True
-    assert allowing_llm.calls == expected_nested_reviews
+    assert allowing_llm.calls == expected_reviews
     assert recording_provider.calls == [
         (
             "record_tool",
