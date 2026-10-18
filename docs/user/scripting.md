@@ -189,6 +189,13 @@ the approved run still uses the earlier source. Calls to saved child scripts wit
 included recursively in that review. If a child changes or disappears before it runs, prepare and
 approve the script again.
 
+A review can also approve a script on condition that one kind of step in it is checked each time it
+happens, for example every email it forwards when the recipient comes from the data it reads. Each
+of those steps is then checked with its actual contents while the rest of the script runs under the
+approval. If one is declined, that step does not happen and the script carries on. A step too large
+to check automatically, such as uploading a big file, asks you to confirm it, or is declined when
+nobody can be asked.
+
 A scheduled or event-triggered script is reviewed the same way: the first step that needs a review
 gets one covering the whole script, and the steps after it do not ask again.
 
