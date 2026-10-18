@@ -2658,7 +2658,11 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       const modelTier =
         selectedTier ??
         (tierState?.namesTier ? (defaultModelTierRef.current ?? undefined) : undefined);
-      if (tierState) {
+      if (targetConversationId === homeConversationIdRef.current) {
+        // A tier chosen in Home is for this turn only; the server doesn't carry
+        // it forward, so the control goes back to the default.
+        setModelTierState(null);
+      } else if (tierState) {
         setModelTierState({
           ...tierState,
           conversationId: targetConversationId,

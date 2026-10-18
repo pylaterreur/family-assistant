@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { HttpResponse, http } from 'msw';
 import { vi } from 'vitest';
+import { capturedTurnModelTiers } from '../../test/mocks/handlers';
 import { mockLocalStorage, resetLocalStorageMock } from '../../test/mocks/localStorageMock';
 import { server } from '../../test/setup.js';
 import { renderChatApp } from '../../test/utils/renderChatApp';
@@ -397,6 +398,41 @@ describe('Home and threads', () => {
     expect(window.location.search).toBe(sentTo);
     expect(screen.getByTestId('user-message')).toHaveTextContent('Is the bin out?');
     expect(screen.queryByText("On it. I've started a thread for it.")).not.toBeInTheDocument();
+  });
+
+  it('sends a tier chosen in Home with that turn only, then shows the default again', async () => {
+    const proto = window.HTMLElement.prototype as unknown as Record<string, unknown>;
+    const stubbed = ['hasPointerCapture', 'releasePointerCapture', 'scrollIntoView'].filter(
+      (method) => !(method in proto)
+    );
+    for (const method of stubbed) {
+      proto[method] = vi.fn();
+    }
+    try {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      serveThreads();
+      capturedTurnModelTiers.length = 0;
+
+      await renderChatApp({ waitForReady: true });
+      await screen.findByText("On it. I've started a thread for it.");
+      const intelligence = await screen.findByRole('combobox', { name: 'Intelligence' });
+      await user.click(intelligence);
+      await user.click(await screen.findByRole('option', { name: /Deep/ }));
+      expect(intelligence).toHaveTextContent('Deep');
+
+      const input = screen.getByTestId('chat-input');
+      await user.type(input, 'A hard question');
+      await user.keyboard('{Enter}');
+
+      await waitFor(() => expect(capturedTurnModelTiers).toEqual(['deep']));
+      await waitFor(() =>
+        expect(screen.getByRole('combobox', { name: 'Intelligence' })).toHaveTextContent('Standard')
+      );
+    } finally {
+      for (const method of stubbed) {
+        delete proto[method];
+      }
+    }
   });
 
   it('moves a thread between groups when a turn ends and the list is refetched', async () => {
