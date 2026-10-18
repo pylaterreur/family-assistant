@@ -13,6 +13,7 @@ just the part you need.
 | ------------------------------------------------ | --------------------------------------------------------------- |
 | [QUICK_START.md](QUICK_START.md)                 | Get going in five minutes with a handful of example requests    |
 | [interfaces.md](interfaces.md)                   | Know what Telegram, the web app, and the iOS app each offer     |
+| [home-and-threads.md](home-and-threads.md)       | Use Home in the web chat, and follow the threads it starts      |
 | [slash-commands.md](slash-commands.md)           | Look up `/browse`, `/research`, `/engineer` and the other modes |
 | [intelligence-levels.md](intelligence-levels.md) | Ask for more thinking on a request that deserves it             |
 | [connecting-claude.md](connecting-claude.md)     | Let Claude, Claude Code, or the Claude API ask your assistant   |

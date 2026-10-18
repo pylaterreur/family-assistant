@@ -49,7 +49,9 @@ every section*
 
 ### Chat
 
-Replies stream in as they're generated, and conversations are easy to switch between.
+Replies stream in as they're generated, and conversations are easy to switch between. Where threads
+are turned on, the chat opens on Home and bigger jobs get threads of their own; see
+[home-and-threads.md](home-and-threads.md).
 
 The assistant's work shows up in the reply where it happened: a group of tool calls sits between the
 text written before it and the text written after it. Each group is a single line. While it runs,
