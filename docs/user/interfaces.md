@@ -284,7 +284,8 @@ Home where you left it. A thread keeps its own profile, so it has no profile pic
 shows the request the assistant started it with. The threads button at the top right counts threads
 waiting on you and opens the thread list: Home, your threads grouped by state, and your other
 conversations under **Earlier**, with search and **New Chat**. Something you share into the app
-lands in Home's composer.
+lands in Home's composer. An intelligence level picked in Home applies to that one message. See
+[Home and threads](#home-and-threads) for how threads work.
 
 **Getting content in:** share a supported file from the iOS share sheet or Files "Open In" and it
 opens a new Chat draft with the file attached. A copied image can be pasted with the paste button
