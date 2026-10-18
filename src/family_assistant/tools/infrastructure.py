@@ -636,6 +636,16 @@ _ESCALATION_OUTCOMES = {
 }
 """What each tool-call review escalation status did, or would have done."""
 
+
+@dataclass(frozen=True, slots=True)
+class _ProgramGate:
+    """A gated action a program can reach, and whether static policy gates it."""
+
+    name: str
+    static: bool
+    """Static policy enforces in every taint mode, so its review is never a forecast."""
+
+
 _ALLOWING_VERDICTS = frozenset({
     ToolCallReviewVerdict.ALLOW,
     ToolCallReviewVerdict.ALLOW_WATCHED,
@@ -2771,7 +2781,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
         # A program is reviewed before it runs whenever it can reach a gated
         # action, because it usually reads its untrusted data itself, after
         # this submission's taint was measured.
-        gated_capability = (
+        gate = (
             await self._gated_program_capability(context.prepared_script, state)
             if name == "execute_script"
             and context.prepared_script is not None
@@ -2782,11 +2792,13 @@ class TaintTrackingToolsProvider(ToolsProvider):
             and not _confirmation_authorizes_script(context, name, arguments, call_id)
             else None
         )
-        capability_review = gated_capability is not None
+        gated_capability = gate.name if gate is not None else None
+        capability_review = gate is not None
         # Observe runs enforce's decision path for a taint-only review and
-        # replaces only its block or prompt with a recorded verdict.
+        # replaces only its block or prompt with a recorded verdict. Static
+        # policy enforces in every mode, so a review it asked for stays live.
         forecast_review = (
-            (taint_review or watched or capability_review)
+            (taint_review or watched or (gate is not None and not gate.static))
             and evaluation is not None
             and evaluation.mode is TaintPolicyMode.OBSERVE
             and not static_review
@@ -3361,7 +3373,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
 
     async def _gated_program_capability(
         self, prepared: PreparedScriptInvocation, state: TurnTaintState
-    ) -> str | None:
+    ) -> _ProgramGate | None:
         """A gated action the program can reach, judged as if it read untrusted data.
 
         Uses the evaluations its calls will face: static policy, decided at
@@ -3391,7 +3403,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
         }
         for name in sorted(reachable):
             if name in prepared.policy_gated:
-                return name
+                return _ProgramGate(name=name, static=True)
             if name in GATED_EXTERNAL_FUNCTIONS:
                 sink_class = SinkClass.SANDBOX_NETWORK
             elif name in descriptors:
@@ -3404,7 +3416,7 @@ class TaintTrackingToolsProvider(ToolsProvider):
                 state=worst, sink_class=sink_class
             ).requested_outcome
             if requested in gating:
-                return name
+                return _ProgramGate(name=name, static=False)
         return None
 
     def _reviewer_revision(self) -> str:

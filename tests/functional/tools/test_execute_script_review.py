@@ -3179,6 +3179,31 @@ _TWO_EFFECTS = 'ordinary_effect(value="first")\nordinary_effect(value="second")'
 
 
 @pytest.mark.asyncio
+async def test_observe_keeps_a_statically_gated_program_review_live(
+    db_engine: AsyncEngine,
+) -> None:
+    # Static policy enforces in every taint mode, so the program review it
+    # asked for decides the program rather than forecasting.
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.DENY)
+    provider = _provider(
+        [_real_registration("execute_script"), _ordinary_effect_registration(effects)],
+        reviewer=reviewer,
+        rules=[_review_rule("ordinary_effect", ToolPolicyDecision.REVIEW)],
+        taint_policy=TaintPolicyConfig(mode=TaintPolicyMode.OBSERVE),
+    )
+    context = _context(db_engine, provider)
+
+    await _execute_script(provider, context, script=_TWO_EFFECTS)
+    await provider.close()
+
+    assert effects == []
+    assert [call.review_input.descriptor.name for call in reviewer.calls] == [
+        "execute_script"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_observe_program_allow_covers_nested_gates_once(
     db_engine: AsyncEngine,
 ) -> None:
