@@ -181,7 +181,11 @@ from family_assistant.storage.tasks import (
     tasks_table,
     unregister_worker_wake_event,
 )
-from family_assistant.tools import ToolExecutionContext
+from family_assistant.tools import (
+    TaintTrackingToolsProvider,
+    ToolExecutionContext,
+    find_provider_by_type,
+)
 from family_assistant.tools.authenticated_site_results import authenticated_site_result
 from family_assistant.tools.computer_use_names import COMPUTER_USE_FUNCTION_NAMES
 from family_assistant.tools.confirmation import render_tool_confirmation
@@ -6691,6 +6695,26 @@ async def handle_script_execution(
         )
     )
     exec_context = replace(exec_context, script_execution=scope)
+
+    if script_definition_resolution.resolved:
+        # The definition's creation gate judged this program, so its firing
+        # runs as an approved one.
+        scope.invocation.approved = True
+        scope.invocation.review = replace(
+            scope.invocation.review, decision="definition_resolved"
+        )
+    elif tools_provider is not None:
+        authorizer = find_provider_by_type(tools_provider, TaintTrackingToolsProvider)
+        if authorizer is not None:
+            refusal = await authorizer.review_firing_program(exec_context)
+            if refusal is not None:
+                logger.warning(
+                    "Script for listener %s (script %s) was not run: %s",
+                    listener_id,
+                    script_name or "inline",
+                    refusal,
+                )
+                return f"Script was not run: {refusal}"
 
     if processing_service is not None:
         script_globals = add_keychute_http_api(

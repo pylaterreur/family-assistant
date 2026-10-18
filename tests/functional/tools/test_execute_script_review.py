@@ -57,7 +57,10 @@ from family_assistant.services.tool_call_review import (
 from family_assistant.storage.database import Database
 from family_assistant.storage.repositories.notes import NoteReadPolicy
 from family_assistant.storage.scripts import scripts_table
-from family_assistant.task_worker import handle_script_execution
+from family_assistant.task_worker import (
+    ScriptExecutionPayload,
+    handle_script_execution,
+)
 from family_assistant.tools import LOCAL_TOOL_REGISTRATIONS
 from family_assistant.tools.automations import create_automation_tool
 from family_assistant.tools.infrastructure import (
@@ -2368,71 +2371,208 @@ async def test_delegation_is_its_own_boundary_and_caller_resumes(
     ]
 
 
-@pytest.mark.asyncio
-async def test_scheduled_stored_script_is_approved_by_one_program_review(
+async def _fire_stored_script(
     db_engine: AsyncEngine,
-) -> None:
-    effects: list[str] = []
-    source = (
-        "read_external()\n"
-        'run_sandbox(command="convert in.png -dither out.bmp", cwd="/work/ink")\n'
-        'run_sandbox(command="upload out.bmp", cwd="/work/ink")\n'
-        'run_sandbox(command="refresh-display", cwd="/work/ink")'
-    )
-    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
-    provider = _provider(
-        [
-            _read_external_registration(),
-            _sandbox_registration(effects),
-        ],
-        reviewer=reviewer,
-        rules=[],
-    )
+    provider: TaintTrackingToolsProvider,
+    source: str,
+    *,
+    resolved: bool,
+) -> str | None:
+    """Fire ``source`` as a scheduled stored script, as the task worker does.
+
+    A resolved definition is saved on a trusted turn and fired by a stamped
+    automation; an unresolved one is saved from external content and fired
+    with no definition record behind it.
+    """
     context = _context(db_engine, provider)
     await context.db_context.scripts.save(
         name="update_eink_display",
         description="Render and upload the e-ink image.",
         script_code=source,
-        definition_taint_state=TurnTaintState.empty(),
-    )
-    processing_service = ProcessingService(
-        llm_client=RuleBasedMockLLMClient(
-            rules=[], default_response=LLMOutput(content="unused")
+        definition_taint_state=(
+            TurnTaintState.empty() if resolved else _unknown_external_state()
         ),
-        tools_provider=provider,
-        service_config=ProcessingServiceConfig(
-            id="script-review-profile",
-            prompts={"system_prompt": "Scheduled scripts"},
-            timezone=ZoneInfo("UTC"),
-            history_budget_chars=0,
-            history_min_turns=0,
-            history_max_age_hours=1,
-            tools_config=ToolsConfig(),
-            delegation_security_level=DelegationSecurityLevel.BLOCKED,
-        ),
-        app_config=AppConfig(),
-        context_providers=[],
-        server_url=None,
     )
-    context = replace(context, processing_service=processing_service)
+    payload: ScriptExecutionPayload = {
+        "script_name": "update_eink_display",
+        "conversation_id": "script-review-conversation",
+        "processing_profile_id": "script-review-profile",
+    }
+    if resolved:
+        automation_id = await _create_script_automation(
+            context,
+            automation_type="schedule",
+            trigger_config={"recurrence_rule": "FREQ=DAILY"},
+            script_name="update_eink_display",
+        )
+        payload["automation_id"] = str(automation_id)
+        payload["automation_type"] = "schedule"
+    return await handle_script_execution(
+        _script_firing_context(context, provider), payload
+    )
 
-    await handle_script_execution(
-        context,
-        {
-            "script_name": "update_eink_display",
-            "conversation_id": "script-review-conversation",
-            "processing_profile_id": "script-review-profile",
-        },
+
+_EINK_FIRING = (
+    "read_external()\n"
+    'run_sandbox(command="convert in.png -dither out.bmp", cwd="/work/ink")\n'
+    'run_sandbox(command="upload out.bmp", cwd="/work/ink")\n'
+    'run_sandbox(command="refresh-display", cwd="/work/ink")'
+)
+
+
+def _eink_provider(
+    effects: list[str],
+    reviewer: _RecordingReviewer,
+    *,
+    taint_policy: TaintPolicyConfig | None = None,
+) -> TaintTrackingToolsProvider:
+    return _provider(
+        [_read_external_registration(), _sandbox_registration(effects)],
+        reviewer=reviewer,
+        rules=[],
+        taint_policy=taint_policy,
+    )
+
+
+@pytest.mark.asyncio
+async def test_firing_of_a_resolved_definition_runs_as_an_approved_program(
+    db_engine: AsyncEngine,
+) -> None:
+    # Saved on a trusted turn, the definition resolves; its creation gate was
+    # its review.
+    effects: list[str] = []
+    reviewer = _RecordingReviewer()
+
+    await _fire_stored_script(
+        db_engine,
+        _eink_provider(effects, reviewer),
+        _EINK_FIRING,
+        resolved=True,
+    )
+
+    assert len(effects) == 3
+    assert reviewer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_firing_of_an_unresolved_definition_is_reviewed_once_at_start(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
+
+    await _fire_stored_script(
+        db_engine,
+        _eink_provider(effects, reviewer),
+        _EINK_FIRING,
+        resolved=False,
     )
 
     assert len(effects) == 3
     assert len(reviewer.calls) == 1
-    review_input = reviewer.calls[0].review_input
-    assert review_input.descriptor.name == "run_sandbox"
-    assert review_input.program_approval_requested
-    assert review_input.trigger is not None
-    assert review_input.trigger.trigger_type == "scheduled_script"
-    _assert_program_source(review_input, source)
+    call = reviewer.calls[0]
+    review = call.review_input
+    assert review.descriptor.name == "execute_script"
+    assert review.script is not None
+    assert review.script.source == _EINK_FIRING
+    assert not review.program_approval_requested
+    assert review.trigger is not None
+    assert review.trigger.trigger_type == "scheduled_script"
+    assert ToolCallReviewVerdict.CONFIRM not in call.constraints.available_verdicts
+    assert ToolCallReviewVerdict.ALLOW_WATCHED in call.constraints.available_verdicts
+
+
+@pytest.mark.asyncio
+async def test_unresolved_firing_that_is_not_allowed_does_not_run(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.DENY)
+
+    note = await _fire_stored_script(
+        db_engine,
+        _eink_provider(effects, reviewer),
+        _EINK_FIRING,
+        resolved=False,
+    )
+
+    assert effects == []
+    assert note is not None
+    assert note.startswith("Script was not run")
+
+
+@pytest.mark.asyncio
+async def test_observe_firing_review_never_stops_the_firing(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.DENY,
+        ToolCallReviewVerdict.DENY,
+        ToolCallReviewVerdict.DENY,
+        ToolCallReviewVerdict.DENY,
+    )
+    provider = _eink_provider(
+        effects, reviewer, taint_policy=TaintPolicyConfig(mode=TaintPolicyMode.OBSERVE)
+    )
+
+    await _fire_stored_script(
+        db_engine,
+        provider,
+        _EINK_FIRING,
+        resolved=False,
+    )
+    await provider.close()
+
+    assert len(effects) == 3
+    assert reviewer.calls[0].review_input.descriptor.name == "execute_script"
+
+
+@pytest.mark.asyncio
+async def test_unresolved_firing_reaching_no_gated_action_is_not_reviewed(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer()
+
+    await _fire_stored_script(
+        db_engine,
+        _provider(
+            [_ordinary_effect_registration(effects)], reviewer=reviewer, rules=[]
+        ),
+        'ordinary_effect(value="x")',
+        resolved=False,
+    )
+
+    assert effects == ["x"]
+    assert reviewer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_watched_call_in_a_firing_cannot_be_confirmed_later(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.ALLOW_WATCHED,
+        ToolCallReviewVerdict.DENY,
+        ToolCallReviewVerdict.DENY,
+        ToolCallReviewVerdict.DENY,
+        watched_tools=("run_sandbox",),
+    )
+
+    await _fire_stored_script(
+        db_engine,
+        _eink_provider(effects, reviewer),
+        _EINK_FIRING,
+        resolved=False,
+    )
+
+    assert effects == []
+    watched = reviewer.calls[1]
+    assert watched.review_input.watched_call
+    assert ToolCallReviewVerdict.CONFIRM not in watched.constraints.available_verdicts
+    assert watched.constraints.fallback_verdict is ToolCallReviewVerdict.DENY
 
 
 @pytest.mark.asyncio
