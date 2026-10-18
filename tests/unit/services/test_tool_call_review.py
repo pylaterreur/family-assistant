@@ -14,7 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 import family_assistant.services.tool_call_review as tool_call_review_module
-from family_assistant.config_models import ToolCallReviewConfig
+from family_assistant.config_models import KeychuteConfig, ToolCallReviewConfig
 from family_assistant.llm import ToolCallFunction, ToolCallItem
 from family_assistant.llm.base import StructuredOutputError
 from family_assistant.llm.messages import (
@@ -24,6 +24,7 @@ from family_assistant.llm.messages import (
     ToolMessage,
     UserMessage,
 )
+from family_assistant.scripting.apis.keychute import keychute_external_function_names
 from family_assistant.scripting.invocation import ScriptReviewContext
 from family_assistant.security.definition_records import (
     CreationDisposition,
@@ -44,6 +45,8 @@ from family_assistant.security.taint import (
 from family_assistant.security.taint_audit import taint_audit_sources
 from family_assistant.services.tool_call_review import (
     ACTION_REVIEW_VERDICTS,
+    GATED_EXTERNAL_FUNCTIONS,
+    MAX_REVIEWABLE_ARGUMENT_TOKENS,
     BrowserActionReviewDecision,
     BrowserActionReviewInput,
     DelegatingPolicyContext,
@@ -61,6 +64,7 @@ from family_assistant.services.tool_call_review import (
     assemble_tool_call_review_messages,
     build_delegation_review_trigger,
     compute_trusted_destination_echo,
+    estimated_argument_tokens,
     human_decision_from_confirmation,
     program_review_constraints,
     resolve_originating_request,
@@ -2633,16 +2637,109 @@ async def test_unusable_watched_list_takes_the_caller_fallback(
 
 
 @pytest.mark.no_db
-async def test_external_function_pattern_match_may_be_watched() -> None:
+async def test_gated_external_function_may_be_watched() -> None:
     result, _ = await _review_program(
         ProgramReviewResponse(
             reason="r",
             verdict=ToolCallReviewVerdict.ALLOW_WATCHED,
-            watched_tools=["json_parse"],
+            watched_tools=["keychute_http_request"],
         )
     )
     assert result.status is ToolCallReviewStatus.MODEL_VERDICT
-    assert result.watched_tools == ("json_parse",)
+    assert result.watched_tools == ("keychute_http_request",)
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize("name", ["llm", "json_parse"])
+async def test_capability_no_gate_sees_cannot_be_watched(name: str) -> None:
+    # Watching it would read as watched while every call ran unreviewed.
+    result, _ = await _review_program(
+        ProgramReviewResponse(
+            reason="r",
+            verdict=ToolCallReviewVerdict.ALLOW_WATCHED,
+            watched_tools=["send_email", name],
+        )
+    )
+    assert result.status is ToolCallReviewStatus.MALFORMED_FALLBACK
+    assert "no gate can watch" in result.reason
+
+
+@pytest.mark.no_db
+def test_keychute_functions_are_all_gated() -> None:
+    names = keychute_external_function_names(KeychuteConfig(enabled=True))
+    assert names is not None
+    assert set(names) <= GATED_EXTERNAL_FUNCTIONS
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize(
+    ("fallback", "available"),
+    [
+        (ToolCallReviewVerdict.CONFIRM, None),
+        # An unattended caller offers no confirm and falls back to deny.
+        (
+            ToolCallReviewVerdict.DENY,
+            frozenset({ToolCallReviewVerdict.ALLOW, ToolCallReviewVerdict.DENY}),
+        ),
+    ],
+)
+async def test_oversized_arguments_take_the_fallback_unreviewed(
+    fallback: ToolCallReviewVerdict,
+    available: frozenset[ToolCallReviewVerdict] | None,
+) -> None:
+    fake = _StructuredFake(
+        ToolCallReviewResponse(verdict=ToolCallReviewVerdict.ALLOW, reason="unused")
+    )
+    reviewer = ToolCallReviewer(
+        cast("LLMInterface", fake), ToolCallReviewConfig(timeout_seconds=1)
+    )
+    oversized = replace(
+        _review_input(),
+        arguments={"body": "x" * (4 * MAX_REVIEWABLE_ARGUMENT_TOKENS + 4)},
+    )
+
+    result = await reviewer.review_tool_call(
+        oversized, _constraints(fallback, available)
+    )
+
+    assert fake.calls == []
+    assert result.status is ToolCallReviewStatus.OVERSIZED_FALLBACK
+    assert result.verdict is fallback
+
+
+@pytest.mark.no_db
+async def test_arguments_at_the_limit_are_reviewed() -> None:
+    fake = _StructuredFake(
+        ToolCallReviewResponse(verdict=ToolCallReviewVerdict.ALLOW, reason="fine")
+    )
+    reviewer = ToolCallReviewer(
+        cast("LLMInterface", fake), ToolCallReviewConfig(timeout_seconds=1)
+    )
+    overhead = len(
+        tool_call_review_module._render_fenced_data("tool_call_arguments", {"body": ""})
+    )
+    padding = 3 * MAX_REVIEWABLE_ARGUMENT_TOKENS - overhead
+    at_limit = replace(_review_input(), arguments={"body": "x" * padding})
+    assert estimated_argument_tokens(at_limit.arguments) == (
+        MAX_REVIEWABLE_ARGUMENT_TOKENS
+    )
+
+    result = await reviewer.review_tool_call(at_limit, _constraints())
+
+    assert result.status is ToolCallReviewStatus.MODEL_VERDICT
+
+
+@pytest.mark.no_db
+def test_watched_call_prompt_says_it_is_the_programs_watch() -> None:
+    review_input = replace(_review_input(), watched_call=True)
+    system, _ = assemble_tool_call_review_messages(review_input, _constraints())
+    assert "chose to watch" in str(system.content)
+
+
+@pytest.mark.no_db
+def test_unwatched_call_prompt_has_no_watch_text() -> None:
+    system, _ = assemble_tool_call_review_messages(_review_input(), _constraints())
+    assert "chose to watch" not in str(system.content)
 
 
 @pytest.mark.no_db

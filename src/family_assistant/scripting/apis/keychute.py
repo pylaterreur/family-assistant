@@ -571,7 +571,11 @@ class KeychuteScriptHttpClient:
     ) -> None:
         """Apply the profile's runtime-taint policy before contacting Keychute."""
         context = self._execution_context
-        if context is None or context.taint_tracker is None:
+        if context is None:
+            return
+        scope = context.script_execution
+        watched = scope is not None and "keychute_http_request" in scope.watched_tools
+        if context.taint_tracker is None and not watched:
             return
 
         provider = context.tools_provider

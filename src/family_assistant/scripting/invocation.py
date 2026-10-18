@@ -93,6 +93,8 @@ class PreparedScriptInvocation:
     gate still decides on its own.
     """
     bound_child: bool = False
+    watched_tools: frozenset[str] = frozenset()
+    """Tools whose every call the approving review asked to see on its own."""
 
     def arguments(self) -> dict[str, object]:
         """Return the inline payload used for review, confirmation and execution."""
@@ -144,6 +146,20 @@ class ScriptExecutionScope:
         return (
             self._bound_parent is not None and self._bound_parent.approval_is_forecast
         )
+
+    @property
+    def watched_tools(self) -> frozenset[str]:
+        """Tools this run's calls to never inherit approval for.
+
+        A bound child is part of the program that names it, so the program's
+        watch covers it, whichever review approved it.
+        """
+        bound = (
+            self._bound_parent.watched_tools
+            if self._bound_parent is not None
+            else frozenset()
+        )
+        return self.invocation.watched_tools | bound
 
     @property
     def _bound_parent(self) -> ScriptExecutionScope | None:

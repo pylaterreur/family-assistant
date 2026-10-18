@@ -3,9 +3,9 @@
 Status: the program boundary (resolution, binding, scoped approval) is implemented. **Who reviews
 what inside a program** ("Review model output once" through "Work plan") is proposed, 2026-10-16. It
 replaces the shipped model-result rule, code-execution literal rule and first-nested-review program
-decision, which remain the behaviour until milestone 4 lands. Milestone 2 is implemented: the
-production program reviewer returns `allow_watched`, which runs as a confirmation until milestone 3
-(see "Deliberate simplifications"). The evaluation behind the proposal is in the appendix.
+decision, which remain the behaviour until milestone 4 lands. Milestones 2 and 3a are implemented:
+the production program reviewer returns `allow_watched`, and each call to a watched tool is reviewed
+on its own real arguments. The evaluation behind the proposal is in the appendix.
 
 ## Goal
 
@@ -148,10 +148,14 @@ rate.
 
 A watched call is reviewed on its real arguments, because seeing the real arguments is the point of
 watching it. An argument too large to review sensibly fails closed: confirm when a human is present,
-deny when unattended. It is never truncated. A preview and a digest tell the reviewer nothing about
-what the call does (closed [#1416](https://github.com/werdnum/family-assistant/pull/1416)). The case
-that produced 5.6M-token reviews, a reviewed program's deterministic upload, never reaches a
-reviewer under this design unless the program reviewer chose to watch it.
+deny when unattended. It is never truncated. "Too large" is about half a model's maximum output, 32k
+tokens, so a tool call a model actually wrote fits. The size is estimated from the arguments as the
+prompt renders them, at three characters a token, which leans high for dense text such as base64
+bodies; it is an estimate to tune, not a token count. The limit applies to every tool-call review,
+as the caller's fallback. A preview and a digest tell the reviewer nothing about what the call does
+(closed [#1416](https://github.com/werdnum/family-assistant/pull/1416)). The case that produced
+5.6M-token reviews, a reviewed program's deterministic upload, never reaches a reviewer under this
+design unless the program reviewer chose to watch it.
 
 ## Deliberate simplifications
 
@@ -161,7 +165,9 @@ reviewer under this design unless the program reviewer chose to watch it.
   measures the miss rate rather than assuming it away.
 - **Watching is per tool, not per call site.** Watching `forward_email` reviews every forward in the
   program, including fixed-recipient ones. That costs extra reviews and buys a decision the reviewer
-  can express and the runtime can enforce without static analysis.
+  can express and the runtime can enforce without static analysis. Watched reviews count against the
+  per-turn review budget, so past it each watched call takes the fallback: a loop over many watched
+  items prompts per item when attended and stops when not.
 - **Capability-triggered submission review** spends a review on scripts that never touch untrusted
   data, in exchange for not missing scripts that read it after submission.
 - **A confirmed program runs unwatched.** The person approving saw the whole program; asking the
@@ -175,12 +181,16 @@ reviewer under this design unless the program reviewer chose to watch it.
   reviews blind for every program.
 - **Externally chosen code in an empty sandbox runs unreviewed**, including `curl … | bash`. This is
   the sandbox's purpose.
-- **Until milestone 3, a watched program is a confirmed one.** The production reviewer can return
-  `allow_watched` before anything can review a watched call, and running the program unwatched would
-  make the watch a plain allow. The tool-call gate therefore treats it as `confirm`: a human
-  approves the whole program when one can be asked, and an unattended call is blocked. The audit row
-  keeps the reviewer's own verdict and watched list, so the interim cost is measurable. Milestone 3
-  replaces this one conversion.
+- **Only what a gate sees can be watched.** A watched list may name the program's tools and the
+  external functions that reach the named-sink gate (`keychute_http_request`). A capability no gate
+  sees, such as `llm_json`, would read as watched while running unreviewed, so naming one is
+  malformed output.
+- **A watched call's verdict decides that call only.** A denied watched call does not run and the
+  script sees the denial as that call's result; the program's approval stands for its other calls.
+  Aborting the program instead would discard the aligned part the watch exists to keep running.
+- **Observe forecasts watched calls off the critical path.** In observe mode each watched call's
+  review runs detached and records what enforce would have done, as any review that decides no
+  program does.
 - **Until milestone 4, the program prompt says more than the runtime does.** It tells the reviewer
   that a program's calls run without further review, while the old rules still re-review some of
   them. That errs towards stricter verdicts, and the policy text beside it still describes the old
@@ -195,13 +205,18 @@ reviewer under this design unless the program reviewer chose to watch it.
    clarification noted in the appendix. _Verify:_ unit tests for parsing and fail-closed validation;
    the eval re-run through production assembly with zero misses and watch cost no worse than the
    prototype's, including cases not written alongside the prompt.
-3. **Boundary changes.** Capability-triggered submission review, firing-start review of uncured
-   definitions, cured firings as approved programs, watched calls reviewed at both chokepoints on
-   real arguments, and oversized watched arguments failing closed. _Verify:_ functional tests with a
-   recording reviewer and real policy plumbing. The printer slice-and-upload gets exactly one
-   review. A watched tool's calls are each reviewed with their full arguments while other calls
-   inherit. A cured firing gets no review and an uncured one gets one, at start. An oversized
-   watched argument confirms when attended and denies when unattended.
+3. **Boundary changes**, as three PRs, each merged before the next. _Verify:_ functional tests with
+   a recording reviewer and real policy plumbing.
+   - **3a, watched execution.** An `allow_watched` program runs, and its calls to watched tools are
+     reviewed at both chokepoints on real arguments while other calls inherit; oversized arguments
+     fail closed. _Verify:_ a watched tool's calls are each reviewed with their full arguments while
+     other calls inherit; an oversized watched argument confirms when attended and denies when
+     unattended; observe records watched reviews without blocking; the printer slice-and-upload
+     still gets exactly one review.
+   - **3b, capability-triggered submission review.** _Verify:_ a script that reads untrusted data
+     only after submission is reviewed once, up front; one with no gated capability is not.
+   - **3c, firings.** Cured firings run as approved programs; an uncured firing is reviewed once at
+     start. _Verify:_ a cured firing gets no review and an uncured one gets one, at start.
 4. **Retire the old rules.** Remove the lazy program decision, the model-result re-arming, the
    literal rule and the untagged-tool-as-model heuristic. Update the automatic-review design's
    script section, the scripting user guide's review section and the program policy text the
