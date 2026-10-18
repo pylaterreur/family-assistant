@@ -51,6 +51,8 @@ enum UITestConfiguration {
         )
         UserDefaults.standard.set(false, forKey: "fa_notifications_enabled")
         UserDefaults.standard.removeObject(forKey: "fa_apns_device_token")
+        // Each launch decides Home from this launch's mock, not a prior test's.
+        HomeAvailability.clear()
 
         injectSharedFileIfRequested()
     }
@@ -246,7 +248,16 @@ private final class UITestBackendURLProtocol: URLProtocol {
             ]
             pendingChatReplies = [:]
             pendingChatTurnIDs = [:]
+            if threadsEnabled {
+                chatMessages.merge(UITestThreadsFixture.conversations) { current, _ in current }
+            }
         }
+    }
+
+    /// Threads are on only when a test asks for them, so every other test sees
+    /// the server it always has: no Home, and the conversation list.
+    private static var threadsEnabled: Bool {
+        ProcessInfo.processInfo.environment["FAMILY_ASSISTANT_UITEST_THREADS"] == "1"
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -335,9 +346,23 @@ private final class UITestBackendURLProtocol: URLProtocol {
                 """
             )
         case ("GET", "/api/v1/chat/conversations"):
-            return encode(UITestConversationListResponse(
-                conversations: chatConversationSummaries(),
-                count: lock.withLock { chatMessages.count }
+            var summaries = chatConversationSummaries()
+            if request.url?.query?.contains("kind=ordinary") == true {
+                summaries.removeAll { UITestThreadsFixture.nonOrdinaryIDs.contains($0.conversationID) }
+            }
+            return encode(UITestConversationListResponse(conversations: summaries, count: summaries.count))
+        case ("GET", "/api/v1/chat/home"):
+            guard threadsEnabled else {
+                return .json(#"{"detail":"Not Found"}"#, statusCode: 404)
+            }
+            return .json(#"{"enabled":true,"conversation_id":"\#(UITestThreadsFixture.homeID)"}"#)
+        case ("GET", "/api/v1/chat/home/threads"):
+            guard threadsEnabled else {
+                return .json(#"{"detail":"Not Found"}"#, statusCode: 404)
+            }
+            return encode(UITestHomeThreadsResponse(
+                homeConversationID: UITestThreadsFixture.homeID,
+                threads: UITestThreadsFixture.threads
             ))
         case ("GET", "/api/v1/chat/confirmations/pending"):
             return .json(#"{"confirmations":[]}"#)
@@ -366,14 +391,23 @@ private final class UITestBackendURLProtocol: URLProtocol {
             }
             if request.httpMethod == "GET", let conversationID = conversationID(from: request) {
                 let messages = lock.withLock { chatMessages[conversationID] ?? [] }
-                return encode(UITestConversationMessagesResponse(
+                var response = UITestConversationMessagesResponse(
                     conversationID: conversationID,
                     messages: messages,
                     count: messages.count,
                     totalMessages: messages.count,
                     hasMoreBefore: false,
                     hasMoreAfter: false
-                ))
+                )
+                if threadsEnabled, request.url?.query?.contains("include_conversation_profile=true") == true {
+                    let thread = UITestThreadsFixture.threads.first { $0.conversationID == conversationID }
+                    response.thread = thread
+                    response.latestUserProfileID = thread?.profileID ?? "default_assistant"
+                    response.conversationKind = thread != nil
+                        ? "thread"
+                        : conversationID == UITestThreadsFixture.homeID ? "home" : "conversation"
+                }
+                return encode(response)
             }
             if (request.httpMethod ?? "GET") == "GET", let title = noteTitle(from: request) {
                 guard let note = lock.withLock({ notes[title] }) else {
@@ -914,6 +948,9 @@ private struct UITestConversationMessagesResponse: Codable {
     let totalMessages: Int
     let hasMoreBefore: Bool
     let hasMoreAfter: Bool
+    var latestUserProfileID: String?
+    var conversationKind: String?
+    var thread: UITestThreadSummary?
 
     enum CodingKeys: String, CodingKey {
         case conversationID = "conversation_id"
@@ -922,6 +959,160 @@ private struct UITestConversationMessagesResponse: Codable {
         case totalMessages = "total_messages"
         case hasMoreBefore = "has_more_before"
         case hasMoreAfter = "has_more_after"
+        case latestUserProfileID = "latest_user_profile_id"
+        case conversationKind = "conversation_kind"
+        case thread
+    }
+}
+
+private struct UITestThreadSummary: Codable {
+    let conversationID: String
+    let homeConversationID: String
+    let title: String
+    let profileID: String
+    let state: String
+    let sourceToolCallID: String?
+    let seedRequest: String?
+    let preview: String?
+    let createdAt: String
+    let updatedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case conversationID = "conversation_id"
+        case homeConversationID = "home_conversation_id"
+        case title
+        case profileID = "profile_id"
+        case state
+        case sourceToolCallID = "source_tool_call_id"
+        case seedRequest = "seed_request"
+        case preview
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+private struct UITestHomeThreadsResponse: Codable {
+    let homeConversationID: String
+    let threads: [UITestThreadSummary]
+
+    enum CodingKeys: String, CodingKey {
+        case homeConversationID = "home_conversation_id"
+        case threads
+    }
+}
+
+/// Home and two of its threads, served when `FAMILY_ASSISTANT_UITEST_THREADS=1`.
+/// Home's transcript holds the `start_thread` call that started the first
+/// thread, so its card can be found by that call's id.
+private enum UITestThreadsFixture {
+    static let homeID = "web_conv_home"
+    static let quotesThreadID = "web_conv_thread_quotes"
+    static let flightsThreadID = "web_conv_thread_flights"
+    static let startQuotesCallID = "call-start-quotes"
+
+    static var nonOrdinaryIDs: Set<String> {
+        [homeID, quotesThreadID, flightsThreadID]
+    }
+
+    static let threads = [
+        UITestThreadSummary(
+            conversationID: quotesThreadID,
+            homeConversationID: homeID,
+            title: "Hot water system quotes",
+            profileID: "research",
+            state: "waiting",
+            sourceToolCallID: startQuotesCallID,
+            seedRequest: "Find a plumber and get a couple of quotes for the hot water system.",
+            preview: "Gas or electric heat pump?",
+            createdAt: "2026-06-08T09:14:00Z",
+            updatedAt: "2026-06-08T09:40:00Z"
+        ),
+        UITestThreadSummary(
+            conversationID: flightsThreadID,
+            homeConversationID: homeID,
+            title: "Melbourne flights",
+            profileID: "research",
+            state: "working",
+            sourceToolCallID: nil,
+            seedRequest: "Find flights to Melbourne for the September holidays.",
+            preview: "Checking Qantas",
+            createdAt: "2026-06-08T09:20:00Z",
+            updatedAt: "2026-06-08T09:42:00Z"
+        ),
+    ]
+
+    static var conversations: [String: [UITestChatMessage]] {
+        [
+            homeID: [
+                UITestChatMessage(
+                    internalID: 1,
+                    role: "user",
+                    content: "Hot water system is leaking again. Can you get a couple of quotes?",
+                    timestamp: "2026-06-08T09:13:00Z",
+                    toolCalls: nil,
+                    toolCallID: nil,
+                    attachments: nil
+                ),
+                UITestChatMessage(
+                    internalID: 2,
+                    role: "assistant",
+                    content: "",
+                    timestamp: "2026-06-08T09:14:00Z",
+                    toolCalls: [
+                        UITestToolCall(
+                            id: startQuotesCallID,
+                            type: "function",
+                            function: UITestToolFunction(
+                                name: "start_thread",
+                                arguments: #"{"target_service_id":"research","title":"Hot water system quotes","request":"Find a plumber and get a couple of quotes for the hot water system."}"#
+                            )
+                        ),
+                    ],
+                    toolCallID: nil,
+                    attachments: nil
+                ),
+                UITestChatMessage(
+                    internalID: 3,
+                    role: "tool",
+                    content: "Started the thread 'Hot water system quotes' on 'research'.",
+                    timestamp: "2026-06-08T09:14:01Z",
+                    toolCalls: nil,
+                    toolCallID: startQuotesCallID,
+                    attachments: nil
+                ),
+                UITestChatMessage(
+                    internalID: 4,
+                    role: "assistant",
+                    content: "On it. I've started a thread for the quotes.",
+                    timestamp: "2026-06-08T09:14:02Z",
+                    toolCalls: nil,
+                    toolCallID: nil,
+                    attachments: nil
+                ),
+            ],
+            quotesThreadID: [
+                UITestChatMessage(
+                    internalID: 1,
+                    role: "assistant",
+                    content: "Gas or electric heat pump? Heat pumps qualify for a rebate.",
+                    timestamp: "2026-06-08T09:40:00Z",
+                    toolCalls: nil,
+                    toolCallID: nil,
+                    attachments: nil
+                ),
+            ],
+            flightsThreadID: [
+                UITestChatMessage(
+                    internalID: 1,
+                    role: "assistant",
+                    content: "Checking Qantas first.",
+                    timestamp: "2026-06-08T09:42:00Z",
+                    toolCalls: nil,
+                    toolCallID: nil,
+                    attachments: nil
+                ),
+            ],
+        ]
     }
 }
 

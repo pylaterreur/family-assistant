@@ -62,7 +62,7 @@ struct RootTabView: View {
                 )
             }
         } else {
-            ChatRootView(
+            ChatEntryView(
                 authManager: authManager,
                 route: appRouter.chatSelection
             )

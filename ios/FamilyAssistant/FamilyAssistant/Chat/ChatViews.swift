@@ -127,7 +127,7 @@ struct ChatRootView: View {
     }
 }
 
-private struct ConversationShareToolbar: View {
+struct ConversationShareToolbar: View {
     let conversationID: String?
 
     @State private var shareViewModel: ConversationShareViewModel
@@ -386,8 +386,11 @@ private struct ConversationRow: View {
     }
 }
 
-private struct ChatThreadView: View {
+struct ChatThreadView: View {
     var viewModel: ChatViewModel
+    /// Keep the reader's place when the view reappears, as Home does when a
+    /// pushed thread is popped. Otherwise every appearance lands at the bottom.
+    var keepsScrollPositionOnReappear = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -420,9 +423,13 @@ private struct ChatThreadView: View {
         StickyBottomScroll(
             followTrigger: viewModel.visibleGroupedMessages.last?.id,
             forceFollowTrigger: viewModel.scrollToLatestRequestID,
-            canFollow: { UIApplication.shared.applicationState == .active }
+            canFollow: { UIApplication.shared.applicationState == .active },
+            landsAtBottomOnlyOnFirstAppear: keepsScrollPositionOnReappear
         ) {
             VStack(spacing: 14) {
+                if !viewModel.hasEarlierMessages {
+                    ThreadOriginBanner(viewModel: viewModel)
+                }
                 if viewModel.messages.isEmpty && !viewModel.isLoadingMessages {
                     ContentUnavailableView {
                         Label("Ask Family Assistant", systemImage: "sparkles")
@@ -564,6 +571,7 @@ protocol ChatAttachmentLoading: AnyObject {
 extension ChatViewModel: ChatAttachmentLoading {}
 
 struct MessageBubble: View {
+    @Environment(\.homeThreads) private var homeThreads
     let message: ChatMessage
     let attachmentLoader: any ChatAttachmentLoading
     let retryViewModel: ChatViewModel?
@@ -669,11 +677,25 @@ struct MessageBubble: View {
                     // fast path lived here.
                     NativeMarkdownView(markdown: text)
                 case .tools(_, let toolCalls):
-                    ToolGroupView(
+                    // In Home, a call that started a thread is the thread's card,
+                    // kept out of the collapsed group so it is always visible.
+                    let split = ThreadCardSplit(
                         toolCalls: toolCalls,
-                        hoistedAttachmentKeys: hoistedKeys,
-                        attachmentLoader: attachmentLoader
+                        showsCards: homeThreads != nil,
+                        hasThread: { homeThreads?.thread(forSourceToolCallID: $0) != nil }
                     )
+                    if !split.otherCalls.isEmpty {
+                        ToolGroupView(
+                            toolCalls: split.otherCalls,
+                            hoistedAttachmentKeys: hoistedKeys,
+                            attachmentLoader: attachmentLoader
+                        )
+                    }
+                    if let homeThreads {
+                        ForEach(split.threadCalls) { call in
+                            ThreadCardView(call: call, store: homeThreads)
+                        }
+                    }
                 }
             }
             // Images belong with the answer, not behind a disclosure arrow: a
@@ -821,22 +843,28 @@ struct StickyBottomScroll<Content: View>: View {
     /// Read at trigger time so lifecycle suppression does not require an
     /// `@Environment(\.scenePhase)` dependency in the heavy scrolling subtree.
     let canFollow: () -> Bool
+    /// Land at the bottom only the first time the list appears, so a list that
+    /// stays mounted under a pushed view keeps its place when shown again.
+    let landsAtBottomOnlyOnFirstAppear: Bool
     @ViewBuilder let content: () -> Content
 
     @State private var isNearBottom = true
     @State private var hasPendingFollow = false
+    @State private var hasLandedAtBottom = false
 
     init(
         followTrigger: AnyHashable?,
         forceFollowTrigger: AnyHashable? = nil,
         shouldFollow: @escaping (_ isNearBottom: Bool) -> Bool = { $0 },
         canFollow: @escaping () -> Bool = { true },
+        landsAtBottomOnlyOnFirstAppear: Bool = false,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.followTrigger = followTrigger
         self.forceFollowTrigger = forceFollowTrigger
         self.shouldFollow = shouldFollow
         self.canFollow = canFollow
+        self.landsAtBottomOnlyOnFirstAppear = landsAtBottomOnlyOnFirstAppear
         self.content = content
     }
 
@@ -859,6 +887,10 @@ struct StickyBottomScroll<Content: View>: View {
                 // The list can mount already populated (a restored thread, or
                 // returning from a backgrounded scene). Land at the bottom so the
                 // newest content is visible. No animation.
+                guard !(landsAtBottomOnlyOnFirstAppear && hasLandedAtBottom) else {
+                    return
+                }
+                hasLandedAtBottom = true
                 proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
             }
             .onChange(of: followTrigger) {
@@ -1310,7 +1342,7 @@ private struct DraftAttachmentStrip: View {
 /// a distinct symbol/label/identifier and its own tap action, instead of
 /// collapsing degraded/offline/authRequired into one false "no connection" icon.
 /// `.live` and `.suspended` (background) render nothing.
-private struct LiveUpdatesIndicator: View {
+struct LiveUpdatesIndicator: View {
     var viewModel: ChatViewModel
 
     private struct Style {
@@ -1379,7 +1411,7 @@ private struct LiveUpdatesIndicator: View {
     }
 }
 
-private struct ProfilePickerView: View {
+struct ProfilePickerView: View {
     var viewModel: ChatViewModel
 
     var body: some View {
@@ -1416,7 +1448,7 @@ private struct ProfilePickerView: View {
 /// the tier once the user has chosen one: a selection is the state that has to be
 /// visible, and a phone toolbar should not spend permanent width restating a
 /// default.
-private struct IntelligencePickerView: View {
+struct IntelligencePickerView: View {
     var viewModel: ChatViewModel
 
     private var choice: String? {

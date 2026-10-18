@@ -6,7 +6,30 @@ import SwiftUI
 @MainActor
 @Observable
 final class ChatViewModel {
+    /// Where the model is shown. `standalone` is the conversation list with one
+    /// conversation open, as when threads are off. With threads on, `home` is the
+    /// landing stream and `pushed` is a conversation opened on top of it (a
+    /// thread, or an ordinary conversation from "Earlier"). Neither of those
+    /// keeps a conversation list or the restore-on-launch record: the thread
+    /// switcher lists conversations, and the app always lands on Home.
+    enum Role {
+        case standalone
+        case home
+        case pushed
+    }
+
+    @ObservationIgnored let role: Role
     var conversations: [ChatConversationSummary] = []
+    /// What the open conversation is, as the server reports it. Known only for
+    /// `home` and `pushed`, whose loads ask for it.
+    private(set) var conversationKind: ChatConversationKind?
+    /// The open thread's card, when the open conversation is a thread.
+    private(set) var threadSummary: ChatThreadSummary?
+    /// The profile the server says the open conversation's history is under.
+    @ObservationIgnored private var serverConversationProfileID: String?
+    /// Called on every activity-stream ping, after the model's own refresh, so
+    /// the owner can refresh what it shows alongside (the thread list).
+    @ObservationIgnored var onActivity: (@MainActor () async -> Void)?
     var messages: [ChatMessage] = []
     // Fixed upper bound on how many grouped bubbles are realized into the chat
     // view at once. The full thread is still loaded into `messages`; only a
@@ -508,6 +531,7 @@ final class ChatViewModel {
         conversationID: String? = nil,
         initialPrompt: String? = nil,
         startsNewConversation: Bool = false,
+        role: Role = .standalone,
         liveReconnectInitialDelaySeconds: Double = 2,
         liveReconnectMaxDelaySeconds: Double = 30,
         maxConsecutiveStreamResumes: Int = 5,
@@ -517,6 +541,7 @@ final class ChatViewModel {
         errorReporter: ErrorReporter = .shared,
         pathMonitor: PathMonitoring? = nil
     ) {
+        self.role = role
         self.liveReconnectInitialDelaySeconds = liveReconnectInitialDelaySeconds
         self.liveReconnectMaxDelaySeconds = liveReconnectMaxDelaySeconds
         self.maxConsecutiveStreamResumes = maxConsecutiveStreamResumes
@@ -664,6 +689,18 @@ final class ChatViewModel {
         }
     }
 
+    /// Send `prompt` in the open conversation rather than a new one, as a
+    /// request routed into Home is. A prompt already sent this way is not sent
+    /// again when the same route is applied twice.
+    func sendPromptInPlace(_ prompt: String) async {
+        guard shouldProcessInitialPrompt(prompt) else {
+            return
+        }
+        lastProcessedInitialPrompt = prompt
+        draftText = prompt
+        await sendDraft()
+    }
+
     func applyRoute(
         conversationID: String?,
         initialPrompt: String?,
@@ -709,6 +746,9 @@ final class ChatViewModel {
     /// modal/inline surface.
     @discardableResult
     func refreshConversations() async -> Bool {
+        guard role == .standalone else {
+            return true
+        }
         isLoadingConversations = true
         let succeeded: Bool
         do {
@@ -760,6 +800,9 @@ final class ChatViewModel {
     /// row is authoritative. The whole list is sorted most-recent-first so a kept
     /// optimistic row stays at the top.
     private func refreshRecentConversations() async {
+        guard role == .standalone else {
+            return
+        }
         do {
             let recent = try await apiClient.listRecentConversations()
             let recentIDs = Set(recent.map(\.conversationID))
@@ -944,6 +987,7 @@ final class ChatViewModel {
             swapDraft(leaving: conversationID, entering: id)
             persistedMessagesConversationID = nil
             setPendingDelegations([])
+            clearConversationIdentity()
         }
         conversationID = id
         conversationSelection = id
@@ -999,11 +1043,31 @@ final class ChatViewModel {
     /// tagged with the delegate's profile, so user messages are the reliable
     /// signal). An empty conversation, or one whose messages predate profile
     /// tagging, falls back to the preferred profile.
+    ///
+    /// Home and pushed conversations take the server's word first: a thread's
+    /// opening request is not a user message, so its messages alone would
+    /// leave it on the preferred profile and outside its own history. Home
+    /// with no history yet runs on the server's default profile.
     private func adoptConversationProfile() {
         let conversationProfile = messages.last {
             $0.role == .user && $0.processingProfileID != nil
         }?.processingProfileID
-        selectedProfileID = conversationProfile ?? preferredProfileID
+        switch role {
+        case .standalone:
+            selectedProfileID = conversationProfile ?? preferredProfileID
+        case .home:
+            selectedProfileID = serverConversationProfileID ?? defaultProfileID
+        case .pushed:
+            selectedProfileID = threadSummary?.profileID ?? serverConversationProfileID
+                ?? conversationProfile ?? preferredProfileID
+        }
+    }
+
+    /// Whether the user may move this conversation to another profile. Home
+    /// stays on its profile and a thread runs on its own; switching either
+    /// would start an unrelated conversation in their place.
+    var allowsProfileChange: Bool {
+        role == .standalone || (role == .pushed && conversationKind != .thread && threadSummary == nil)
     }
 
     /// Restore the tier the conversation just loaded is on, for its profile.
@@ -1048,6 +1112,7 @@ final class ChatViewModel {
         conversationID = Self.generateConversationID()
         conversationSelection = conversationID
         setPendingDelegations([])
+        clearConversationIdentity()
         messages = []
         persistedMessagesConversationID = nil
         composerFocusRequestID = UUID()
@@ -1074,6 +1139,12 @@ final class ChatViewModel {
         // deferred until the first accepted turn makes the conversation server-backed
         // (see `runSendTurn`, which flips this flag and starts following then).
         opensGeneratedLaunchDraft = true
+    }
+
+    private func clearConversationIdentity() {
+        conversationKind = nil
+        threadSummary = nil
+        serverConversationProfileID = nil
     }
 
     private func resetTurnControlState() {
@@ -1244,12 +1315,20 @@ final class ChatViewModel {
             }
         }
         do {
-            let response = try await apiClient.getMessages(conversationID: id)
+            let response = try await apiClient.getMessages(
+                conversationID: id,
+                includeConversationProfile: role != .standalone
+            )
             // The user may have switched conversations during the network await;
             // applying this thread's rows now would clobber the one they moved to.
             // (`self.` is required: the `conversationID` parameter shadows it.)
             guard self.conversationID == id else {
                 return
+            }
+            if role != .standalone {
+                conversationKind = response.conversationKind
+                threadSummary = response.thread
+                serverConversationProfileID = response.latestUserProfileID
             }
             replaceMessagesPreservingPagedBackWindow(withLiveFollowBubbles(Self.renderMessages(
                 from: response.messages,
@@ -5156,7 +5235,7 @@ final class ChatViewModel {
     }
 
     private func persistConversationID() {
-        guard let conversationID else {
+        guard role == .standalone, let conversationID else {
             return
         }
         let defaults = UserDefaults.standard
@@ -5556,6 +5635,7 @@ extension ChatViewModel: SyncStreamDelegate {
         // buffered resync drain silent (finding 10): the drain routes through this
         // same handler.
         await refreshRecentConversations()
+        await onActivity?()
     }
 
     func presentFollowStreamAuthWall(_ error: Error, generation: Int) {
