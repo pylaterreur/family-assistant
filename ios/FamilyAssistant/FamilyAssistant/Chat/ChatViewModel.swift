@@ -114,9 +114,19 @@ final class ChatViewModel {
                     await self?.sendNextQueuedFollowUpSteerIfReady()
                 }
             }
+            if oldValue, !isLoadingMessages, hasBootstrapped, !pendingInPlacePrompts.isEmpty {
+                Task { [weak self] in
+                    await self?.sendPendingInPlacePromptsIfReady()
+                }
+            }
         }
     }
     @ObservationIgnored private var activeMessageLoads = 0
+    /// Whether `bootstrap` has finished once: the conversation is loaded and
+    /// its profile adopted, so a routed prompt may be sent.
+    @ObservationIgnored private var hasBootstrapped = false
+    /// Routed prompts waiting for the conversation to be ready to send.
+    @ObservationIgnored private var pendingInPlacePrompts: [String] = []
     var isLoadingProfiles = false
     var isStreaming = false
     var errorMessage: String?
@@ -689,18 +699,36 @@ final class ChatViewModel {
             lastProcessedInitialPrompt = seeded
             await sendDraft()
         }
+        hasBootstrapped = true
+        await sendPendingInPlacePromptsIfReady()
     }
 
     /// Send `prompt` in the open conversation rather than a new one, as a
     /// request routed into Home is. A prompt already sent this way is not sent
     /// again when the same route is applied twice.
+    ///
+    /// A route can arrive while the conversation is still bootstrapping or
+    /// loading, when a send would be refused or go out before the conversation's
+    /// profile is adopted. The prompt waits until both have finished, and is
+    /// marked sent only when it is actually handed to the composer.
     func sendPromptInPlace(_ prompt: String) async {
-        guard shouldProcessInitialPrompt(prompt) else {
+        guard shouldProcessInitialPrompt(prompt), !pendingInPlacePrompts.contains(prompt) else {
             return
         }
-        lastProcessedInitialPrompt = prompt
-        draftText = prompt
-        await sendDraft()
+        pendingInPlacePrompts.append(prompt)
+        await sendPendingInPlacePromptsIfReady()
+    }
+
+    private func sendPendingInPlacePromptsIfReady() async {
+        while hasBootstrapped, !isLoadingMessages, !pendingInPlacePrompts.isEmpty {
+            let prompt = pendingInPlacePrompts.removeFirst()
+            guard shouldProcessInitialPrompt(prompt) else {
+                continue
+            }
+            lastProcessedInitialPrompt = prompt
+            draftText = prompt
+            await sendDraft()
+        }
     }
 
     func applyRoute(

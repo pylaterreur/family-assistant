@@ -247,7 +247,10 @@ struct HomeRootView: View {
     }
 
     /// The parts of a route that act on Home itself: a shared hand-off goes
-    /// into Home's composer, and a prompt is sent there.
+    /// into Home's composer, and a prompt is sent there. Safe while Home is
+    /// still bootstrapping: the model holds a routed prompt until Home has
+    /// loaded and adopted its profile, then sends it once. The other route
+    /// kinds only change the navigation path, which needs no loaded Home.
     private func applyInHome(_ route: ChatRoute) async {
         if let batchID = route.sharedAttachmentBatchID,
            let batch = sharedAttachmentInbox.consume(batchID: batchID)

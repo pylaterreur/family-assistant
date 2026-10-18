@@ -445,6 +445,69 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertEqual(activitySignals, 3)
     }
 
+    func testPromptRoutedMidBootstrapSendsOnceOnHomesProfile() async throws {
+        PreferredProfile.store("research")
+        let messagesRequested = expectation(description: "Home's history requested")
+        let releaseHistory = DispatchSemaphore(value: 0)
+        let historyLoads = LockedStrings()
+        let turnProfiles = LockedStrings()
+        ChatMockBackendURLProtocol.respond { request in
+            let path = request.url?.path ?? ""
+            switch (request.httpMethod ?? "GET", path) {
+            case ("GET", "/api/v1/profiles"):
+                return .json("""
+                {"profiles":[
+                  {"id":"default_assistant","description":"d","available_tools":[],"enabled_mcp_servers":[],"delegation_only":false},
+                  {"id":"research","description":"r","available_tools":[],"enabled_mcp_servers":[],"delegation_only":false}
+                ],"default_profile_id":"default_assistant"}
+                """)
+            case ("GET", "/api/v1/chat/conversations/home/messages"):
+                historyLoads.append(request.url?.query ?? "")
+                if historyLoads.values.count == 1 {
+                    // Hold the bootstrap load open until the route has arrived.
+                    messagesRequested.fulfill()
+                    releaseHistory.wait()
+                }
+                return .json(
+                    #"{"conversation_id":"home","messages":[],"count":0,"total_messages":0,"conversation_kind":"home"}"#
+                )
+            case ("POST", "/api/v1/chat/turns"):
+                let payload = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: Any]
+                )
+                turnProfiles.append(payload["profile_id"] as? String ?? "<nil>")
+                let turnID = try XCTUnwrap(payload["turn_id"] as? String)
+                return .json(#"{"turn_id":"\#(turnID)","conversation_id":"home","first_seq":0}"#)
+            case ("GET", "/api/v1/chat/conversations/home/stream"):
+                return .droppedStream("")
+            case ("GET", "/api/v1/chat/confirmations/pending"):
+                return .json(#"{"confirmations":[]}"#)
+            case ("GET", "/api/v1/chat/activity/stream"):
+                return .text("")
+            default:
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+            }
+        }
+        let model = makeViewModel(conversationID: "home", role: .home)
+
+        let bootstrap = Task { await model.bootstrap() }
+        await fulfillment(of: [messagesRequested], timeout: 10)
+
+        // The route lands (twice, as a re-applied route does) while Home is
+        // still loading: nothing may be sent yet.
+        await model.sendPromptInPlace("Buy milk")
+        await model.sendPromptInPlace("Buy milk")
+        XCTAssertTrue(turnProfiles.values.isEmpty)
+
+        releaseHistory.signal()
+        await bootstrap.value
+        try await waitUntil { !turnProfiles.values.isEmpty }
+
+        XCTAssertEqual(turnProfiles.values, ["default_assistant"])
+        await model.sendPromptInPlace("Buy milk")
+        XCTAssertEqual(turnProfiles.values.count, 1, "A prompt already sent is not sent again.")
+    }
+
     func testHomeDoesNotBecomeTheRestoredConversation() {
         _ = makeViewModel(conversationID: "home", role: .home)
         _ = makeViewModel(conversationID: "t1", role: .pushed)
@@ -453,6 +516,37 @@ final class HomeThreadsTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    private nonisolated static func body(of request: URLRequest) -> Data {
+        if let body = request.httpBody {
+            return body
+        }
+        guard let stream = request.httpBodyStream else {
+            return Data()
+        }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+
+    private func waitUntil(timeout: TimeInterval = 10, _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition")
+                return
+            }
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
 
     private func makeAuthManager() -> AuthManager {
         let authManager = AuthManager()
