@@ -149,16 +149,18 @@ Three paths move rows between conversations: the seed copied into a new thread, 
 their taint and are re-stamped to the destination's profile**, because the history window is scoped
 by profile and an unstamped row would be invisible there.
 
-- **The seed follows the delegation boundary.** An assistant-started thread carries what a
-  delegation carries today: the request its starting turn wrote, plus the anchor turn. It never
-  carries the Home transcript around them. That matters most for profiles that read untrusted
-  content and can act, such as `browser_profile`, where a page could try to exfiltrate whatever the
-  seed contains. Only the user's own "Continue in a thread" carries the Home turns leading up to the
-  anchor, as a deliberate choice to bring that context along, and only into a profile that already
-  receives household context. A profile that excludes it (`coder`, `media_analyst`, via
-  `excluded_context_providers`) gets the request only, whoever starts the thread. A seed is copied
-  rather than read across conversations at every turn, so the thread's history doesn't depend on
-  Home's later compaction or edits.
+- **The seed follows the delegation boundary.** An assistant-started thread carries exactly what a
+  delegation carries today: the request its starting turn wrote, plus any attachments it passed
+  explicitly. Neither the anchor turn nor the Home transcript around it is copied, because the
+  anchor may hold private tool output. That matters most for profiles that read untrusted content
+  and can act, such as `browser_profile`, where a page could try to exfiltrate whatever the seed
+  contains. The thread's "Started from" quote is drawn by the client from the link record. It is
+  never part of the thread's model history. Only the user's own "Continue in a thread" copies the
+  anchor and the Home turns leading up to it, as a deliberate choice to bring that context along,
+  and only into a profile that already receives household context. A profile that excludes it
+  (`coder`, `media_analyst`, via `excluded_context_providers`) gets the request only, whoever starts
+  the thread. A seed is copied rather than read across conversations at every turn, so the thread's
+  history doesn't depend on Home's later compaction or edits.
 - **Home sees its threads as facts, not transcripts.** Home's assistant sees each live thread's
   title, state and, once it finishes, the echoed final message. That is enough to answer "how are
   the quotes going?" without merging histories. **Generated conversation summaries are never used
@@ -170,10 +172,13 @@ by profile and an unstamped row would be invisible there.
 ### State
 
 - **Working:** the thread has a queued or active turn, a pending delegation or a pending worker.
-- **Waiting on you:** the thread is neither working nor done, so the next move is the user's. This
-  is derived by code, not marked by the model, so every thread is always in exactly one state.
-- **Done or failed:** the thread's assistant ends the job with a tool call, or the user marks it
-  done.
+- **Failed:** the thread's last run or turn ended in a terminal failure, such as retries exhausted,
+  a provider error or a crash. This is derived by code, so infrastructure failure is never presented
+  as a request for input. The thread's assistant can also mark a job failed when the job itself
+  can't be done.
+- **Done:** the thread's assistant ends the job with a tool call, or the user marks it done.
+- **Waiting on you:** anything else. The thread is not working, failed or done, so the next move is
+  the user's. Every thread is always in exactly one state.
 - **A done thread reopens when something new arrives in it.** That could be a reminder or callback
   it scheduled, a late delegation result, or a user message. The day the plumber comes is the same
   thread, not a new one. The thread goes back to working or waiting, its card and switcher row
@@ -210,8 +215,9 @@ and each path is governed:
 - **Starting a thread** is admitted by the target profile's delegation policy, and the request
   carries delegation taint.
 - **Copied rows** keep their taint. An assistant-started thread is seeded with no more than a
-  delegation carries: the request and the anchor turn. Wider Home context goes only where the user
-  chose to bring it, and never to a profile that excludes household context.
+  delegation carries: the request and its explicit attachments. Home context goes only where the
+  user chose to bring it with "Continue in a thread", the same as pasting it into that profile's
+  chat today. It never goes to a profile that excludes household context.
 - **Home's view of a thread** is a title (carrying its creating turn's taint), a code-derived or
   explicitly set state, and echoes (carrying their source's taint). Generated summaries never reach
   a prompt.
@@ -248,14 +254,16 @@ and each path is governed:
    - The target's delegation policy is enforced.
    - Seeded rows are visible to the thread's history window and keep their taint.
    - Coder receives no seed.
+   - An assistant-started seed holds only the request.
    - A message sent before the first turn starts steers it.
 2. **Home on web.** Add Home as the landing view, thread cards, the grouped sidebar and the
    right-hand panel. Verified by Playwright tests of card state transitions, answering from a card,
    and panel navigation.
-3. **State and echo.** Add derived working and waiting states, explicit done and failed, per-viewer
+3. **State and echo.** Add derived working, waiting and failed states, explicit done, per-viewer
    unread counts, the echo, and Home's view of thread facts. Verified by tests that Home answers a
-   status question from thread facts, that an echo keeps its taint, and that a thread ending on a
-   question is waiting rather than done.
+   status question from thread facts, that an echo keeps its taint, that a thread ending on a
+   question is waiting rather than done, and that a run that exhausts its retries is failed rather
+   than waiting.
 4. **Home on iOS.** Add the landing view, the switcher, cards and push navigation. Verified by unit
    tests on card state and UI tests on navigation.
 5. **User overrides.** Add "Continue in a thread", "Move to thread…" (moves a turn), send-as-thread

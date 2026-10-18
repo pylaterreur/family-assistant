@@ -470,8 +470,9 @@
       <h3>What Home shows</h3>
       <ul>
         <li>One <b>live card per thread</b>, updated in place, never a stream of progress messages.</li>
-        <li><b>States:</b> working (an active turn, delegation or worker) · waiting on you (not working,
-          not done: the next move is yours) · done · failed. The unread count is separate and per person, so one
+        <li><b>States:</b> working (an active turn, delegation or worker) · failed (a run or turn
+          ended in a terminal failure, derived by code) · done · waiting on you (anything else: the next
+          move is yours). The unread count is separate and per person, so one
           person reading a thread doesn't clear another's badge.</li>
         <li><b>Answering a thread always reaches the thread.</b> Quick replies on a card (Gas / Heat
           pump, Hold Jetstar) go into the thread, where its profile, tools and browser tab are. Home's
@@ -503,8 +504,8 @@
         <li><b>Home</b> sees its own history plus each thread's facts: the title written when the thread
           was created, its state, and the echoed final message. It never sees the generated summary,
           which carries no taint.</li>
-        <li><b>A thread</b> started by the assistant carries what a delegation does today: the request and
-          the turn it grew from, never the surrounding Home transcript. Only the user's "Continue in a
+        <li><b>A thread</b> started by the assistant carries what a delegation does today: the request it
+          was given, never the anchor turn or the Home transcript. The "Started from" quote is display-only. Only the user's "Continue in a
           thread" brings earlier Home turns along, and never into coder or media analyst. Copies keep
           their taint. A thread doesn't see its siblings.</li>
         <li><b>Each thread keeps its own profile and tier.</b> Home stays on the default profile, and a
