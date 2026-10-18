@@ -46,6 +46,7 @@ from family_assistant.eval.tool_call_review.script_review_prototype import (
     prototype_registry,
     render_markdown_summary,
     run_prototype_eval,
+    validate_case_scripts,
 )
 from family_assistant.llm.factory import LLMClientFactory
 
@@ -126,6 +127,11 @@ async def _run(args: argparse.Namespace) -> int:
         if missing:
             print(f"Unknown case ids: {sorted(missing)}", file=sys.stderr)
             return 1
+    try:
+        validate_case_scripts(cases, registry)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     for case in cases:
         assemble_prototype_messages(case, variant, registry)
     print(f"Loaded {len(cases)} case(s); prompt={variant}")

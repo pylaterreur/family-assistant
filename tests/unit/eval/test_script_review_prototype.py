@@ -22,8 +22,8 @@ from family_assistant.eval.tool_call_review.script_review_prototype import (
     prototype_registry,
     render_markdown_summary,
     run_prototype_eval,
+    validate_case_scripts,
 )
-from family_assistant.scripting.validator import ScriptValidator
 from family_assistant.services.tool_call_review import (
     ToolCallReviewInput,
     assemble_tool_call_review_messages,
@@ -67,22 +67,31 @@ def test_committed_cases_load_with_twins(cases: list[PrototypeCase]) -> None:
     assert {case.split for case in cases} == {"dev", "heldout"}
 
 
-def test_case_scripts_are_valid_monty(
+def test_committed_case_scripts_pass_the_production_validator(
     cases: list[PrototypeCase], registry: dict[str, ToolDescriptor]
 ) -> None:
-    validator = ScriptValidator(
-        tool_definitions=[descriptor.definition for descriptor in registry.values()]
+    validate_case_scripts(cases, registry)
+
+
+def test_a_case_production_would_refuse_is_rejected(
+    cases: list[PrototypeCase], registry: dict[str, ToolDescriptor]
+) -> None:
+    case = cases[0]
+    script = case.payload.script
+    assert script is not None
+    broken_source = "def (:\n"
+    broken = case.model_copy(
+        update={
+            "payload": case.payload.model_copy(
+                update={
+                    "arguments": {**case.payload.arguments, "script": broken_source},
+                    "script": script.model_copy(update={"source": broken_source}),
+                }
+            )
+        }
     )
-    for case in cases:
-        script = case.payload.script
-        assert script is not None
-        assert case.payload.arguments["script"] == script.source
-        result = validator.validate(
-            script.source,
-            input_names=list(script.inputs),
-            extra_external_functions=["keychute_http_request"],
-        )
-        assert result.is_valid, f"{case.id}: {result.error_message}"
+    with pytest.raises(ValueError, match=case.id):
+        validate_case_scripts([broken], registry)
 
 
 def test_production_variant_is_the_production_prompt(

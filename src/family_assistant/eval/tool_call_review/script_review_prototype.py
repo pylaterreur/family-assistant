@@ -53,6 +53,7 @@ from family_assistant.llm.base import (
     StructuredOutputError,
 )
 from family_assistant.llm.messages import SystemMessage, UserMessage
+from family_assistant.scripting.validator import ScriptValidator
 from family_assistant.services.tool_call_review import (
     _ACTION_REVIEW_SYSTEM_PROMPT,
     ToolCallReviewInput,
@@ -389,6 +390,35 @@ class PrototypeCase(BaseModel):
 def default_cases_dir() -> Path:
     """The committed prototype cases."""
     return Path(__file__).parent / "script_review_cases"
+
+
+def validate_case_scripts(
+    cases: Sequence[PrototypeCase], registry: Mapping[str, ToolDescriptor]
+) -> None:
+    """Reject a case whose program production's validator would refuse.
+
+    Production validates a script at preparation, before any review, so a case
+    it would refuse is not a program the reviewer could ever see.
+    """
+    validator = ScriptValidator(
+        tool_definitions=[descriptor.definition for descriptor in registry.values()]
+    )
+    invalid: list[str] = []
+    for case in cases:
+        script = case.payload.script
+        assert script is not None
+        if case.payload.arguments.get("script") != script.source:
+            invalid.append(f"{case.id}: arguments.script differs from the source")
+            continue
+        result = validator.validate(
+            script.source,
+            input_names=list(script.inputs),
+            extra_external_functions=["keychute_http_request"],
+        )
+        if not result.is_valid:
+            invalid.append(f"{case.id}: {result.error_message}")
+    if invalid:
+        raise ValueError("invalid case scripts:\n" + "\n".join(invalid))
 
 
 def cases_digest(cases: Sequence[PrototypeCase]) -> str:
