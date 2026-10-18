@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -118,6 +119,7 @@ async def _run(args: argparse.Namespace) -> int:
         )
         return 1
     variant: PromptVariant = args.prompt
+    source_revision = _source_revision()
     registry = prototype_registry()
     cases = load_prototype_cases(args.cases)
     if args.case:
@@ -168,6 +170,7 @@ async def _run(args: argparse.Namespace) -> int:
                     "model": args.model,
                     "prompt": variant,
                     "seeds": args.seeds,
+                    "source_revision": source_revision,
                     "cases_digest": cases_digest(cases),
                     "registry_digest": registry_digest(registry),
                     "trials": [trial.model_dump(mode="json") for trial in trials],
@@ -178,6 +181,33 @@ async def _run(args: argparse.Namespace) -> int:
         )
         print(f"\nWrote {out_path}")
     return 0
+
+
+def _source_revision() -> dict[str, object] | None:
+    """The checkout's commit and whether it had uncommitted changes.
+
+    ``dirty`` means the run is not pinned to the commit: the uncommitted
+    changes themselves are not recorded. None outside a git checkout.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return {"commit": head.stdout.strip(), "dirty": bool(status.stdout.strip())}
 
 
 def main(argv: list[str] | None = None) -> int:

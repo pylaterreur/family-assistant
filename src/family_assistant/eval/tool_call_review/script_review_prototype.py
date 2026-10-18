@@ -395,13 +395,13 @@ def default_cases_dir() -> Path:
 def validate_case_scripts(
     cases: Sequence[PrototypeCase], registry: Mapping[str, ToolDescriptor]
 ) -> None:
-    """Reject a case whose review input production could not have prepared.
+    """Reject cases with the preparation defects this harness can detect.
 
-    Production derives the reviewed program from the call's ``script`` and
-    ``globals`` and validates it against the advertised capabilities before
-    any review, so a case that disagrees with its own arguments, or that
-    production's validator would refuse, is not a program the reviewer could
-    ever see.
+    Checks that the arguments carry the same source and ``globals`` as the
+    reviewed program, that the program passes production's validator against
+    the tools the case declares, and that it declares no ``execute_script``:
+    production resolves a stored child script's closure before review, which
+    a case file cannot represent.
     """
     invalid: list[str] = []
     for case in cases:
@@ -413,6 +413,9 @@ def validate_case_scripts(
             continue
         if (arguments.get("globals") or {}) != script.inputs:
             invalid.append(f"{case.id}: arguments.globals differs from the inputs")
+            continue
+        if "execute_script" in script.tool_names:
+            invalid.append(f"{case.id}: nested execute_script is not supported")
             continue
         validator = ScriptValidator(
             tool_definitions=[registry[name].definition for name in script.tool_names]
