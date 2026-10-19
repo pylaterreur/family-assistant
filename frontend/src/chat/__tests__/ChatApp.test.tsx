@@ -7,7 +7,10 @@ import { capturedTurnModelTiers } from '../../test/mocks/handlers';
 import { server } from '../../test/setup.js';
 import { renderChatApp } from '../../test/utils/renderChatApp';
 import { waitForMessageSent } from '../../test/utils/waitHelpers';
-import { adoptPreviousMessageIds, mergeConsecutiveToolOnlyAssistantMessages } from '../ChatApp';
+import {
+  adoptPreviousMessageIds,
+  mergeConsecutiveToolOnlyAssistantMessages,
+} from '../ConversationPane';
 import type { Message } from '../types';
 
 // Mock window.history for navigation
