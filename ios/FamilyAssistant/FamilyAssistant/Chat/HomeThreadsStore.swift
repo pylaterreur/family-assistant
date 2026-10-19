@@ -223,6 +223,19 @@ final class HomeDiscovery {
         }
     }
 
+    /// The route a root may act on in `state`. Until the lookup has settled
+    /// whether there is a Home, a route is held (an empty route stands in), so
+    /// a prompt or shared file is not consumed by a provisional conversation
+    /// list that Home then replaces. The root that wins receives it.
+    static func deliverableRoute(_ route: ChatRoute, state: HomeAvailability.State) -> ChatRoute {
+        switch state {
+        case .enabled, .disabled:
+            return route
+        case .unknown, .failed:
+            return ChatRoute()
+        }
+    }
+
     /// Look again, if the last lookup failed (Retry, or signing in again).
     func retryIfFailed() async {
         guard state == .failed else {

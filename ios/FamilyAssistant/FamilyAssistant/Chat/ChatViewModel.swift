@@ -31,7 +31,9 @@ final class ChatViewModel {
     /// profile). Home and conversations pushed over it cannot send until it
     /// has: the profile a send runs under, and so the history it sees, comes
     /// from that description, not from a guess.
-    private(set) var hasConversationMetadata = false
+    private(set) var hasConversationMetadata = false {
+        didSet { routedPromptReadinessMayHaveChanged() }
+    }
     /// The load that would have described the open conversation failed. The
     /// composer stays closed until `retryConversationLoad` succeeds.
     private(set) var conversationMetadataLoadFailed = false
@@ -128,28 +130,33 @@ final class ChatViewModel {
                     await self?.sendNextQueuedFollowUpSteerIfReady()
                 }
             }
-            if oldValue, !isLoadingMessages, hasBootstrapped, !pendingInPlacePrompts.isEmpty {
-                Task { [weak self] in
-                    await self?.sendPendingInPlacePromptsIfReady()
-                }
-            }
+            routedPromptReadinessMayHaveChanged()
         }
     }
     @ObservationIgnored private var activeMessageLoads = 0
     /// Whether `bootstrap` has finished once: the conversation is loaded and
-    /// its profile adopted, so a routed prompt may be sent.
-    @ObservationIgnored private var hasBootstrapped = false
-    /// Routed prompts waiting for the conversation to be ready to send.
-    @ObservationIgnored private var pendingInPlacePrompts: [String] = []
-    var isLoadingProfiles = false
-    var isStreaming = false {
+    /// its profile adopted. An input to `isReadyForRoutedPrompt`.
+    @ObservationIgnored private var hasBootstrapped = false {
+        didSet { routedPromptReadinessMayHaveChanged() }
+    }
+    /// Prompts routed into this conversation (a `?q=` link, an App Intent) that
+    /// are held until it is ready to take them. Observed so the composer can say
+    /// one is waiting rather than holding it silently.
+    private(set) var heldRoutedPrompts: [String] = []
+    /// Turns the server or the follow stream says are running here, whoever
+    /// started them. An input to `isReadyForRoutedPrompt`: a turn running on
+    /// another device holds a routed prompt as much as one of our own does.
+    @ObservationIgnored private var knownRunningTurnIDs: Set<String> = [] {
         didSet {
-            if oldValue, !isStreaming, hasBootstrapped, !pendingInPlacePrompts.isEmpty {
-                Task { [weak self] in
-                    await self?.sendPendingInPlacePromptsIfReady()
-                }
+            if knownRunningTurnIDs != oldValue {
+                routedPromptReadinessMayHaveChanged()
             }
         }
+    }
+    @ObservationIgnored private var isDrainingRoutedPrompts = false
+    var isLoadingProfiles = false
+    var isStreaming = false {
+        didSet { routedPromptReadinessMayHaveChanged() }
     }
     var errorMessage: String?
     var mobileShowsConversationList = false
@@ -727,38 +734,60 @@ final class ChatViewModel {
             await sendDraft()
         }
         hasBootstrapped = true
-        await sendPendingInPlacePromptsIfReady()
     }
 
     /// Send `prompt` in the open conversation rather than a new one, as a
     /// request routed into Home is. A prompt already sent this way is not sent
     /// again when the same route is applied twice.
     ///
-    /// A route can arrive while the conversation is still bootstrapping or
-    /// loading, when a send would be refused or go out before the conversation's
-    /// profile is adopted. The prompt waits until both have finished, and is
-    /// marked sent only when it is actually handed to the composer.
+    /// The prompt is held until `isReadyForRoutedPrompt`, and is marked sent
+    /// only once it has actually gone out.
     func sendPromptInPlace(_ prompt: String) async {
-        guard shouldProcessInitialPrompt(prompt), !pendingInPlacePrompts.contains(prompt) else {
+        guard shouldProcessInitialPrompt(prompt), !heldRoutedPrompts.contains(prompt) else {
             return
         }
-        pendingInPlacePrompts.append(prompt)
-        await sendPendingInPlacePromptsIfReady()
+        heldRoutedPrompts.append(prompt)
+        await drainRoutedPrompts()
     }
 
-    private func sendPendingInPlacePromptsIfReady() async {
-        while hasBootstrapped, !isLoadingMessages, !isStreaming, let prompt = pendingInPlacePrompts.first {
+    /// The one condition a routed prompt waits for: the conversation has been
+    /// bootstrapped, loaded and described (so it sends on the right profile),
+    /// and no turn is running in it, here or on another device. Every input is a
+    /// stored property whose change calls `routedPromptReadinessMayHaveChanged`.
+    var isReadyForRoutedPrompt: Bool {
+        hasBootstrapped && !isLoadingMessages && !awaitsConversationMetadata
+            && !isStreaming && activeTurnIdentity == nil && knownRunningTurnIDs.isEmpty
+    }
+
+    /// The single drain point for held routed prompts.
+    private func routedPromptReadinessMayHaveChanged() {
+        guard !heldRoutedPrompts.isEmpty, !isDrainingRoutedPrompts, isReadyForRoutedPrompt else {
+            return
+        }
+        Task { [weak self] in
+            await self?.drainRoutedPrompts()
+        }
+    }
+
+    private func drainRoutedPrompts() async {
+        guard !isDrainingRoutedPrompts else {
+            return
+        }
+        isDrainingRoutedPrompts = true
+        defer { isDrainingRoutedPrompts = false }
+        while isReadyForRoutedPrompt, let prompt = heldRoutedPrompts.first {
             guard shouldProcessInitialPrompt(prompt) else {
-                pendingInPlacePrompts.removeFirst()
+                heldRoutedPrompts.removeFirst()
                 continue
             }
             // Sent on its own: whatever the user has in the composer stays there.
             guard await sendDraft(fallbackFromSteer: false, routedPrompt: prompt) else {
-                // Not sendable yet (a turn is running): it stays queued, and goes
-                // when the conversation next settles.
+                // Refused at the last moment (the preflight found a turn running
+                // on the server, now recorded in `knownRunningTurnIDs`): it stays held
+                // and goes when readiness next changes.
                 return
             }
-            pendingInPlacePrompts.removeAll { $0 == prompt }
+            heldRoutedPrompts.removeAll { $0 == prompt }
             lastProcessedInitialPrompt = prompt
         }
     }
@@ -1491,6 +1520,7 @@ final class ChatViewModel {
     /// `ActiveTurnSession` preserved) is reconciled here against the authoritative
     /// snapshot before the foreign-turn loop: see `reconcileSuspendedSession`.
     private func attachDiscoveredActiveTurns(_ activeTurns: [ChatActiveTurnInfo]) async {
+        knownRunningTurnIDs = Self.runningTurnIDs(in: activeTurns)
         await reconcileSuspendedSession(against: activeTurns)
         if activeTurnSession == nil, let reattachedRunningTurnID,
            !activeTurns.contains(where: {
@@ -2009,6 +2039,7 @@ final class ChatViewModel {
                     .filter({ $0.status == "running" })
                     .max(by: { $0.startedAt < $1.startedAt }) {
                     if isRouted {
+                        knownRunningTurnIDs.insert(runningTurn.turnID)
                         return false
                     }
                     reportTurnHandleRecovery(
@@ -4171,6 +4202,7 @@ final class ChatViewModel {
             // returns an empty delta, and so the merge then sees an unmapped
             // `local_` bubble it can drop and replace with the persisted reply.
             if event.type == .turnEnded, let turnID = event.turnID {
+                knownRunningTurnIDs.remove(turnID)
                 finalizeLiveFollowBubble(turnID: turnID, status: event.status)
                 // A turn reattached on foreground has no send transport, so its end
                 // is observed HERE on the follow stream rather than by
@@ -4210,6 +4242,9 @@ final class ChatViewModel {
                 appendUserInput(event)
             }
         case .text, .toolCall, .toolResult, .attachment:
+            if let turnID = event.turnID, !endedTurnIDs.contains(turnID), !knownRunningTurnIDs.contains(turnID) {
+                knownRunningTurnIDs.insert(turnID)
+            }
             // Render only visible reply content from the always-on follow stream.
             // `.error` and tool-confirmation frames are deliberately NOT applied
             // here: they drive global UI (a modal "Chat Error" alert, a tool
@@ -4218,7 +4253,11 @@ final class ChatViewModel {
             // stream (started on another device or by a schedule). A failed
             // follow turn still surfaces via its `turn_ended` + history reload.
             applyLiveFollowToken(event)
-        case .connected, .heartbeat, .turnStarted, .streamDropped, .error,
+        case .turnStarted:
+            if let turnID = event.turnID, !endedTurnIDs.contains(turnID) {
+                knownRunningTurnIDs.insert(turnID)
+            }
+        case .connected, .heartbeat, .streamDropped, .error,
              .toolConfirmationRequest, .toolConfirmationResult:
             // `.connected` is dead against this backend (the server never emits
             // it); connect health is inferred from the connect call succeeding and

@@ -38,17 +38,23 @@ struct ChatEntryView: View {
             case .unknown:
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .disabled:
-                ChatRootView(authManager: authManager, route: route)
-            case .failed:
-                // The conversation list keeps chat usable; the banner says
-                // Home could not be checked and offers to look again.
-                ChatRootView(authManager: authManager, route: route)
-                    .safeAreaInset(edge: .top, spacing: 0) {
-                        HomeLookupFailedBanner {
+            case .disabled, .failed:
+                // One view for both, so a failed lookup that resolves to "off"
+                // keeps the same conversation list. While the lookup has failed
+                // the list keeps chat usable but is not given the route: a routed
+                // prompt or shared file waits for whichever root the retry
+                // settles on (`HomeDiscovery.deliverableRoute`).
+                ChatRootView(
+                    authManager: authManager,
+                    route: HomeDiscovery.deliverableRoute(route, state: discovery.state)
+                )
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if discovery.state == .failed {
+                        HomeLookupFailedBanner(holdsRoute: route != ChatRoute()) {
                             Task { await discovery.retryIfFailed() }
                         }
                     }
+                }
             case let .enabled(homeConversationID):
                 HomeRootView(
                     authManager: authManager,
@@ -71,6 +77,26 @@ struct ChatEntryView: View {
             if wasRequired, !isRequired {
                 Task { await discovery.retryIfFailed() }
             }
+        }
+    }
+}
+
+/// A routed prompt is held until Home can take it; say so rather than hold it
+/// silently.
+private struct HeldRoutedPromptNote: View {
+    var viewModel: ChatViewModel
+
+    var body: some View {
+        if let prompt = viewModel.heldRoutedPrompts.first {
+            Label("Will send when ready: “\(String(prompt.prefix(80)))”", systemImage: "clock")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.bar)
+                .accessibilityIdentifier("held-routed-prompt")
         }
     }
 }
@@ -104,13 +130,14 @@ private struct ConversationLoadRetryBanner: View {
 }
 
 private struct HomeLookupFailedBanner: View {
+    let holdsRoute: Bool
     let retry: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
-            Text("Couldn’t check for Home.")
+            Text(holdsRoute ? "Couldn’t check for Home. Your request will open once it’s checked." : "Couldn’t check for Home.")
                 .font(.footnote)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button("Retry", action: retry)
@@ -169,7 +196,10 @@ struct HomeRootView: View {
         NavigationStack(path: $path) {
             ChatThreadView(viewModel: viewModel, keepsScrollPositionOnReappear: true)
                 .safeAreaInset(edge: .top, spacing: 0) {
-                    ConversationLoadRetryBanner(viewModel: viewModel)
+                    VStack(spacing: 0) {
+                        ConversationLoadRetryBanner(viewModel: viewModel)
+                        HeldRoutedPromptNote(viewModel: viewModel)
+                    }
                 }
                 .navigationTitle("Home")
                 .navigationBarTitleDisplayMode(.inline)

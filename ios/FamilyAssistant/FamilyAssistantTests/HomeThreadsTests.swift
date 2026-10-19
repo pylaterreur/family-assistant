@@ -372,6 +372,48 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertEqual(lookups, 2, "Retry looks again only after a failure.")
     }
 
+    func testRouteArrivingWhileLookupFailedReachesHomeAfterRetry() async throws {
+        let suite = "HomeThreadsTests.heldRoute"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        let failures = LockedStrings()
+        failures.append("fail")
+        let discovery = HomeDiscovery(
+            serverURL: serverURL,
+            defaults: defaults,
+            lookUp: {
+                if !failures.values.isEmpty {
+                    throw URLError(.notConnectedToInternet)
+                }
+                return ChatHomeResponse(enabled: true, conversationID: "web_conv_home")
+            },
+            reportFailure: { _ in }
+        )
+        await discovery.refresh()
+        XCTAssertEqual(discovery.state, .failed)
+
+        let prompt = ChatRoute(initialPrompt: "Buy milk")
+        let share = ChatRoute(newConversationRequestID: "b1", sharedAttachmentBatchID: "b1")
+        XCTAssertEqual(
+            HomeDiscovery.deliverableRoute(prompt, state: discovery.state),
+            ChatRoute(),
+            "The provisional conversation list must not consume a routed prompt."
+        )
+        XCTAssertEqual(HomeDiscovery.deliverableRoute(share, state: discovery.state), ChatRoute())
+        XCTAssertEqual(HomeDiscovery.deliverableRoute(prompt, state: .unknown), ChatRoute())
+
+        failures.reset()
+        await discovery.retryIfFailed()
+
+        let delivered = HomeDiscovery.deliverableRoute(prompt, state: discovery.state)
+        XCTAssertEqual(delivered, prompt)
+        XCTAssertEqual(
+            HomeRouteAction.resolve(delivered, homeConversationID: "web_conv_home"),
+            .sendInHome(prompt: "Buy milk")
+        )
+        XCTAssertEqual(HomeDiscovery.deliverableRoute(share, state: .disabled), share)
+    }
+
     func testFailedLookupKeepsARememberedHome() async throws {
         let suite = "HomeThreadsTests.discoveryRemembered"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -679,6 +721,77 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertEqual(model.draftAttachments, [draftAttachment])
     }
 
+    func testPromptHeldByAForeignTurnSendsWhenThatTurnEnds() async throws {
+        let historyLoads = LockedStrings()
+        let turnPrompts = LockedStrings()
+        ChatMockBackendURLProtocol.respond { request in
+            switch (request.httpMethod ?? "GET", request.url?.path ?? "") {
+            case ("GET", "/api/v1/profiles"):
+                return .json(#"{"profiles":[],"default_profile_id":"default_assistant"}"#)
+            case ("GET", "/api/v1/chat/conversations/home/messages"):
+                historyLoads.append(request.url?.query ?? "")
+                // Home's first load finds a turn running that another device
+                // started; by any later load it has finished.
+                let activeTurns = historyLoads.values.count == 1
+                    ? #"[{"turn_id":"turn-remote","started_at":"2026-06-08T12:00:00Z","latest_seq":3,"status":"running"}]"#
+                    : "[]"
+                return .json("""
+                {"conversation_id":"home","messages":[],"count":0,"total_messages":0,
+                 "conversation_kind":"home","active_turns":\(activeTurns)}
+                """)
+            case ("POST", "/api/v1/chat/turns"):
+                let payload = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: Any]
+                )
+                turnPrompts.append(payload["prompt"] as? String ?? "<nil>")
+                let turnID = try XCTUnwrap(payload["turn_id"] as? String)
+                return .json(#"{"turn_id":"\#(turnID)","conversation_id":"home","first_seq":0}"#)
+            case ("GET", "/api/v1/chat/conversations/home/stream"):
+                return .droppedStream("")
+            case ("GET", "/api/v1/chat/confirmations/pending"):
+                return .json(#"{"confirmations":[]}"#)
+            case ("GET", "/api/v1/chat/activity/stream"):
+                return .text("")
+            default:
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+            }
+        }
+        let model = makeViewModel(conversationID: "home", role: .home)
+        await model.bootstrap()
+
+        await model.sendPromptInPlace("Buy milk")
+
+        XCTAssertFalse(model.isReadyForRoutedPrompt, "A turn running on another device holds the prompt.")
+        XCTAssertEqual(model.heldRoutedPrompts, ["Buy milk"], "A held prompt is visible, not silent.")
+        XCTAssertTrue(turnPrompts.values.isEmpty)
+
+        // The other device's turn ends, seen on the follow stream.
+        let turnEnded = ChatStreamEvent(
+            type: .turnEnded,
+            turnID: "turn-remote",
+            seq: 9,
+            text: nil,
+            toolCall: nil,
+            toolCallID: nil,
+            toolResult: nil,
+            attachments: [],
+            attachmentSource: .response,
+            confirmation: nil,
+            confirmationResult: nil,
+            errorMessage: nil,
+            status: "complete"
+        )
+        _ = await model.handleFollowEvent(
+            turnEnded,
+            conversationID: "home",
+            generation: model.syncCoordinator.followGeneration
+        )
+        try await waitUntil { !turnPrompts.values.isEmpty }
+
+        XCTAssertEqual(turnPrompts.values, ["Buy milk"])
+        XCTAssertTrue(model.heldRoutedPrompts.isEmpty)
+    }
+
     func testOrdinaryControlsWaitUntilTheConversationIsKnownToBeOrdinary() async {
         respondWithConversation(id: "t1", messagesJSON: "[]", extraJSON: #","conversation_kind":"thread""#)
         let linked = makeViewModel(conversationID: "t1", role: .pushed)
@@ -861,5 +974,9 @@ private final class LockedStrings: @unchecked Sendable {
 
     func append(_ value: String) {
         lock.withLock { stored.append(value) }
+    }
+
+    func reset() {
+        lock.withLock { stored.removeAll() }
     }
 }
