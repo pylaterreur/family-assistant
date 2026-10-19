@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import insert, select
 
 from family_assistant.config_models import ToolsConfig
 from family_assistant.delegation_security import DelegationSecurityLevel
@@ -20,7 +20,11 @@ from family_assistant.memory.review_settings import MemoryReviewSettings
 from family_assistant.processing.types import ProcessingServiceConfig
 from family_assistant.storage.base import attachment_metadata_table
 from family_assistant.storage.database import Database
-from family_assistant.storage.message_history import message_history_table
+from family_assistant.storage.message_history import (
+    MESSAGE_HISTORY_SOURCE_TYPE,
+    message_history_table,
+)
+from family_assistant.storage.vector import DocumentRecord
 from family_assistant.threads.boundary import (
     AssistantRequest,
     BoundaryDestination,
@@ -248,6 +252,13 @@ async def test_a_moved_turn_leaves_a_marker_and_takes_its_attachments(
             created_at=NOW,
         )
     )
+    await db.execute(
+        insert(DocumentRecord).values(
+            source_type=MESSAGE_HISTORY_SOURCE_TYPE,
+            source_id="message_turn:home-turn",
+            added_at=NOW,
+        )
+    )
 
     moved = await move_turn_across_boundary(
         db,
@@ -278,6 +289,9 @@ async def test_a_moved_turn_leaves_a_marker_and_takes_its_attachments(
         moved.copied_ids[0],
         THREAD,
     )
+    # Home's index record goes; the copy, under a turn of its own, is indexed anew.
+    assert await db.fetch_all(select(DocumentRecord.id)) == []
+    assert {row["turn_id"] for row in thread_rows} != {"home-turn"}
 
 
 @pytest.mark.asyncio

@@ -66,11 +66,13 @@ from family_assistant.storage.delegation_runs import (
 from family_assistant.storage.message_history import (
     MESSAGE_CONTENT_SEARCH_CONFIG,
     MESSAGE_CONTENT_TSVECTOR,
+    MESSAGE_HISTORY_SOURCE_TYPE,
     message_history_table,
 )
 from family_assistant.storage.repositories.base import BaseRepository
 from family_assistant.storage.tasks import TaskPriority
 from family_assistant.storage.types import ConversationSummaryRow, MessageHistoryRow
+from family_assistant.storage.vector import delete_documents_by_source
 
 logger = logging.getLogger(__name__)
 
@@ -2168,12 +2170,14 @@ class MessageHistoryRepository(BaseRepository):
     ) -> MovedTurnRows:
         """Move one whole top-level turn into another conversation.
 
-        The turn's rows are copied as :meth:`copy_turns` copies them, keeping
-        their turn id, and stamped ``now``: a moved turn is the newest thing in
+        The turn's rows are copied as :meth:`copy_turns` copies them, under a
+        fresh turn id and stamped ``now``: a moved turn is the newest thing in
         its destination, and fresh ids keep it above any compaction point the
         destination has already passed. The originals are then deleted, with
-        the attachments recorded against them following their copies, and a
-        marker row records in the source where the turn went. Atomic.
+        the attachments recorded against them following their copies and the
+        turn's search index record going with them -- the copy is indexed
+        afresh under its own turn id -- and a marker row records in the source
+        where the turn went. Atomic.
 
         Callers go through ``family_assistant.threads.boundary``.
 
@@ -2189,6 +2193,7 @@ class MessageHistoryRepository(BaseRepository):
                 f"Turn {turn_id!r} has no rows in {source_conversation_id!r}."
             )
         marker_taint = TurnTaintState.empty().to_metadata()
+        moved_turn_id = str(uuid.uuid4())
 
         async def _move(txn: DatabaseTransaction) -> MovedTurnRows:
             copied: list[int] = []
@@ -2198,7 +2203,7 @@ class MessageHistoryRepository(BaseRepository):
                     row,
                     conversation_id=destination_conversation_id,
                     processing_profile_id=destination_profile_id,
-                    turn_id=turn_id,
+                    turn_id=moved_turn_id,
                     timestamp=now,
                 )
                 await txn.execute(
@@ -2216,6 +2221,9 @@ class MessageHistoryRepository(BaseRepository):
                         row["internal_id"] for row in rows
                     ])
                 )
+            )
+            await delete_documents_by_source(
+                txn, MESSAGE_HISTORY_SOURCE_TYPE, f"message_turn:{turn_id}"
             )
             marker_turn_id = str(uuid.uuid4())
             result = await txn.execute(

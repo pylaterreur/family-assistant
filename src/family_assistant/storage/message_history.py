@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 # instead, so the index is PostgreSQL-only.
 MESSAGE_CONTENT_SEARCH_CONFIG = literal_column("'simple'::regconfig")
 
+MESSAGE_HISTORY_SOURCE_TYPE = "message_history"
+"""The ``documents.source_type`` of a message-history turn's search index record."""
+
 # Define the message history table
 message_history_table = Table(
     "message_history",
