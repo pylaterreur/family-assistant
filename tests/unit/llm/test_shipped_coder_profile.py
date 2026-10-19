@@ -8,11 +8,13 @@ a chat model's own knowledge instead of running the task. Each is a
 plausible-looking answer rather than an error, so each is pinned here.
 """
 
+from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
+from google.genai.interactions import Interaction
 
-from family_assistant.assistant import Assistant, validate_antigravity_agent_config
+from family_assistant.assistant import validate_antigravity_agent_config
 from family_assistant.config_models import (
     AppConfig,
     ProcessingConfig,
@@ -21,8 +23,12 @@ from family_assistant.config_models import (
     ToolsConfig,
 )
 from family_assistant.delegation_security import DelegationSecurityLevel
+from family_assistant.llm.factory import LLMClientFactory
 from family_assistant.llm.messages import SystemMessage, UserMessage
-from family_assistant.llm.model_tiers import validate_profile_model_tier
+from family_assistant.llm.model_tiers import (
+    resolve_antigravity_tier_client_config,
+    validate_profile_model_tier,
+)
 from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
     is_interactions_agent_model,
@@ -165,26 +171,45 @@ def test_the_shipped_matrix_adjudicates_a_sandbox_run_untrusted_content() -> Non
     assert evaluation.fallback_outcome is TaintPolicyOutcome.CONFIRM
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tier", "reasoning_model"),
     [("gemini_3_8_flash", "gemini-3.8-flash"), ("gemini_4_argon", "gemini-4-argon")],
 )
-def test_each_coder_tier_reaches_the_agent_config_payload(
+async def test_each_coder_tier_submits_the_agent_with_that_tiers_model(
     shipped_config: AppConfig,
     provider_api_keys: None,
     tier: str,
     reasoning_model: str,
 ) -> None:
-    """The client built for a tier sends the agent, reasoning with that tier's model."""
-    profile = shipped_profile(shipped_config, "coder")
-    assistant = Assistant(shipped_config, llm_client_overrides={})
+    """A run at a tier reaches the agent, reasoning with that tier's model."""
+    antigravity_config = shipped_profile(
+        shipped_config, "coder"
+    ).processing_config.antigravity_config
+    assert antigravity_config is not None
+    client_config = resolve_antigravity_tier_client_config(
+        antigravity_config,
+        shipped_config.model_tiers[tier],
+        shipped_config.llm_parameters,
+    )
 
-    client = assistant._antigravity_tier_llm_client(profile, tier)  # pyright: ignore[reportPrivateUsage]
+    with patch(
+        "family_assistant.llm.providers.google_genai_client.genai.Client"
+    ) as sdk_client:
+        create = AsyncMock(
+            return_value=Interaction(id="inter_coder", status="in_progress")
+        )
+        sdk_client.return_value.aio.interactions.create = create
+        client = LLMClientFactory.create_client(config=client_config)
+        assert isinstance(client, GoogleGenAIClient)
+        await client.start_agent_interaction([UserMessage(content="Do the thing.")])
 
-    assert isinstance(client, GoogleGenAIClient)
-    kwargs = client._build_agent_create_kwargs([UserMessage(content="Do the thing.")])  # pyright: ignore[reportPrivateUsage]
-    assert kwargs["agent"] == "antigravity-preview-09-2026"
-    assert kwargs["agent_config"] == {"type": "antigravity", "model": reasoning_model}
+    call_kwargs = create.call_args.kwargs
+    assert call_kwargs["agent"] == "antigravity-preview-09-2026"
+    assert call_kwargs["agent_config"] == {
+        "type": "antigravity",
+        "model": reasoning_model,
+    }
 
 
 def test_shipped_coder_profile_passes_its_own_startup_validation(

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from family_assistant.config_models import (
+        AntigravityConfig,
         ModelTierConfig,
         ProcessingConfig,
         RetryModelConfig,
@@ -128,6 +129,31 @@ def resolve_tier_client_config(
                 tier.chain[1], global_llm_parameters
             ),
         }
+    }
+
+
+def resolve_antigravity_tier_client_config(
+    antigravity_config: AntigravityConfig,
+    tier: ModelTierConfig,
+    # ast-grep-ignore: no-dict-any - LLM params are provider-specific and genuinely arbitrary
+    global_llm_parameters: dict[str, dict[str, Any]],
+    # ast-grep-ignore: no-dict-any - Factory config has varying provider keys.
+) -> dict[str, Any]:
+    """An Antigravity profile's client configuration at one tier.
+
+    The request goes to the profile's agent, under its token cap and sandbox
+    environment; the tier supplies only the reasoning model. That makes the
+    client per profile rather than per tier, unlike a chat tier's.
+    ``validate_profile_model_tier`` establishes beforehand that the tier is
+    exactly one Google model.
+    """
+    return {
+        "provider": "google",
+        "model": antigravity_config.agent,
+        "model_parameters": global_llm_parameters,
+        "antigravity_model": tier.chain[0].model,
+        "antigravity_max_total_tokens": antigravity_config.max_total_tokens,
+        "antigravity_environment": antigravity_config.environment,
     }
 
 

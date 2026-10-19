@@ -88,6 +88,7 @@ from family_assistant.llm.model_routing import (
 from family_assistant.llm.model_selection import ModelTierEligibility
 from family_assistant.llm.model_tiers import (
     models_in_chain,
+    resolve_antigravity_tier_client_config,
     resolve_entry_client_config,
     resolve_profile_llm_model,
     resolve_tier_client_config,
@@ -1871,34 +1872,23 @@ class Assistant:
     def _antigravity_tier_llm_client(
         self, profile_conf: ServiceProfile, tier_id: str
     ) -> LLMInterface:
-        """The agent, reasoning with *tier_id*'s model, for this profile alone.
-
-        Not shared like a chat tier's client: the request goes to the profile's
-        agent, under its token cap and sandbox environment, and the tier only
-        supplies the reasoning model. ``validate_profile_model_tier`` has
-        already established that the tier is exactly one Google model.
-        """
+        """The agent, reasoning with *tier_id*'s model, for this profile alone."""
         antigravity_config = profile_conf.processing_config.antigravity_config
         assert antigravity_config is not None
-        reasoning_model = self.config.model_tiers[tier_id].chain[0].model
+        client_config = resolve_antigravity_tier_client_config(
+            antigravity_config,
+            self.config.model_tiers[tier_id],
+            self.config.llm_parameters,
+        )
         logger.info(
             "Creating Antigravity client for profile '%s' tier '%s' "
             "(agent '%s', reasoning model '%s')",
             profile_conf.id,
             tier_id,
             antigravity_config.agent,
-            reasoning_model,
+            client_config["antigravity_model"],
         )
-        return LLMClientFactory.create_client(
-            config={
-                "provider": "google",
-                "model": antigravity_config.agent,
-                "model_parameters": self.config.llm_parameters,
-                "antigravity_model": reasoning_model,
-                "antigravity_max_total_tokens": antigravity_config.max_total_tokens,
-                "antigravity_environment": antigravity_config.environment,
-            }
-        )
+        return LLMClientFactory.create_client(config=client_config)
 
     @staticmethod
     def _validate_computer_use_config(
