@@ -526,6 +526,25 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertEqual(reads.values.count, 1)
     }
 
+    func testReturningToTheNewestPageMarksWhatItShows() async throws {
+        let reads = respondWithReadableConversation(id: "home", kind: "home")
+        let model = makeViewModel(conversationID: "home", role: .home)
+        model.markReadDelay = .milliseconds(20)
+        await model.selectConversation("home")
+        model.setOnScreen(true)
+        model.messages.append(contentsOf: (10..<50).map(persistedMessage(id:)))
+        model.displayedMessageNewerOffset = ChatViewModel.displayedMessageWindowCount
+        XCTAssertTrue(model.hasNewerMessages)
+
+        model.setScrolledToLatest(true)
+        await model.settleReadMarker()
+        XCTAssertTrue(reads.values.isEmpty, "The bottom of an older page is not the newest message.")
+
+        model.showNewerMessages()
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values, [#"{"through_message_id":49}"#])
+    }
+
     func testOrdinaryConversationIsNeverMarkedRead() async throws {
         let reads = respondWithReadableConversation(id: "c1", kind: "conversation")
         let model = makeViewModel(conversationID: "c1", role: .pushed)

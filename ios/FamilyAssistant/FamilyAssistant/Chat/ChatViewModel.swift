@@ -66,7 +66,11 @@ final class ChatViewModel {
     // recent window is shown, and `showEarlierMessages()` /
     // `showNewerMessages()` slide that fixed eager-render window through
     // history. See `visibleGroupedMessages`.
-    var displayedMessageNewerOffset = 0
+    var displayedMessageNewerOffset = 0 {
+        // Paging back to the newest window can bring unread messages into view
+        // with the bottom of the transcript visible throughout.
+        didSet { readPositionMayHaveChanged() }
+    }
     var profiles: [ChatProfile] = [] {
         didSet { modelTierLabels = Self.modelTierLabels(from: profiles) }
     }
