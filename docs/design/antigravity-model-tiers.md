@@ -59,8 +59,8 @@ The council is unaffected: its Gemini seat runs `gemini_4_argon` as a chat model
 
 ## Verification
 
-- Unit tests over the tier rules (each refused tier shape, no tier, inline agent id) and over the
-  shipped profile: each of its tiers builds a client whose `agent_config` names that tier's model.
-- An integration recording (`test_the_agent_runs_to_completion_reasoning_with_gemini_4_argon`) of
-  the shipped agent run to completion reasoning with `gemini-4-argon`, which only the API can
-  confirm it accepts.
+- Unit tests over the tier rules: each refused tier shape, no tier, an inline agent id.
+- Replayed integration runs of the shipped `coder`, built through normal startup
+  (`test_shipped_coder_profile_integration.py`): the finished interaction reports the reasoning
+  model the backend ran (Flash by default, Argon when a delegation asks for it) and the system
+  instruction the agent received.

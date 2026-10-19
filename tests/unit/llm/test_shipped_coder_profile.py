@@ -1,18 +1,14 @@
 """The shipped `coder` profile must reach the managed agent, not a chat model.
 
-Three things can break silently between `defaults.yaml` and an actual agent
-run: the profile could name a model that routes to `generateContent` instead of
-the Interactions API, a tier's model could fail to reach the agent (leaving it
-on whatever model the API defaults to), or a fallback could quietly answer from
-a chat model's own knowledge instead of running the task. Each is a
-plausible-looking answer rather than an error, so each is pinned here.
+Each way this breaks gives a plausible-looking answer rather than an error: a
+fallback chat model answering from its own knowledge, or a profile that is
+advertised, gated or credentialed differently from what it claims. Those are
+pinned here. That a run is reasoned with its tier's model, and that the agent
+receives the profile's own prompt, is read back from the real agent in
+tests/integration/llm/test_shipped_coder_profile_integration.py.
 """
 
-from unittest.mock import AsyncMock, patch
-from zoneinfo import ZoneInfo
-
 import pytest
-from google.genai.interactions import Interaction
 
 from family_assistant.assistant import validate_antigravity_agent_config
 from family_assistant.config_models import (
@@ -20,23 +16,14 @@ from family_assistant.config_models import (
     ProcessingConfig,
     RetryConfig,
     RetryModelConfig,
-    ToolsConfig,
 )
-from family_assistant.delegation_security import DelegationSecurityLevel
-from family_assistant.llm.factory import LLMClientFactory
-from family_assistant.llm.messages import SystemMessage, UserMessage
-from family_assistant.llm.model_tiers import (
-    resolve_antigravity_tier_client_config,
-    validate_profile_model_tier,
+from family_assistant.llm.model_selection import (
+    ModelSelectionRequest,
+    ModelTierEligibility,
+    ModelTierNotPermitted,
+    resolve_model_selection,
 )
-from family_assistant.llm.providers.google_genai_client import (
-    GoogleGenAIClient,
-    is_interactions_agent_model,
-)
-from family_assistant.processing import ProcessingServiceConfig
-from family_assistant.processing.interactions_agent_service import (
-    InteractionsAgentProcessingService,
-)
+from family_assistant.llm.model_tiers import validate_profile_model_tier
 from family_assistant.security.taint import (
     SinkClass,
     SourceTrustTier,
@@ -49,30 +36,40 @@ from family_assistant.security.taint import (
     TurnTaintState,
     merge_taint_policy_config,
 )
-from family_assistant.tools import LocalToolsProvider
+from family_assistant.telegram.commands import normalize_slash_command
+from family_assistant.telegram.service import build_profile_slash_command_map
 from tests.unit.conftest import shipped_profile
 
 
-def test_shipped_coder_profile_runs_the_agent_on_flash_by_default(
-    shipped_config: AppConfig,
-) -> None:
-    """The profile names the managed agent, and its default tier is Flash."""
-    profile = shipped_profile(shipped_config, "coder")
-    processing_config = profile.processing_config
-
-    assert processing_config.antigravity_config is not None
-    assert is_interactions_agent_model(processing_config.antigravity_config.agent)
-    assert processing_config.model_tier == "gemini_3_8_flash"
-    assert "/coder" in profile.slash_commands
+def _coder_eligibility(shipped_config: AppConfig) -> ModelTierEligibility:
+    return ModelTierEligibility.from_profile(
+        shipped_profile(shipped_config, "coder"), shipped_config.model_tiers
+    )
 
 
-def test_shipped_coder_profile_can_be_run_on_argon(shipped_config: AppConfig) -> None:
-    """By a person choosing it, or a delegating model asking for it -- never Auto."""
-    profile = shipped_profile(shipped_config, "coder")
+def test_the_tier_picker_offers_argon_on_coder(shipped_config: AppConfig) -> None:
+    """The web and iOS picker lists the profile's selectable tiers, and only those.
 
-    assert "gemini_4_argon" in (profile.allowed_model_tiers or [])
-    assert "gemini_4_argon" in (profile.delegation_model_tiers or [])
-    assert not profile.auto_model_tiers
+    A person's request for a delegation preset is admitted too, but nothing
+    offers it to them, so admission alone would not show the choice exists.
+    """
+    assert "gemini_4_argon" in _coder_eligibility(shipped_config).selectable_ids
+
+
+def test_auto_routing_never_puts_coder_on_argon(shipped_config: AppConfig) -> None:
+    """Argon costs many times Flash, so only someone's explicit choice reaches it."""
+    with pytest.raises(ModelTierNotPermitted):
+        resolve_model_selection(
+            _coder_eligibility(shipped_config),
+            ModelSelectionRequest(tier="gemini_4_argon", source="auto"),
+            profile_id="coder",
+        )
+
+
+def test_slash_coder_reaches_the_coder_profile(shipped_config: AppConfig) -> None:
+    command_map = build_profile_slash_command_map(shipped_config)
+
+    assert command_map[normalize_slash_command("/coder")] == "coder"
 
 
 def test_shipped_coder_profile_configures_no_sandbox_credentials(
@@ -171,47 +168,6 @@ def test_the_shipped_matrix_adjudicates_a_sandbox_run_untrusted_content() -> Non
     assert evaluation.fallback_outcome is TaintPolicyOutcome.CONFIRM
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("tier", "reasoning_model"),
-    [("gemini_3_8_flash", "gemini-3.8-flash"), ("gemini_4_argon", "gemini-4-argon")],
-)
-async def test_each_coder_tier_submits_the_agent_with_that_tiers_model(
-    shipped_config: AppConfig,
-    provider_api_keys: None,
-    tier: str,
-    reasoning_model: str,
-) -> None:
-    """A run at a tier reaches the agent, reasoning with that tier's model."""
-    antigravity_config = shipped_profile(
-        shipped_config, "coder"
-    ).processing_config.antigravity_config
-    assert antigravity_config is not None
-    client_config = resolve_antigravity_tier_client_config(
-        antigravity_config,
-        shipped_config.model_tiers[tier],
-        shipped_config.llm_parameters,
-    )
-
-    with patch(
-        "family_assistant.llm.providers.google_genai_client.genai.Client"
-    ) as sdk_client:
-        create = AsyncMock(
-            return_value=Interaction(id="inter_coder", status="in_progress")
-        )
-        sdk_client.return_value.aio.interactions.create = create
-        client = LLMClientFactory.create_client(config=client_config)
-        assert isinstance(client, GoogleGenAIClient)
-        await client.start_agent_interaction([UserMessage(content="Do the thing.")])
-
-    call_kwargs = create.call_args.kwargs
-    assert call_kwargs["agent"] == "antigravity-preview-09-2026"
-    assert call_kwargs["agent_config"] == {
-        "type": "antigravity",
-        "model": reasoning_model,
-    }
-
-
 def test_shipped_coder_profile_passes_its_own_startup_validation(
     shipped_config: AppConfig,
 ) -> None:
@@ -240,70 +196,3 @@ def test_the_agent_in_a_retry_chain_is_rejected() -> None:
             ),
             "gemini-3.8-flash",
         )
-
-
-def _coder_system_instruction(shipped_config: AppConfig) -> str:
-    """What the shipped `coder` profile actually sends as `system_instruction`."""
-    profile = shipped_profile(shipped_config, "coder")
-    processing_config = profile.processing_config
-    assert processing_config.antigravity_config is not None
-
-    client = GoogleGenAIClient(
-        api_key="test",
-        model=processing_config.antigravity_config.agent,
-        antigravity_model="gemini-3.8-flash",
-    )
-    service = InteractionsAgentProcessingService(
-        llm_client=client,
-        tools_provider=LocalToolsProvider(definitions=[], implementations={}),
-        service_config=ProcessingServiceConfig(
-            prompts=processing_config.prompts,
-            timezone=ZoneInfo("UTC"),
-            history_budget_chars=100_000,
-            history_max_age_hours=24,
-            tools_config=ToolsConfig(),
-            delegation_security_level=DelegationSecurityLevel.BLOCKED,
-            id=profile.id,
-            description=profile.description,
-        ),
-        context_providers=[],
-        server_url="http://testserver",
-        app_config=AppConfig(),
-    )
-
-    kwargs = client._build_agent_create_kwargs([  # pyright: ignore[reportPrivateUsage]
-        SystemMessage(content=service.format_system_prompt(user_name="Tester")),
-        UserMessage(content="Reverse this CSV."),
-    ])
-    return str(kwargs["system_instruction"])
-
-
-def test_coder_system_instruction_carries_no_caller_facing_routing_guidance(
-    shipped_config: AppConfig,
-) -> None:
-    """The profile's `description` is written to whoever picks a profile.
-
-    It says things like "choose it over spawn_worker" in the second person; the
-    agent reads that "you" as itself and is handed alternatives it cannot
-    reach. What the agent is for is its own `system_prompt`'s job.
-    """
-    instruction = _coder_system_instruction(shipped_config)
-
-    assert "spawn_worker" not in instruction
-    assert "complex_tasks" not in instruction
-    assert "Profile purpose:" not in instruction
-    assert "You are a coding agent working for Tester" in instruction
-
-
-def test_coder_system_instruction_is_unmarked(shipped_config: AppConfig) -> None:
-    """Antigravity takes a first-class system field, so nothing labels it.
-
-    The `System:` marker exists for the paths that have to carry system content
-    as something else -- `generateContent` parts, Deep Research's single input
-    string -- and prefixing a native `system_instruction` only spends the first
-    line of the prompt saying what the field already says.
-    """
-    instruction = _coder_system_instruction(shipped_config)
-
-    assert not instruction.startswith("System:")
-    assert instruction.startswith("[Active Processing Profile: coder]")
