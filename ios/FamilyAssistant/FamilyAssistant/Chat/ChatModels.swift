@@ -397,6 +397,9 @@ struct ChatMessage: Identifiable, Equatable {
     // Who chose that tier: `user`, `model` (Auto routing), or `default` for the
     // profile's own. What ran and who asked for it are separate questions.
     var modelTierSource: String? = nil
+    /// On a Home message echoing a finished thread's outcome: the thread's
+    /// conversation id, so the message is shown as coming from it.
+    var echoedFromThread: String? = nil
 }
 
 /// The intelligence level a persisted reply ran at, as reported on the message's
@@ -981,6 +984,8 @@ struct ChatBackendMessage: Decodable, Equatable {
     let processingProfileID: String?
     let reasoningInfo: ChatMessageReasoningInfo?
     let metadata: [String: JSONValue]?
+    /// On a Home row echoing a finished thread's outcome: that thread.
+    let echoedFromThread: String?
 
     enum CodingKeys: String, CodingKey {
         case internalID = "internal_id"
@@ -996,6 +1001,7 @@ struct ChatBackendMessage: Decodable, Equatable {
         case processingProfileID = "processing_profile_id"
         case reasoningInfo = "reasoning_info"
         case metadata
+        case echoedFromThread = "echoed_from_thread"
     }
 
     init(from decoder: Decoder) throws {
@@ -1018,6 +1024,7 @@ struct ChatBackendMessage: Decodable, Equatable {
         processingProfileID = try container.decodeIfPresent(String.self, forKey: .processingProfileID)
         reasoningInfo = try container.decodeIfPresent(ChatMessageReasoningInfo.self, forKey: .reasoningInfo)
         metadata = try container.decodeIfPresent([String: JSONValue].self, forKey: .metadata)
+        echoedFromThread = try container.decodeIfPresent(String.self, forKey: .echoedFromThread)
 
         if let content = try? container.decode(String.self, forKey: .content) {
             text = content

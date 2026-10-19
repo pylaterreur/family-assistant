@@ -70,6 +70,51 @@ final class HomeThreadsStore {
         }
     }
 
+    /// Threads a "Mark done" request is out for, so it is not sent twice.
+    private(set) var markingDone: Set<String> = []
+    /// A user action on a thread that failed, for the alert that reports it.
+    var actionErrorMessage: String?
+
+    /// Close a thread as done, as the user. The card and row show the closed
+    /// thread straight from the server's answer, and the list is refreshed for
+    /// anything else that changed. A failure is reported, never dropped.
+    func markDone(_ conversationID: String) async {
+        guard !markingDone.contains(conversationID) else {
+            return
+        }
+        markingDone.insert(conversationID)
+        defer { markingDone.remove(conversationID) }
+        do {
+            let closed = try await apiClient.markThreadDone(conversationID: conversationID)
+            replace(closed)
+        } catch {
+            guard !Self.isCancellation(error) else {
+                return
+            }
+            actionErrorMessage = "Couldn’t mark this thread done. \(error.localizedDescription)"
+            errorReporter.report(error, component: "Chat.markThreadDone")
+            return
+        }
+        await refreshThreads()
+    }
+
+    /// Show the caller's unread count for a thread they have just read.
+    func applyUnreadCount(_ unreadCount: Int, for conversationID: String) {
+        guard let index = threads.firstIndex(where: { $0.conversationID == conversationID }),
+              threads[index].unreadCount != unreadCount
+        else {
+            return
+        }
+        threads[index].unreadCount = unreadCount
+    }
+
+    private func replace(_ thread: ChatThreadSummary) {
+        guard let index = threads.firstIndex(where: { $0.conversationID == thread.conversationID }) else {
+            return
+        }
+        threads[index] = thread
+    }
+
     func refreshConversations() async {
         isLoadingConversations = true
         defer { isLoadingConversations = false }

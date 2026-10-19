@@ -262,6 +262,412 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertTrue(store.threadsRefreshFailed)
     }
 
+    // MARK: - Thread state, unread and done
+
+    func testSummaryDecodesCloseAndUnreadAndDefaultsWithoutThem() throws {
+        let closed = try JSONDecoder.chatDecoder.decode(ChatThreadSummary.self, from: Data(threadJSON(
+            id: "t1",
+            state: "done",
+            extra: #","closed_by":"assistant","closed_at":"2026-06-08T12:06:00Z","echo_message_id":7,"unread_count":3"#
+        ).utf8))
+        let plain = try JSONDecoder.chatDecoder.decode(
+            ChatThreadSummary.self,
+            from: Data(threadJSON(id: "t2", state: "waiting").utf8)
+        )
+
+        XCTAssertEqual(closed.closedBy, .assistant)
+        XCTAssertNotNil(closed.closedAt)
+        XCTAssertEqual(closed.echoMessageID, 7)
+        XCTAssertEqual(closed.unreadCount, 3)
+        XCTAssertNil(plain.closedBy)
+        XCTAssertNil(plain.echoMessageID)
+        XCTAssertEqual(plain.unreadCount, 0)
+    }
+
+    /// Every state and closer: the label, the line under the title, whether
+    /// "Mark done" is offered, and the switcher group.
+    func testCardAndSwitcherShowEveryStateAndCloser() {
+        let states: [(ChatThreadState, String, String)] = [
+            (.working, "Working", ThreadSwitcherSections.workingTitle),
+            (.waiting, "Waiting on you", ThreadSwitcherSections.waitingTitle),
+            (.failed, "Failed", ThreadSwitcherSections.failedTitle),
+            (.done, "Done", ThreadSwitcherSections.doneTitle),
+        ]
+        for (state, label, group) in states {
+            for closer in [nil, ChatThreadCloser.assistant, .user] {
+                let summary = thread("t", state, preview: "Booked for Saturday", closedBy: closer)
+                let context = "\(state) closed by \(String(describing: closer))"
+
+                XCTAssertEqual(ThreadPresentationState.label(for: summary.presentationState), label, context)
+                let userClosedDone = state == .done && closer == .user
+                XCTAssertEqual(
+                    summary.detailLine,
+                    userClosedDone ? "You marked this done" : "Booked for Saturday",
+                    context
+                )
+                XCTAssertEqual(summary.canMarkDone, state == .waiting || state == .failed, context)
+                let sections = ThreadSwitcherSections(threads: [summary], conversations: [], homeConversationID: "home")
+                XCTAssertEqual(sections.groups.map(\.title), [group], context)
+            }
+        }
+    }
+
+    func testSwitcherOrdersGroupsWaitingWorkingFailedDone() {
+        let sections = ThreadSwitcherSections(
+            threads: [thread("d", .done), thread("f", .failed), thread("w", .working), thread("q", .waiting)],
+            conversations: [conversation("old", kind: "conversation")],
+            homeConversationID: "home"
+        )
+
+        XCTAssertEqual(sections.groups.map(\.title), ["Waiting on you", "Working", "Failed", "Done"])
+        XCTAssertEqual(sections.earlier.map(\.conversationID), ["old"])
+    }
+
+    func testUnreadCountIsInTheCardsSpokenSummaryOnlyWhenNonZero() {
+        XCTAssertEqual(
+            thread("Quotes", .waiting, preview: "Gas or electric?", unread: 2).accessibilitySummary,
+            "Quotes, Waiting on you, Gas or electric?, 2 unread"
+        )
+        XCTAssertEqual(
+            thread("Quotes", .done, preview: "Asked", closedBy: .user).accessibilitySummary,
+            "Quotes, Done, You marked this done"
+        )
+    }
+
+    func testStoreAppliesAReadThreadsUnreadCount() async {
+        ChatMockBackendURLProtocol.respond { _ in
+            .json("""
+            {"home_conversation_id":"home","threads":[
+              \(self.threadJSON(id: "t1", state: "waiting", extra: #","unread_count":4"#)),
+              \(self.threadJSON(id: "t2", state: "working", extra: #","unread_count":1"#))
+            ]}
+            """)
+        }
+        let store = makeStore()
+        await store.refreshThreads()
+
+        store.applyUnreadCount(0, for: "t1")
+
+        XCTAssertEqual(store.thread(conversationID: "t1")?.unreadCount, 0)
+        XCTAssertEqual(store.thread(conversationID: "t2")?.unreadCount, 1)
+    }
+
+    func testMarkDoneShowsTheThreadClosedByTheUser() async {
+        let doneRequests = LockedStrings()
+        ChatMockBackendURLProtocol.respond { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST", path == "/api/v1/chat/home/threads/t1/done" {
+                doneRequests.append(path)
+                return .json(self.threadJSON(
+                    id: "t1",
+                    state: "done",
+                    extra: #","closed_by":"user","closed_at":"2026-06-08T12:06:00Z""#
+                ))
+            }
+            let state = doneRequests.values.isEmpty ? "waiting" : "done"
+            return .json("""
+            {"home_conversation_id":"home","threads":[
+              \(self.threadJSON(id: "t1", state: state, extra: doneRequests.values.isEmpty ? "" : #","closed_by":"user""#))
+            ]}
+            """)
+        }
+        let store = makeStore()
+        await store.refreshThreads()
+        XCTAssertEqual(store.thread(conversationID: "t1")?.presentationState, .waiting)
+
+        await store.markDone("t1")
+
+        let closed = store.thread(conversationID: "t1")
+        XCTAssertEqual(doneRequests.values.count, 1)
+        XCTAssertEqual(closed?.presentationState, .done)
+        XCTAssertEqual(closed?.closedBy, .user)
+        XCTAssertEqual(closed?.detailLine, "You marked this done")
+        XCTAssertNil(store.actionErrorMessage)
+        XCTAssertTrue(store.markingDone.isEmpty)
+    }
+
+    func testMarkDoneFailureIsReportedAndLeavesTheThreadAsItWas() async {
+        ChatMockBackendURLProtocol.respond { request in
+            if request.httpMethod == "POST" {
+                return .json(#"{"detail":"boom"}"#, statusCode: 500)
+            }
+            return .json("""
+            {"home_conversation_id":"home","threads":[\(self.threadJSON(id: "t1", state: "waiting"))]}
+            """)
+        }
+        let store = makeStore()
+        await store.refreshThreads()
+
+        await store.markDone("t1")
+
+        XCTAssertNotNil(store.actionErrorMessage, "A failed Mark done is reported, never dropped.")
+        XCTAssertEqual(store.thread(conversationID: "t1")?.presentationState, .waiting)
+        XCTAssertTrue(store.markingDone.isEmpty)
+    }
+
+    // MARK: - Echo rows
+
+    func testHomeRowEchoingAThreadCarriesTheThread() async {
+        respondWithConversation(
+            id: "home",
+            messagesJSON: """
+            [{"internal_id":1,"role":"assistant","content":"Hi","timestamp":"2026-06-08T12:00:00Z"},
+             {"internal_id":2,"role":"assistant","content":"Booked for Saturday.","timestamp":"2026-06-08T12:01:00Z",
+              "echoed_from_thread":"t1"}]
+            """,
+            extraJSON: #","conversation_kind":"home""#
+        )
+        let model = makeViewModel(conversationID: "home", role: .home)
+
+        await model.selectConversation("home")
+
+        XCTAssertEqual(model.messages.map(\.echoedFromThread), [nil, "t1"])
+        XCTAssertEqual(model.groupedMessages.last?.echoedFromThread, "t1")
+    }
+
+    // MARK: - Read marker
+
+    func testReadMarkerMovesOnlyWhileTheNewestMessageIsInView() {
+        let reading = ReadMarkerGate.Inputs(
+            kind: .thread,
+            isOnScreen: true,
+            isSceneActive: true,
+            isAtLatest: true,
+            latestPersistedMessageID: 9,
+            markedThrough: nil
+        )
+        XCTAssertEqual(ReadMarkerGate.messageToMark(reading), 9)
+
+        var home = reading
+        home.kind = .home
+        XCTAssertEqual(ReadMarkerGate.messageToMark(home), 9)
+
+        for (change, name) in [
+            ({ (inputs: inout ReadMarkerGate.Inputs) in inputs.kind = .conversation }, "ordinary conversation"),
+            ({ (inputs: inout ReadMarkerGate.Inputs) in inputs.kind = nil }, "unknown kind"),
+            ({ (inputs: inout ReadMarkerGate.Inputs) in inputs.isOnScreen = false }, "off screen"),
+            ({ (inputs: inout ReadMarkerGate.Inputs) in inputs.isSceneActive = false }, "backgrounded"),
+            ({ (inputs: inout ReadMarkerGate.Inputs) in inputs.isAtLatest = false }, "scrolled up"),
+            ({ (inputs: inout ReadMarkerGate.Inputs) in inputs.latestPersistedMessageID = nil }, "nothing persisted"),
+            ({ (inputs: inout ReadMarkerGate.Inputs) in inputs.markedThrough = 9 }, "already marked"),
+            ({ (inputs: inout ReadMarkerGate.Inputs) in inputs.markedThrough = 12 }, "marked further"),
+        ] {
+            var inputs = reading
+            change(&inputs)
+            XCTAssertNil(ReadMarkerGate.messageToMark(inputs), name)
+        }
+        XCTAssertEqual(ReadMarkerGate.persistedID(of: "msg_42"), 42)
+        XCTAssertNil(ReadMarkerGate.persistedID(of: "local_assistant_1"))
+    }
+
+    func testReadingHomeMarksItReadThroughTheNewestMessageOnce() async throws {
+        let reads = respondWithReadableConversation(id: "home", kind: "home")
+        let model = makeViewModel(conversationID: "home", role: .home)
+        model.markReadDelay = .milliseconds(20)
+        var reported: [(String, Int)] = []
+        model.onMarkedRead = { reported.append(($0, $1)) }
+        await model.selectConversation("home")
+
+        model.setOnScreen(true)
+        model.setScrolledToLatest(true)
+        await model.settleReadMarker()
+
+        XCTAssertEqual(reads.values, [#"{"through_message_id":3}"#])
+        XCTAssertEqual(reported.map(\.0), ["home"])
+        XCTAssertEqual(reported.map(\.1), [0])
+
+        // A streamed token changes no persisted message: nothing more to mark.
+        model.messages[model.messages.count - 1].text += " more"
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values.count, 1, "Marking read never follows streamed tokens.")
+
+        model.messages.append(persistedMessage(id: 7))
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values.last, #"{"through_message_id":7}"#)
+    }
+
+    func testThreadIsNotMarkedReadScrolledUpOffScreenOrBackgrounded() async throws {
+        let reads = respondWithReadableConversation(id: "t1", kind: "thread")
+        let model = makeViewModel(conversationID: "t1", role: .pushed)
+        model.markReadDelay = .milliseconds(20)
+        await model.selectConversation("t1")
+
+        model.setOnScreen(true)
+        model.setScrolledToLatest(false)
+        XCTAssertFalse(model.hasPendingReadCheck, "Scrolled up: the newest message is not in view.")
+
+        model.setOnScreen(false)
+        model.setScrolledToLatest(true)
+        XCTAssertFalse(model.hasPendingReadCheck, "Covered by another view.")
+
+        model.setOnScreen(true)
+        model.scenePhaseChanged(old: .active, new: .background)
+        XCTAssertFalse(model.hasPendingReadCheck, "Backgrounded: a check already scheduled is dropped.")
+        XCTAssertTrue(reads.values.isEmpty)
+
+        model.scenePhaseChanged(old: .background, new: .active)
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values.count, 1)
+    }
+
+    func testHomeIsNotMarkedReadUnderTheChatSwitcher() async throws {
+        let reads = respondWithReadableConversation(id: "home", kind: "home")
+        let model = makeViewModel(conversationID: "home", role: .home)
+        model.markReadDelay = .milliseconds(20)
+        await model.selectConversation("home")
+
+        model.setCoveredBySheet(true)
+        model.setOnScreen(true)
+        model.setScrolledToLatest(true)
+        XCTAssertFalse(model.hasPendingReadCheck, "Home behind the switcher sheet is not being read.")
+
+        model.setCoveredBySheet(false)
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values.count, 1)
+    }
+
+    func testReturningToTheNewestPageMarksWhatItShows() async throws {
+        let reads = respondWithReadableConversation(id: "home", kind: "home")
+        let model = makeViewModel(conversationID: "home", role: .home)
+        model.markReadDelay = .milliseconds(20)
+        await model.selectConversation("home")
+        model.setOnScreen(true)
+        model.messages.append(contentsOf: (10..<50).map(persistedMessage(id:)))
+        model.displayedMessageNewerOffset = ChatViewModel.displayedMessageWindowCount
+        XCTAssertTrue(model.hasNewerMessages)
+
+        model.setScrolledToLatest(true)
+        await model.settleReadMarker()
+        XCTAssertTrue(reads.values.isEmpty, "The bottom of an older page is not the newest message.")
+
+        model.showNewerMessages()
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values, [#"{"through_message_id":49}"#])
+    }
+
+    func testOrdinaryConversationIsNeverMarkedRead() async throws {
+        let reads = respondWithReadableConversation(id: "c1", kind: "conversation")
+        let model = makeViewModel(conversationID: "c1", role: .pushed)
+        model.markReadDelay = .milliseconds(20)
+        await model.selectConversation("c1")
+
+        model.setOnScreen(true)
+        model.setScrolledToLatest(true)
+
+        XCTAssertFalse(model.hasPendingReadCheck)
+        XCTAssertTrue(reads.values.isEmpty)
+    }
+
+    func testFailedReadIsNotRetriedUntilSomethingNewArrives() async throws {
+        let reads = respondWithReadableConversation(id: "t1", kind: "thread", readStatus: 500)
+        let model = makeViewModel(conversationID: "t1", role: .pushed)
+        model.markReadDelay = .milliseconds(20)
+        await model.selectConversation("t1")
+
+        model.setOnScreen(true)
+        model.setScrolledToLatest(true)
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values.count, 1)
+
+        model.messages[model.messages.count - 1].text += " more"
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values.count, 1, "The same position is not retried on every change.")
+
+        model.messages.append(persistedMessage(id: 8))
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values.count, 2)
+    }
+
+    func testMessageArrivingWhileAReadFailsIsMarkedAfterIt() async throws {
+        let pending = HangingStream()
+        let reads = LockedStrings()
+        ChatMockBackendURLProtocol.respond { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST", path == "/api/v1/chat/conversations/t1/read" {
+                reads.append(String(decoding: Self.body(of: request), as: UTF8.self))
+                if reads.values.count == 1 {
+                    // Not a read response: the first request fails once released.
+                    return .hangingStream(#"{"detail":"boom"}"#, controller: pending)
+                }
+                return .json(#"{"conversation_id":"t1","unread_count":0}"#)
+            }
+            return .json("""
+            {"conversation_id":"t1","messages":[
+              {"internal_id":3,"role":"assistant","content":"Anything else?","timestamp":"2026-06-08T12:00:02Z"}
+            ],"count":1,"total_messages":1,"latest_user_profile_id":"research",
+             "conversation_kind":"thread","thread":\(self.threadJSON(id: "t1", state: "waiting"))}
+            """)
+        }
+        let model = makeViewModel(conversationID: "t1", role: .pushed)
+        model.markReadDelay = .milliseconds(20)
+        await model.selectConversation("t1")
+        model.setOnScreen(true)
+        model.setScrolledToLatest(true)
+        try await waitUntil { reads.values.count == 1 }
+
+        model.messages.append(persistedMessage(id: 9))
+        pending.finish()
+        await model.settleReadMarker()
+
+        XCTAssertEqual(reads.values, [#"{"through_message_id":3}"#, #"{"through_message_id":9}"#])
+    }
+
+    /// A conversation of `kind` holding messages 1–3, with a read endpoint that
+    /// records each request body.
+    private func respondWithReadableConversation(
+        id: String,
+        kind: String,
+        readStatus: Int = 200
+    ) -> LockedStrings {
+        let reads = LockedStrings()
+        let threadField = kind == "thread" ? #","thread":\#(threadJSON(id: id, state: "waiting"))"# : ""
+        ChatMockBackendURLProtocol.respond { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST", path == "/api/v1/chat/conversations/\(id)/read" {
+                reads.append(String(decoding: Self.body(of: request), as: UTF8.self))
+                if readStatus != 200 {
+                    return .json(#"{"detail":"boom"}"#, statusCode: readStatus)
+                }
+                return .json(#"{"conversation_id":"\#(id)","unread_count":0}"#)
+            }
+            if request.httpMethod == "GET", path.hasSuffix("/messages") {
+                return .json("""
+                {"conversation_id":"\(id)","messages":[
+                  {"internal_id":1,"role":"user","content":"Hi","timestamp":"2026-06-08T12:00:00Z"},
+                  {"internal_id":2,"role":"assistant","content":"Hello","timestamp":"2026-06-08T12:00:01Z"},
+                  {"internal_id":3,"role":"assistant","content":"Anything else?","timestamp":"2026-06-08T12:00:02Z"}
+                ],"count":3,"total_messages":3,"latest_user_profile_id":"research",
+                 "conversation_kind":"\(kind)"\(threadField)}
+                """)
+            }
+            return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+        }
+        return reads
+    }
+
+    private func persistedMessage(id: Int) -> ChatMessage {
+        ChatMessage(
+            id: "msg_\(id)",
+            role: .assistant,
+            text: "Later",
+            createdAt: Date(),
+            toolCalls: [],
+            attachments: [],
+            isLoading: false,
+            status: .complete,
+            processingProfileID: nil,
+            errorTraceback: nil
+        )
+    }
+
+    private func makeStore() -> HomeThreadsStore {
+        HomeThreadsStore(
+            homeConversationID: "home",
+            apiClient: ChatAPIClient(authManager: makeAuthManager()),
+            errorReporter: ErrorReporter(spoolDirectory: nil)
+        )
+    }
+
     // MARK: - Routes
 
     func testRoutesIntoHome() {
@@ -1137,14 +1543,15 @@ final class HomeThreadsTests: XCTestCase {
         id: String,
         state: String,
         sourceToolCallID: String? = nil,
-        profileID: String = "research"
+        profileID: String = "research",
+        extra: String = ""
     ) -> String {
         let source = sourceToolCallID.map { "\"\($0)\"" } ?? "null"
         return """
         {"conversation_id":"\(id)","home_conversation_id":"web_conv_home","title":"Thread \(id)",
          "profile_id":"\(profileID)","state":"\(state)","source_tool_call_id":\(source),
          "seed_request":"Do \(id)","preview":null,
-         "created_at":"2026-06-08T12:00:00Z","updated_at":"2026-06-08T12:05:00.123456+00:00"}
+         "created_at":"2026-06-08T12:00:00Z","updated_at":"2026-06-08T12:05:00.123456+00:00"\(extra)}
         """
     }
 
@@ -1152,7 +1559,9 @@ final class HomeThreadsTests: XCTestCase {
         _ id: String,
         _ state: ChatThreadState,
         preview: String? = nil,
-        seed: String? = nil
+        seed: String? = nil,
+        closedBy: ChatThreadCloser? = nil,
+        unread: Int = 0
     ) -> ChatThreadSummary {
         ChatThreadSummary(
             conversationID: id,
@@ -1164,7 +1573,9 @@ final class HomeThreadsTests: XCTestCase {
             seedRequest: seed,
             preview: preview,
             createdAt: Date(),
-            updatedAt: Date()
+            updatedAt: Date(),
+            closedBy: closedBy,
+            unreadCount: unread
         )
     }
 

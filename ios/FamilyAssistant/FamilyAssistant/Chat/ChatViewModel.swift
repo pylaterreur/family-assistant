@@ -22,7 +22,9 @@ final class ChatViewModel {
     var conversations: [ChatConversationSummary] = []
     /// What the open conversation is, as the server reports it. Known only for
     /// `home` and `pushed`, whose loads ask for it.
-    private(set) var conversationKind: ChatConversationKind?
+    private(set) var conversationKind: ChatConversationKind? {
+        didSet { readPositionMayHaveChanged() }
+    }
     /// The open thread's card, when the open conversation is a thread.
     private(set) var threadSummary: ChatThreadSummary?
     /// The profile the server says the open conversation's history is under.
@@ -54,13 +56,21 @@ final class ChatViewModel {
     /// refresh what it shows alongside (the thread list). A resync matters as
     /// much as a ping: the activity stream does not replay what it missed.
     @ObservationIgnored var onListRefresh: (@MainActor () async -> Void)?
-    var messages: [ChatMessage] = []
+    var messages: [ChatMessage] = [] {
+        // Cheap unless a read could be recorded: the check that reads the
+        // messages runs once the position has settled, not per streamed token.
+        didSet { readPositionMayHaveChanged() }
+    }
     // Fixed upper bound on how many grouped bubbles are realized into the chat
     // view at once. The full thread is still loaded into `messages`; only a
     // recent window is shown, and `showEarlierMessages()` /
     // `showNewerMessages()` slide that fixed eager-render window through
     // history. See `visibleGroupedMessages`.
-    var displayedMessageNewerOffset = 0
+    var displayedMessageNewerOffset = 0 {
+        // Paging back to the newest window can bring unread messages into view
+        // with the bottom of the transcript visible throughout.
+        didSet { readPositionMayHaveChanged() }
+    }
     var profiles: [ChatProfile] = [] {
         didSet { modelTierLabels = Self.modelTierLabels(from: profiles) }
     }
@@ -106,7 +116,12 @@ final class ChatViewModel {
     /// different from what the control shows.
     @ObservationIgnored private var namesModelTier = false
     var conversationID: String? {
-        didSet { clearModelTierChoiceIfScopeChanged(oldValue != conversationID) }
+        didSet {
+            clearModelTierChoiceIfScopeChanged(oldValue != conversationID)
+            if oldValue != conversationID {
+                resetReadMarker()
+            }
+        }
     }
     var conversationSelection: String?
     /// The conversation whose persisted messages are currently rendered. This is
@@ -160,6 +175,19 @@ final class ChatViewModel {
         }
     }
     @ObservationIgnored private var isDrainingRoutedPrompts = false
+    /// Read-marker inputs: see `ReadMarkerGate`.
+    @ObservationIgnored private var isOnScreen = false
+    @ObservationIgnored private var isCoveredBySheet = false
+    @ObservationIgnored private var isSceneActive = true
+    @ObservationIgnored private var isScrolledToLatest = false
+    @ObservationIgnored private var markedReadThrough: Int?
+    @ObservationIgnored private var failedReadThrough: Int?
+    @ObservationIgnored private var markReadTask: Task<Void, Never>?
+    /// How long a read position must settle before it is recorded.
+    @ObservationIgnored var markReadDelay: Duration = .seconds(1)
+    /// Called with the caller's unread count once a read is recorded, so the
+    /// thread's badge clears without waiting for the list to refresh.
+    @ObservationIgnored var onMarkedRead: (@MainActor (_ conversationID: String, _ unreadCount: Int) -> Void)?
     var isLoadingProfiles = false
     var isStreaming = false {
         didSet { routedPromptReadinessMayHaveChanged() }
@@ -4106,6 +4134,133 @@ final class ChatViewModel {
     /// `cameFromBackground` when it observes a background, then runs the resync on
     /// the next active, so every real resume is caught while transient
     /// `.inactive → .active` blips (never having backgrounded) are ignored.
+    // MARK: - Read marker
+
+    /// Whether this conversation's view is on screen, rather than covered by a
+    /// view pushed over it, on another tab, or gone.
+    func setOnScreen(_ onScreen: Bool) {
+        isOnScreen = onScreen
+        readPositionMayHaveChanged()
+    }
+
+    /// Whether a sheet over this conversation's view (the chat switcher)
+    /// hides it. A sheet does not take the view off screen as a push does.
+    func setCoveredBySheet(_ covered: Bool) {
+        isCoveredBySheet = covered
+        readPositionMayHaveChanged()
+    }
+
+    /// Whether the reader is at the bottom of the transcript.
+    func setScrolledToLatest(_ atLatest: Bool) {
+        isScrolledToLatest = atLatest
+        readPositionMayHaveChanged()
+    }
+
+    private var readMarkerInputs: ReadMarkerGate.Inputs {
+        ReadMarkerGate.Inputs(
+            kind: conversationKind,
+            isOnScreen: isOnScreen && !isCoveredBySheet,
+            isSceneActive: isSceneActive,
+            isAtLatest: isScrolledToLatest,
+            latestPersistedMessageID: nil,
+            markedThrough: [markedReadThrough, failedReadThrough].compactMap { $0 }.max()
+        )
+    }
+
+    /// Schedules a check of the read position once it has settled for
+    /// `markReadDelay`, so a burst of arrivals is one request, and drops a
+    /// pending check as soon as the reader is no longer reading.
+    private func readPositionMayHaveChanged() {
+        guard ReadMarkerGate.isReading(readMarkerInputs) else {
+            markReadTask?.cancel()
+            markReadTask = nil
+            return
+        }
+        guard markReadTask == nil else {
+            return
+        }
+        let delay = markReadDelay
+        markReadTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self else {
+                return
+            }
+            let requested = await self.markReadIfReading()
+            guard !Task.isCancelled else {
+                return
+            }
+            self.markReadTask = nil
+            // What arrived while the request was out is checked again, whether
+            // or not it succeeded. A position already sent is not sent again,
+            // so this ends once nothing newer has arrived.
+            if requested {
+                self.readPositionMayHaveChanged()
+            }
+        }
+    }
+
+    /// Whether a read-position check is scheduled or running.
+    var hasPendingReadCheck: Bool {
+        markReadTask != nil
+    }
+
+    /// Waits until no read-position check is scheduled or running.
+    func settleReadMarker() async {
+        while let task = markReadTask {
+            await task.value
+            if markReadTask == task {
+                return
+            }
+        }
+    }
+
+    /// Records the read through the newest persisted message, if the reader
+    /// can see it and it is past the marker. Returns whether a request was made.
+    private func markReadIfReading() async -> Bool {
+        guard let conversationID else {
+            return false
+        }
+        var inputs = readMarkerInputs
+        // The bottom of the rendered window is the newest message only when no
+        // newer page is held back.
+        inputs.isAtLatest = inputs.isAtLatest && !hasNewerMessages
+        inputs.latestPersistedMessageID = messages.lazy
+            .compactMap { ReadMarkerGate.persistedID(of: $0.id) }
+            .max()
+        guard let through = ReadMarkerGate.messageToMark(inputs) else {
+            return false
+        }
+        do {
+            let result = try await apiClient.markConversationRead(
+                conversationID: conversationID,
+                throughMessageID: through
+            )
+            guard self.conversationID == conversationID else {
+                return false
+            }
+            markedReadThrough = max(markedReadThrough ?? through, through)
+            onMarkedRead?(conversationID, result.unreadCount)
+            return true
+        } catch {
+            guard !(error is CancellationError || (error as? URLError)?.code == .cancelled) else {
+                return false
+            }
+            // Not retried for the same position, so a failing endpoint is not
+            // called once a second while a reply streams; the next message
+            // tries again.
+            failedReadThrough = through
+            errorReporter.report(error, component: "Chat.markRead")
+            return true
+        }
+    }
+
+    private func resetReadMarker() {
+        markReadTask?.cancel()
+        markReadTask = nil
+        markedReadThrough = nil
+        failedReadThrough = nil
+    }
+
     func scenePhaseChanged(old: ScenePhase, new: ScenePhase) {
         errorReporter.report(
             message: "iOS chat scene phase changed",
@@ -4118,6 +4273,8 @@ final class ChatViewModel {
             ],
             bypassDedupe: true
         )
+        isSceneActive = new == .active
+        readPositionMayHaveChanged()
         let effects = syncCoordinator.scenePhaseChanged(
             didBackground: new == .background,
             isActive: new == .active
@@ -5558,7 +5715,8 @@ final class ChatViewModel {
                 errorTraceback: backend.errorTraceback,
                 turnID: backend.turnID,
                 modelTier: backend.reasoningInfo?.modelTier,
-                modelTierSource: backend.reasoningInfo?.modelTierSource
+                modelTierSource: backend.reasoningInfo?.modelTierSource,
+                echoedFromThread: backend.echoedFromThread
             )
         }
         return rendered

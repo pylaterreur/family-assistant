@@ -3,9 +3,9 @@
 ## Status
 
 Approved. Milestone 1 (threads exist), milestone 2 apart from the right-hand panel, milestone 3
-(state and echo) on the backend and the web, and milestone 4 (Home on iOS) implemented. Mockups:
-[one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered: [iOS](one-thread-ux/ios.png),
-[web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
+(state and echo) on the backend, the web and iOS, and milestone 4 (Home on iOS) implemented.
+Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered:
+[iOS](one-thread-ux/ios.png), [web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
 
 ## Problem
 
@@ -260,36 +260,49 @@ and each path is governed:
 - **One Home per surface.** The Telegram Home and the web/iOS Home are separate conversations,
   because history is scoped by interface type. A household that uses both sees two Homes. Unifying
   them means lifting interface scoping from history, which is a separate project.
+
 - **No nested threads.** One level covers the household use cases.
+
 - **Only the streaming turn endpoint absorbs a queued run.** A non-streaming message sent into a
   thread whose first turn hasn't started holds the conversation until it is answered; the first turn
   then runs after it rather than being absorbed. Clients use the streaming endpoint.
+
 - **The seed is a snapshot.** A Home message edited after the thread started is not reflected in the
   thread.
+
 - **Cards do not re-post.** A card that has scrolled out of view in Home stays where it is. "Waiting
   on you" is carried by the switcher badge, the sidebar and push notifications.
+
 - **Tier choices don't stick in Home.** Home is everlasting, so a sticky tier would quietly apply to
   every later quick question.
+
 - **Some profiles cannot finish their threads.** Closing a job is a tool call, so a profile with no
   Family Assistant tools (`coder`), or one that withholds every global grant, leaves its threads
   waiting until the user marks them done.
+
 - **A working thread can't be marked done.** Work in progress outranks a close, so a thread marked
-  done mid-turn would still read as working, and the turn's reply would reopen it. The web client
-  offers Mark done only once the thread is waiting or has failed.
+  done mid-turn would still read as working, and the turn's reply would reopen it. Both clients
+  offer Mark done only once the thread is waiting or has failed.
+
 - **Read marks follow the newest message on screen.** The web client marks a conversation read while
   its newest message is scrolled into view in a visible tab. When a turn sent from that tab ends, it
   marks through the conversation's newest message, because a streamed reply has no stored id on the
   client yet, so a message landing from elsewhere in that instant is marked read too.
+
 - **A closing turn that never ends cleanly echoes nothing.** The echo is the message the closing
   turn ends with. A turn that ends without one, or is stopped after the close, leaves the thread
   closed with no echo; the next thing to arrive reopens it as usual.
+
 - **A turn that closes the thread and then fails shows the thread as failed.** The user never got
   that turn's answer, so the failure is shown rather than hidden behind "done"; they can mark the
   thread done themselves.
+
 - **Home reads facts for its recent threads only.** A status question is about live work, so Home's
   view covers the most recently active threads; older ones are in the switcher.
+
 - **Unread is counted for Home and threads only.** Legacy conversations have no state, so they have
   no read markers either.
+
 - **iOS: routed requests and drafts on rare paths are correct, not seamless.** A prompt or shared
   file routed in while the app cannot yet tell whether Home exists is held and delivered once it
   can. A prompt routed into Home waits until Home is loaded and idle, showing a short "Will send
@@ -298,6 +311,17 @@ and each path is governed:
   rebuilds the chat tab, even for the same account, so an unsent draft there is dropped. A draft
   written in the fallback conversation list moves into Home when Retry finds it, but nothing carries
   across a re-sign-in, which may be as someone else.
+
+- **iOS lists every done thread under "Done".** The switcher has no "Done today" cut-off. A done
+  thread stays there until something reopens it, and older conversations stay under Earlier, so the
+  switcher needs no second clock.
+
+- **iOS marks read only what is on screen, a moment after it settles.** Home or a thread is marked
+  read through its newest saved message once the reader has been at the bottom, with the app in the
+  foreground, for about a second. A reply still streaming is marked when it is saved. A failed mark
+  is retried only when a newer message arrives, never in a loop. "At the bottom" comes from the
+  scroll view's own visibility report, which iOS 17 lacks. There it falls back to the bottom of the
+  transcript having appeared, which can stay true after scrolling up within the loaded page.
 
 ## Decisions
 

@@ -41,6 +41,33 @@ struct ChatAPIClient {
         return try JSONDecoder.chatDecoder.decode(ChatHomeThreadsResponse.self, from: data)
     }
 
+    /// Close one of the caller's threads as done. Nothing is echoed into Home.
+    func markThreadDone(conversationID: String) async throws -> ChatThreadSummary {
+        let encodedID = Self.encodedPathComponent(conversationID)
+        let request = try await authManager.authorizedRequest(
+            url: apiURL("/api/v1/chat/home/threads/\(encodedID)/done"),
+            method: "POST"
+        )
+        let (data, response) = try await urlSession.dataExpectingJSON(for: request, authWallError: ChatAPIError.authWall)
+        try validate(response: response, data: data)
+        return try JSONDecoder.chatDecoder.decode(ChatThreadSummary.self, from: data)
+    }
+
+    /// Move the caller's read marker in Home or a thread forward to
+    /// `throughMessageID`. The server never moves it back.
+    func markConversationRead(conversationID: String, throughMessageID: Int) async throws -> ChatMarkReadResponse {
+        let encodedID = Self.encodedPathComponent(conversationID)
+        var request = try await authManager.authorizedRequest(
+            url: apiURL("/api/v1/chat/conversations/\(encodedID)/read"),
+            method: "POST"
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder.chatEncoder.encode(ChatMarkReadRequest(throughMessageID: throughMessageID))
+        let (data, response) = try await urlSession.dataExpectingJSON(for: request, authWallError: ChatAPIError.authWall)
+        try validate(response: response, data: data)
+        return try JSONDecoder.chatDecoder.decode(ChatMarkReadResponse.self, from: data)
+    }
+
     private func listAllConversationPages(
         query: String?,
         ordinaryOnly: Bool = false

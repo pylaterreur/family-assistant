@@ -306,14 +306,24 @@ long messages render a section at a time behind a **Show more** control.
 
 **Home and threads.** Where your assistant has threads turned on, Chat opens on **Home**, one
 ongoing conversation for quick questions and everyday requests. When the assistant moves a bigger
-job into a thread, the thread appears in Home as a card showing its title, whether it is working,
-waiting on you or failed, and its latest line. Tap the card to open the thread; Back returns you to
-Home where you left it. A thread keeps its own profile, so it has no profile picker, and its top
-shows the request the assistant started it with. The threads button at the top right counts threads
-waiting on you and opens the thread list: Home, your threads grouped by state, and your other
-conversations under **Earlier**, with search and **New Chat**. Something you share into the app
-lands in Home's composer. An intelligence level picked in Home applies to that one message. See
-[Home and threads](#home-and-threads) for how threads work.
+job into a thread, the thread appears in Home as a card. The card shows the thread's title, whether
+it is working, waiting on you, done or failed, its latest line, and how many of its messages you
+haven't read. A thread the assistant finished shows its outcome; one you closed yourself says "You
+marked this done". When a thread finishes, its outcome also appears in Home under a **From thread:**
+label; tap the label to open that thread. Tap a card to open the thread; Back returns you to Home
+where you left it. A thread keeps its own profile, so it has no profile picker, and its top shows
+the request the assistant started it with. To close a thread yourself, choose **Mark Done** from the
+**…** menu at the top of the thread, or long-press its card in Home. It's offered while the thread
+is **Waiting on you** or **Failed**; a thread that is still working can be marked done once it
+stops. It reopens by itself when something new arrives in it.
+
+Home and threads count as read once you have scrolled to their newest message with the app open, so
+opening a thread clears its unread count. The **Chats** button at the top right (also in the menu at
+the top left) counts threads waiting on you. It opens the chat list: Home, then your threads grouped
+as **Waiting on you**, **Working**, **Failed** and **Done**, then all your other conversations,
+including those from before threads, under **Earlier**. The list also has search and **New Chat**.
+Something you share into the app lands in Home's composer. An intelligence level picked in Home
+applies to that one message. See [Home and threads](#home-and-threads) for how threads work.
 
 **Getting content in:** share a supported file from the iOS share sheet or Files "Open In" and it
 opens a new Chat draft with the file attached. A copied image can be pasted with the paste button
