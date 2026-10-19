@@ -244,7 +244,14 @@ def test_a_global_grant_by_glob_is_counted_against_the_profile(
     data["global_tools_policy"] = {
         "rules": [
             {
-                "match": {"names": ["report_technical_problem", "jq_query", "read_*"]},
+                "match": {
+                    "names": [
+                        "report_technical_problem",
+                        "jq_query",
+                        "finish_thread",
+                        "read_*",
+                    ]
+                },
                 "decision": "allow",
                 "priority": 50,
             }
