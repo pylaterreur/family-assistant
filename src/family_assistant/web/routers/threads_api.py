@@ -515,7 +515,8 @@ async def start_home_thread(
     conversation_id = f"web_conv_{uuid.uuid5(uuid.NAMESPACE_URL, f'{home}/{turn_id}')}"
 
     copied: list[int] = []
-    if await db_context.conversation_threads.get_thread(conversation_id) is None:
+    created = await db_context.conversation_threads.get_thread(conversation_id) is None
+    if created:
         if await db_context.message_history.get_user_row_by_turn_id(turn_id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -533,24 +534,31 @@ async def start_home_thread(
             conversation_id=conversation_id,
         )
 
-    turn = (
-        await start_chat_turn(
-            ChatTurnRequest(
-                turn_id=turn_id,
-                conversation_id=conversation_id,
-                prompt=prompt,
-                interface_type="web",
-                attachments=payload.attachments,
-                model_tier=payload.model_tier,
-            ),
-            request,
-            current_user,
-            default_processing_service=default_processing_service,
-            web_chat_interface=web_chat_interface,
+    turn: ChatTurnResponse | None = None
+    if prompt is not None:
+        turn_request = ChatTurnRequest(
+            turn_id=turn_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+            interface_type="web",
+            attachments=payload.attachments,
+            model_tier=payload.model_tier,
         )
-        if prompt is not None
-        else None
-    )
+        try:
+            turn = await start_chat_turn(
+                turn_request,
+                request,
+                current_user,
+                default_processing_service=default_processing_service,
+                web_chat_interface=web_chat_interface,
+            )
+        except HTTPException as refusal:
+            # The turn refuses its request -- an unusable attachment, say --
+            # before writing anything, so a thread made for it would be left
+            # empty, under an id the caller may never learn.
+            if created and refusal.status_code < status.HTTP_500_INTERNAL_SERVER_ERROR:
+                await db_context.conversation_threads.discard_thread(conversation_id)
+            raise
     if turn is None:
         await hub.publish_activity(
             conversation_id, user_id=user_id, reason="thread_started"
@@ -661,7 +669,20 @@ async def move_turn_to_thread(
     assert row["turn_id"] is not None
     # A row landing in either conversation mid-turn would sort into the middle
     # of that turn's own rows.
-    if hub.has_running_turn(home) or hub.has_running_turn(conversation_id):
+    # A thread whose starting run is still queued has a turn under way that
+    # the hub does not know of yet.
+    starting_run = (
+        await db_context.delegation_runs.get_by_delegation_id(thread.delegation_id)
+        if thread.delegation_id is not None
+        else None
+    )
+    if (
+        hub.has_running_turn(home)
+        or hub.has_running_turn(conversation_id)
+        or (
+            starting_run is not None and starting_run["status"] in {"queued", "running"}
+        )
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Wait for the reply in progress to finish, then move the turn.",

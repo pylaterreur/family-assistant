@@ -294,6 +294,25 @@ async def test_retrying_a_start_returns_the_thread_it_started(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("profiles")
+async def test_a_start_whose_first_turn_is_refused_leaves_no_thread(
+    api_test_client: AsyncClient,
+) -> None:
+    response = await api_test_client.post(
+        "/api/v1/chat/home/threads",
+        json={
+            "profile_id": CONTEXT_PROFILE,
+            "prompt": "See attached",
+            "attachments": [{"type": "image", "content": "", "mime_type": "image/png"}],
+        },
+    )
+
+    listed = (await api_test_client.get("/api/v1/chat/home/threads")).json()
+    assert response.status_code == 400
+    assert listed["threads"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
 async def test_a_new_thread_needs_an_opening_message(
     api_test_client: AsyncClient,
 ) -> None:
@@ -349,6 +368,8 @@ async def test_continuing_copies_the_anchor_and_the_turns_before_it(
     record = await db.conversation_threads.get_thread(thread["conversation_id"])
     assert record is not None
     assert record.anchor_message_id == anchor
+    listed = (await api_test_client.get("/api/v1/chat/home/threads")).json()
+    assert [entry["anchor_message_id"] for entry in listed["threads"]] == [anchor]
 
 
 @pytest.mark.asyncio
@@ -725,6 +746,59 @@ async def test_moving_into_a_thread_of_another_home_is_not_found(
     )
 
     assert response.status_code == 404
+    assert await db.message_history.get_row_by_internal_id(moved["reply"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
+async def test_moving_into_a_thread_whose_first_run_is_queued_is_refused(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    """The worker has not registered that turn anywhere the hub can see yet."""
+    db = Database(engine=db_engine)
+    home = await _home(api_test_client)
+    moved = await _home_turn(db, home, words="hold on", at=NOW)
+    thread = "web_conv_assistant_started"
+    await db.conversation_threads.create_thread(
+        conversation_id=thread,
+        home_conversation_id=home,
+        interface_type="web",
+        owner_user_id=CALLER,
+        profile_id=CONTEXT_PROFILE,
+        title="Queued",
+        title_taint=None,
+        anchor_message_id=None,
+        delegation_id="delegation_queued",
+        now=NOW,
+    )
+    await db.message_history.add_message(
+        UserMessage.from_trusted_user(content="Plan the trip."),
+        interface_type="web",
+        conversation_id=thread,
+        timestamp=NOW,
+        processing_profile_id=CONTEXT_PROFILE,
+        user_id=CALLER,
+        is_internal=True,
+    )
+    await db.delegation_runs.create_run({
+        "delegation_id": "delegation_queued",
+        "task_id": "task_queued",
+        "source_profile_id": "chat_api_test_profile",
+        "target_service_id": CONTEXT_PROFILE,
+        "interface_type": "web",
+        "conversation_id": thread,
+        "subconversation_id": None,
+        "run_kind": "thread",
+        "request_text": "Plan the trip.",
+        "content_parts_json": [{"type": "text", "text": "Plan the trip."}],
+    })
+
+    response = await api_test_client.post(
+        f"/api/v1/chat/home/threads/{thread}/moved-turns",
+        json={"message_id": moved["reply"]},
+    )
+
+    assert response.status_code == 409
     assert await db.message_history.get_row_by_internal_id(moved["reply"]) is not None
 
 

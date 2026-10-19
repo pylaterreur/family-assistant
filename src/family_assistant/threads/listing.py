@@ -158,6 +158,7 @@ class ThreadSummary:
     echo_message_id: int | None
     unread_count: int | None
     source_tool_call_id: str | None
+    anchor_message_id: int | None
     seed_request: str | None
     preview: str | None
     created_at: datetime
@@ -239,6 +240,7 @@ async def summarize_threads(
                     else None
                 ),
                 source_tool_call_id=thread.source_tool_call_id,
+                anchor_message_id=thread.anchor_message_id,
                 seed_request=(
                     seeds.get(thread.seed_message_id)
                     if thread.seed_message_id

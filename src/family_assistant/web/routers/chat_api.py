@@ -613,6 +613,14 @@ class ThreadSummaryResponse(BaseModel):
     source_tool_call_id: str | None = Field(
         default=None, description="The Home tool call that started the thread, if any"
     )
+    anchor_message_id: int | None = Field(
+        default=None,
+        description=(
+            "The Home message the user continued the thread from, for its "
+            "'Started from' quote. Display only: the message may since have "
+            "been moved out of Home"
+        ),
+    )
     seed_request: str | None = Field(
         default=None, description="The request the thread was started with"
     )
@@ -638,6 +646,7 @@ def thread_summary_response(
         echo_message_id=summary.echo_message_id,
         unread_count=summary.unread_count or 0,
         source_tool_call_id=summary.source_tool_call_id,
+        anchor_message_id=summary.anchor_message_id,
         seed_request=summary.seed_request,
         preview=summary.preview,
         created_at=summary.created_at,
