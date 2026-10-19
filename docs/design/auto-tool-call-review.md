@@ -541,12 +541,6 @@ instead of building one.
 
 ## Integration 4: script-execution review boundary
 
-> **Revision proposed.** [script-execution-review-boundary.md](script-execution-review-boundary.md)
-> proposes reviewing every program once, before it runs, with the program reviewer naming any tools
-> whose calls still need their own review. That replaces the model-result re-review, the
-> code-execution literal rule and the first-nested-review program decision described below, which
-> remain the shipped behaviour until it lands.
-
 The script boundary in [script-execution-review-boundary.md](script-execution-review-boundary.md)
 extends the review input with the resolved program: complete executable source, effective inputs,
 enabled capabilities, and stored-definition provenance. It is carried in the `.script` and
@@ -572,29 +566,23 @@ verifies its binding against the loaded row; changed or missing dependencies req
 including on durable confirmation replay. Scheduled firings use the same recursive closure when
 combining definition provenance.
 
-The boundary ends wherever executable content the reviewed source does not spell out begins. Saving
-a script or automation, persisting callback code, or creating another executable definition retains
-an independent definition gate. Unbound nested scripts, delegated agents, callbacks and future
-automation runs keep their own enforcement and policy-required review before their later effects,
-and a code-execution call inherits only when every string argument is a complete literal of the
-reviewed source. Those independent reviews receive the enclosing program and parent decision as
-context, but cannot inherit its verdict or its provenance disposition. What they return, like
-`llm()` or `llm_json()` output, is data: the approved program's continuation keeps its approval,
-except that arbitrary external messages, attacker-addressable egress and brokered credential
-requests made after a model result are reviewed again, because a model can turn what it read into a
-destination. A result from any tool not tagged `script_deterministic` counts as a model result.
+A program is reviewed once, before it runs, whenever it can reach a gated action: on submission, and
+when an unresolved stored definition fires. A firing whose definition resolves runs as an approved
+program, its creation gate having been its review. The program reviewer may answer `allow_watched`
+with a list of tools; each call to a watched tool is then reviewed on its real arguments at both
+chokepoints, with the program and its decision as context, and its verdict decides that call only.
 
-A program with no review of its own, such as a scheduled firing, is decided by the first blocking
-review one of its operations needs. `program_approval_requested` tells the reviewer that its verdict
-decides the innermost enclosing program as well as the call; a model allow approves both, and any
-other outcome is recorded so the question is not asked again.
+The approval covers the program's deterministic calls, whatever untrusted data or model output they
+process: what `llm()`, `llm_json()` or `classify()` return is data the program review already
+judged. Other executable content keeps its own gate. Saving a script or automation, persisting
+callback code, or creating another executable definition retains an independent definition gate.
+Unbound nested scripts, delegated agents, tools not declared `script_deterministic`, callbacks and
+future automation runs keep their own enforcement and policy-required review. Those independent
+reviews receive the enclosing program as context, but cannot inherit its verdict or its provenance
+disposition.
 
-This enrichment also matters when there is no outer review to inherit. A script admitted by static
-policy can read untrusted data before its first nested egress needs review. That nested review must
-receive the same resolved program and originating request; otherwise it would judge a legitimate
-intermediate effect or an unsafe data-dependent destination without the context that explains it.
-The corresponding evaluation corpus includes both shapes: a requested multi-step planning script and
-a script that derives an authenticated external destination from runtime data.
+The evaluation corpus for program reviews is described in the appendix of
+[script-execution-review-boundary.md](script-execution-review-boundary.md).
 
 ## Configuration
 

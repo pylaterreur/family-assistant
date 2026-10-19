@@ -1,13 +1,10 @@
 # Script execution as the automatic review boundary
 
-Status: the program boundary (resolution, binding, scoped approval) is implemented. **Who reviews
-what inside a program** ("Review model output once" through "Work plan") is proposed, 2026-10-16. It
-replaces the shipped model-result rule, code-execution literal rule and first-nested-review program
-decision, which remain the behaviour until milestone 4 lands. Milestones 2 and 3 are implemented:
-the production program reviewer returns `allow_watched`, each call to a watched tool is reviewed on
-its own real arguments, a submitted program that can reach a gated action is reviewed before it
-runs, and a firing runs as an approved program when its definition resolves and is reviewed once at
-start when it does not. The evaluation behind the proposal is in the appendix.
+Status: implemented through milestone 4, 2026-10-19. Each program is reviewed once, before it runs,
+and the program reviewer decides which of its calls still need their own review; the model-result
+rule, the code-execution literal rule and the first-nested-review program decision are retired.
+Milestone 5's re-measure of the projected prompt rate is outstanding. The evaluation behind the
+design is in the appendix.
 
 ## Goal
 
@@ -53,7 +50,7 @@ cancellation. Taint collection and result provenance stay live throughout. Persi
 keep their own provenance, so a parent approval never stamps runtime-derived executable content as
 reviewed.
 
-## Review model output once (proposed)
+## Review model output once (implemented)
 
 **`execute_script` submissions** are reviewed when the program can reach a gated action. That is
 judged on capability, not on the turn's taint at submission, because a script usually reads its
@@ -71,7 +68,7 @@ today.
 The lazy rule, under which the first nested review a program needs decides the whole program, is
 retired. A program that needs a decision gets it before it runs.
 
-## The program reviewer decides inner review (proposed)
+## The program reviewer decides inner review (implemented)
 
 A program review has four outcomes:
 
@@ -210,10 +207,6 @@ design unless the program reviewer chose to watch it.
 - **Observe forecasts watched calls off the critical path.** In observe mode each watched call's
   review runs detached and records what enforce would have done, as any review that decides no
   program does.
-- **Until milestone 4, the program prompt says more than the runtime does.** It tells the reviewer
-  that a program's calls run without further review, while the old rules still re-review some of
-  them. That errs towards stricter verdicts, and the policy text beside it still describes the old
-  rules accurately until milestone 4 updates both together.
 
 ## Work plan
 
