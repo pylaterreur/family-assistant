@@ -868,39 +868,19 @@ def _unreviewed_program() -> ScriptExecutionScope:
 
 
 @pytest.mark.asyncio
-async def test_an_enforced_admission_review_decides_an_unreviewed_program(
-    db_engine: AsyncEngine,
+@pytest.mark.parametrize("mode", [ENFORCE, OBSERVE])
+async def test_an_admission_review_inside_a_program_decides_only_the_admission(
+    db_engine: AsyncEngine, mode: TaintPolicyMode
 ) -> None:
+    # A program is decided by its own review before it runs, never by a
+    # review one of its operations needs.
     db = Database(db_engine)
     reviewer = _Reviewer(ToolCallReviewVerdict.ALLOW)
-    context = _context(db, tracker_at(EXTERNAL), _gate(ENFORCE, reviewer))
+    context = _context(db, tracker_at(EXTERNAL), _gate(mode, reviewer))
     program = _unreviewed_program()
     context.script_execution = program
 
     await _save(context)
 
-    assert reviewer.inputs[0].program_approval_requested
-    assert program.approved
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("verdict", "approved"),
-    [(ToolCallReviewVerdict.ALLOW, True), (ToolCallReviewVerdict.DENY, False)],
-)
-async def test_an_observed_admission_review_decides_an_unreviewed_program(
-    db_engine: AsyncEngine,
-    verdict: ToolCallReviewVerdict,
-    approved: bool,
-) -> None:
-    db = Database(db_engine)
-    reviewer = _Reviewer(verdict)
-    context = _context(db, tracker_at(EXTERNAL), _gate(OBSERVE, reviewer))
-    program = _unreviewed_program()
-    context.script_execution = program
-
-    await _save(context)
-
-    assert reviewer.inputs[0].program_approval_requested
-    assert program.approved is approved
-    assert not program.awaiting_program_review
+    assert len(reviewer.inputs) == 1
+    assert not program.approved

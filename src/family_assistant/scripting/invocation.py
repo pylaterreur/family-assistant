@@ -143,12 +143,6 @@ class ScriptExecutionScope:
     invocation: PreparedScriptInvocation
     parent: ScriptExecutionScope | None = None
     active: bool = True
-    model_output_received: bool = False
-
-    def __post_init__(self) -> None:
-        # A child can be handed its caller's model output as a parameter.
-        if self.parent is not None and self.parent.model_output_received:
-            self.model_output_received = True
 
     @property
     def approved(self) -> bool:
@@ -193,80 +187,6 @@ class ScriptExecutionScope:
         """The program this one is statically bound into, and so part of."""
         return self.parent if self.invocation.bound_child else None
 
-    def note_model_output(self) -> None:
-        """Record that a model or delegated agent has handed this run a result.
-
-        A model can turn instructions it read into a well-formed destination,
-        which raw untrusted data rarely is, so a destination chosen after this
-        point is reviewed rather than inherited. Enclosing programs receive the
-        result too, through whatever the child returns.
-        """
-        self.model_output_received = True
-        if self.parent is not None:
-            self.parent.note_model_output()
-
-    @property
-    def awaiting_program_review(self) -> bool:
-        """Whether no review has yet decided this running program.
-
-        A program admitted without a review of its own -- a scheduled firing,
-        or an ``execute_script`` call no gate asked about -- is decided by the
-        first model review one of its operations needs, once.
-        """
-        if not self.active or self.approved:
-            return False
-        if self._bound_parent is not None:
-            return self._bound_parent.awaiting_program_review
-        return self.invocation.review.decision == "unreviewed"
-
-    def program_to_decide(self) -> ScriptExecutionScope:
-        """The outermost program this one is statically bound into.
-
-        A bound child is part of the program that names it, so a review that
-        decides the child decides that whole program.
-        """
-        scope = self
-        while scope._bound_parent is not None:
-            scope = scope._bound_parent
-        return scope
-
-    def approve_program(self, review_id: str | None) -> None:
-        """Record a model allow of the complete program as its approval."""
-        self.invocation.approved = True
-        self.invocation.forecast_approval = False
-        self.invocation.review = replace(
-            self.invocation.review, decision="allow", review_id=review_id
-        )
-
-    def record_program_decision(self, decision: str, review_id: str | None) -> None:
-        """Record a review that decided the program without approving it."""
-        self.invocation.review = replace(
-            self.invocation.review, decision=decision, review_id=review_id
-        )
-
-    def program_string_literals(self) -> frozenset[str]:
-        """Complete string literals written in the reviewed program's source.
-
-        Covers the whole bound program -- the outermost program this one is
-        bound into, and every hash-bound stored script in its closure -- so a
-        literal a caller passes into a bound child still counts. Parts of
-        f-strings are not complete literals, and inputs are values rather than
-        code, so neither counts.
-        """
-        review = self.program_to_decide().invocation.review
-        sources = (
-            review.source,
-            *(
-                str(binding.get("script_code", ""))
-                for binding in review.script_bindings
-            ),
-        )
-        return frozenset(
-            literal
-            for source in sources
-            for literal in _complete_string_literals(source)
-        )
-
     def review_contexts(self) -> tuple[ScriptReviewContext, ...]:
         """Keep enclosing source available even after its approval has ended."""
         parents = self.parent.review_contexts() if self.parent is not None else ()
@@ -293,27 +213,6 @@ def _referenced_names(sources: Iterable[str]) -> frozenset[str] | None:
             return None
         names.update(node.id for node in ast.walk(tree) if isinstance(node, ast.Name))
     return frozenset(names)
-
-
-def _complete_string_literals(source: str) -> set[str]:
-    """String constants that stand alone as an expression, never f-string parts."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return set()
-    fragments = {
-        id(child)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.JoinedStr)
-        for child in ast.walk(node)
-    }
-    return {
-        node.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and id(node) not in fragments
-    }
 
 
 async def _resolve_bound_closure(

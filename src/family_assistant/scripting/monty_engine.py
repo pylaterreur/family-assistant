@@ -959,17 +959,9 @@ class MontyEngine:
         )
         from .apis.llm import llm_call_async, llm_call_json_async  # noqa: PLC0415
 
-        def note_model_output() -> None:
-            if (
-                execution_context is not None
-                and execution_context.script_execution is not None
-            ):
-                execution_context.script_execution.note_model_output()
-
         async def llm(
             prompt: str, system: str | None = None, model: str | None = None
         ) -> str:
-            note_model_output()
             return await llm_call_async(prompt, system=system, model=model)
 
         async def llm_json(
@@ -978,7 +970,6 @@ class MontyEngine:
             system: str | None = None,
             model: str | None = None,
         ) -> object:
-            note_model_output()
             return await llm_call_json_async(
                 prompt, schema=schema, system=system, model=model
             )
@@ -996,7 +987,6 @@ class MontyEngine:
             question: str,
             options: list[str] | dict[str, str | None],
         ) -> dict[str, object]:
-            note_model_output()
             return await classify_async(jev_client(), state, question, options)
 
         async def classify_yes_no(
@@ -1005,7 +995,6 @@ class MontyEngine:
             yes: str | None = None,
             no: str | None = None,
         ) -> float:
-            note_model_output()
             return await classify_yes_no_async(
                 jev_client(), state, question, yes=yes, no=no
             )

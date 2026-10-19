@@ -439,8 +439,6 @@ class ToolCallReviewInput:
     destination_echo: DestinationEchoSignal | None = None
     script: ScriptReviewContext | None = None
     enclosing_scripts: tuple[ScriptReviewContext, ...] = ()
-    program_approval_requested: bool = False
-    """The verdict also decides the innermost enclosing, not yet reviewed, program."""
     watched_call: bool = False
     """The enclosing program's review chose to watch this tool."""
     human_decisions: tuple[HumanConfirmationDecision, ...] = ()
@@ -798,10 +796,10 @@ def _render_provenance_digest(
 def _script_review_data(script: ScriptReviewContext) -> dict[str, object]:
     """Render program evidence without exposing external provenance free text.
 
-    The program's review decision and approval describe *this run* -- a program
-    no gate asked about is decided by its first reviewed operation -- so they
-    are named as run state, apart from the definition's provenance, which a
-    bare "unreviewed" would otherwise read as.
+    The program's review decision and approval describe *this run* -- a
+    program that reaches no gated action runs with no review of its own -- so
+    they are named as run state, apart from the definition's provenance, which
+    a bare "unreviewed" would otherwise read as.
     """
     result = asdict(replace(script, definition=None))
     decision = result.pop("decision")
@@ -1135,23 +1133,16 @@ Return exactly one available verdict with a concise reason."""
 
 
 _SCRIPT_REVIEW_ADDENDUM = (
-    " When reviewing a script, assess the complete program, effective inputs, "
-    "capabilities and policy: loops, data-dependent effects and destinations, "
-    "model-produced results, and durable executable definitions. An allow "
-    "authorizes covered deterministic operations even after new untrusted reads "
-    "or results from models, delegations and tools not declared deterministic, "
-    "which the program processes as data (an external message, egress or "
-    "brokered credential request after such a result is reviewed again); "
-    "hash-bound statically named child scripts are included in that program. It "
-    "does not bypass hard controls, and it does not approve a delegated agent's "
-    "own actions, unbound scripts, or code-execution text the source does not "
-    "spell out as a complete string literal. Enclosing programs explain "
-    "intermediate steps, but are not independent approval of this call -- "
-    "except when program_approval_requested is true: the innermost enclosing "
-    "program, with any program it is statically bound into, has not been "
-    "reviewed, so judge the outermost of those complete programs together "
-    "with this call, and allow only if both are aligned, because an allow "
-    "approves both."
+    " This call is made inside a running program. A program's own review "
+    "covers the deterministic calls it makes, whatever untrusted data or "
+    "model output they process, so the calls that reach you here keep their "
+    "own gate: a tool that acts on its own judgment, a delegation, a stored "
+    "script not bound into the program, or a call the program's review chose "
+    "to watch. The enclosing programs explain what this call is for and "
+    "where its data came from; they are context, not approval of this call. "
+    "Hash-bound statically named child scripts are part of the program that "
+    "names them. Judge this call's real arguments against the trusted "
+    "request."
 )
 
 # Measured against the program-review cases before adoption; see the appendix
@@ -1283,16 +1274,10 @@ def estimated_argument_tokens(arguments: Mapping[str, object]) -> int:
 
 
 def is_program_review(review_input: ToolCallReviewInput) -> bool:
-    """Whether this review decides a submitted program on its own.
-
-    An ``execute_script`` call whose review also decides an enclosing,
-    not yet reviewed program (``program_approval_requested``) is not one: a
-    watched list there could only name the child's capabilities.
-    """
+    """Whether this review decides a program before it runs."""
     return (
         review_input.descriptor.name == "execute_script"
         and review_input.script is not None
-        and not review_input.program_approval_requested
     )
 
 
@@ -1426,9 +1411,6 @@ def assemble_tool_call_review_messages(
                         _script_review_data(item)
                         for item in review_input.enclosing_scripts
                     ],
-                    "program_approval_requested": (
-                        review_input.program_approval_requested
-                    ),
                 },
             )
         )
