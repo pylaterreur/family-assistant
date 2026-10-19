@@ -327,6 +327,9 @@ struct HomeRootView: View {
         .onChange(of: route) { _, newRoute in
             apply(newRoute)
         }
+        .onChange(of: showsSwitcher) { _, shown in
+            viewModel.setCoveredBySheet(shown)
+        }
         .onChange(of: notificationManager.pendingPushHint) { _, _ in
             consumePendingPushHint()
         }

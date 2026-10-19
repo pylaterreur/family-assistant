@@ -511,6 +511,22 @@ final class HomeThreadsTests: XCTestCase {
         try await waitUntil { reads.values.count == 1 }
     }
 
+    func testHomeIsNotMarkedReadUnderTheChatSwitcher() async throws {
+        let reads = respondWithReadableConversation(id: "home", kind: "home")
+        let model = makeViewModel(conversationID: "home", role: .home)
+        model.markReadDelay = .milliseconds(20)
+        await model.selectConversation("home")
+
+        model.setCoveredBySheet(true)
+        model.setOnScreen(true)
+        model.setScrolledToLatest(true)
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertTrue(reads.values.isEmpty, "Home behind the switcher sheet is not being read.")
+
+        model.setCoveredBySheet(false)
+        try await waitUntil { reads.values.count == 1 }
+    }
+
     func testOrdinaryConversationIsNeverMarkedRead() async throws {
         let reads = respondWithReadableConversation(id: "c1", kind: "conversation")
         let model = makeViewModel(conversationID: "c1", role: .pushed)

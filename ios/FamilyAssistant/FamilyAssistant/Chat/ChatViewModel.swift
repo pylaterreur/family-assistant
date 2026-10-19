@@ -173,6 +173,7 @@ final class ChatViewModel {
     @ObservationIgnored private var isDrainingRoutedPrompts = false
     /// Read-marker inputs: see `ReadMarkerGate`.
     @ObservationIgnored private var isOnScreen = false
+    @ObservationIgnored private var isCoveredBySheet = false
     @ObservationIgnored private var isSceneActive = true
     @ObservationIgnored private var isScrolledToLatest = false
     @ObservationIgnored private var markedReadThrough: Int?
@@ -4138,6 +4139,13 @@ final class ChatViewModel {
         readPositionMayHaveChanged()
     }
 
+    /// Whether a sheet over this conversation's view (the chat switcher)
+    /// hides it. A sheet does not take the view off screen as a push does.
+    func setCoveredBySheet(_ covered: Bool) {
+        isCoveredBySheet = covered
+        readPositionMayHaveChanged()
+    }
+
     /// Whether the reader is at the bottom of the transcript.
     func setScrolledToLatest(_ atLatest: Bool) {
         isScrolledToLatest = atLatest
@@ -4147,7 +4155,7 @@ final class ChatViewModel {
     private var readMarkerInputs: ReadMarkerGate.Inputs {
         ReadMarkerGate.Inputs(
             kind: conversationKind,
-            isOnScreen: isOnScreen,
+            isOnScreen: isOnScreen && !isCoveredBySheet,
             isSceneActive: isSceneActive,
             isAtLatest: isScrolledToLatest,
             latestPersistedMessageID: nil,
