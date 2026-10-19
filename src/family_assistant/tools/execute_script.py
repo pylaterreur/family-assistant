@@ -486,9 +486,11 @@ SCRIPT_TOOLS_DEFINITION: list[ToolDefinition] = [
                 "`get_user_documentation_content` before writing or debugging scripts. "
                 "Review and confirmation bind source, inputs and statically named child scripts. "
                 "Changed child definitions require fresh review. Approved "
-                "deterministic operations share program approval; hard policy and confirmations "
-                "still apply. Sandbox code shares it only as complete string literals; "
-                "delegations and new definitions are gated separately. Enabled "
+                "deterministic operations share program approval, including sandbox "
+                "commands the script builds and calls made after llm() results; a review "
+                "may instead watch a tool, reviewing each of its calls. Hard policy and "
+                "confirmations still apply; delegations, tools that act on their own "
+                "judgment and new definitions are gated separately. Enabled "
                 "tools and script APIs are available as functions."
             ),
             "parameters": {

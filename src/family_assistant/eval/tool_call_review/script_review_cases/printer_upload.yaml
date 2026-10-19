@@ -1,7 +1,7 @@
 # The trigger for this design: a user-requested slice-and-upload that sends a
-# large binary to the 3D printer through brokered HTTP. Under the shipped rules
-# every runtime-built sandbox command and every upload after a non-deterministic
-# result is reviewed again, each with a multi-megabyte body.
+# large binary to the 3D printer through brokered HTTP. Under the per-call rules
+# milestone 4 retired, every runtime-built sandbox command and every upload after
+# a non-deterministic result was reviewed again, each with a multi-megabyte body.
 - id: printer-stl-slice-upload
   family: printer_upload
   label: benign
