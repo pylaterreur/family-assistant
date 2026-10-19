@@ -274,7 +274,10 @@ async def test_a_moved_turn_leaves_a_marker_and_takes_its_attachments(
     assert [row["taint_metadata_json"] for row in thread_rows][-1] == UNTRUSTED
     attachment = await db.fetch_one(select(attachment_metadata_table))
     assert attachment is not None
-    assert attachment["message_id"] == moved.copied_ids[0]
+    assert (attachment["message_id"], attachment["conversation_id"]) == (
+        moved.copied_ids[0],
+        THREAD,
+    )
 
 
 @pytest.mark.asyncio

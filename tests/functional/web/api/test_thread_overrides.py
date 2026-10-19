@@ -402,6 +402,32 @@ async def test_a_continued_thread_answers_from_the_copied_turns(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("profiles")
+async def test_continuing_from_an_old_exchange_still_shows_it_to_the_thread(
+    api_test_client: AsyncClient, db_engine: AsyncEngine, profiles: Profiles
+) -> None:
+    """Older than the profile's history age, the exchange is still what was chosen."""
+    db = Database(engine=db_engine)
+    home = await _home(api_test_client)
+    anchor = await _home_turn(
+        db, home, words="last week's quote", at=NOW - timedelta(days=2)
+    )
+
+    body = await _start(
+        api_test_client,
+        profile_id=CONTEXT_PROFILE,
+        anchor_message_id=anchor["reply"],
+        prompt="Is it still valid?",
+    )
+
+    await api_test_client.get(
+        f"/api/v1/chat/conversations/{body['thread']['conversation_id']}/stream",
+        params={"from_seq": 0},
+    )
+    assert profiles.saw(CONTEXT_PROFILE, "reply to last week's quote")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
 async def test_continuing_with_context_is_refused_into_a_sealed_profile(
     api_test_client: AsyncClient, db_engine: AsyncEngine
 ) -> None:

@@ -344,7 +344,9 @@ and each path is governed:
 
 - **"Continue in a thread" carries a fixed window.** It copies the anchor's turn and at most four
   Home turns before it. That covers the exchange being continued and what led up to it; anything
-  older stays in Home, and the user can say more in the opening message.
+  older stays in Home, and the user can say more in the opening message. The copies are stamped with
+  the time they were made, so an old exchange the user chose doesn't age out of the thread's window
+  before its first turn reads it.
 
 - **Continuing into a profile without household context carries the request only.** With context it
   is refused, and the client offers "continue without context" there instead: a thread that starts

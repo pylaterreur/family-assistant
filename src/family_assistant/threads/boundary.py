@@ -135,6 +135,7 @@ async def copy_across_boundary(
                 turn_ids=payload.turn_ids,
                 destination_conversation_id=destination.conversation_id,
                 destination_profile_id=destination.profile.id,
+                timestamp=now,
             )
 
 

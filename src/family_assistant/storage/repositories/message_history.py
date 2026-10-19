@@ -2115,6 +2115,7 @@ class MessageHistoryRepository(BaseRepository):
         turn_ids: Sequence[str],
         destination_conversation_id: str,
         destination_profile_id: str,
+        timestamp: datetime,
     ) -> list[int]:
         """Copy whole top-level turns into another conversation, verbatim.
 
@@ -2122,8 +2123,12 @@ class MessageHistoryRepository(BaseRepository):
         exactly. Only where it lives changes: the destination conversation, at
         its top level, stamped with the destination's profile (history windows
         are scoped by profile, so an unstamped row would be invisible there),
-        under a fresh turn id per source turn. Interface message ids and thread
-        roots point into the source conversation, so they are not carried.
+        under a fresh turn id per source turn, at ``timestamp``. A copy is new
+        to its destination, so it ages from when it was copied: an exchange
+        older than the destination's history age would otherwise drop out of
+        its window before the destination's first turn reads it. Rows keep
+        their order by id. Interface message ids and thread roots point into
+        the source conversation, so they are not carried.
 
         Callers go through ``family_assistant.threads.boundary``, which decides
         whether the copy is allowed at all.
@@ -2143,7 +2148,7 @@ class MessageHistoryRepository(BaseRepository):
                     conversation_id=destination_conversation_id,
                     processing_profile_id=destination_profile_id,
                     turn_id=new_turn_ids[row["turn_id"]],
-                    timestamp=row["timestamp"],
+                    timestamp=timestamp,
                 )
                 for row in rows
             ]
@@ -2199,7 +2204,10 @@ class MessageHistoryRepository(BaseRepository):
                 await txn.execute(
                     update(attachment_metadata_table)
                     .where(attachment_metadata_table.c.message_id == row["internal_id"])
-                    .values(message_id=copy_id)
+                    .values(
+                        message_id=copy_id,
+                        conversation_id=destination_conversation_id,
+                    )
                 )
                 copied.append(copy_id)
             await txn.execute(
