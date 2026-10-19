@@ -29,10 +29,11 @@ from family_assistant.security.taint import (
     merge_taint_state_into_tracker,
 )
 from family_assistant.storage.tasks import TaskPriority
-from family_assistant.threads.boundary import (
-    AssistantRequest,
-    BoundaryDestination,
-    copy_across_boundary,
+from family_assistant.threads.boundary import AssistantRequest
+from family_assistant.threads.creation import (
+    NewThread,
+    create_thread,
+    new_thread_conversation_id,
 )
 from family_assistant.threads.home import find_home, home_owner_id
 from family_assistant.threads.listing import summarize_threads
@@ -177,12 +178,6 @@ def _error(text: str) -> ToolResult:
 def _app_config(exec_context: ToolExecutionContext) -> AppConfig | None:
     service = exec_context.processing_service
     return getattr(service, "app_config", None) if service is not None else None
-
-
-def _new_thread_conversation_id(interface_type: str) -> str:
-    if interface_type == "web":
-        return f"web_conv_{uuid.uuid4()}"
-    return f"thread_{uuid.uuid4().hex}"
 
 
 async def thread_start_refusal(
@@ -543,7 +538,7 @@ async def start_thread_tool(
     if attachment_error is not None:
         return attachment_error
 
-    thread_conversation_id = _new_thread_conversation_id(interface_type)
+    thread_conversation_id = new_thread_conversation_id(interface_type)
     model_selection = await target_service.resolve_model_selection_for_run(
         model_selection,
         db_context=exec_context.db_context,
@@ -575,37 +570,27 @@ async def start_thread_tool(
     ]
 
     async def _create(txn: DatabaseTransaction) -> None:
-        await txn.conversation_threads.create_thread(
-            conversation_id=thread_conversation_id,
-            home_conversation_id=home_conversation_id,
-            interface_type=interface_type,
-            owner_user_id=home_owner_id(app_config, owner),
-            profile_id=target_config.id,
-            source_tool_call_id=exec_context.tool_call_id,
-            title=title,
-            title_taint=taint,
-            anchor_message_id=None,
-            delegation_id=delegation_id,
-            now=now,
-        )
-        [seed_message_id] = await copy_across_boundary(
+        await create_thread(
             txn,
-            destination=BoundaryDestination(
-                interface_type=interface_type,
+            thread=NewThread(
                 conversation_id=thread_conversation_id,
-                profile=target_config,
+                home_conversation_id=home_conversation_id,
+                interface_type=interface_type,
+                owner_user_id=home_owner_id(app_config, owner),
                 user_id=owner,
+                profile=target_config,
+                title=title,
+                title_taint=taint,
+                source_tool_call_id=exec_context.tool_call_id,
+                delegation_id=delegation_id,
             ),
-            payload=AssistantRequest(
+            seed=AssistantRequest(
                 text=request,
                 taint=taint,
                 attachments=seed_attachments,
             ),
             turn_id=turn_id,
             now=now,
-        )
-        await txn.conversation_threads.set_seed_message(
-            thread_conversation_id, seed_message_id, now
         )
         await txn.delegation_runs.create_run({
             "delegation_id": delegation_id,

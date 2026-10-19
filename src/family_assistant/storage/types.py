@@ -261,6 +261,8 @@ class MessageHistoryRow(TypedDict):
     is_internal: bool
     # The thread a Home row echoes, when it is a finished thread's echo.
     echoed_from_conversation_id: str | None
+    # The thread a Home row's turn was moved into, when it marks a move.
+    moved_to_conversation_id: str | None
 
 
 class ConversationSummaryRow(TypedDict):

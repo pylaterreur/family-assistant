@@ -50,6 +50,7 @@ from family_assistant.security.taint import (
     merge_history_taint,
     strip_legacy_labeled_echoes,
 )
+from family_assistant.storage.base import attachment_metadata_table
 from family_assistant.storage.conversation_summaries import (
     conversation_summaries_table,
 )
@@ -424,6 +425,14 @@ class LatestVisibleMessage:
     content: str
     timestamp: datetime
     turn_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MovedTurnRows:
+    """Where a moved turn's rows went: its copies, and the marker left behind."""
+
+    copied_ids: tuple[int, ...]
+    marker_id: int
 
 
 class MessageHistoryRepository(BaseRepository):
@@ -2121,48 +2130,208 @@ class MessageHistoryRepository(BaseRepository):
         """
         if not turn_ids:
             return []
-        rows = await self._db.fetch_all(
-            select(message_history_table)
-            .where(
-                message_history_table.c.interface_type == source_interface_type,
-                message_history_table.c.conversation_id == source_conversation_id,
-                message_history_table.c.subconversation_id.is_(None),
-                message_history_table.c.turn_id.in_(list(turn_ids)),
-            )
-            .order_by(message_history_table.c.internal_id.asc())
+        rows = await self._top_level_turn_rows(
+            source_interface_type, source_conversation_id, turn_ids
         )
         new_turn_ids = {turn_id: str(uuid.uuid4()) for turn_id in turn_ids}
 
         async def _copy(txn: DatabaseTransaction) -> list[int]:
-            copied: list[int] = []
-            for row in rows:
-                values = {
-                    column.name: row[column.name]
-                    for column in message_history_table.columns
-                    if column.name != "internal_id"
-                }
-                new_turn_id = new_turn_ids[row["turn_id"]]
-                values.update(
+            return [
+                await self._insert_copy(
+                    txn,
+                    row,
                     conversation_id=destination_conversation_id,
                     processing_profile_id=destination_profile_id,
-                    subconversation_id=None,
-                    turn_id=new_turn_id,
-                    interface_message_id=None,
-                    thread_root_id=None,
+                    turn_id=new_turn_ids[row["turn_id"]],
+                    timestamp=row["timestamp"],
                 )
-                result = await txn.execute(
-                    insert(message_history_table)
-                    .values(**values)
-                    .returning(message_history_table.c.internal_id)
-                )
-                internal_id = cast("int", result.scalar_one())
-                await self._enqueue_message_history_indexing_task(
-                    internal_id=internal_id, turn_id=new_turn_id, db=txn
-                )
-                copied.append(internal_id)
-            return copied
+                for row in rows
+            ]
 
         return await self._db.atomic(_copy)
+
+    async def move_turn(
+        self,
+        *,
+        source_interface_type: str,
+        source_conversation_id: str,
+        turn_id: str,
+        destination_conversation_id: str,
+        destination_profile_id: str,
+        marker_content: str,
+        now: datetime,
+    ) -> MovedTurnRows:
+        """Move one whole top-level turn into another conversation.
+
+        The turn's rows are copied as :meth:`copy_turns` copies them, keeping
+        their turn id, and stamped ``now``: a moved turn is the newest thing in
+        its destination, and fresh ids keep it above any compaction point the
+        destination has already passed. The originals are then deleted, with
+        the attachments recorded against them following their copies, and a
+        marker row records in the source where the turn went. Atomic.
+
+        Callers go through ``family_assistant.threads.boundary``.
+
+        Raises:
+            LookupError: the source conversation has no top-level rows of
+                ``turn_id``.
+        """
+        rows = await self._top_level_turn_rows(
+            source_interface_type, source_conversation_id, [turn_id]
+        )
+        if not rows:
+            raise LookupError(
+                f"Turn {turn_id!r} has no rows in {source_conversation_id!r}."
+            )
+        marker_taint = TurnTaintState.empty().to_metadata()
+
+        async def _move(txn: DatabaseTransaction) -> MovedTurnRows:
+            copied: list[int] = []
+            for row in rows:
+                copy_id = await self._insert_copy(
+                    txn,
+                    row,
+                    conversation_id=destination_conversation_id,
+                    processing_profile_id=destination_profile_id,
+                    turn_id=turn_id,
+                    timestamp=now,
+                )
+                await txn.execute(
+                    update(attachment_metadata_table)
+                    .where(attachment_metadata_table.c.message_id == row["internal_id"])
+                    .values(message_id=copy_id)
+                )
+                copied.append(copy_id)
+            await txn.execute(
+                message_history_table.delete().where(
+                    message_history_table.c.internal_id.in_([
+                        row["internal_id"] for row in rows
+                    ])
+                )
+            )
+            marker_turn_id = str(uuid.uuid4())
+            result = await txn.execute(
+                insert(message_history_table)
+                .values(
+                    interface_type=source_interface_type,
+                    conversation_id=source_conversation_id,
+                    turn_id=marker_turn_id,
+                    timestamp=now,
+                    role="assistant",
+                    content=marker_content,
+                    # On the profile the turn ran on, so the source's history
+                    # window shows the turn's absence where the turn was read.
+                    processing_profile_id=rows[0]["processing_profile_id"],
+                    subconversation_id=None,
+                    taint_metadata_json=marker_taint,
+                    taint_metadata_version=TAINT_METADATA_VERSION,
+                    is_internal=False,
+                    moved_to_conversation_id=destination_conversation_id,
+                )
+                .returning(message_history_table.c.internal_id)
+            )
+            return MovedTurnRows(
+                copied_ids=tuple(copied),
+                marker_id=cast("int", result.scalar_one()),
+            )
+
+        return await self._db.atomic(_move)
+
+    async def turn_ids_leading_to(
+        self,
+        *,
+        interface_type: str,
+        conversation_id: str,
+        turn_id: str,
+        limit: int,
+    ) -> list[str]:
+        """``turn_id`` and the top-level turns before it, at most ``limit``, oldest first.
+
+        Turns are ordered by when they started. Rows without a turn id and the
+        markers of moved turns are not turns that can be carried anywhere, so
+        they are skipped.
+        """
+        scope = (
+            message_history_table.c.interface_type == interface_type,
+            message_history_table.c.conversation_id == conversation_id,
+            message_history_table.c.subconversation_id.is_(None),
+            message_history_table.c.turn_id.isnot(None),
+            message_history_table.c.moved_to_conversation_id.is_(None),
+        )
+        started = func.min(message_history_table.c.timestamp).label("started")
+        anchor = await self._db.fetch_one(
+            select(started).where(*scope, message_history_table.c.turn_id == turn_id)
+        )
+        if anchor is None or anchor["started"] is None:
+            return []
+        rows = await self._db.fetch_all(
+            select(message_history_table.c.turn_id, started)
+            .where(*scope)
+            .group_by(message_history_table.c.turn_id)
+            .having(started <= anchor["started"])
+            .order_by(started.desc())
+            .limit(limit)
+        )
+        return [row["turn_id"] for row in reversed(rows)]
+
+    async def _top_level_turn_rows(
+        self,
+        interface_type: str,
+        conversation_id: str,
+        turn_ids: Sequence[str],
+    ) -> list[Mapping[str, Any]]:
+        return list(
+            await self._db.fetch_all(
+                select(message_history_table)
+                .where(
+                    message_history_table.c.interface_type == interface_type,
+                    message_history_table.c.conversation_id == conversation_id,
+                    message_history_table.c.subconversation_id.is_(None),
+                    message_history_table.c.turn_id.in_(list(turn_ids)),
+                )
+                .order_by(message_history_table.c.internal_id.asc())
+            )
+        )
+
+    async def _insert_copy(
+        self,
+        txn: DatabaseTransaction,
+        row: Mapping[str, Any],
+        *,
+        conversation_id: str,
+        processing_profile_id: str,
+        turn_id: str,
+        timestamp: datetime,
+    ) -> int:
+        """Insert ``row`` verbatim at the top level of another conversation.
+
+        Interface message ids and thread roots point into the source
+        conversation, so they are not carried.
+        """
+        values = {
+            column.name: row[column.name]
+            for column in message_history_table.columns
+            if column.name != "internal_id"
+        }
+        values.update(
+            conversation_id=conversation_id,
+            processing_profile_id=processing_profile_id,
+            subconversation_id=None,
+            turn_id=turn_id,
+            timestamp=timestamp,
+            interface_message_id=None,
+            thread_root_id=None,
+        )
+        result = await txn.execute(
+            insert(message_history_table)
+            .values(**values)
+            .returning(message_history_table.c.internal_id)
+        )
+        internal_id = cast("int", result.scalar_one())
+        await self._enqueue_message_history_indexing_task(
+            internal_id=internal_id, turn_id=turn_id, db=txn
+        )
+        return internal_id
 
     async def copy_message_as_echo(
         self,

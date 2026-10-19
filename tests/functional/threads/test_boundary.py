@@ -18,6 +18,7 @@ from family_assistant.llm.messages import AssistantMessage, UserMessage
 from family_assistant.memory.due import select_due_conversations
 from family_assistant.memory.review_settings import MemoryReviewSettings
 from family_assistant.processing.types import ProcessingServiceConfig
+from family_assistant.storage.base import attachment_metadata_table
 from family_assistant.storage.database import Database
 from family_assistant.storage.message_history import message_history_table
 from family_assistant.threads.boundary import (
@@ -25,7 +26,9 @@ from family_assistant.threads.boundary import (
     BoundaryDestination,
     CopiedTurns,
     CrossBoundaryCopyRefusedError,
+    MovedTurn,
     copy_across_boundary,
+    move_turn_across_boundary,
 )
 
 if TYPE_CHECKING:
@@ -220,6 +223,81 @@ async def test_an_assistant_request_is_not_stored_as_the_users_words(
         (row["role"], row["is_internal"], row["user_id"], row["taint_metadata_json"])
         for row in rows
     ] == [("user", True, "alice", UNTRUSTED)]
+
+
+@pytest.mark.asyncio
+async def test_a_moved_turn_leaves_a_marker_and_takes_its_attachments(
+    db_engine: AsyncEngine,
+) -> None:
+    db = Database(engine=db_engine)
+    await _home_turn(db, turn_id="home-turn")
+    [user_row] = [
+        row
+        for row in await db.message_history.get_rows_by_turn_id("home-turn")
+        if row["role"] == "user"
+    ]
+    await db.execute(
+        attachment_metadata_table.insert().values(
+            attachment_id="11111111-1111-1111-1111-111111111111",
+            source_type="user",
+            source_id="alice",
+            mime_type="image/png",
+            size=1,
+            conversation_id=HOME,
+            message_id=user_row["internal_id"],
+            created_at=NOW,
+        )
+    )
+
+    moved = await move_turn_across_boundary(
+        db,
+        destination=_destination(_profile("complex_tasks", household=True)),
+        turn=MovedTurn(
+            source_interface_type="web",
+            source_conversation_id=HOME,
+            turn_id="home-turn",
+        ),
+        now=NOW,
+    )
+
+    home_rows = await db.fetch_all(
+        select(message_history_table).where(
+            message_history_table.c.conversation_id == HOME
+        )
+    )
+    assert [
+        (row["internal_id"], row["role"], row["moved_to_conversation_id"])
+        for row in home_rows
+    ] == [(moved.marker_id, "assistant", THREAD)]
+    thread_rows = await _thread_rows(db)
+    assert [row["internal_id"] for row in thread_rows] == list(moved.copied_ids)
+    assert [row["taint_metadata_json"] for row in thread_rows][-1] == UNTRUSTED
+    attachment = await db.fetch_one(select(attachment_metadata_table))
+    assert attachment is not None
+    assert attachment["message_id"] == moved.copied_ids[0]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_is_not_moved_into_a_profile_without_household_context(
+    db_engine: AsyncEngine,
+) -> None:
+    db = Database(engine=db_engine)
+    await _home_turn(db, turn_id="home-turn")
+
+    with pytest.raises(CrossBoundaryCopyRefusedError):
+        await move_turn_across_boundary(
+            db,
+            destination=_destination(_profile("coder", household=False)),
+            turn=MovedTurn(
+                source_interface_type="web",
+                source_conversation_id=HOME,
+                turn_id="home-turn",
+            ),
+            now=NOW,
+        )
+
+    assert await _thread_rows(db) == []
+    assert len(await db.message_history.get_rows_by_turn_id("home-turn")) == 2
 
 
 @pytest.mark.asyncio
