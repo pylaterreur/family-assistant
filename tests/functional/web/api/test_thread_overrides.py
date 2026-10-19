@@ -594,6 +594,92 @@ async def test_moving_a_turn_still_running_is_refused(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("profiles")
+async def test_moving_while_home_has_another_reply_in_progress_is_refused(
+    app_fixture: FastAPI, api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = await _home(api_test_client)
+    thread = await _thread_on(api_test_client, CONTEXT_PROFILE)
+    moved = await _home_turn(db, home, words="finished", at=NOW)
+    hub: ConversationStreamHub = app_fixture.state.conversation_stream_hub
+    await hub.start_turn(
+        home, turn_id=str(uuid.uuid4()), user_id=CALLER, started_at=datetime.now(UTC)
+    )
+
+    response = await api_test_client.post(
+        f"/api/v1/chat/home/threads/{thread}/moved-turns",
+        json={"message_id": moved["reply"]},
+    )
+
+    assert response.status_code == 409
+    assert await db.message_history.get_row_by_internal_id(moved["reply"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
+async def test_continuing_from_a_turn_still_running_is_refused(
+    app_fixture: FastAPI, api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = await _home(api_test_client)
+    anchor = await _home_turn(db, home, words="in progress", at=NOW)
+    row = await db.message_history.get_row_by_internal_id(anchor["user"])
+    assert row is not None and row["turn_id"] is not None
+    hub: ConversationStreamHub = app_fixture.state.conversation_stream_hub
+    await hub.start_turn(
+        home, turn_id=row["turn_id"], user_id=CALLER, started_at=datetime.now(UTC)
+    )
+
+    response = await api_test_client.post(
+        "/api/v1/chat/home/threads",
+        json={"profile_id": CONTEXT_PROFILE, "anchor_message_id": anchor["user"]},
+    )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
+async def test_moving_into_a_thread_of_another_home_is_not_found(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    """Both ends must be the caller's web Home and a thread of it."""
+    db = Database(engine=db_engine)
+    home = await _home(api_test_client)
+    moved = await _home_turn(db, home, words="web only", at=NOW)
+    elsewhere = "web_conv_thread_of_another_home"
+    await db.conversation_threads.create_thread(
+        conversation_id=elsewhere,
+        home_conversation_id="telegram_home",
+        interface_type="web",
+        owner_user_id=CALLER,
+        profile_id=CONTEXT_PROFILE,
+        title="Elsewhere",
+        title_taint=None,
+        anchor_message_id=None,
+        delegation_id=None,
+        now=NOW,
+    )
+    await db.message_history.add_message(
+        UserMessage.from_trusted_user(content="mine too"),
+        interface_type="web",
+        conversation_id=elsewhere,
+        timestamp=NOW,
+        processing_profile_id=CONTEXT_PROFILE,
+        user_id=CALLER,
+    )
+
+    response = await api_test_client.post(
+        f"/api/v1/chat/home/threads/{elsewhere}/moved-turns",
+        json={"message_id": moved["reply"]},
+    )
+
+    assert response.status_code == 404
+    assert await db.message_history.get_row_by_internal_id(moved["reply"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
 async def test_moving_a_message_that_is_not_in_home_is_not_found(
     api_test_client: AsyncClient, db_engine: AsyncEngine
 ) -> None:
