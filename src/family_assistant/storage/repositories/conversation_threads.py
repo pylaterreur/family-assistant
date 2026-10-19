@@ -366,6 +366,21 @@ class ConversationThreadsRepository(BaseRepository):
             return {}
         history = message_history_table
         markers = conversation_read_markers_table
+        # The furthest the viewer has read under any of their ids: a marker
+        # written under a login's own id before an operator mapped it to its
+        # owner still counts.
+        read_through = (
+            select(
+                markers.c.conversation_id,
+                func.max(markers.c.last_read_message_id).label("last_read"),
+            )
+            .where(
+                markers.c.conversation_id.in_(list(conversation_ids)),
+                markers.c.viewer_user_id.in_([viewer_user_id, *viewer_keys]),
+            )
+            .group_by(markers.c.conversation_id)
+            .subquery()
+        )
         rows = await self._db.fetch_all(
             select(
                 history.c.conversation_id,
@@ -373,9 +388,8 @@ class ConversationThreadsRepository(BaseRepository):
             )
             .select_from(
                 history.outerjoin(
-                    markers,
-                    (markers.c.conversation_id == history.c.conversation_id)
-                    & (markers.c.viewer_user_id == viewer_user_id),
+                    read_through,
+                    read_through.c.conversation_id == history.c.conversation_id,
                 )
             )
             .where(
@@ -385,8 +399,8 @@ class ConversationThreadsRepository(BaseRepository):
                 history.c.content.isnot(None),
                 history.c.subconversation_id.is_(None),
                 or_(
-                    markers.c.last_read_message_id.is_(None),
-                    history.c.internal_id > markers.c.last_read_message_id,
+                    read_through.c.last_read.is_(None),
+                    history.c.internal_id > read_through.c.last_read,
                 ),
                 or_(
                     history.c.role != "user",

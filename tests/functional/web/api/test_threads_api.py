@@ -559,6 +559,28 @@ async def test_a_thread_written_under_an_alias_is_still_its_owners(
 
 
 @pytest.mark.asyncio
+async def test_a_read_marker_written_under_an_alias_still_counts(
+    app_fixture: FastAPI, api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    """Reading a thread before a login was mapped to its owner stays read."""
+    _alias_config(app_fixture)
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(db, home)
+    latest = (await db.message_history.latest_visible_messages([thread]))[thread]
+    await db.conversation_threads.mark_read(
+        thread,
+        viewer_user_id=ALIAS,
+        through_message_id=latest.internal_id,
+        now=NOW,
+    )
+
+    body = (await api_test_client.get("/api/v1/chat/home/threads")).json()
+
+    assert [entry["unread_count"] for entry in body["threads"]] == [0]
+
+
+@pytest.mark.asyncio
 async def test_marking_done_pings_the_login_the_caller_used(
     app_fixture: FastAPI, api_test_client: AsyncClient, db_engine: AsyncEngine
 ) -> None:
