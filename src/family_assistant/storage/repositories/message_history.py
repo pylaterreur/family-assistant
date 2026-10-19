@@ -429,6 +429,16 @@ class LatestVisibleMessage:
     turn_id: str | None
 
 
+def _nth_copy_time(start: datetime, index: int) -> datetime:
+    """When the ``index``-th row of a copy is stamped.
+
+    A microsecond apart rather than all at ``start``: the messages endpoint
+    pages by timestamp alone, and a page boundary falling inside a run of equal
+    timestamps would skip the rest of the run.
+    """
+    return start + timedelta(microseconds=index)
+
+
 @dataclass(frozen=True, slots=True)
 class MovedTurnRows:
     """Where a moved turn's rows went: its copies, and the marker left behind."""
@@ -2138,7 +2148,7 @@ class MessageHistoryRepository(BaseRepository):
         if not turn_ids:
             return []
         rows = await self._top_level_turn_rows(
-            source_interface_type, source_conversation_id, turn_ids
+            self._db, source_interface_type, source_conversation_id, turn_ids
         )
         new_turn_ids = {turn_id: str(uuid.uuid4()) for turn_id in turn_ids}
 
@@ -2150,9 +2160,9 @@ class MessageHistoryRepository(BaseRepository):
                     conversation_id=destination_conversation_id,
                     processing_profile_id=destination_profile_id,
                     turn_id=new_turn_ids[row["turn_id"]],
-                    timestamp=timestamp,
+                    timestamp=_nth_copy_time(timestamp, index),
                 )
-                for row in rows
+                for index, row in enumerate(rows)
             ]
 
         return await self._db.atomic(_copy)
@@ -2185,26 +2195,27 @@ class MessageHistoryRepository(BaseRepository):
             LookupError: the source conversation has no top-level rows of
                 ``turn_id``.
         """
-        rows = await self._top_level_turn_rows(
-            source_interface_type, source_conversation_id, [turn_id]
-        )
-        if not rows:
-            raise LookupError(
-                f"Turn {turn_id!r} has no rows in {source_conversation_id!r}."
-            )
         marker_taint = TurnTaintState.empty().to_metadata()
         moved_turn_id = str(uuid.uuid4())
+        missing = LookupError(
+            f"Turn {turn_id!r} has no rows in {source_conversation_id!r}."
+        )
 
         async def _move(txn: DatabaseTransaction) -> MovedTurnRows:
+            rows = await self._top_level_turn_rows(
+                txn, source_interface_type, source_conversation_id, [turn_id]
+            )
+            if not rows:
+                raise missing
             copied: list[int] = []
-            for row in rows:
+            for index, row in enumerate(rows):
                 copy_id = await self._insert_copy(
                     txn,
                     row,
                     conversation_id=destination_conversation_id,
                     processing_profile_id=destination_profile_id,
                     turn_id=moved_turn_id,
-                    timestamp=now,
+                    timestamp=_nth_copy_time(now, index),
                 )
                 await txn.execute(
                     update(attachment_metadata_table)
@@ -2215,13 +2226,17 @@ class MessageHistoryRepository(BaseRepository):
                     )
                 )
                 copied.append(copy_id)
-            await txn.execute(
+            deleted = await txn.execute(
                 message_history_table.delete().where(
                     message_history_table.c.internal_id.in_([
                         row["internal_id"] for row in rows
                     ])
                 )
             )
+            if deleted.rowcount != len(rows):
+                # A concurrent move took the turn first; rolling back keeps
+                # this one from copying it a second time.
+                raise missing
             await delete_documents_by_source(
                 txn, MESSAGE_HISTORY_SOURCE_TYPE, f"message_turn:{turn_id}"
             )
@@ -2290,14 +2305,15 @@ class MessageHistoryRepository(BaseRepository):
         )
         return [row["turn_id"] for row in reversed(rows)]
 
+    @staticmethod
     async def _top_level_turn_rows(
-        self,
+        db: DatabaseExecutor,
         interface_type: str,
         conversation_id: str,
         turn_ids: Sequence[str],
     ) -> list[Mapping[str, Any]]:
         return list(
-            await self._db.fetch_all(
+            await db.fetch_all(
                 select(message_history_table)
                 .where(
                     message_history_table.c.interface_type == interface_type,

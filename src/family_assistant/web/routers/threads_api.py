@@ -713,6 +713,12 @@ async def move_turn_to_thread(
                 "receive household context, so a Home turn can't be moved into it."
             ),
         ) from refusal
+    except LookupError as gone:
+        # Moved by a request that got there first.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No such message in your Home.",
+        ) from gone
 
     await announce_home_change(
         hub, home_conversation_id=home, user_id=user_id, reason="turn_moved"

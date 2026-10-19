@@ -5,6 +5,7 @@ See docs/design/one-thread-chat-ux.md, "Moving content across the boundary".
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from family_assistant.security.taint import TaintMetadata
+    from family_assistant.storage.repositories.message_history import MovedTurnRows
 
 # Anchored to the real clock: history windows are read against it, so a fixed
 # date ages out of the window and the copied rows stop being visible.
@@ -292,6 +294,57 @@ async def test_a_moved_turn_leaves_a_marker_and_takes_its_attachments(
     # Home's index record goes; the copy, under a turn of its own, is indexed anew.
     assert await db.fetch_all(select(DocumentRecord.id)) == []
     assert {row["turn_id"] for row in thread_rows} != {"home-turn"}
+
+
+@pytest.mark.asyncio
+async def test_two_moves_of_one_turn_copy_it_once(db_engine: AsyncEngine) -> None:
+    db = Database(engine=db_engine)
+    await _home_turn(db, turn_id="home-turn")
+
+    async def move() -> MovedTurnRows:
+        return await move_turn_across_boundary(
+            db,
+            destination=_destination(_profile("complex_tasks", household=True)),
+            turn=MovedTurn(
+                source_interface_type="web",
+                source_conversation_id=HOME,
+                turn_id="home-turn",
+            ),
+            now=NOW,
+        )
+
+    outcomes = await asyncio.gather(move(), move(), return_exceptions=True)
+
+    assert sorted(type(outcome).__name__ for outcome in outcomes) == [
+        "LookupError",
+        "MovedTurnRows",
+    ]
+    assert len(await _thread_rows(db)) == 2
+
+
+@pytest.mark.asyncio
+async def test_copied_rows_are_stamped_in_order_and_apart(
+    db_engine: AsyncEngine,
+) -> None:
+    """The messages endpoint pages by timestamp, so equal stamps would be skipped."""
+    db = Database(engine=db_engine)
+    await _home_turn(db, turn_id="home-turn")
+
+    await copy_across_boundary(
+        db,
+        destination=_destination(_profile("complex_tasks", household=True)),
+        payload=CopiedTurns(
+            source_interface_type="web",
+            source_conversation_id=HOME,
+            turn_ids=("home-turn",),
+        ),
+        turn_id="unused",
+        now=NOW,
+    )
+
+    stamps = [cast("datetime", row["timestamp"]) for row in await _thread_rows(db)]
+    assert stamps == sorted(set(stamps))
+    assert len(stamps) == 2
 
 
 @pytest.mark.asyncio
