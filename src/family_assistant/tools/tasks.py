@@ -35,6 +35,7 @@ from family_assistant.security.definition_records import (
     stamp_callback_definition,
 )
 from family_assistant.storage.tasks import TaskPriority
+from family_assistant.threads.home import find_home, home_owner_id
 from family_assistant.tools.automations import validate_action_scripts
 from family_assistant.tools.stored_scripts import validate_script_action_config
 from family_assistant.utils.clock import SystemClock
@@ -97,6 +98,52 @@ async def _callback_home_owner(
             f"'{WAKE_CONVERSATION_SOURCE}', got {conversation!r}."
         )
     return exec_context.user_id if destination == WAKE_CONVERSATION_HOME else None
+
+
+async def _home_viewer(exec_context: ToolExecutionContext) -> str | None:
+    """The caller's Home owner key when this turn runs in their Home, else None.
+
+    A callback created elsewhere but routed to Home keeps its source
+    conversation on the payload, so Home recognises it by its owner instead.
+    """
+    app_config = getattr(exec_context.processing_service, "app_config", None)
+    if (
+        not threads_enabled(exec_context.processing_service)
+        or app_config is None
+        or not exec_context.user_id
+    ):
+        return None
+    home = await find_home(
+        exec_context.db_context,
+        app_config,
+        user_id=exec_context.user_id,
+        interface_type=exec_context.interface_type,
+    )
+    if home != exec_context.conversation_id:
+        return None
+    return home_owner_id(app_config, exec_context.user_id)
+
+
+def _callback_belongs_here(
+    exec_context: ToolExecutionContext,
+    payload: Mapping[str, Any],
+    home_viewer: str | None,
+) -> bool:
+    """Whether this conversation may list and manage a pending callback.
+
+    That is one created here, or, in a user's Home, one of theirs routed to
+    it. Another user's Home-bound callbacks stay out of reach.
+    """
+    if (
+        payload.get("interface_type") == exec_context.interface_type
+        and payload.get("conversation_id") == exec_context.conversation_id
+    ):
+        return True
+    owner = payload.get("home_owner_user_id")
+    if home_viewer is None or not isinstance(owner, str):
+        return False
+    app_config = getattr(exec_context.processing_service, "app_config", None)
+    return app_config is not None and home_owner_id(app_config, owner) == home_viewer
 
 
 # Tool Definitions
@@ -195,7 +242,7 @@ TASK_TOOLS_DEFINITION: list[ToolDefinition] = [
         "function": {
             "name": "list_pending_callbacks",
             "description": (
-                "Lists all pending LLM callback tasks for the current conversation, including:"
+                "Lists all pending LLM callback tasks for the current conversation (in the user's Home, also their reminders and callbacks set up elsewhere that will arrive in Home), including:"
                 "\n- One-time callbacks from schedule_future_callback"
                 "\n- Reminder callbacks from schedule_reminder"
                 "\nReturns task IDs, scheduled times, and context for each pending callback.\n\n"
@@ -627,13 +674,11 @@ async def list_pending_callbacks_tool(
         return f"Error: Failed to list pending callbacks. {e}"
 
     # Filter results in Python to match the conversation
+    home_viewer = await _home_viewer(exec_context)
     filtered_results = []
     for row in results:
         payload = row.get("payload", {})
-        if (
-            payload.get("interface_type") == interface_type
-            and payload.get("conversation_id") == conversation_id
-        ):
+        if _callback_belongs_here(exec_context, payload, home_viewer):
             filtered_results.append(row)
             if len(filtered_results) >= limit:
                 break
@@ -719,9 +764,8 @@ async def modify_pending_callback_tool(
         return f"Error: Callback task '{task_id}' is not pending (current status: {task.get('status')}). It cannot be modified."
 
     task_payload = task.get("payload", {})
-    if (
-        task_payload.get("interface_type") != interface_type
-        or task_payload.get("conversation_id") != conversation_id
+    if not _callback_belongs_here(
+        exec_context, task_payload, await _home_viewer(exec_context)
     ):
         return f"Error: Callback task '{task_id}' does not belong to this conversation. Modification denied."
 
@@ -829,9 +873,8 @@ async def cancel_pending_callback_tool(
         return f"Error: Callback task '{task_id}' is not pending (current status: {task.get('status')}). It cannot be cancelled."
 
     task_payload = task.get("payload", {})
-    if (
-        task_payload.get("interface_type") != interface_type
-        or task_payload.get("conversation_id") != conversation_id
+    if not _callback_belongs_here(
+        exec_context, task_payload, await _home_viewer(exec_context)
     ):
         return f"Error: Callback task '{task_id}' does not belong to this conversation. Cancellation denied."
 

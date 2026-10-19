@@ -23,6 +23,7 @@ from family_assistant.config_models import (
 )
 from family_assistant.delegation_security import DelegationSecurityLevel
 from family_assistant.interfaces import ChatInterface
+from family_assistant.llm.messages import UserMessage
 from family_assistant.processing import ProcessingService, ProcessingServiceConfig
 from family_assistant.storage.database import Database
 from family_assistant.storage.message_history import message_history_table
@@ -39,6 +40,9 @@ from family_assistant.tools.automations import (
     update_automation_tool,
 )
 from family_assistant.tools.tasks import (
+    cancel_pending_callback_tool,
+    list_pending_callbacks_tool,
+    modify_pending_callback_tool,
     schedule_future_callback_tool,
     schedule_reminder_tool,
 )
@@ -59,9 +63,12 @@ if TYPE_CHECKING:
 SOURCE_CONVERSATION_ID = "web_conv_source"
 TELEGRAM_CHAT_ID = "123456"
 OWNER = "alice@example.com"
+OTHER = "bob@example.com"
 
 
-def _processing_service(*, threads: bool) -> ProcessingService:
+def _processing_service(
+    *, threads: bool, profile_id: str = "default_assistant"
+) -> ProcessingService:
     tools_provider = CompositeToolsProvider(
         providers=[LocalToolsProvider(definitions=[], implementations={})]
     )
@@ -71,7 +78,7 @@ def _processing_service(*, threads: bool) -> ProcessingService:
         ),
         tools_provider=tools_provider,
         service_config=ProcessingServiceConfig(
-            id="default_assistant",
+            id=profile_id,
             prompts={"system_prompt": "Assistant"},
             timezone=ZoneInfo("UTC"),
             history_budget_chars=0,
@@ -691,3 +698,94 @@ async def test_push_for_a_home_wake_targets_the_new_home(
     home = await _home(db, service)
     assert home is not None
     assert notifier.calls == [(OWNER, home)]
+
+
+@pytest.mark.asyncio
+async def test_home_lists_modifies_and_cancels_a_reminder_routed_there(
+    db_engine: AsyncEngine,
+) -> None:
+    db = Database(engine=db_engine)
+    service = _processing_service(threads=True)
+    now = datetime.now(UTC)
+    home = await ensure_web_home(db, service.app_config, user_id=OWNER, now=now)
+    other_home = await ensure_web_home(db, service.app_config, user_id=OTHER, now=now)
+
+    await schedule_reminder_tool(
+        exec_context=_exec_context(db, service),
+        reminder_time=(now + timedelta(hours=1)).isoformat(),
+        message="Take the bins out",
+    )
+    [row] = await db.fetch_all(
+        select(tasks_table.c.task_id).where(tasks_table.c.task_type == "llm_callback")
+    )
+    task_id = row["task_id"]
+    in_home = _exec_context(db, service, conversation_id=home)
+    in_other_home = _exec_context(
+        db, service, conversation_id=other_home, user_id=OTHER
+    )
+
+    assert task_id in await list_pending_callbacks_tool(in_home)
+    assert task_id not in await list_pending_callbacks_tool(
+        _exec_context(db, service, conversation_id="web_conv_elsewhere")
+    )
+    assert task_id not in await list_pending_callbacks_tool(in_other_home)
+    assert "denied" in await modify_pending_callback_tool(
+        in_other_home, task_id, new_context="Not yours"
+    )
+    assert "denied" in await cancel_pending_callback_tool(in_other_home, task_id)
+
+    assert "modified successfully" in await modify_pending_callback_tool(
+        in_home, task_id, new_context="Take the recycling out"
+    )
+    assert "cancelled successfully" in await cancel_pending_callback_tool(
+        in_home, task_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_event_wake_in_home_leaves_home_on_its_profile(
+    db_engine: AsyncEngine,
+    task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+) -> None:
+    """Event wakes run on event_handler; Home's user turns still adopt their own."""
+    db = Database(engine=db_engine)
+    service = _processing_service(threads=True)
+    event_service = _processing_service(threads=True, profile_id="event_handler")
+    registry = {"default_assistant": service, "event_handler": event_service}
+    service.processing_services_registry = registry
+    event_service.processing_services_registry = registry
+    chat_interface, new_task_event = await _start_worker(task_worker_manager, service)
+    now = datetime.now(UTC)
+    home = await ensure_web_home(db, service.app_config, user_id=OWNER, now=now)
+    await db.message_history.add_message(
+        message=UserMessage.from_trusted_user(content="Morning!"),
+        interface_type="web",
+        conversation_id=home,
+        timestamp=now,
+        user_id=OWNER,
+        processing_profile_id="default_assistant",
+    )
+
+    await execute_action(
+        db_ctx=db,
+        action_type=ActionType.WAKE_LLM,
+        action_config={"context": "The garage door opened", "conversation": "home"},
+        conversation_id=SOURCE_CONVERSATION_ID,
+        interface_type="web",
+        processing_profile_id="event_handler",
+        created_by_user_id=OWNER,
+    )
+    new_task_event.set()
+    await wait_for_tasks_to_complete(db_engine, task_types={"llm_callback"})
+
+    assert _sent_conversation_ids(chat_interface) == [home]
+    event_rows = await db.fetch_all(
+        select(message_history_table.c.internal_id).where(
+            message_history_table.c.conversation_id == home,
+            message_history_table.c.processing_profile_id == "event_handler",
+        )
+    )
+    assert event_rows
+    assert (
+        await db.message_history.get_latest_user_profile_id(home) == "default_assistant"
+    )
