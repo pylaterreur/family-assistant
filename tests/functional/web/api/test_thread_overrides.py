@@ -353,6 +353,30 @@ async def test_continuing_copies_the_anchor_and_the_turns_before_it(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("profiles")
+async def test_retrying_a_continue_with_no_opening_message_copies_once(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = await _home(api_test_client)
+    anchor = await _home_turn(db, home, words="the quote", at=NOW)
+    request = {
+        "profile_id": CONTEXT_PROFILE,
+        "anchor_message_id": anchor["reply"],
+        "turn_id": str(uuid.uuid4()),
+    }
+
+    first = await _start(api_test_client, **request)
+    second = await _start(api_test_client, **request)
+
+    conversation_id = first["thread"]["conversation_id"]
+    listed = (await api_test_client.get("/api/v1/chat/home/threads")).json()
+    assert second["thread"]["conversation_id"] == conversation_id
+    assert len(listed["threads"]) == 1
+    assert len(await _rows(db, conversation_id)) == len(first["copied_message_ids"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
 async def test_a_continued_thread_answers_from_the_copied_turns(
     api_test_client: AsyncClient, db_engine: AsyncEngine, profiles: Profiles
 ) -> None:

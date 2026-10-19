@@ -29,7 +29,6 @@ from family_assistant.threads.creation import (
     CONTINUE_CONTEXT_TURNS,
     NewThread,
     create_thread,
-    new_thread_conversation_id,
 )
 from family_assistant.threads.echo import announce_home_change
 from family_assistant.threads.home import (
@@ -127,10 +126,10 @@ class StartThreadRequest(BaseModel):
     turn_id: str | None = Field(
         default=None,
         description=(
-            "Client-supplied UUIDv4 for the first turn, as on POST "
-            "/v1/chat/turns. A retry with the same turn_id returns the thread "
-            "it already started instead of starting another. Generated when "
-            "omitted"
+            "Client-supplied UUIDv4 identifying this start, and the id of its "
+            "first turn, as on POST /v1/chat/turns. A retry with the same "
+            "turn_id returns the thread it already started instead of starting "
+            "another. Generated when omitted, which gives up that guarantee"
         ),
     )
     title: str | None = Field(
@@ -511,22 +510,17 @@ async def start_home_thread(
         db_context, config, user_id=user_id, now=datetime.now(UTC)
     )
     turn_id = payload.turn_id or str(uuid.uuid4())
+    # Named after the request, so a retry finds the thread it started whether
+    # or not that start wrote a turn.
+    conversation_id = f"web_conv_{uuid.uuid5(uuid.NAMESPACE_URL, f'{home}/{turn_id}')}"
 
-    existing = await db_context.message_history.get_user_row_by_turn_id(turn_id)
-    if existing is not None:
-        # A retry of a start that already happened: answer with that thread.
-        thread = await db_context.conversation_threads.get_thread(
-            existing["conversation_id"]
-        )
-        if thread is None or thread.home_conversation_id != home:
+    copied: list[int] = []
+    if await db_context.conversation_threads.get_thread(conversation_id) is None:
+        if await db_context.message_history.get_user_row_by_turn_id(turn_id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="That turn_id is already in use.",
             )
-        conversation_id = thread.conversation_id
-        copied: list[int] = []
-    else:
-        conversation_id = new_thread_conversation_id("web")
         copied = await _create_user_thread(
             db_context,
             config,
