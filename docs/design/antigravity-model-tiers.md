@@ -61,5 +61,6 @@ The council is unaffected: its Gemini seat runs `gemini_4_argon` as a chat model
 
 - Unit tests over the tier rules (each refused tier shape, no tier, inline agent id) and over the
   shipped profile: each of its tiers builds a client whose `agent_config` names that tier's model.
-- An integration recording of a run on `gemini-4-argon` before relying on it in production, since
-  only the API can confirm the agent accepts the model.
+- An integration recording (`test_the_agent_runs_to_completion_reasoning_with_gemini_4_argon`) of
+  the shipped agent run to completion reasoning with `gemini-4-argon`, which only the API can
+  confirm it accepts.
