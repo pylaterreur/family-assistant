@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -395,3 +396,67 @@ async def test_a_turn_naming_no_interface_still_sees_the_thread(
     )
 
     assert any("Find three plumbers." in str(m.content) for m in seen[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_a_home_send_runs_on_the_default_profile_whatever_it_names(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+    api_test_processing_service: ProcessingService,
+    db_engine: AsyncEngine,
+) -> None:
+    await _thread_on_its_own_profile(
+        app_fixture, api_test_client, api_test_processing_service, db_engine
+    )
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+
+    response = await api_test_client.post(
+        "/api/v1/chat/send_message",
+        json={
+            "prompt": "What's on today?",
+            "conversation_id": home,
+            "profile_id": "browser_profile",
+            "interface_type": "web",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reply"] != "the thread's profile answered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_a_home_turn_runs_on_the_default_profile_whatever_it_names(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+    api_test_processing_service: ProcessingService,
+    db_engine: AsyncEngine,
+) -> None:
+    await _thread_on_its_own_profile(
+        app_fixture, api_test_client, api_test_processing_service, db_engine
+    )
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    turn_id = str(uuid.uuid4())
+
+    post = await api_test_client.post(
+        "/api/v1/chat/turns",
+        json={
+            "turn_id": turn_id,
+            "conversation_id": home,
+            "prompt": "What's on today?",
+            "profile_id": "browser_profile",
+            "interface_type": "web",
+        },
+    )
+    assert post.status_code == 200
+    stream = await api_test_client.get(
+        f"/api/v1/chat/conversations/{home}/stream", params={"from_seq": 0}
+    )
+
+    assert "the thread's profile answered" not in stream.text
+    row = await Database(engine=db_engine).message_history.get_user_row_by_turn_id(
+        turn_id
+    )
+    assert row is not None
+    assert row["processing_profile_id"] == api_test_processing_service.service_config.id

@@ -1485,7 +1485,11 @@ async def api_chat_create_turn(
         if pinned_thread is not None
         else default_processing_service
     )
-    if pinned_thread is None and payload.profile_id:
+    if (
+        pinned_thread is None
+        and payload.profile_id
+        and not await _is_home(request, conversation_id)
+    ):
         registry = getattr(request.app.state, "processing_services", {})
         candidate = registry.get(payload.profile_id)
         if candidate and candidate.kind == "remote":
@@ -2452,6 +2456,16 @@ async def _thread_for(
     return await db_context.conversation_threads.get_thread(conversation_id)
 
 
+async def _is_home(request: Request, conversation_id: str) -> bool:
+    """Whether a conversation is a Home, which always runs on the default profile.
+
+    History is partitioned by profile, so a Home turn on any other profile would
+    not see Home's history. Choosing another profile from Home starts a thread.
+    """
+    db_context = Database(request.app.state.database_engine)
+    return await db_context.conversation_threads.is_home(conversation_id)
+
+
 def _thread_profile(request: Request, thread: ConversationThread) -> ProcessingService:
     """The profile a thread runs on, whatever the request names.
 
@@ -2821,6 +2835,9 @@ async def api_chat_send_message(
                 "interface_type": thread.interface_type,
             }
         )
+    elif await _is_home(request, conversation_id):
+        selected_processing_service = default_processing_service
+        payload = payload.model_copy(update={"conversation_id": conversation_id})
     else:
         selected_processing_service = _select_processing_service(
             request, payload, default_processing_service, conversation_id
