@@ -9,7 +9,7 @@ import { Conversation, ConversationSidebarProps, ThreadState } from './types';
 const SEARCH_DEBOUNCE_MS = 300;
 
 // Threads that need the user come first.
-const THREAD_GROUPS: ThreadState[] = ['waiting', 'working', 'failed'];
+const THREAD_GROUPS: ThreadState[] = ['waiting', 'working', 'failed', 'done'];
 
 interface SearchResults {
   query: string;

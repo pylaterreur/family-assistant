@@ -29,6 +29,7 @@ from family_assistant.processing import ProcessingService, ProcessingServiceConf
 from family_assistant.services.attachment_registry import AttachmentRegistry
 from family_assistant.storage import delegation_runs_table, message_history_table
 from family_assistant.storage.database import Database
+from family_assistant.threads.listing import summarize_threads
 from family_assistant.tools import LOCAL_TOOL_REGISTRATIONS as local_tool_registrations
 from family_assistant.tools import (
     CompositeToolsProvider,
@@ -43,7 +44,7 @@ from tests.helpers import wait_for_condition
 from tests.mocks.mock_llm import LLMOutput, MatcherArgs, RuleBasedMockLLMClient
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Mapping
     from pathlib import Path
 
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -194,6 +195,7 @@ async def world(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[Any, Any, Any]],
     request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> ThreadWorld:
     marker = request.node.get_closest_marker("target_sources")
@@ -233,6 +235,16 @@ async def world(
         return LLMOutput(content=THREAD_REPLY)
 
     target_llm = RuleBasedMockLLMClient(rules=[(lambda _kwargs: True, target_reply)])
+    if request.node.get_closest_marker("target_fails") is not None:
+
+        def provider_down(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+            async def stream() -> AsyncIterator[object]:
+                raise RuntimeError("The provider is down.")
+                yield  # pragma: no cover - makes this an async generator
+
+            return stream()
+
+        monkeypatch.setattr(target_llm, "generate_response_stream", provider_down)
 
     world.home_llm = home_llm
     world.home_service = ProcessingService(
@@ -284,6 +296,27 @@ async def test_a_started_thread_runs_on_its_own_profile(world: ThreadWorld) -> N
         if row["role"] == "assistant"
     ]
     assert replies == [(THREAD_REPLY, TARGET_PROFILE)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.target_fails
+async def test_a_run_that_exhausts_its_retries_is_failed_not_waiting(
+    world: ThreadWorld,
+) -> None:
+    await world.say_in(HOME, "please start a thread for the quotes")
+    await world.wait_for_thread_run_to_finish()
+
+    [thread] = await world.db.conversation_threads.list_for_home(HOME)
+    [summary] = await summarize_threads(
+        world.db, [thread], turn_running=lambda _id: False, viewer=None
+    )
+    [run] = await world.db.fetch_all(
+        select(delegation_runs_table).where(
+            delegation_runs_table.c.run_kind == "thread"
+        )
+    )
+    assert run["status"] == "failed"
+    assert summary.state == "failed"
 
 
 @pytest.mark.asyncio

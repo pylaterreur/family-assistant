@@ -272,10 +272,16 @@ describe('Home and threads', () => {
       QUOTES,
       thread({ conversation_id: 'web_conv_flights', title: 'Flights', state: 'working' }),
       thread({ conversation_id: 'web_conv_rego', title: 'Car rego', state: 'failed' }),
+      thread({ conversation_id: 'web_conv_tyres', title: 'New tyres', state: 'done' }),
     ]);
 
     await renderChatApp({ waitForReady: true });
 
+    expect(
+      within(await screen.findByTestId('thread-group-done')).getByTestId(
+        'thread-item-web_conv_tyres'
+      )
+    ).toBeInTheDocument();
     const homeItem = await screen.findByTestId('home-item');
     expect(homeItem).toHaveAttribute('data-conversation-id', HOME);
     expect(

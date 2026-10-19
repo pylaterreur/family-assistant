@@ -472,6 +472,7 @@ ENGINEER_TRUSTED_OUTPUT_ALLOWLIST = {
     "get_resolved_config": "the deployment's own configuration, redacted",
     "get_profile_config": "one profile's configuration, redacted",
     "get_system_info": "interpreter, platform and dialect facts",
+    "finish_thread": "a fixed confirmation the tool writes; it reads nothing",
     # The MCP-registry diagnostics report on servers the operator configured
     # and has therefore already approved: the names and descriptions those
     # servers publish sit on the trusted side of the same boundary as the rest

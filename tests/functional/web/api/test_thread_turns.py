@@ -15,7 +15,7 @@ import json
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
@@ -24,6 +24,7 @@ from sqlalchemy import select, update
 
 from family_assistant.config_models import AppConfig, ConversationThreadsConfig
 from family_assistant.interfaces import ChatInterface
+from family_assistant.llm import ToolCallFunction, ToolCallItem
 from family_assistant.processing import ProcessingService
 from family_assistant.storage import delegation_runs_table, tasks_table
 from family_assistant.storage.database import Database
@@ -53,6 +54,18 @@ TARGET = "complex_tasks"
 OWNER = "test_user"
 THREAD = "web_conv_thread"
 THREAD_REPLY = "Here are three quotes."
+
+
+class _EnteredGate(asyncio.Event):
+    """A response gate that says when a model call first waits on it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def wait(self) -> Literal[True]:
+        self.entered.set()
+        return await super().wait()
 
 
 @dataclass
@@ -458,18 +471,67 @@ async def test_the_first_turn_gets_the_attachments_it_was_started_with(
 async def test_cancelling_the_worker_stops_the_turn(
     queued_thread: QueuedThread,
 ) -> None:
+    # The run reads as running once claimed, a step before the turn itself
+    # starts; cancelling in between abandons a turn that never began. Wait
+    # for the model call so the cancellation lands on a turn in progress.
+    gate = _EnteredGate()
+    queued_thread.target_llm.response_gate = gate
     handler = asyncio.create_task(queued_thread.run_worker())
-    live = LiveThread(
-        client=queued_thread.client,
-        db=queued_thread.db,
-        target_gate=queued_thread.target_gate,
-        turn_id=queued_thread.turn_id,
-    )
-    await live.wait_until_running()
 
+    await asyncio.wait_for(gate.entered.wait(), timeout=30)
     handler.cancel()
     await asyncio.wait([handler])
 
     record = queued_thread.hub.get_turn(THREAD, queued_thread.turn_id)
     assert record is not None
     assert record.status != "running"
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_turn_that_finishes_the_thread_echoes_into_home(
+    queued_thread: QueuedThread,
+    api_test_processing_service: ProcessingService,
+) -> None:
+    """A thread's turns on the web stream; the echo follows them there too."""
+    registry = {
+        TARGET: queued_thread.target_service,
+        "default_assistant": api_test_processing_service,
+    }
+    queued_thread.target_service.processing_services_registry = registry
+    queued_thread.target_llm.rules = [
+        (
+            lambda kwargs: getattr(kwargs["messages"][-1], "role", None) == "tool",
+            lambda _kwargs: LLMOutput(content=THREAD_REPLY),
+        ),
+        (
+            lambda _kwargs: True,
+            lambda _kwargs: LLMOutput(
+                content=None,
+                tool_calls=[
+                    ToolCallItem(
+                        id="call_finish",
+                        type="function",
+                        function=ToolCallFunction(
+                            name="finish_thread", arguments='{"outcome": "done"}'
+                        ),
+                    )
+                ],
+            ),
+        ),
+    ]
+    queued_thread.target_gate.set()
+
+    await queued_thread.run_worker()
+
+    thread = await queued_thread.db.conversation_threads.get_thread(THREAD)
+    assert thread is not None and thread.close is not None
+    assert thread.close.echo_message_id is not None
+    echo = await queued_thread.db.message_history.get_row_by_internal_id(
+        thread.close.echo_message_id
+    )
+    assert echo is not None
+    assert (
+        echo["conversation_id"],
+        echo["content"],
+        echo["echoed_from_conversation_id"],
+    ) == (thread.home_conversation_id, THREAD_REPLY, THREAD)

@@ -33,7 +33,9 @@ if TYPE_CHECKING:
 
     from family_assistant.security.taint import TaintMetadata
 
-NOW = datetime(2026, 10, 18, 9, 0, tzinfo=UTC)
+# Anchored to the real clock: history windows are read against it, so a fixed
+# date ages out of the window and the copied rows stop being visible.
+NOW = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
 HOME = "web_conv_home"
 THREAD = "web_conv_thread"
 UNTRUSTED: TaintMetadata = cast(

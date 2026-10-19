@@ -1396,9 +1396,14 @@ same `tools_policy` rules as `delegate_to_service`, matched on the `delegation` 
 `target_service_id` argument. It is seeded with the request only, and a profile that doesn't receive
 household context never receives Home's messages.
 
-| Key       | Default (shipped) | Meaning                                                      |
-| --------- | ----------------- | ------------------------------------------------------------ |
-| `enabled` | `false`           | `true` lets the assistant start threads with `start_thread`. |
+| Key       | Default (shipped) | Meaning                                                                                                                         |
+| --------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled` | `false`           | `true` offers `start_thread` and `list_threads` in Home and `finish_thread` in a thread. While `false`, all three are withheld. |
+
+`list_threads` is granted to `default_assistant`, the profile Home runs on. `finish_thread` is
+granted through [global_tools_policy](#global_tools_policy), because a thread can run on any
+profile. A profile that withholds it, or has no Family Assistant tools at all (`coder`), can't
+finish its threads; the user marks those done.
 
 See [one-thread-chat-ux.md](../design/one-thread-chat-ux.md).
 
@@ -3363,9 +3368,10 @@ written there does not override a global allow at any priority — layer beats p
 
 Use `excluded_global_tools` on the profile to withhold one. It denies in the same layer as the
 global rules at the maximum priority, which is what makes it effective. The shipped `media_analyst`
-profile withholds all three, because none is safe in a fully untrusted context:
+profile withholds all of them, because none is safe in a fully untrusted context:
 `read_text_attachment` and `jq_query` resolve any attachment the acting user owns rather than only
-the current turn's artifacts, and `report_technical_problem` persists model-supplied text.
+the current turn's artifacts, `report_technical_problem` persists model-supplied text, and
+`finish_thread` echoes a reply into the user's Home.
 
 ```yaml
 service_profiles:
@@ -3374,17 +3380,22 @@ service_profiles:
       - "read_text_attachment"
       - "jq_query"
       - "report_technical_problem"
+      - "finish_thread"
 ```
 
 Keep this section to broadly safe tools, and treat anything that reads user-owned data by id, or
 writes, as needing an exclusion in every profile that processes untrusted input.
 
-The shipped default uses it for two things:
+The shipped default uses it for three things:
 
 - `report_technical_problem`, so the assistant can always report bugs — these surface through the
   error-log and diagnostics endpoints.
 - `read_text_attachment` and `jq_query`, so the assistant can always read back tool results that
   exceeded the large-result threshold and were auto-converted to attachments.
+- `finish_thread`, so whichever profile runs a thread can close its job (see
+  [conversation_threads](#conversation_threads)). It is offered only in a thread's own turns. Every
+  shipped profile that withholds the other global tools withholds this one too; the user closes
+  their threads instead.
 
 ```yaml
 global_tools_policy:
@@ -3398,6 +3409,11 @@ global_tools_policy:
         names:
           - "read_text_attachment"
           - "jq_query"
+      decision: "allow"
+      priority: 50
+    - match:
+        names:
+          - "finish_thread"
       decision: "allow"
       priority: 50
 ```

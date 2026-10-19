@@ -36,6 +36,7 @@ from family_assistant.storage.conversation_summaries import (
 )
 from family_assistant.storage.conversation_threads import (
     conversation_homes_table,
+    conversation_read_markers_table,
     conversation_threads_table,
 )
 from family_assistant.storage.database import Database
@@ -367,6 +368,7 @@ __all__ = [
     "calendar_event_provenance_table",
     "confirmation_requests_table",
     "conversation_homes_table",
+    "conversation_read_markers_table",
     "conversation_shares_table",
     "conversation_summaries_table",
     "conversation_threads_table",

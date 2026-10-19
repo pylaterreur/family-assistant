@@ -63,6 +63,7 @@ from family_assistant.storage.delegation_runs import (
     is_delegation_wake_trigger,
 )
 from family_assistant.storage.history_compaction import HistoryScope
+from family_assistant.threads.echo import announce_home_change, echo_finished_turn
 from family_assistant.utils.clock import Clock, SystemClock
 from family_assistant.utils.text_normalization import normalize_latex_to_unicode
 
@@ -122,6 +123,7 @@ if TYPE_CHECKING:
     from family_assistant.services.tool_call_review import TriggerReviewInput
     from family_assistant.storage.database import Database
     from family_assistant.telegram.protocols import ConfirmationUIManager
+    from family_assistant.threads.echo import HomeActivityPublisher
     from family_assistant.tools import OnDemandToolsView, ToolsProvider
     from family_assistant.tools.types import EventSourcesById
 
@@ -329,6 +331,7 @@ class ProcessingService:
         model_router: TierRouter | None = None,
         turn_relevance: TurnRelevance | None = None,
         jev_client: JevClient | None = None,
+        home_activity_publisher: HomeActivityPublisher | None = None,
     ) -> None:
         """Build a profile's service.
 
@@ -348,8 +351,12 @@ class ProcessingService:
         none, compaction proceeds oldest-first. ``jev_client`` is the
         deployment's TypeSafe client, which scripts' ``classify()`` calls; with
         none, those calls raise.
+
+        ``home_activity_publisher`` is the live stream open clients follow,
+        told when a turn here echoes a finished thread into its Home.
         """
         self.jev_client = jev_client
+        self.home_activity_publisher = home_activity_publisher
         self._llm_client = llm_client
         self._tier_llm_clients: dict[str, LLMInterface] = dict(tier_llm_clients or {})
         self._model_router = model_router
@@ -1718,6 +1725,57 @@ class ProcessingService:
                 break
         messages_for_llm.append(SystemMessage(content=trigger_content))
 
+    async def _echo_if_thread_finished(
+        self,
+        db_context: Database,
+        *,
+        conversation_id: str,
+        subconversation_id: str | None,
+        turn_id: str,
+        user_id: str | None,
+    ) -> None:
+        """Echo a thread's outcome into its Home if this turn finished the thread.
+
+        Called as every turn ends, which is what makes the echo independent of
+        which surface or task ran the turn (see ``threads.echo``). ``user_id``
+        is the login the turn ran as, which open clients may be subscribed
+        under rather than the canonical owner.
+        """
+        if subconversation_id is not None or not (
+            self.app_config.conversation_threads.enabled
+        ):
+            return
+        echo = await echo_finished_turn(
+            db_context,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            home_profile=self._home_profile_config(),
+            now=self.clock.now(),
+        )
+        if echo is not None:
+            await announce_home_change(
+                self.home_activity_publisher,
+                home_conversation_id=echo.home_conversation_id,
+                # The login the turn ran as, which is what its owner's
+                # activity stream subscribes under.
+                user_id=user_id or echo.owner_user_id,
+                reason="thread_echo",
+            )
+
+    def _home_profile_config(self) -> ProcessingServiceConfig:
+        """The profile Home runs on, which an echo is stamped with."""
+        home_profile_id = self.app_config.default_service_profile_id
+        if self.service_config.id == home_profile_id:
+            return self.service_config
+        home_service = (self.processing_services_registry or {}).get(home_profile_id)
+        home_config = getattr(home_service, "service_config", None)
+        if not isinstance(home_config, ProcessingServiceConfig):
+            raise RuntimeError(
+                f"Home's profile {home_profile_id!r} is not a local profile, so a "
+                "finished thread cannot be echoed into Home."
+            )
+        return home_config
+
     async def _save_history_message(
         self,
         db_context: Database,
@@ -2441,6 +2499,13 @@ class ProcessingService:
                     if saved_turn_msg_record is not None:
                         final_assistant_message_internal_id = saved_turn_msg_record
 
+            await self._echo_if_thread_finished(
+                db_context,
+                conversation_id=conversation_id,
+                subconversation_id=subconversation_id,
+                turn_id=turn_id,
+                user_id=user_id,
+            )
             if ended_quietly:
                 return ChatInteractionResult.quiet(
                     assistant_message_internal_id=final_assistant_message_internal_id,
@@ -2698,6 +2763,14 @@ class ProcessingService:
 
                 if publish_after_save:
                     yield event
+
+            await self._echo_if_thread_finished(
+                db_context,
+                conversation_id=conversation_id,
+                subconversation_id=subconversation_id,
+                turn_id=turn_id,
+                user_id=user_id,
+            )
 
         events = interaction_events()
 

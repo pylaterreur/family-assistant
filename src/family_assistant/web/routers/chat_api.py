@@ -70,6 +70,7 @@ from family_assistant.storage.repositories.conversation_threads import (
     ConversationThread,
 )
 from family_assistant.storage.types import MessageHistoryRow
+from family_assistant.threads.home import viewer_for
 from family_assistant.threads.listing import ThreadSummary, summarize_threads
 from family_assistant.tools import MCPToolsProvider, find_provider_by_type
 from family_assistant.tools.confirmation import render_tool_confirmation
@@ -547,6 +548,13 @@ class ConversationMessage(BaseModel):
     reasoning_info: MessageReasoningInfo | None = Field(
         None, description="LLM reasoning/usage information (token counts, model, etc.)"
     )
+    echoed_from_thread: str | None = Field(
+        None,
+        description=(
+            "On a Home message echoing a finished thread's outcome: the "
+            "thread's conversation id, so the message is shown attributed to it"
+        ),
+    )
     metadata: dict | None = Field(None, description="Additional message metadata")
 
 
@@ -557,12 +565,40 @@ class ThreadSummaryResponse(BaseModel):
     home_conversation_id: str
     title: str
     profile_id: str
-    state: Literal["working", "waiting", "failed"] = Field(
+    state: Literal["working", "waiting", "done", "failed"] = Field(
         ...,
         description=(
-            "working while a turn or the starting run is in progress; failed "
-            "when the starting run failed and nothing has been said since; "
-            "waiting otherwise"
+            "working while a turn, the starting run or background work is in "
+            "progress; done or failed when the thread was closed, or failed "
+            "when its latest turn or starting run failed, and nothing visible "
+            "has arrived since -- anything that does reopens it; waiting "
+            "otherwise"
+        ),
+    )
+    closed_by: Literal["assistant", "user"] | None = Field(
+        default=None,
+        description=(
+            "Who closed the thread, while that close is what its state shows. "
+            "None when the state comes from anything else, including a starting "
+            "run that failed"
+        ),
+    )
+    closed_at: datetime | None = Field(
+        default=None, description="When the close closed_by describes was made"
+    )
+    echo_message_id: int | None = Field(
+        default=None,
+        description=(
+            "The Home message echoing the outcome of the close closed_by "
+            "describes. None when the user closed the thread, which echoes "
+            "nothing, or while the closing turn has not ended"
+        ),
+    )
+    unread_count: int = Field(
+        default=0,
+        description=(
+            "Visible messages in the thread after the caller's read marker that "
+            "the caller did not write"
         ),
     )
     source_tool_call_id: str | None = Field(
@@ -588,6 +624,10 @@ def thread_summary_response(
         title=summary.title,
         profile_id=summary.profile_id,
         state=summary.state,
+        closed_by=summary.closed_by,
+        closed_at=summary.closed_at,
+        echo_message_id=summary.echo_message_id,
+        unread_count=summary.unread_count or 0,
         source_tool_call_id=summary.source_tool_call_id,
         seed_request=summary.seed_request,
         preview=summary.preview,
@@ -598,13 +638,7 @@ def thread_summary_response(
 
 def turn_running_in(hub: ConversationStreamHub) -> Callable[[str], bool]:
     """Whether the hub has a turn in progress in a conversation."""
-
-    def running(conversation_id: str) -> bool:
-        return any(
-            turn.status == "running" for turn in hub.active_turns(conversation_id)
-        )
-
-    return running
+    return hub.has_running_turn
 
 
 class ConversationMessagesResponse(BaseModel):
@@ -1330,6 +1364,23 @@ async def _ensure_user_owns_persisted_conversation(
     if not await db_context.message_history.get_conversation_owner_ids(conversation_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     return user_id
+
+
+async def ensure_caller_owns_conversation(
+    request: Request,
+    current_user: Mapping[str, object],
+    conversation_id: str,
+) -> str:
+    """The ownership check the conversation endpoints apply, for other routers.
+
+    Identity-aware like every endpoint here: stored owner ids are
+    canonicalized, so a conversation written under a login's own id before an
+    operator mapped it stays its owner's. Returns the caller's raw login id,
+    which is also the id their activity stream subscribes under.
+    """
+    return await _ensure_user_owns_persisted_conversation(
+        request, current_user, conversation_id
+    )
 
 
 def _share_token_hash(token: str) -> str:
@@ -3072,6 +3123,7 @@ def _serialize_conversation_messages(
                 attachments=msg.get("attachments"),
                 processing_profile_id=msg.get("processing_profile_id"),
                 reasoning_info=msg.get("reasoning_info"),
+                echoed_from_thread=msg.get("echoed_from_conversation_id"),
                 metadata=None,
             )
         )
@@ -3199,7 +3251,10 @@ async def get_conversation_messages(
         thread = await db_context.conversation_threads.get_thread(conversation_id)
         if thread is not None:
             [summary] = await summarize_threads(
-                db_context, [thread], turn_running=turn_running_in(hub)
+                db_context,
+                [thread],
+                turn_running=turn_running_in(hub),
+                viewer=viewer_for(request.app.state.config, user_id),
             )
             thread_response = thread_summary_response(
                 summary, thread.home_conversation_id

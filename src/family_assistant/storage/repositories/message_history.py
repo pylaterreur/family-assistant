@@ -407,13 +407,23 @@ class ToolHistoryExample:
     tool_call_id: str
 
 
+THREAD_VISIBLE_ROLES: tuple[str, ...] = ("user", "assistant", "error")
+"""Roles a reader of a thread sees: its messages, and a failed turn's error.
+
+One definition for a thread's latest message, the failure it implies, and the
+reader's unread count, so they cannot disagree about what is visible.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class LatestVisibleMessage:
     """A conversation's newest visible message."""
 
+    internal_id: int
     role: str
     content: str
     timestamp: datetime
+    turn_id: str | None
 
 
 class MessageHistoryRepository(BaseRepository):
@@ -2154,6 +2164,62 @@ class MessageHistoryRepository(BaseRepository):
 
         return await self._db.atomic(_copy)
 
+    async def copy_message_as_echo(
+        self,
+        *,
+        source_internal_id: int,
+        destination_conversation_id: str,
+        destination_profile_id: str,
+        echoed_from_conversation_id: str,
+        turn_id: str,
+        timestamp: datetime,
+    ) -> int:
+        """Copy one assistant row into another conversation as an echo of it.
+
+        The row keeps its role, content and taint exactly, and records the
+        conversation it echoes. It is stamped with the destination's profile,
+        at the top level, under ``turn_id``, as a row of its own: none of its
+        tool linkage, reasoning or attachments are carried, since they belong
+        to the turn it was written in.
+
+        Callers go through ``family_assistant.threads.boundary``.
+        """
+        row = await self._db.fetch_one(
+            select(message_history_table).where(
+                message_history_table.c.internal_id == source_internal_id
+            )
+        )
+        if row is None or row["role"] != "assistant":
+            raise ValueError(
+                f"Message {source_internal_id} is not an assistant row to echo."
+            )
+        result = await self._db.execute(
+            insert(message_history_table)
+            .values(
+                interface_type=row["interface_type"],
+                conversation_id=destination_conversation_id,
+                interface_message_id=None,
+                turn_id=turn_id,
+                thread_root_id=None,
+                timestamp=timestamp,
+                role="assistant",
+                content=row["content"],
+                processing_profile_id=destination_profile_id,
+                subconversation_id=None,
+                user_id=row["user_id"],
+                taint_metadata_json=row["taint_metadata_json"],
+                taint_metadata_version=row["taint_metadata_version"],
+                is_internal=False,
+                echoed_from_conversation_id=echoed_from_conversation_id,
+            )
+            .returning(message_history_table.c.internal_id)
+        )
+        internal_id = cast("int", result.scalar_one())
+        await self._enqueue_message_history_indexing_task(
+            internal_id=internal_id, turn_id=turn_id
+        )
+        return internal_id
+
     async def has_terminal_reply_for_turn(self, turn_id: str) -> bool:
         """Whether the turn has a TERMINAL assistant row — a final reply, stopped
         marker, or error message.
@@ -2442,15 +2508,16 @@ class MessageHistoryRepository(BaseRepository):
     ) -> dict[str, LatestVisibleMessage]:
         """Each conversation's newest message a reader of it would see.
 
-        Visible means what the conversation list shows: a non-internal user or
-        assistant row with content, at the top level of the conversation.
+        Visible means a non-internal row of :data:`THREAD_VISIBLE_ROLES` with
+        content, at the top level of the conversation. A failed turn's error
+        row counts: it is what the reader sees, and it is how a failure shows.
         """
         if not conversation_ids:
             return {}
         visible = (
             message_history_table.c.conversation_id.in_(list(conversation_ids)),
             message_history_table.c.is_internal.is_(False),
-            message_history_table.c.role.in_(["user", "assistant"]),
+            message_history_table.c.role.in_(THREAD_VISIBLE_ROLES),
             message_history_table.c.content.isnot(None),
             message_history_table.c.subconversation_id.is_(None),
         )
@@ -2466,14 +2533,20 @@ class MessageHistoryRepository(BaseRepository):
         rows = await self._db.fetch_all(
             select(
                 message_history_table.c.conversation_id,
+                message_history_table.c.internal_id,
                 message_history_table.c.role,
                 message_history_table.c.content,
                 message_history_table.c.timestamp,
+                message_history_table.c.turn_id,
             ).join(latest, message_history_table.c.internal_id == latest.c.latest_id)
         )
         return {
             row["conversation_id"]: LatestVisibleMessage(
-                role=row["role"], content=row["content"], timestamp=row["timestamp"]
+                internal_id=row["internal_id"],
+                role=row["role"],
+                content=row["content"],
+                timestamp=row["timestamp"],
+                turn_id=row["turn_id"],
             )
             for row in rows
         }

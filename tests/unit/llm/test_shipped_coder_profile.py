@@ -97,7 +97,7 @@ def test_shipped_coder_profile_grants_no_family_assistant_tools(
 
     A deny-by-default `tools_policy` is not enough on its own: `global_tools_policy`
     is injected at the `profile` layer, which outranks the `defaults` layer this
-    policy occupies, so the three globally granted tools have to be withheld
+    policy occupies, so the globally granted tools have to be withheld
     explicitly or the profile is advertised as holding them.
     """
     profile = shipped_profile(shipped_config, "coder")
@@ -107,6 +107,7 @@ def test_shipped_coder_profile_grants_no_family_assistant_tools(
         "read_text_attachment",
         "jq_query",
         "report_technical_problem",
+        "finish_thread",
     }
 
 

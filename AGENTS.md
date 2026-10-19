@@ -316,11 +316,12 @@ supervision requirements based on input trust level:
    are injected at the `profile` layer, which outranks the `defaults` layer a profile's own
    `tools_policy` occupies, so a profile cannot refuse a global grant through its own policy at any
    priority — `excluded_global_tools` is the mechanism for that, denying in the same layer at a
-   higher priority. All three globally granted tools are withheld here: `read_text_attachment` and
+   higher priority. Every globally granted tool is withheld here: `read_text_attachment` and
    `jq_query` resolve any attachment the acting user owns rather than only the current turn's
-   artifacts, and `report_technical_problem` persists model-supplied text. The profile therefore
-   reaches no tools at all. Deliberately has no `retry_config`: falling back to a provider that
-   cannot read the media would return a confident description of nothing.
+   artifacts, `report_technical_problem` persists model-supplied text, and `finish_thread` echoes a
+   reply into the user's Home. The profile therefore reaches no tools at all. Deliberately has no
+   `retry_config`: falling back to a provider that cannot read the media would return a confident
+   description of nothing.
 7. **Coder Profile [C]**: a coding agent — writes and runs code, works with files, reads the web —
    on Google's Antigravity managed agent (`antigravity-preview-09-2026`), in a Google-hosted
    throwaway sandbox. Its **model tier is the agent's reasoning model**: `gemini_3_8_flash` by
@@ -329,7 +330,7 @@ supervision requirements based on input trust level:
    [docs/design/antigravity-model-tiers.md](docs/design/antigravity-model-tiers.md)). Used via
    `/coder` or delegation. It acts but reads nothing of the household's: no aggregated context, and
    the agent runs server-side with no FA tool surface, so it works only from the request text. As
-   with `media_analyst`, a deny-by-default `tools_policy` does not achieve that alone -- the three
+   with `media_analyst`, a deny-by-default `tools_policy` does not achieve that alone -- the
    globally granted tools are withheld via `excluded_global_tools`, so the profile is not advertised
    as holding tools it says it has none of; and it has no `retry_config`, because a fallback chat
    model would answer from its own knowledge instead of running the task. **Three ways to reach a
@@ -356,7 +357,7 @@ supervision requirements based on input trust level:
    `search_documents` (the widest path from the indexed corpus into a turn with no human in it), no
    `delete_note` (deletion is not a write under the confinement policy, so it would remove any note
    the curator can see; removals are edits in the proposed list), no messaging, calendar,
-   scheduling, egress or delegation, and the three globally granted tools withheld through
+   scheduling, egress or delegation, and the globally granted tools withheld through
    `excluded_global_tools` as `media_analyst` and `coder` do. The `known_users` context provider is
    excluded, because contacts do not come from the notes table and no note-read confinement touches
    them. **It is run by the memory review task, not delegated to**: the task hands it a rendered
