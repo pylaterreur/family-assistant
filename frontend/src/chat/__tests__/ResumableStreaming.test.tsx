@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetLocalStorageMock } from '../../test/mocks/localStorageMock';
 import { server } from '../../test/setup.js';
 import { renderChatApp } from '../../test/utils/renderChatApp';
-import { reconcilePollTuning } from '../ChatApp';
+import { reconcilePollTuning } from '../ConversationPane';
 import { streamResumeTuning } from '../useStreamingResponse';
 
 /**

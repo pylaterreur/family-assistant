@@ -181,10 +181,21 @@ To catch up without opening each thread, ask in Home, for example *"How are the 
 assistant answers from each thread's title, where it stands and the outcome it reported. It doesn't
 read the threads' conversations, so for the detail, open the thread.
 
-Click the card to open the thread. An open thread is an ordinary chat: read what the assistant has
-done, answer its questions, and ask for more. The bar above it shows **← Home** to go back, what the
-assistant asked the thread to do when it started it, and where the thread stands (**Working…** while
-it is busy). The thread's assistant is fixed, so the profile picker is locked here too.
+Click the card to open the thread. On a wide screen the thread opens in a panel on the right, and
+Home stays where it is in the middle, with anything you were typing still in its message box. You
+can keep chatting in Home while the thread works, and send messages in either: each reply appears in
+the conversation you sent it from. Opening another thread, from a card, the sidebar or a **From
+thread:** line, puts it in the panel instead. The panel's buttons expand the thread to fill the
+middle (where **← Home** goes back, and the collapse button puts it back in the panel) or close it.
+On a narrower window or a phone, a thread opens in place of Home, with **← Home** to go back. The
+address bar keeps track of the open thread, so reloading the page or using the browser's back and
+forward buttons brings back what you were looking at. Conversations listed under **Earlier** open in
+the middle, not in the panel.
+
+An open thread is an ordinary chat: read what the assistant has done, answer its questions, and ask
+for more. The bar above it shows what the assistant asked the thread to do when it started it, and
+where the thread stands (**Working…** while it is busy). The thread's assistant is fixed, so the
+profile picker is locked here too.
 
 To close a thread yourself, select **Mark done** in the bar above it. It's there while the thread is
 **Waiting on you** or **Failed**; a thread that is still working can be marked done once it stops.
@@ -192,10 +203,11 @@ Nothing is added to Home when you do, because the thread's last message may be a
 than an outcome. If the thread can't be marked done, the bar says so and the thread stays as it was.
 
 **Unread counts.** Opening Home or a thread marks what's on screen as read, a moment after it
-appears, and the thread's unread count clears. While you are scrolled up reading older messages,
-anything new below stays unread until you scroll down to it. A browser tab in the background doesn't
-mark anything read, so the count is still there when you come back to it. Unread counts are your
-own: someone else in the household reading a thread doesn't clear yours.
+appears, and the thread's unread count clears. With a thread open beside Home, each counts as on
+screen; Home hidden behind an expanded thread doesn't. While you are scrolled up reading older
+messages, anything new below stays unread until you scroll down to it. A browser tab in the
+background doesn't mark anything read, so the count is still there when you come back to it. Unread
+counts are your own: someone else in the household reading a thread doesn't clear yours.
 
 The sidebar lists **Home** first, with a count of the threads waiting on you, then your threads
 grouped by where they stand, with whatever needs you at the top. Each thread shows its unread count,

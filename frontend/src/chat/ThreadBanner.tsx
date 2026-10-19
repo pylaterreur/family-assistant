@@ -13,6 +13,11 @@ interface ThreadBannerProps {
   onMarkDone: (conversationId: string) => void;
   /** A Mark done for this thread in flight, or the last one having failed. */
   markDoneStatus: 'pending' | 'failed' | null;
+  /**
+   * In the right-hand panel, Home is beside the thread and the panel's header
+   * names it, so the banner leaves out the way back and the title.
+   */
+  compact?: boolean;
 }
 
 /**
@@ -24,6 +29,7 @@ export const ThreadBanner: React.FC<ThreadBannerProps> = ({
   onOpenHome,
   onMarkDone,
   markDoneStatus,
+  compact = false,
 }) => {
   // Work in progress outranks a close, so a working thread would stay working;
   // it can be marked done once it stops.
@@ -36,23 +42,30 @@ export const ThreadBanner: React.FC<ThreadBannerProps> = ({
     >
       <div className="mx-auto flex max-w-3xl flex-col gap-1.5">
         <div className="flex min-w-0 items-center gap-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 shrink-0 gap-1 px-2"
-            onClick={() => onOpenHome(thread.home_conversation_id)}
-            data-testid="thread-breadcrumb-home"
-          >
-            <ArrowLeftIcon size={14} aria-hidden="true" />
-            Home
-          </Button>
-          <span className="text-muted-foreground" aria-hidden="true">
-            /
-          </span>
-          <ThreadStateDot state={thread.state} />
-          <span className="min-w-0 truncate text-sm font-medium" data-testid="thread-banner-title">
-            {thread.title}
-          </span>
+          {!compact && (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 shrink-0 gap-1 px-2"
+                onClick={() => onOpenHome(thread.home_conversation_id)}
+                data-testid="thread-breadcrumb-home"
+              >
+                <ArrowLeftIcon size={14} aria-hidden="true" />
+                Home
+              </Button>
+              <span className="text-muted-foreground" aria-hidden="true">
+                /
+              </span>
+              <ThreadStateDot state={thread.state} />
+              <span
+                className="min-w-0 truncate text-sm font-medium"
+                data-testid="thread-banner-title"
+              >
+                {thread.title}
+              </span>
+            </>
+          )}
           {/* Narrow screens keep the row to the way back, the title and the action. */}
           <Badge
             variant="secondary"
