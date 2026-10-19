@@ -558,7 +558,7 @@ private struct PushedConversationView: View {
                     if viewModel.isConversationDescribed {
                         IntelligencePickerView(viewModel: viewModel)
                     }
-                    if let thread {
+                    if let thread, thread.canMarkDone {
                         ThreadActionsMenu(thread: thread, store: store)
                     }
                 }
@@ -646,7 +646,7 @@ private struct ThreadActionsMenu: View {
             } label: {
                 Label("Mark Done", systemImage: "checkmark.circle")
             }
-            .disabled(!thread.canMarkDone || store.markingDone.contains(thread.conversationID))
+            .disabled(store.markingDone.contains(thread.conversationID))
             .accessibilityIdentifier("thread-mark-done")
         } label: {
             Label("Thread Actions", systemImage: "ellipsis.circle")

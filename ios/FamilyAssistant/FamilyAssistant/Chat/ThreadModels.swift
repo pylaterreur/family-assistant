@@ -129,9 +129,11 @@ struct ChatThreadSummary: Equatable, Identifiable {
         return previewLine
     }
 
-    /// Whether "Mark done" is offered: a thread already done has nothing to close.
+    /// Whether "Mark done" is offered: only once the thread is waiting or has
+    /// failed. Work in progress outranks a close, so a working thread marked
+    /// done would still read as working and its turn's reply would reopen it.
     var canMarkDone: Bool {
-        presentationState != .done
+        presentationState == .waiting || presentationState == .failed
     }
 
     /// The card and row label for VoiceOver, which reads them as one element.

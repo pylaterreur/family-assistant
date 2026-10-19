@@ -313,8 +313,9 @@ marked this done". When a thread finishes, its outcome also appears in Home unde
 label; tap the label to open that thread. Tap a card to open the thread; Back returns you to Home
 where you left it. A thread keeps its own profile, so it has no profile picker, and its top shows
 the request the assistant started it with. To close a thread yourself, choose **Mark Done** from the
-**…** menu at the top of the thread, or long-press its card in Home. It reopens by itself when
-something new arrives in it.
+**…** menu at the top of the thread, or long-press its card in Home. It's offered while the thread
+is **Waiting on you** or **Failed**; a thread that is still working can be marked done once it
+stops. It reopens by itself when something new arrives in it.
 
 Home and threads count as read once you have scrolled to their newest message with the app open, so
 opening a thread clears its unread count. The **Chats** button at the top right (also in the menu at

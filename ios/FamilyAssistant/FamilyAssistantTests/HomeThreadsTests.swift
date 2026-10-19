@@ -305,7 +305,7 @@ final class HomeThreadsTests: XCTestCase {
                     userClosedDone ? "You marked this done" : "Booked for Saturday",
                     context
                 )
-                XCTAssertEqual(summary.canMarkDone, state != .done, context)
+                XCTAssertEqual(summary.canMarkDone, state == .waiting || state == .failed, context)
                 let sections = ThreadSwitcherSections(threads: [summary], conversations: [], homeConversationID: "home")
                 XCTAssertEqual(sections.groups.map(\.title), [group], context)
             }
