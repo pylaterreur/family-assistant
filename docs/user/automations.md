@@ -66,17 +66,28 @@ which are simpler than automations and often what you actually want.
 
 ## Where the assistant replies
 
-By default an automation that wakes the assistant does so in the conversation where you created it,
-so the reply arrives alongside what you were already discussing.
+If your household has threads turned on (the web chat opens on **Home** — see
+[Home and threads](interfaces.md#home-and-threads)), an automation you create in the web or iOS app
+replies in your Home, whichever conversation you were in when you set it up. Reminders and callbacks
+work the same way, and so do a script's `wake_llm()` hand-offs and the note you get when a script
+automation fails. If you don't have a Home yet, the first reply creates one. You get a notification
+as with any other reply.
 
-In the web app you can ask for each run to start a **new conversation** instead: "every morning at
-7am, start a new conversation with my daily briefing." Each run then appears as its own conversation
-in the sidebar, and you get a notification as with any other reply. On the Automations page this is
-the "Start a new conversation each time" checkbox.
+There are two exceptions:
 
-A new conversation has no earlier history, so the automation's prompt has to say everything the
-assistant needs. This option isn't available for automations created in Telegram, where a chat is a
-single conversation.
+- **Created inside a thread:** the automation, reminder or callback stays with that thread, so it
+  arrives alongside the work it belongs to.
+- **Created in Telegram:** it replies in the chat where you created it.
+
+To keep one in the conversation where you created it, say so: "remind me here tomorrow at 9", or
+"check back in this conversation in an hour". Automations you set up before Home existed keep
+replying where they always have.
+
+In the web app you can also ask for each run to start a **new conversation**: "every morning at 7am,
+start a new conversation with my daily briefing." Each run then appears as its own conversation in
+the sidebar. On the Automations page this is the "Start a new conversation each time" checkbox. A
+new conversation has no earlier history, so the automation's prompt has to say everything the
+assistant needs. This option isn't available in Telegram, where a chat is a single conversation.
 
 ## Managing automations
 

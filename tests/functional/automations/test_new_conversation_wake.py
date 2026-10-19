@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from family_assistant.actions import (
     ActionType,
-    NewConversationError,
+    WakeDestinationError,
     execute_action,
     validate_wake_destination,
 )
@@ -278,19 +278,22 @@ async def test_script_new_conversation_wake_from_telegram_is_not_retried(
 def test_validate_wake_destination_refuses(
     action_config: dict[str, str], interface_type: str, owner: str | None
 ) -> None:
-    with pytest.raises(NewConversationError):
+    with pytest.raises(WakeDestinationError):
         validate_wake_destination(
             "wake_llm",
             action_config,
             interface_type=interface_type,
             owner_user_id=owner,
+            threads_enabled=True,
         )
 
 
-def test_validate_wake_destination_ignores_scripts() -> None:
-    validate_wake_destination(
-        "script",
-        {"conversation": "new"},
-        interface_type="telegram",
-        owner_user_id=None,
-    )
+def test_validate_wake_destination_points_scripts_at_wake_llm_for_new() -> None:
+    with pytest.raises(WakeDestinationError, match="new_conversation=True"):
+        validate_wake_destination(
+            "script",
+            {"conversation": "new"},
+            interface_type="web",
+            owner_user_id=OWNER,
+            threads_enabled=True,
+        )

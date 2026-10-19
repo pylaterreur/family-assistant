@@ -17,10 +17,17 @@ from sqlalchemy import select, update
 
 from family_assistant import storage
 from family_assistant.actions import (
+    WAKE_CONVERSATION_HOME,
+    WAKE_CONVERSATION_SOURCE,
     ActionType,
+    WakeDestinationError,
     WakeLlmProfileError,
     assert_wake_llm_allowed,
+    default_wake_destination,
     execute_action,
+    threads_enabled,
+    validate_wake_destination,
+    with_default_wake_destination,
 )
 from family_assistant.security.definition_records import (
     DefinitionArtifactKind,
@@ -28,6 +35,7 @@ from family_assistant.security.definition_records import (
     stamp_callback_definition,
 )
 from family_assistant.storage.tasks import TaskPriority
+from family_assistant.threads.home import find_home, home_owner_id
 from family_assistant.tools.automations import validate_action_scripts
 from family_assistant.tools.stored_scripts import validate_script_action_config
 from family_assistant.utils.clock import SystemClock
@@ -35,11 +43,107 @@ from family_assistant.utils.clock import SystemClock
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from family_assistant.json_schema import JsonSchemaObject
     from family_assistant.task_worker import LlmCallbackPayload
     from family_assistant.tools.types import ToolDefinition, ToolExecutionContext
 
 
 logger = logging.getLogger(__name__)
+
+
+def _destination_parameter(what: str) -> JsonSchemaObject:
+    return {
+        "type": "string",
+        "enum": [WAKE_CONVERSATION_HOME, WAKE_CONVERSATION_SOURCE],
+        "description": (
+            f"Where the {what} is delivered. Omit it for the default: the "
+            "user's Home in the web and iOS apps when they have one, otherwise "
+            "this conversation (always this chat in Telegram). "
+            f"'{WAKE_CONVERSATION_SOURCE}' delivers it here, in this "
+            "conversation, which suits one that only makes sense next to this "
+            f"conversation's history. '{WAKE_CONVERSATION_HOME}' asks for Home "
+            "explicitly."
+        ),
+    }
+
+
+async def _callback_home_owner(
+    exec_context: ToolExecutionContext, conversation: str | None
+) -> str | None:
+    """Whose Home a reminder or callback created now lands in, if anyone's.
+
+    Raises WakeDestinationError for a destination this turn cannot have.
+    """
+    threads_on = threads_enabled(exec_context.processing_service)
+    if conversation is None:
+        destination = await default_wake_destination(
+            exec_context.db_context,
+            conversation_id=exec_context.conversation_id,
+            interface_type=exec_context.interface_type,
+            owner_user_id=exec_context.user_id,
+            threads_enabled=threads_on,
+        )
+    elif conversation in {WAKE_CONVERSATION_HOME, WAKE_CONVERSATION_SOURCE}:
+        destination = conversation
+        validate_wake_destination(
+            ActionType.WAKE_LLM,
+            {"conversation": destination},
+            interface_type=exec_context.interface_type,
+            owner_user_id=exec_context.user_id,
+            threads_enabled=threads_on,
+        )
+    else:
+        raise WakeDestinationError(
+            f"conversation must be '{WAKE_CONVERSATION_HOME}' or "
+            f"'{WAKE_CONVERSATION_SOURCE}', got {conversation!r}."
+        )
+    return exec_context.user_id if destination == WAKE_CONVERSATION_HOME else None
+
+
+async def _home_viewer(exec_context: ToolExecutionContext) -> str | None:
+    """The caller's Home owner key when this turn runs in their Home, else None.
+
+    A callback created elsewhere but routed to Home keeps its source
+    conversation on the payload, so Home recognises it by its owner instead.
+    """
+    app_config = getattr(exec_context.processing_service, "app_config", None)
+    if (
+        not threads_enabled(exec_context.processing_service)
+        or app_config is None
+        or not exec_context.user_id
+    ):
+        return None
+    home = await find_home(
+        exec_context.db_context,
+        app_config,
+        user_id=exec_context.user_id,
+        interface_type=exec_context.interface_type,
+    )
+    if home != exec_context.conversation_id:
+        return None
+    return home_owner_id(app_config, exec_context.user_id)
+
+
+def _callback_belongs_here(
+    exec_context: ToolExecutionContext,
+    payload: Mapping[str, Any],
+    home_viewer: str | None,
+) -> bool:
+    """Whether this conversation may list and manage a pending callback.
+
+    That is one created here, or, in a user's Home, one of theirs routed to
+    it. Another user's Home-bound callbacks stay out of reach.
+    """
+    if (
+        payload.get("interface_type") == exec_context.interface_type
+        and payload.get("conversation_id") == exec_context.conversation_id
+    ):
+        return True
+    owner = payload.get("home_owner_user_id")
+    if home_viewer is None or not isinstance(owner, str):
+        return False
+    app_config = getattr(exec_context.processing_service, "app_config", None)
+    return app_config is not None and home_owner_id(app_config, owner) == home_viewer
 
 
 # Tool Definitions
@@ -93,6 +197,7 @@ TASK_TOOLS_DEFINITION: list[ToolDefinition] = [
                         ),
                         "default": 2,
                     },
+                    "conversation": _destination_parameter("reminder"),
                 },
                 "required": ["reminder_time", "message"],
             },
@@ -126,6 +231,7 @@ TASK_TOOLS_DEFINITION: list[ToolDefinition] = [
                             "The specific instructions or information you need to remember for the callback (e.g., 'Check if the download finished', 'Continue analyzing the data')."
                         ),
                     },
+                    "conversation": _destination_parameter("callback"),
                 },
                 "required": ["callback_time", "context"],
             },
@@ -136,7 +242,7 @@ TASK_TOOLS_DEFINITION: list[ToolDefinition] = [
         "function": {
             "name": "list_pending_callbacks",
             "description": (
-                "Lists all pending LLM callback tasks for the current conversation, including:"
+                "Lists all pending LLM callback tasks for the current conversation (in the user's Home, also their reminders and callbacks set up elsewhere that will arrive in Home), including:"
                 "\n- One-time callbacks from schedule_future_callback"
                 "\n- Reminder callbacks from schedule_reminder"
                 "\nReturns task IDs, scheduled times, and context for each pending callback.\n\n"
@@ -260,7 +366,12 @@ TASK_TOOLS_DEFINITION: list[ToolDefinition] = [
                         "description": (
                             "Configuration for the action. "
                             "For wake_llm: {'context': 'message for LLM'}. "
-                            "For script: {'script_code': 'Python code', 'timeout': 600}"
+                            "For script: {'script_code': 'Python code', 'timeout': 600}. "
+                            "Either may add 'conversation' to say where the woken "
+                            "assistant replies: omit it for the default (the "
+                            "user's Home in the web and iOS apps when they have "
+                            "one, otherwise this conversation), 'source' for this "
+                            "conversation, or 'home'."
                         ),
                     },
                 },
@@ -279,6 +390,7 @@ async def schedule_reminder_tool(
     follow_up: bool = False,
     follow_up_interval: str = "30 minutes",
     max_follow_ups: int = 2,
+    conversation: str | None = None,
 ) -> str | None:
     """
     Schedules a reminder to be sent at a specific time.
@@ -290,6 +402,8 @@ async def schedule_reminder_tool(
         follow_up: If True, will automatically send follow-up reminders if no response.
         follow_up_interval: Time between follow-ups (e.g., "30 minutes", "1 hour").
         max_follow_ups: Maximum number of follow-up reminders.
+        conversation: Where the reminder lands, 'home' or 'source'; omitted
+            for the default (see _callback_home_owner).
     """
 
     # Get interface_type, conversation_id, and db_context from the execution context object
@@ -339,6 +453,11 @@ async def schedule_reminder_tool(
             logger.error(f"Invalid reminder parameters: {message_text}")
             return f"Error: Invalid reminder parameters. {message_text}"
 
+    try:
+        home_owner = await _callback_home_owner(exec_context, conversation)
+    except WakeDestinationError as err:
+        return f"Error: Invalid reminder parameters. {err}"
+
     task_id = f"llm_callback_{uuid.uuid4()}"
     scheduling_time = clock.now()
     payload: LlmCallbackPayload = {
@@ -365,6 +484,8 @@ async def schedule_reminder_tool(
     }
     if exec_context.user_id is not None:
         payload["created_by_user_id"] = exec_context.user_id
+    if home_owner is not None:
+        payload["home_owner_user_id"] = home_owner
 
     register_definition_write(
         exec_context.definition_gate_outcome,
@@ -400,6 +521,7 @@ async def schedule_future_callback_tool(
     exec_context: ToolExecutionContext,
     callback_time: str,
     context: str,  # This is the LLM context string
+    conversation: str | None = None,
 ) -> str | None:
     """
     Schedules a task to trigger an LLM callback in a specific chat at a future time.
@@ -408,6 +530,8 @@ async def schedule_future_callback_tool(
         exec_context: The ToolExecutionContext containing chat_id, application instance, and db_context.
         callback_time: ISO 8601 formatted datetime string (including timezone).
         context: The context/prompt for the future LLM callback.
+        conversation: Where the callback lands, 'home' or 'source'; omitted
+            for the default (see _callback_home_owner).
     """
     # A future callback is a wake_llm in disguise: it enqueues an llm_callback
     # that runs a model turn later. A profile that may not wake the LLM must be
@@ -448,6 +572,11 @@ async def schedule_future_callback_tool(
         )
         return f"Error: Invalid callback time provided. Ensure it's a future ISO 8601 datetime with timezone. {message_text}"
 
+    try:
+        home_owner = await _callback_home_owner(exec_context, conversation)
+    except WakeDestinationError as err:
+        return f"Error: {err}"
+
     task_id = f"llm_callback_{uuid.uuid4()}"
     scheduling_time = clock.now()  # Use the clock from context
     payload: LlmCallbackPayload = {
@@ -471,6 +600,8 @@ async def schedule_future_callback_tool(
     # under the originating profile rather than the worker default.
     if exec_context.processing_profile_id is not None:
         payload["processing_profile_id"] = exec_context.processing_profile_id
+    if home_owner is not None:
+        payload["home_owner_user_id"] = home_owner
 
     register_definition_write(
         exec_context.definition_gate_outcome,
@@ -543,13 +674,11 @@ async def list_pending_callbacks_tool(
         return f"Error: Failed to list pending callbacks. {e}"
 
     # Filter results in Python to match the conversation
+    home_viewer = await _home_viewer(exec_context)
     filtered_results = []
     for row in results:
         payload = row.get("payload", {})
-        if (
-            payload.get("interface_type") == interface_type
-            and payload.get("conversation_id") == conversation_id
-        ):
+        if _callback_belongs_here(exec_context, payload, home_viewer):
             filtered_results.append(row)
             if len(filtered_results) >= limit:
                 break
@@ -635,9 +764,8 @@ async def modify_pending_callback_tool(
         return f"Error: Callback task '{task_id}' is not pending (current status: {task.get('status')}). It cannot be modified."
 
     task_payload = task.get("payload", {})
-    if (
-        task_payload.get("interface_type") != interface_type
-        or task_payload.get("conversation_id") != conversation_id
+    if not _callback_belongs_here(
+        exec_context, task_payload, await _home_viewer(exec_context)
     ):
         return f"Error: Callback task '{task_id}' does not belong to this conversation. Modification denied."
 
@@ -745,9 +873,8 @@ async def cancel_pending_callback_tool(
         return f"Error: Callback task '{task_id}' is not pending (current status: {task.get('status')}). It cannot be cancelled."
 
     task_payload = task.get("payload", {})
-    if (
-        task_payload.get("interface_type") != interface_type
-        or task_payload.get("conversation_id") != conversation_id
+    if not _callback_belongs_here(
+        exec_context, task_payload, await _home_viewer(exec_context)
     ):
         return f"Error: Callback task '{task_id}' does not belong to this conversation. Cancellation denied."
 
@@ -820,6 +947,26 @@ async def schedule_action_tool(
             return "Error: Schedule time must be in the future"
     except ValueError as e:
         return f"Error: Invalid schedule_time format: {e}"
+
+    threads_on = threads_enabled(exec_context.processing_service)
+    try:
+        validate_wake_destination(
+            action_type_enum,
+            action_config,
+            interface_type=exec_context.interface_type,
+            owner_user_id=exec_context.user_id,
+            threads_enabled=threads_on,
+        )
+    except WakeDestinationError as err:
+        return f"Error: {err}"
+    action_config = await with_default_wake_destination(
+        exec_context.db_context,
+        action_config,
+        conversation_id=exec_context.conversation_id,
+        interface_type=exec_context.interface_type,
+        owner_user_id=exec_context.user_id,
+        threads_enabled=threads_on,
+    )
 
     # Use the shared action executor with scheduling
     try:

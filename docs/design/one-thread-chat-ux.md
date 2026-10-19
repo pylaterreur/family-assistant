@@ -42,6 +42,16 @@ it happily for quick questions, but it breaks down when several jobs run in para
 **Home is a single stream and the landing screen.** Quick questions, small edits, reminders,
 proactive messages and the morning brief all live there, inline, like a Telegram DM.
 
+**Proactive messages land in Home.** A reminder, callback or automation created on web or iOS
+delivers to its owner's Home, whichever conversation created it, except one created in a thread,
+which belongs to that thread's work. The destination is written down when it is created and resolved
+to a conversation when it fires, so it reaches the Home the owner has then. "Here" remains an
+explicit choice. Telegram is unchanged, because a Telegram chat is already its own Home. The
+existing "new conversation per run" option stays a separate conversation for now; it is planned to
+become a thread off Home, reusing user-started threads (milestone 5). Results of work started in a
+conversation, such as worker completions and delegation results, return to that conversation; only
+proactive messages default to Home.
+
 **A thread is for work that outlives the turn.** That means work that runs in the background, waits
 on someone, takes several steps the user will want to follow, or is a project the user will come
 back to. The assistant starts a thread and says so in its reply. The user can start one too:
@@ -263,6 +273,15 @@ and each path is governed:
 
 - **No nested threads.** One level covers the household use cases.
 
+- **Automations from before Home stay where they are.** There is no migration. A wake created now
+  has its destination written down, and one with none written down fires where it was created, so
+  existing automations, reminders and script automations keep their behaviour. Moving one to Home is
+  an edit by the user.
+
+- **A Home-bound wake falls back to where it was created when Home no longer applies.** If threads
+  are switched off after it was created, it fires in its source conversation, which is where it
+  would have gone before Home existed.
+
 - **Only the streaming turn endpoint absorbs a queued run.** A non-streaming message sent into a
   thread whose first turn hasn't started holds the conversation until it is answered; the first turn
   then runs after it rather than being absorbed. Clients use the streaming endpoint.
@@ -369,7 +388,8 @@ and each path is governed:
 4. **Home on iOS.** Add the landing view, the switcher, cards and push navigation. Verified by unit
    tests on card state and UI tests on navigation.
 5. **User overrides.** Add "Continue in a thread", "Move to thread…" (moves a turn), send-as-thread
-   and "New thread" on both clients.
+   and "New thread" on both clients. Afterwards, an automation's "new conversation per run" becomes
+   a thread off Home through the same thread-creation path.
 6. **Telegram.** Add a per-conversation turn slot, delivery from thread to chat, edited-in-place
    cards, reply-to-card routing and echoes. Verified by tests that a Home message during a running
    thread turn starts its own turn rather than steering.

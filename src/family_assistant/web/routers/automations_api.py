@@ -7,7 +7,13 @@ from typing import TYPE_CHECKING, Annotated, Any, cast
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from family_assistant.actions import NewConversationError, validate_wake_destination
+from family_assistant.actions import (
+    WakeDestinationError,
+    carry_wake_destination,
+    threads_enabled,
+    validate_wake_destination,
+    with_default_wake_destination,
+)
 from family_assistant.processing import ProcessingService
 from family_assistant.security.taint import TurnTaintState
 from family_assistant.storage.database import Database
@@ -174,6 +180,7 @@ def _check_wake_destination(
     *,
     interface_type: str,
     current_user: dict,
+    processing_service: ProcessingService,
 ) -> None:
     try:
         validate_wake_destination(
@@ -181,8 +188,9 @@ def _check_wake_destination(
             action_config,
             interface_type=interface_type,
             owner_user_id=str(current_user["user_identifier"]),
+            threads_enabled=threads_enabled(processing_service),
         )
-    except NewConversationError as err:
+    except WakeDestinationError as err:
         raise HTTPException(status_code=400, detail=str(err)) from err
 
 
@@ -401,6 +409,15 @@ async def create_event_automation(
         request.action_config or {},
         interface_type="web",
         current_user=current_user,
+        processing_service=processing_service,
+    )
+    request.action_config = await with_default_wake_destination(
+        db,
+        request.action_config or {},
+        conversation_id=request.conversation_id,
+        interface_type="web",
+        owner_user_id=str(current_user["user_identifier"]),
+        threads_enabled=threads_enabled(processing_service),
     )
 
     # Validate script requirements
@@ -496,6 +513,15 @@ async def create_schedule_automation(
         request.action_config or {},
         interface_type="web",
         current_user=current_user,
+        processing_service=processing_service,
+    )
+    request.action_config = await with_default_wake_destination(
+        db,
+        request.action_config or {},
+        conversation_id=request.conversation_id,
+        interface_type="web",
+        owner_user_id=str(current_user["user_identifier"]),
+        threads_enabled=threads_enabled(processing_service),
     )
 
     # Validate script requirements
@@ -613,6 +639,11 @@ async def update_automation(
             cast("dict[str, Any]", request.action_config),
             interface_type=existing.interface_type,
             current_user=current_user,
+            processing_service=processing_service,
+        )
+        request.action_config = carry_wake_destination(
+            cast("dict[str, Any]", request.action_config),
+            existing.action_config,
         )
 
     # When a script automation's action_config (and therefore its script)

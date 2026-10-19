@@ -11,7 +11,7 @@ from dateutil.parser import ParserError
 from sqlalchemy import delete, insert, null, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from family_assistant.actions import wants_new_conversation
+from family_assistant.actions import home_owner_for, wants_new_conversation
 from family_assistant.security.definition_records import (
     CreationDisposition,
     DefinitionArtifactKind,
@@ -128,6 +128,9 @@ def _build_wake_payload(
         payload["processing_profile_id"] = processing_profile_id
     if wants_new_conversation(action_config):
         payload["new_conversation"] = True
+    home_owner = home_owner_for(action_config, created_by_user_id)
+    if home_owner is not None:
+        payload["home_owner_user_id"] = home_owner
     return payload
 
 
