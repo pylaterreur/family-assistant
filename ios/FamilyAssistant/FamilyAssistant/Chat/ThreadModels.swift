@@ -67,8 +67,22 @@ enum ThreadPresentationState: Equatable {
     }
 }
 
+/// Who closed a thread, while that close is what its state shows.
+enum ChatThreadCloser: Equatable {
+    case assistant
+    case user
+
+    init?(rawValue: String?) {
+        switch rawValue {
+        case "assistant": self = .assistant
+        case "user": self = .user
+        default: return nil
+        }
+    }
+}
+
 /// One thread of a Home: what its card and switcher row show.
-struct ChatThreadSummary: Decodable, Equatable, Identifiable {
+struct ChatThreadSummary: Equatable, Identifiable {
     let conversationID: String
     let homeConversationID: String
     let title: String
@@ -79,6 +93,11 @@ struct ChatThreadSummary: Decodable, Equatable, Identifiable {
     let preview: String?
     let createdAt: Date
     let updatedAt: Date
+    var closedBy: ChatThreadCloser? = nil
+    var closedAt: Date? = nil
+    var echoMessageID: Int? = nil
+    /// The caller's own unread count: someone else reading it does not clear it.
+    var unreadCount = 0
 
     var id: String { conversationID }
 
@@ -97,6 +116,38 @@ struct ChatThreadSummary: Decodable, Equatable, Identifiable {
         return nil
     }
 
+    static let userClosedLine = "You marked this done"
+
+    /// What a card or switcher row says under the title. A thread the user
+    /// closed says so: its latest message may be a question or a progress
+    /// update rather than an outcome. Anything else shows its latest message,
+    /// which for a thread its assistant finished is the outcome.
+    var detailLine: String? {
+        if presentationState == .done, closedBy == .user {
+            return Self.userClosedLine
+        }
+        return previewLine
+    }
+
+    /// Whether "Mark done" is offered: a thread already done has nothing to close.
+    var canMarkDone: Bool {
+        presentationState != .done
+    }
+
+    /// The card and row label for VoiceOver, which reads them as one element.
+    var accessibilitySummary: String {
+        var parts = [title, ThreadPresentationState.label(for: presentationState)]
+        if let detailLine {
+            parts.append(detailLine)
+        }
+        if unreadCount > 0 {
+            parts.append("\(unreadCount) unread")
+        }
+        return parts.joined(separator: ", ")
+    }
+}
+
+extension ChatThreadSummary: Decodable {
     enum CodingKeys: String, CodingKey {
         case conversationID = "conversation_id"
         case homeConversationID = "home_conversation_id"
@@ -108,6 +159,89 @@ struct ChatThreadSummary: Decodable, Equatable, Identifiable {
         case preview
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case closedBy = "closed_by"
+        case closedAt = "closed_at"
+        case echoMessageID = "echo_message_id"
+        case unreadCount = "unread_count"
+    }
+
+    // In an extension so the memberwise initializer stays available.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        conversationID = try container.decode(String.self, forKey: .conversationID)
+        homeConversationID = try container.decode(String.self, forKey: .homeConversationID)
+        title = try container.decode(String.self, forKey: .title)
+        profileID = try container.decode(String.self, forKey: .profileID)
+        state = try container.decode(ChatThreadState.self, forKey: .state)
+        sourceToolCallID = try container.decodeIfPresent(String.self, forKey: .sourceToolCallID)
+        seedRequest = try container.decodeIfPresent(String.self, forKey: .seedRequest)
+        preview = try container.decodeIfPresent(String.self, forKey: .preview)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        closedBy = ChatThreadCloser(rawValue: try container.decodeIfPresent(String.self, forKey: .closedBy))
+        closedAt = try container.decodeIfPresent(Date.self, forKey: .closedAt)
+        echoMessageID = try container.decodeIfPresent(Int.self, forKey: .echoMessageID)
+        unreadCount = try container.decodeIfPresent(Int.self, forKey: .unreadCount) ?? 0
+    }
+}
+
+/// The caller's unread count once a read is recorded
+/// (`POST /api/v1/chat/conversations/{id}/read`).
+struct ChatMarkReadResponse: Decodable, Equatable {
+    let conversationID: String
+    let unreadCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case conversationID = "conversation_id"
+        case unreadCount = "unread_count"
+    }
+}
+
+struct ChatMarkReadRequest: Encodable {
+    let throughMessageID: Int
+
+    enum CodingKeys: String, CodingKey {
+        case throughMessageID = "through_message_id"
+    }
+}
+
+/// Whether a conversation's read marker should move, and how far. A marker
+/// moves only for Home and threads (ordinary conversations have none), only
+/// while the reader can see the newest message — the conversation on screen,
+/// the app in the foreground, scrolled to the bottom — and only forward.
+enum ReadMarkerGate {
+    struct Inputs: Equatable {
+        var kind: ChatConversationKind?
+        var isOnScreen: Bool
+        var isSceneActive: Bool
+        var isAtLatest: Bool
+        var latestPersistedMessageID: Int?
+        var markedThrough: Int?
+    }
+
+    /// Whether watching for a position to mark is worth anything right now.
+    static func isReading(_ inputs: Inputs) -> Bool {
+        (inputs.kind == .home || inputs.kind == .thread)
+            && inputs.isOnScreen && inputs.isSceneActive && inputs.isAtLatest
+    }
+
+    /// The message to mark read through, or nil to leave the marker where it is.
+    static func messageToMark(_ inputs: Inputs) -> Int? {
+        guard isReading(inputs), let latest = inputs.latestPersistedMessageID else {
+            return nil
+        }
+        if let marked = inputs.markedThrough, marked >= latest {
+            return nil
+        }
+        return latest
+    }
+
+    /// The id the server knows a rendered message by, for a persisted row.
+    static func persistedID(of messageID: String) -> Int? {
+        guard messageID.hasPrefix("msg_") else {
+            return nil
+        }
+        return Int(messageID.dropFirst(4))
     }
 }
 
@@ -202,8 +336,9 @@ struct ThreadCardSplit {
     }
 }
 
-/// The thread switcher's contents: Home, then threads grouped by what they
-/// need, then the ordinary conversations under "Earlier".
+/// The chat switcher's contents: Home, then threads grouped by what they
+/// need, then the ordinary conversations under "Earlier". Every done thread is
+/// listed under Done until something reopens it.
 struct ThreadSwitcherSections: Equatable {
     struct Group: Equatable, Identifiable {
         let title: String
