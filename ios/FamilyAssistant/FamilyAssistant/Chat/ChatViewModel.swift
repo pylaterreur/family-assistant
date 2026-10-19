@@ -164,6 +164,17 @@ final class ChatViewModel {
     var isStreaming = false {
         didSet { routedPromptReadinessMayHaveChanged() }
     }
+    /// A composer send has been accepted but its turn has not started yet:
+    /// `sendDraft` is asking the server whether a turn is already running
+    /// before it shows the message. The composer shows it as sending and takes
+    /// no second send meanwhile. Scoped to the conversation the send was made
+    /// in, so opening another one mid-preflight leaves its composer free.
+    var isSubmittingDraft: Bool {
+        submittingDraftConversationID != nil && submittingDraftConversationID == conversationID
+    }
+    private var submittingDraftConversationID: String? {
+        didSet { routedPromptReadinessMayHaveChanged() }
+    }
     var errorMessage: String?
     var mobileShowsConversationList = false
     var steerErrorMessage: String?
@@ -229,6 +240,7 @@ final class ChatViewModel {
         // so a send would post under the previous profile and the backend would
         // filter this thread's history out of the turn's context.
         return hasContent && attachmentsReady && !isLoadingMessages && !awaitsConversationMetadata
+            && !isSubmittingDraft
     }
 
     /// Owner-side share controls mirror the web app and appear only after this
@@ -778,7 +790,8 @@ final class ChatViewModel {
     /// stored property whose change calls `routedPromptReadinessMayHaveChanged`.
     var isReadyForRoutedPrompt: Bool {
         hasBootstrapped && !isLoadingMessages && !awaitsConversationMetadata
-            && !isStreaming && activeTurnIdentity == nil && knownRunningTurnIDs.isEmpty
+            && !isStreaming && !isSubmittingDraft
+            && activeTurnIdentity == nil && knownRunningTurnIDs.isEmpty
     }
 
     /// The single drain point for held routed prompts.
@@ -1986,6 +1999,10 @@ final class ChatViewModel {
     }
 
     func sendDraft() async {
+        // A second tap while the first is still submitting must not send twice.
+        guard !isSubmittingDraft else {
+            return
+        }
         _ = await sendDraft(fallbackFromSteer: false)
     }
 
@@ -2010,7 +2027,9 @@ final class ChatViewModel {
             return false
         }
         if isRouted {
-            guard conversationID != nil, !hadActiveTurnAtSubmission, !isStreaming else {
+            guard conversationID != nil, !hadActiveTurnAtSubmission, !isStreaming,
+                  !isSubmittingDraft
+            else {
                 return false
             }
         }
@@ -2034,6 +2053,20 @@ final class ChatViewModel {
             // prompt so the recursive send still has it.
             draftText = prompt
             return await sendDraft(fallbackFromSteer: fallbackFromSteer)
+        }
+
+        // The preflight below is a network round trip made before the message
+        // appears, so the composer needs a state for it. A nested call (the
+        // steer fallback) runs under the outer call's submission.
+        let ownsSubmission = !isRouted && !isSubmittingDraft
+        if ownsSubmission {
+            submittingDraftConversationID = id
+        }
+        defer {
+            // A send started since in another conversation owns the state now.
+            if ownsSubmission, submittingDraftConversationID == id {
+                submittingDraftConversationID = nil
+            }
         }
 
         // A missing local session is not proof that the conversation is idle: a

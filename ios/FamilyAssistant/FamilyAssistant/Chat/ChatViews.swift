@@ -950,6 +950,7 @@ private struct ChatComposerView: View {
     }
 
     private var actionButtonLabel: String {
+        if viewModel.isSubmittingDraft { return "Sending" }
         guard viewModel.isStreaming else { return "Send" }
         return hasComposerText ? "Steer" : "Stop"
     }
@@ -1066,11 +1067,22 @@ private struct ChatComposerView: View {
                         Task { await viewModel.sendDraft() }
                     }
                 } label: {
-                    Image(systemName: actionButtonImage)
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(.white)
+                    Group {
+                        if viewModel.isSubmittingDraft {
+                            ProgressView()
+                                .tint(.white)
+                                .accessibilityIdentifier("chat-send-progress")
+                        } else {
+                            Image(systemName: actionButtonImage)
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(.white)
+                        }
+                    }
                         .frame(width: 32, height: 32)
-                        .background(sendButtonEnabled ? Color.accentColor : Color.secondary.opacity(0.4))
+                        .background(
+                            sendButtonEnabled || viewModel.isSubmittingDraft
+                                ? Color.accentColor : Color.secondary.opacity(0.4)
+                        )
                         .clipShape(Circle())
                         // The visible circle stays compact; the tappable area
                         // is the 44pt minimum touch target.
@@ -1078,7 +1090,7 @@ private struct ChatComposerView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(!viewModel.isStreaming && !viewModel.canSendDraft)
+                .disabled(viewModel.isSubmittingDraft || (!viewModel.isStreaming && !viewModel.canSendDraft))
                 .accessibilityLabel(actionButtonLabel)
                 .accessibilityIdentifier(actionButtonIdentifier)
             }
