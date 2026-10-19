@@ -2623,7 +2623,9 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
   useEffect(
     () => () => {
       const convId = conversationIdRef.current;
-      if (convId) {
+      // Mid-send, what the composer still holds belongs to the message going
+      // out, not to a draft.
+      if (convId && !composerSendingRef.current) {
         const { text, attachments } = runtimeRef.current.thread.composer.getState();
         const unfinishedRestore = draftRestoreRef.current;
         const draftAttachments =
