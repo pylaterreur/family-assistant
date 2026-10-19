@@ -523,6 +523,85 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertTrue(queries.values[0].contains("kind=ordinary"))
     }
 
+    // MARK: - Send feedback
+
+    func testSendShowsSendingAtOnceAndTakesOneTapInHome() async throws {
+        try await assertSendShowsSendingWhileItsPreflightRuns(
+            role: .home,
+            extraJSON: #","conversation_kind":"home""#
+        )
+    }
+
+    func testSendShowsSendingAtOnceAndTakesOneTapInAPushedThread() async throws {
+        try await assertSendShowsSendingWhileItsPreflightRuns(
+            role: .pushed,
+            extraJSON: """
+            ,"latest_user_profile_id":"research","conversation_kind":"thread",
+            "thread": \(threadJSON(id: "conv", state: "waiting"))
+            """
+        )
+    }
+
+    func testSendShowsSendingAtOnceAndTakesOneTapStandalone() async throws {
+        try await assertSendShowsSendingWhileItsPreflightRuns(role: .standalone, extraJSON: "")
+    }
+
+    /// The send path asks the server whether a turn is already running before
+    /// it shows the message. Over a slow network that round trip is the gap in
+    /// which the button looked dead, so hold it open and check what the user
+    /// sees meanwhile, then let the turn fail to start and check it says so.
+    private func assertSendShowsSendingWhileItsPreflightRuns(
+        role: ChatViewModel.Role,
+        extraJSON: String
+    ) async throws {
+        let preflight = HangingStream()
+        let preflights = LockedStrings()
+        let turnPosts = LockedStrings()
+        let page = """
+        {"conversation_id":"conv","messages":[],"count":0,"total_messages":0\(extraJSON)}
+        """
+        ChatMockBackendURLProtocol.respond { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST", path == "/api/v1/chat/turns" {
+                turnPosts.append(path)
+                return .json(#"{"detail":"server is down"}"#, statusCode: 500)
+            }
+            guard request.httpMethod == "GET", path.hasSuffix("/messages") else {
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+            }
+            let query = request.url?.query ?? ""
+            guard query.split(separator: "&").contains("limit=1") else {
+                return .json(page)
+            }
+            preflights.append(path)
+            return .hangingStream(page, controller: preflight)
+        }
+        let model = makeViewModel(conversationID: "conv", role: role)
+        await model.selectConversation("conv")
+        model.draftText = "Hello"
+        XCTAssertTrue(model.canSendDraft)
+
+        let send = Task { await model.sendDraft() }
+        try await waitUntil { preflights.values.count == 1 }
+
+        XCTAssertTrue(model.isSubmittingDraft, "The composer shows the send in progress.")
+        XCTAssertFalse(model.canSendDraft, "A send in progress takes no second send.")
+        await model.sendDraft()
+        XCTAssertEqual(preflights.values.count, 1, "A second tap starts no second send.")
+
+        preflight.finish()
+        await send.value
+
+        XCTAssertFalse(model.isSubmittingDraft)
+        XCTAssertEqual(model.messages.filter { $0.role == .user }.map(\.text), ["Hello"])
+        XCTAssertEqual(model.draftText, "")
+        try await waitUntil { !model.isStreaming }
+        XCTAssertFalse(turnPosts.values.isEmpty)
+        let assistant = try XCTUnwrap(model.messages.last { $0.role == .assistant })
+        XCTAssertEqual(assistant.status, .failed, "A turn that fails to start says so.")
+        XCTAssertNotNil(model.failedSend(for: assistant))
+    }
+
     // MARK: - View model roles
 
     func testThreadAdoptsItsOwnProfileWithoutAUserMessage() async {
