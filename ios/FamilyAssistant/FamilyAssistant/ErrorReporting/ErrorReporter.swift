@@ -169,7 +169,8 @@ final class ErrorReporter: @unchecked Sendable {
     /// Retry any reports spooled to disk by a previous launch or a failed send. Stops on the first
     /// failure so a persistent outage does not hammer the server.
     func flushPersisted() async {
-        guard let directory = spoolDirectory,
+        guard deliversReports,
+              let directory = spoolDirectory,
               let files = try? FileManager.default.contentsOfDirectory(
                   at: directory,
                   includingPropertiesForKeys: nil
@@ -210,8 +211,9 @@ final class ErrorReporter: @unchecked Sendable {
         }
     }
 
-    // `post` and `persist` are the only places a report leaves the process or reaches disk, so
-    // gating them makes a non-delivering reporter inert on every path.
+    // `post` and `persist` are the only places a report leaves the process or is written to disk,
+    // and `flushPersisted` the only place spool files are removed; gating all three makes a
+    // non-delivering reporter inert on every path.
     private func post(_ payload: ErrorReportPayload, to baseURL: URL) async throws {
         guard deliversReports else { throw ReporterError.deliveryDisabled }
         guard let url = URL(string: "/api/errors/", relativeTo: baseURL)?.absoluteURL else {

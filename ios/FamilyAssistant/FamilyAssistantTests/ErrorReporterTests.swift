@@ -409,14 +409,15 @@ final class ErrorReporterTests: XCTestCase {
             stack: nil,
             extraData: [:]
         )
-        XCTAssertEqual(spooledFiles().count, 1)
+        try Data("not json".utf8).write(to: spoolDirectory.appendingPathComponent("malformed.json"))
+        XCTAssertEqual(spooledFiles().count, 2)
         let reporter = makeReporter(deliversReports: false)
         reporter.configure { self.baseURL }
 
         await reporter.flushPersisted()
 
         XCTAssertTrue(MockErrorURLProtocol.requests.isEmpty)
-        XCTAssertEqual(spooledFiles().count, 1)
+        XCTAssertEqual(spooledFiles().count, 2)
     }
 
     private func makeReporter(deliversReports: Bool = true) -> ErrorReporter {
