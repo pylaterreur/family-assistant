@@ -56,7 +56,12 @@ struct ChatEntryView: View {
                 )
                 .safeAreaInset(edge: .top, spacing: 0) {
                     if discovery.state == .failed {
-                        HomeLookupFailedBanner(holdsRoute: route != ChatRoute()) {
+                        // A snapshot taken mid-upload would carry an attachment
+                        // that never finishes, so Retry waits for uploads.
+                        HomeLookupFailedBanner(
+                            holdsRoute: route != ChatRoute(),
+                            canRetry: !provisionalDraft.hasUploadInProgress
+                        ) {
                             Task { await retry() }
                         }
                     }
@@ -91,6 +96,9 @@ struct ChatEntryView: View {
     }
 
     private func retry() async {
+        guard !provisionalDraft.hasUploadInProgress else {
+            return
+        }
         let draft = provisionalDraft.model?.currentDraft
         await discovery.retryIfFailed()
         if case .enabled = discovery.state {
@@ -102,8 +110,29 @@ struct ChatEntryView: View {
 /// The conversation model behind the fallback conversation list, held weakly
 /// so its draft can be read when Retry replaces it with Home.
 @MainActor
+@Observable
 final class ProvisionalDraftSource {
     weak var model: ChatViewModel?
+
+    var hasUploadInProgress: Bool {
+        model?.draftAttachments.contains { $0.uploadState == .uploading } ?? false
+    }
+}
+
+/// Home's first moments: the route is applied as soon as Home itself is ready,
+/// while the thread list (which only the cards need) loads alongside.
+enum HomeStartup {
+    @MainActor
+    static func run(
+        bootstrap: () async -> Void,
+        refreshThreads: @escaping @MainActor () async -> Void,
+        applyRoute: () async -> Void
+    ) async {
+        let threads = Task { @MainActor in await refreshThreads() }
+        await bootstrap()
+        await applyRoute()
+        await threads.value
+    }
 }
 
 /// A routed prompt is held until Home can take it; say so rather than hold it
@@ -156,6 +185,7 @@ private struct ConversationLoadRetryBanner: View {
 
 private struct HomeLookupFailedBanner: View {
     let holdsRoute: Bool
+    let canRetry: Bool
     let retry: () -> Void
 
     var body: some View {
@@ -167,6 +197,7 @@ private struct HomeLookupFailedBanner: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button("Retry", action: retry)
                 .font(.footnote.weight(.semibold))
+                .disabled(!canRetry)
                 .accessibilityIdentifier("home-lookup-retry")
         }
         .padding(.horizontal, 16)
@@ -273,11 +304,14 @@ struct HomeRootView: View {
             viewModel.onListRefresh = { [weak store] in
                 await store?.refreshForActivity()
             }
-            async let threads: Void = store.refreshThreads()
-            await viewModel.bootstrap()
-            await threads
-            await applyInHome(route)
-            consumePendingPushHint()
+            await HomeStartup.run(
+                bootstrap: { await viewModel.bootstrap() },
+                refreshThreads: { await store.refreshThreads() },
+                applyRoute: {
+                    await applyInHome(route)
+                    consumePendingPushHint()
+                }
+            )
         }
         .onChange(of: route) { _, newRoute in
             apply(newRoute)
@@ -324,7 +358,9 @@ struct HomeRootView: View {
             HomeTitlePill()
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
-            IntelligencePickerView(viewModel: viewModel)
+            if viewModel.isConversationDescribed {
+                IntelligencePickerView(viewModel: viewModel)
+            }
             ThreadsButton(waitingCount: store.waitingCount) {
                 showsSwitcher = true
             }
@@ -500,7 +536,11 @@ private struct PushedConversationView: View {
                         )
                         ProfilePickerView(viewModel: viewModel)
                     }
-                    IntelligencePickerView(viewModel: viewModel)
+                    // Its tiers are the profile's, which is known only once the
+                    // conversation is described (or was started here).
+                    if viewModel.isConversationDescribed {
+                        IntelligencePickerView(viewModel: viewModel)
+                    }
                 }
             }
             .task {

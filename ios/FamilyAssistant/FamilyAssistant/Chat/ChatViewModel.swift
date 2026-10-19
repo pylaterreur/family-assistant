@@ -43,6 +43,12 @@ final class ChatViewModel {
     private var awaitsConversationMetadata: Bool {
         role != .standalone && !hasConversationMetadata && !opensGeneratedLaunchDraft
     }
+
+    /// Whether the open conversation's profile is known, so controls that
+    /// depend on it (sending, the intelligence picker) may be offered.
+    var isConversationDescribed: Bool {
+        !awaitsConversationMetadata
+    }
     /// Called whenever the model refreshes its conversation list for an
     /// activity ping or a resync, after its own refresh, so the owner can
     /// refresh what it shows alongside (the thread list). A resync matters as
@@ -1168,7 +1174,9 @@ final class ChatViewModel {
         case .standalone:
             selectedProfileID = conversationProfile ?? preferredProfileID
         case .home:
-            selectedProfileID = serverConversationProfileID ?? defaultProfileID
+            // Home always runs on the default profile, whatever its latest row
+            // ran on (as on the web).
+            selectedProfileID = defaultProfileID
         case .pushed:
             selectedProfileID = threadSummary?.profileID ?? serverConversationProfileID
                 ?? conversationProfile ?? preferredProfileID

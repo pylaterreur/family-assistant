@@ -584,6 +584,83 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertTrue(model.canSendDraft)
     }
 
+    func testHomeRunsOnTheDefaultProfileWhateverItsLatestRowRanOn() async {
+        respondWithConversation(
+            id: "home",
+            messagesJSON: #"[{"internal_id":1,"role":"user","content":"Hi","timestamp":"2026-06-08T12:00:00Z","processing_profile_id":"research"}]"#,
+            extraJSON: #","latest_user_profile_id":"research","conversation_kind":"home""#
+        )
+        let model = makeViewModel(conversationID: "home", role: .home)
+
+        await model.selectConversation("home")
+
+        XCTAssertEqual(model.selectedProfileID, "default_assistant")
+    }
+
+    func testIntelligenceControlWaitsUntilTheConversationIsDescribed() async {
+        let loads = LockedStrings()
+        ChatMockBackendURLProtocol.respond { request in
+            guard request.url?.path.hasSuffix("/messages") == true else {
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+            }
+            loads.append("load")
+            if loads.values.count == 1 {
+                return .json(#"{"detail":"upstream unavailable"}"#, statusCode: 503)
+            }
+            return .json(
+                #"{"conversation_id":"t1","messages":[],"count":0,"total_messages":0,"conversation_kind":"conversation"}"#
+            )
+        }
+        let linked = makeViewModel(conversationID: "t1", role: .pushed)
+        XCTAssertFalse(linked.isConversationDescribed, "Not described before its history loads.")
+
+        await linked.selectConversation("t1")
+        XCTAssertFalse(linked.isConversationDescribed, "Not described after a failed load.")
+
+        await linked.retryConversationLoad()
+        XCTAssertTrue(linked.isConversationDescribed)
+
+        let fresh = ChatViewModel(
+            authManager: makeAuthManager(),
+            startsNewConversation: true,
+            role: .pushed,
+            errorReporter: ErrorReporter(spoolDirectory: nil),
+            pathMonitor: StubPathMonitor(isSatisfied: true)
+        )
+        models.append(fresh)
+        XCTAssertTrue(fresh.isConversationDescribed, "A conversation started here is described from the start.")
+    }
+
+    func testStartupAppliesTheRouteWithoutWaitingForTheThreadList() async {
+        var events: [String] = []
+        var releaseThreads: CheckedContinuation<Void, Never>?
+        let threadsStarted = expectation(description: "thread list requested")
+
+        let startup = Task { @MainActor in
+            await HomeStartup.run(
+                bootstrap: { events.append("bootstrap") },
+                refreshThreads: {
+                    await withCheckedContinuation { continuation in
+                        releaseThreads = continuation
+                        threadsStarted.fulfill()
+                    }
+                    events.append("threads")
+                },
+                applyRoute: { events.append("route") }
+            )
+        }
+        await fulfillment(of: [threadsStarted], timeout: 5)
+        // The thread list is still outstanding; the route must not have waited.
+        while !events.contains("route") {
+            await Task.yield()
+        }
+        XCTAssertEqual(events, ["bootstrap", "route"])
+
+        releaseThreads?.resume()
+        await startup.value
+        XCTAssertEqual(events, ["bootstrap", "route", "threads"])
+    }
+
     func testHomeWithoutHistoryRunsOnTheDefaultProfile() async {
         PreferredProfile.store("research")
         respondWithConversation(
