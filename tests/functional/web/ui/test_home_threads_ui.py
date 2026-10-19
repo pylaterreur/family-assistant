@@ -363,7 +363,18 @@ async def test_opening_a_thread_clears_its_badge_and_it_can_be_marked_done(
     assert summary["unread_count"] == 0
 
     banner = chat.thread_banner()
-    await banner.locator(chat.THREAD_MARK_DONE).click()
+    mark_done = banner.locator(chat.THREAD_MARK_DONE)
+    # Mark done stays reachable on the narrowest phone screen.
+    desktop = page.viewport_size
+    assert desktop is not None
+    await page.set_viewport_size({"width": 320, "height": 640})
+    await expect(mark_done).to_be_in_viewport(ratio=1)
+    assert not await page.evaluate(
+        "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+    )
+    await page.set_viewport_size(desktop)
+
+    await mark_done.click()
     await expect(banner).to_have_attribute("data-thread-state", "done")
     await expect(banner.locator(chat.THREAD_BANNER_STATE)).to_have_text(
         "You marked this done"
