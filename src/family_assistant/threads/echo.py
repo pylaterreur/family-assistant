@@ -117,24 +117,30 @@ async def echo_finished_turn(
     ):
         return None
     rows = await db.message_history.get_rows_by_turn_id(turn_id)
-    finals = [
+    replies = [
         row
         for row in rows
         if row["role"] == "assistant"
         and row["conversation_id"] == conversation_id
         and row["subconversation_id"] is None
-        and not row["is_internal"]
-        and isinstance(row["content"], str)
-        and row["content"].strip()
     ]
-    if not finals:
+    # Only the turn's terminal reply is the outcome: text written alongside a
+    # tool call -- the finish_thread call itself included -- is a step, and a
+    # turn that ended quietly or empty has no outcome to report.
+    final = replies[-1] if replies else None
+    if (
+        final is None
+        or final["tool_calls"]
+        or final["is_internal"]
+        or not isinstance(final["content"], str)
+        or not final["content"].strip()
+    ):
         logger.info(
             "Thread %s was closed in turn %s, which ended with no message to echo.",
             conversation_id,
             turn_id,
         )
         return None
-    final = finals[-1]
     moment = now or datetime.now(UTC)
 
     async def _write(txn: DatabaseTransaction) -> int:

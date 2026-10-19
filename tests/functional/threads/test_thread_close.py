@@ -64,6 +64,7 @@ USER = "alice"
 TITLE = "Hot water system quotes"
 OUTCOME = "Booked Acme Plumbing for Tuesday at 9am."
 QUESTION = "Gas or heat pump?"
+PREAMBLE = "Wrapping this up."
 NOW = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
 
 UNTRUSTED = TaintSource(
@@ -104,9 +105,11 @@ async def _tools() -> PolicyEnforcingToolsProvider:
     return provider
 
 
-def _call(name: str, arguments: dict[str, object]) -> LLMOutput:
+def _call(
+    name: str, arguments: dict[str, object], *, content: str | None = None
+) -> LLMOutput:
     return LLMOutput(
-        content=None,
+        content=content,
         tool_calls=[
             ToolCallItem(
                 id=f"call_{uuid.uuid4()}",
@@ -175,6 +178,8 @@ class World:
     thread_llm: RuleBasedMockLLMClient
     publisher: RecordingPublisher
     tool_results: list[str] = field(default_factory=list)
+    # What the thread's assistant ends a turn with after finishing the thread.
+    final_reply: str = OUTCOME
 
     async def say(
         self,
@@ -231,7 +236,7 @@ class World:
 def _thread_reply(world_ref: list[World]) -> RuleBasedMockLLMClient:
     def after_tool(kwargs: MatcherArgs) -> LLMOutput:
         world_ref[0].tool_results.append(str(_last_message(kwargs).content))
-        return LLMOutput(content=OUTCOME)
+        return LLMOutput(content=world_ref[0].final_reply)
 
     return RuleBasedMockLLMClient(
         rules=[
@@ -242,7 +247,9 @@ def _thread_reply(world_ref: list[World]) -> RuleBasedMockLLMClient:
             ),
             (
                 lambda kwargs: "finish" in _last_user_text(kwargs),
-                lambda _kwargs: _call("finish_thread", {"outcome": "done"}),
+                lambda _kwargs: _call(
+                    "finish_thread", {"outcome": "done"}, content=PREAMBLE
+                ),
             ),
             (
                 lambda kwargs: "ask me" in _last_user_text(kwargs),
@@ -383,6 +390,18 @@ async def test_an_echo_does_not_wake_home(world: World) -> None:
 
     assert len(await world.echoes()) == 1
     assert world.home_llm.get_calls() == []
+
+
+@pytest.mark.asyncio
+async def test_a_closing_turn_with_no_final_reply_echoes_nothing(world: World) -> None:
+    """The text alongside the finish_thread call is not the outcome."""
+    world.final_reply = ""
+
+    await world.in_thread("please finish up")
+
+    summary = await world.summary()
+    assert (summary.state, summary.echo_message_id) == ("done", None)
+    assert await world.echoes() == []
 
 
 @pytest.mark.asyncio
