@@ -1405,6 +1405,11 @@ granted through [global_tools_policy](#global_tools_policy), because a thread ca
 profile. A profile that withholds it, or has no Family Assistant tools at all (`coder`), can't
 finish its threads; the user marks those done.
 
+While `true`, reminders, callbacks and automations created from the web or iOS app outside a thread
+are delivered to the creator's Home. The destination is recorded when each one is created. Ones
+created before the setting was turned on keep firing where they were created, and Home-bound ones
+created while it was on fire in their source conversation again if it is turned off.
+
 See [one-thread-chat-ux.md](../design/one-thread-chat-ux.md).
 
 ______________________________________________________________________

@@ -64,4 +64,34 @@ describe('AutomationDetail', () => {
       ).toBeInTheDocument();
     });
   });
+
+  it('says when each run wakes the assistant in Home', async () => {
+    server.use(
+      http.get('/api/automations/:type/:id', () =>
+        HttpResponse.json({
+          id: '790',
+          type: 'schedule',
+          name: 'Morning digest',
+          conversation_id: 'web',
+          enabled: true,
+          action_type: 'wake_llm',
+          action_config: { context: 'Summarise the news', conversation: 'home' },
+        })
+      )
+    );
+
+    render(
+      <MemoryRouter initialEntries={['/automations/schedule/790']}>
+        <Routes>
+          <Route path="/automations/:type/:id" element={<AutomationDetail />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('The assistant is woken in your Home with the prompt below.')
+      ).toBeInTheDocument();
+    });
+  });
 });

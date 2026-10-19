@@ -51,6 +51,13 @@ tool. Under the hood the assistant calls `create_automation` with `automation_ty
 "Remind me to take medication every day at 8am and 8pm"
 ```
 
+### Where they arrive
+
+With threads turned on, reminders, callbacks and automations you set up in the web or iOS app arrive
+in your Home rather than the conversation you set them up in, unless you set them up inside a
+thread. Ask for "here" or "in this conversation" to keep one where it is. See
+[automations.md](automations.md#where-the-assistant-replies) for the details.
+
 ## Detailed Tool Reference
 
 ### schedule_reminder
@@ -65,6 +72,8 @@ Creates a simple reminder that will notify you at the specified time.
   it's clear you've already dealt with it, even if you didn't reply.
 - `follow_up_interval`: Time between follow-ups (e.g., "30 minutes", "1 hour")
 - `max_follow_ups`: Maximum number of follow-up reminders
+- `conversation`: `home` or `source` (the conversation it was set up in); omitted, it follows the
+  rule under [Where they arrive](#where-they-arrive)
 
 **Examples:**
 
@@ -85,6 +94,7 @@ and there's nothing you need to know, it finishes without messaging you.
 
 - `callback_time`: When to trigger the callback (ISO 8601 format)
 - `context`: Instructions for what the assistant should do when it wakes up
+- `conversation`: `home` or `source`, as for `schedule_reminder`
 
 **Examples:**
 
