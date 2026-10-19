@@ -107,8 +107,8 @@ async def echo_finished_turn(
 
     Does nothing unless ``conversation_id`` is a thread its assistant closed in
     this turn and the close has not been echoed yet. A closing turn that ended
-    without a visible message leaves nothing to echo, and the thread is closed
-    without one.
+    without a final reply leaves nothing to echo. Whether the close still holds
+    is ``derive_state``'s call: a turn that failed after closing shows failed.
     """
     thread = await db.conversation_threads.get_thread(conversation_id)
     close = thread.close if thread is not None else None

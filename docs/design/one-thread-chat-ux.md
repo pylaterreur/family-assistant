@@ -274,8 +274,11 @@ and each path is governed:
   Family Assistant tools (`coder`), or one that withholds every global grant, leaves its threads
   waiting until the user marks them done.
 - **A closing turn that never ends cleanly echoes nothing.** The echo is the message the closing
-  turn ends with. A turn stopped or failing after the close leaves the thread closed with no echo;
-  the next thing to arrive reopens it as usual.
+  turn ends with. A turn that ends without one, or is stopped after the close, leaves the thread
+  closed with no echo; the next thing to arrive reopens it as usual.
+- **A turn that closes the thread and then fails shows the thread as failed.** The user never got
+  that turn's answer, so the failure is shown rather than hidden behind "done"; they can mark the
+  thread done themselves.
 - **Home reads facts for its recent threads only.** A status question is about live work, so Home's
   view covers the most recently active threads; older ones are in the switcher.
 - **Unread is counted for Home and threads only.** Legacy conversations have no state, so they have

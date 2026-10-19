@@ -82,6 +82,10 @@ def derive_state(
     the starting run failing -- holds until something visible arrives in the
     thread after it, which reopens the thread. Anything else leaves the next
     move with the user.
+
+    A failure after a close wins over it, the closing turn's own failure
+    included: the user never got that turn's answer, and an infrastructure
+    failure is shown rather than hidden behind "done".
     """
     if work_in_progress or run_status in _ACTIVE_RUN_STATUSES:
         return DerivedState("working")
@@ -91,6 +95,14 @@ def derive_state(
         or run_completed_at is None
         or _as_utc(close.closed_at) >= _as_utc(run_completed_at)
     )
+    if (
+        latest_visible_is_error
+        and latest_visible_at is not None
+        and (close is None or _as_utc(latest_visible_at) > _as_utc(close.closed_at))
+    ):
+        # A turn failed and nothing has been said since: an infrastructure
+        # failure, which is never presented as a request for input.
+        return DerivedState("failed")
     if (
         close is not None
         and close_is_latest
@@ -102,10 +114,6 @@ def derive_state(
         )
     ):
         return DerivedState(close.outcome, close)
-    if latest_visible_is_error:
-        # A turn failed and nothing has been said since: an infrastructure
-        # failure, which is never presented as a request for input.
-        return DerivedState("failed")
     if close is not None and close_is_latest:
         return DerivedState("waiting")
     if run_failed:

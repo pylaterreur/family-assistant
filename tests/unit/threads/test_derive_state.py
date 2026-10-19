@@ -153,7 +153,8 @@ def test_an_error_in_a_later_turn_fails_a_closed_thread() -> None:
     assert (derived.state, derived.close) == ("failed", None)
 
 
-def test_an_error_in_the_closing_turn_leaves_the_thread_closed() -> None:
+def test_a_turn_that_closes_the_thread_and_then_fails_is_failed() -> None:
+    """The user never got the turn's answer; the failure is shown."""
     derived = derive_state(
         run_status="completed",
         run_completed_at=FAILED_AT,
@@ -164,7 +165,35 @@ def test_an_error_in_the_closing_turn_leaves_the_thread_closed() -> None:
         close=_close(),
     )
 
-    assert derived.state == "done"
+    assert (derived.state, derived.close) == ("failed", None)
+
+
+def test_a_starting_turn_that_closes_the_thread_and_then_fails_is_failed() -> None:
+    derived = derive_state(
+        run_status="failed",
+        run_completed_at=CLOSED_AT + MINUTE,
+        work_in_progress=False,
+        latest_visible_at=CLOSED_AT + MINUTE,
+        latest_visible_turn_id=CLOSING_TURN,
+        latest_visible_is_error=True,
+        close=_close(),
+    )
+
+    assert (derived.state, derived.close) == ("failed", None)
+
+
+def test_the_user_closing_a_failed_thread_makes_it_done() -> None:
+    derived = derive_state(
+        run_status="completed",
+        run_completed_at=FAILED_AT,
+        work_in_progress=False,
+        latest_visible_at=CLOSED_AT - MINUTE,
+        latest_visible_turn_id="turn-earlier",
+        latest_visible_is_error=True,
+        close=_close(by="user"),
+    )
+
+    assert (derived.state, derived.close) == ("done", _close(by="user"))
 
 
 def test_a_run_failing_after_its_turn_closed_the_thread_is_failed() -> None:
