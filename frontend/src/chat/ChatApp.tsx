@@ -1,10 +1,15 @@
-import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, X } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { AppTopBar } from '../shared/AppShell';
-import { ChatShellContext, type ChatShellValue, type ConversationDraft } from './chatShell';
+import {
+  ChatShellContext,
+  type ChatShellValue,
+  type ConversationDraft,
+  type NotificationRequest,
+} from './chatShell';
 import {
   type ConversationChangeReason,
   ConversationPane,
@@ -98,11 +103,43 @@ export function confirmationMapsEqual(
 /** How a navigation is recorded in the browser history. */
 type HistoryMode = 'push' | 'replace' | 'none';
 
-type PaneSlot = 'center';
+type PaneSlot = 'center' | 'panel';
+
+/** A thread open beside the centre, or in its place once expanded. */
+interface PanelState {
+  threadId: string;
+  expanded: boolean;
+}
+
+// Below this width the panel would squeeze Home and the thread, so a thread
+// opens in place of Home, as on a phone.
+const PANEL_MIN_WIDTH = 1280;
+
+/** The chat's address: what the centre shows, and the thread open beside it. */
+function chatUrl(centerConversationId: string | null, panel: PanelState | null): string {
+  const params: string[] = [];
+  if (centerConversationId) {
+    params.push(`conversation_id=${encodeURIComponent(centerConversationId)}`);
+  }
+  if (panel) {
+    params.push(`thread=${encodeURIComponent(panel.threadId)}`);
+    if (panel.expanded) {
+      params.push('expanded=1');
+    }
+  }
+  return params.length > 0 ? `/chat?${params.join('&')}` : '/chat';
+}
+
+function panelFromUrl(search: string): PanelState | null {
+  const params = new URLSearchParams(search);
+  const threadId = params.get('thread');
+  return threadId ? { threadId, expanded: params.get('expanded') === '1' } : null;
+}
 
 const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant' }) => {
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
   const [isMobile, setIsMobile] = useState<boolean>(window.innerWidth < 768);
+  const [isWide, setIsWide] = useState<boolean>(window.innerWidth >= PANEL_MIN_WIDTH);
   const [mobileShowList, setMobileShowList] = useState<boolean>(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationsLoading, setConversationsLoading] = useState<boolean>(true);
@@ -148,6 +185,47 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     (report: PaneReport) => setPaneReports((prev) => ({ ...prev, center: report })),
     []
   );
+  const centerConversationIdRef = useRef<string | null>(null);
+
+  const panelRef = useRef<ConversationPaneHandle>(null);
+  const [panel, setPanel] = useState<PanelState | null>(null);
+  const panelStateRef = useRef<PanelState | null>(null);
+  // The conversation the panel pane shows, as it last reported.
+  const panelConversationIdRef = useRef<string | null>(null);
+  const handlePanelReport = useCallback(
+    (report: PaneReport) => setPaneReports((prev) => ({ ...prev, panel: report })),
+    []
+  );
+  const handlePanelConversationChange = useCallback((convId: string) => {
+    panelConversationIdRef.current = convId;
+  }, []);
+  // Whether the thread is shown in place of the centre: expanded, or on a
+  // window too narrow for both.
+  const panelCoversCenter = panel !== null && (panel.expanded || isMobile || !isWide);
+  const panelCoversCenterRef = useRef(panelCoversCenter);
+  panelCoversCenterRef.current = panelCoversCenter;
+
+  const writeHistory = useCallback((mode: HistoryMode) => {
+    const url = chatUrl(centerConversationIdRef.current, panelStateRef.current);
+    if (mode === 'push') {
+      window.history.pushState({}, '', url);
+    } else if (mode === 'replace') {
+      window.history.replaceState({}, '', url);
+    }
+  }, []);
+
+  const setPanelState = useCallback(
+    (next: PanelState | null, mode: HistoryMode) => {
+      panelStateRef.current = next;
+      setPanel(next);
+      if (!next) {
+        panelConversationIdRef.current = null;
+        setPaneReports(({ panel: _closed, ...rest }) => rest);
+      }
+      writeHistory(mode);
+    },
+    [writeHistory]
+  );
 
   // How the next conversation change a pane reports is recorded in history:
   // pushed for a user's navigation, replaced or left alone while landing.
@@ -164,6 +242,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   const handleCenterConversationChange = useCallback(
     (convId: string, reason: ConversationChangeReason) => {
       landingSettledRef.current = true;
+      centerConversationIdRef.current = convId;
       setCenterConversationId(convId);
       // A send that minted its conversation replaces the entry it was typed in.
       const mode = reason === 'send' ? 'replace' : historyModeRef.current;
@@ -171,14 +250,9 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       if (mode === 'push' || reason !== 'open') {
         localStorage.setItem('lastConversationId', convId);
       }
-      const url = `/chat?conversation_id=${convId}`;
-      if (mode === 'push') {
-        window.history.pushState({}, '', url);
-      } else if (mode === 'replace') {
-        window.history.replaceState({}, '', url);
-      }
+      writeHistory(mode);
     },
-    []
+    [writeHistory]
   );
 
   // Fetch conversations list
@@ -456,40 +530,160 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
 
   // Navigation. Every way into a conversation — the sidebar, a card, an echo,
   // the breadcrumb, a notification, the approvals tray — comes through here.
-  const openConversation = useCallback((convId: string) => {
-    if (centerRef.current?.openConversation(convId)) {
-      setMobileShowList(false);
-    }
-  }, []);
+  // A thread of Home opens in the panel; Home and ordinary conversations open
+  // in the centre. A thread covering the centre gives way to what opens there,
+  // and one beside Home stays open while Home is chosen again.
+  const homeThreadsRef = useRef(homeThreads);
+  homeThreadsRef.current = homeThreads;
+  const openConversation = useCallback(
+    (convId: string) => {
+      const home = homeConversationIdRef.current;
+      const panelState = panelStateRef.current;
+      if (
+        home &&
+        convId !== home &&
+        homeThreadsRef.current.some((thread) => thread.conversation_id === convId)
+      ) {
+        const next = { threadId: convId, expanded: panelState?.expanded ?? false };
+        if (centerConversationIdRef.current === convId) {
+          // The thread is in the centre already: Home takes the centre back.
+          panelStateRef.current = next;
+          if (centerRef.current?.openConversation(home)) {
+            setPanel(next);
+          } else {
+            panelStateRef.current = panelState;
+          }
+        } else if (panelState?.threadId !== convId) {
+          setPanelState(next, 'push');
+        }
+        setMobileShowList(false);
+        return;
+      }
+      const closesPanel = panelState !== null && (convId !== home || panelCoversCenterRef.current);
+      if (closesPanel && centerConversationIdRef.current === convId) {
+        setPanelState(null, 'push');
+        setMobileShowList(false);
+        return;
+      }
+      // Closed first, so the centre's own history entry is the one recorded.
+      if (closesPanel) {
+        panelStateRef.current = null;
+      }
+      if (centerRef.current?.openConversation(convId)) {
+        if (closesPanel) {
+          setPanelState(null, 'none');
+        }
+        setMobileShowList(false);
+      } else if (closesPanel) {
+        panelStateRef.current = panelState;
+      }
+    },
+    [setPanelState]
+  );
 
   const handleNewChat = useCallback(() => {
+    const panelState = panelStateRef.current;
+    panelStateRef.current = null;
     if (centerRef.current?.newChat()) {
+      if (panelState) {
+        setPanelState(null, 'none');
+      }
       setMobileShowList(false);
+    } else {
+      panelStateRef.current = panelState;
     }
-  }, []);
+  }, [setPanelState]);
+
+  const closePanel = useCallback(() => setPanelState(null, 'push'), [setPanelState]);
+  const setPanelExpanded = useCallback(
+    (expanded: boolean) => {
+      const panelState = panelStateRef.current;
+      if (panelState) {
+        setPanelState({ ...panelState, expanded }, 'replace');
+      }
+    },
+    [setPanelState]
+  );
+
+  // Back and forward move between the places the chat has been.
+  useEffect(() => {
+    const handlePopState = () => {
+      const urlCenter = new URLSearchParams(window.location.search).get('conversation_id');
+      const urlPanel = panelFromUrl(window.location.search);
+      if (urlCenter && urlCenter !== centerConversationIdRef.current) {
+        withHistoryMode('none', () => centerRef.current?.openConversation(urlCenter));
+      }
+      const current = panelStateRef.current;
+      if (urlPanel?.threadId !== current?.threadId || urlPanel?.expanded !== current?.expanded) {
+        setPanelState(urlPanel, 'none');
+      }
+      setMobileShowList(false);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [setPanelState, withHistoryMode]);
+
+  // The panel pane follows the thread the panel is for. It refuses to move
+  // mid-send, and then the panel stays on what it shows.
+  useEffect(() => {
+    if (!panel || panelConversationIdRef.current === panel.threadId) {
+      return;
+    }
+    const pane = panelRef.current;
+    if (pane && !pane.openConversation(panel.threadId) && panelConversationIdRef.current) {
+      setPanelState({ ...panel, threadId: panelConversationIdRef.current }, 'replace');
+    }
+  }, [panel, setPanelState]);
 
   const handleBackToList = useCallback(() => setMobileShowList(true), []);
+
+  const showingMobileList = isMobile && mobileShowList;
+  const centerHidden = showingMobileList || panelCoversCenter;
+  // The conversations on screen right now, one per visible pane.
+  const visibleConversationIds = new Set<string>();
+  if (!centerHidden && centerConversationId) {
+    visibleConversationIds.add(centerConversationId);
+  }
+  if (panel && !showingMobileList) {
+    visibleConversationIds.add(panel.threadId);
+  }
+  const visibleConversationIdsRef = useRef(visibleConversationIds);
+  visibleConversationIdsRef.current = visibleConversationIds;
 
   // Handle notification clicks - navigate to the conversation
   const handleNotificationClick = useCallback(
     (notifConversationId: string) => {
-      if (notifConversationId !== centerConversationId) {
+      if (!visibleConversationIdsRef.current.has(notifConversationId)) {
         openConversation(notifConversationId);
       }
     },
-    [centerConversationId, openConversation]
+    [openConversation]
   );
 
   const {
     isSupported: notificationsSupported,
     permission: notificationPermission,
     requestPermission: requestNotificationPermission,
-    showNotification,
+    showNotification: showAnyNotification,
   } = useNotifications({
     enabled: notificationsEnabled,
-    conversationId: centerConversationId,
+    // Which conversations are on screen is decided below, across both panes.
+    conversationId: null,
     onNotificationClick: handleNotificationClick,
   });
+  // A reply in a conversation the reader is looking at needs no notification.
+  const showNotification = useCallback(
+    (request: NotificationRequest) => {
+      if (
+        document.visibilityState === 'visible' &&
+        visibleConversationIdsRef.current.has(request.conversationId)
+      ) {
+        return;
+      }
+      showAnyNotification(request);
+    },
+    [showAnyNotification]
+  );
 
   // Handle notification preference changes
   const handleNotificationEnabledChange = useCallback((enabled: boolean) => {
@@ -510,6 +704,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     // is left as the user set it for when the window widens again.
     const handleResize = () => {
       setIsMobile(window.innerWidth < 768);
+      setIsWide(window.innerWidth >= PANEL_MIN_WIDTH);
     };
 
     window.addEventListener('resize', handleResize);
@@ -584,6 +779,10 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     const lastConversationId = localStorage.getItem('lastConversationId');
     const opensLanding =
       !(initialPrompt && !initialPromptProcessedRef.current) && !urlConversationId;
+    const urlPanel = initialPrompt ? null : panelFromUrl(window.location.search);
+    if (urlPanel) {
+      setPanelState(urlPanel, 'none');
+    }
 
     if (initialPrompt && !initialPromptProcessedRef.current) {
       // If there's a prompt, start a new chat with it
@@ -618,6 +817,28 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       cancelled = true;
     };
   }, []);
+
+  // A thread reached by a link to it, or opened before Home's threads were
+  // known, lands in the centre; once it is known to be a thread, it moves to
+  // the panel with Home in the centre, as if opened from Home.
+  useEffect(() => {
+    if (
+      !homeConversationId ||
+      !centerConversationId ||
+      centerConversationId === homeConversationId ||
+      panelStateRef.current !== null ||
+      !homeThreads.some((thread) => thread.conversation_id === centerConversationId)
+    ) {
+      return;
+    }
+    const promoted = { threadId: centerConversationId, expanded: false };
+    panelStateRef.current = promoted;
+    if (withHistoryMode('replace', () => centerRef.current?.openConversation(homeConversationId))) {
+      setPanel(promoted);
+    } else {
+      panelStateRef.current = null;
+    }
+  }, [homeConversationId, homeThreads, centerConversationId, withHistoryMode]);
 
   // Handle initial prompt from query parameter once the centre pane is on the
   // new conversation it is for
@@ -663,7 +884,10 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   const [trayClock, setTrayClock] = useState(0);
   const { trayConfirmations, nextTrayRelease } = useMemo(() => {
     void trayClock;
-    const panes = Object.values(paneReports);
+    const panes = [
+      centerHidden ? undefined : paneReports.center,
+      panel && !showingMobileList ? paneReports.panel : undefined,
+    ].filter((pane): pane is PaneReport => pane !== undefined);
     const now = Date.now();
     let nextRelease: number | null = null;
     const inTray = Array.from(pendingConfirmations.values()).filter((confirmation) => {
@@ -695,7 +919,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       return true;
     });
     return { trayConfirmations: inTray, nextTrayRelease: nextRelease };
-  }, [paneReports, pendingConfirmations, trayClock]);
+  }, [paneReports, pendingConfirmations, trayClock, centerHidden, panel, showingMobileList]);
 
   useEffect(() => {
     if (nextTrayRelease === null) {
@@ -793,7 +1017,50 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     </>
   );
 
-  const showingMobileList = isMobile && mobileShowList;
+  const panelControls = (
+    <>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-8 w-8 p-0"
+        onClick={() => setPanelExpanded(true)}
+        aria-label="Expand thread"
+        title="Expand thread"
+        data-testid="panel-expand"
+      >
+        <Maximize2 className="h-4 w-4" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="h-8 w-8 p-0"
+        onClick={closePanel}
+        aria-label="Close thread"
+        title="Close thread"
+        data-testid="panel-close"
+      >
+        <X className="h-4 w-4" />
+      </Button>
+    </>
+  );
+  const coveringPanelControls = (
+    <>
+      {panel?.expanded && isWide && !isMobile && (
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setPanelExpanded(false)}
+          aria-label="Collapse thread to the side panel"
+          title="Collapse thread to the side panel"
+          data-testid="panel-collapse"
+        >
+          <Minimize2 className="h-4 w-4" />
+        </Button>
+      )}
+      {notificationControls}
+    </>
+  );
+  const sidebarConversationId = panel?.threadId ?? centerConversationId;
 
   return (
     <ChatShellContext.Provider value={shell}>
@@ -806,7 +1073,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
               <ConversationSidebar
                 conversations={conversations}
                 conversationsLoading={conversationsLoading}
-                currentConversationId={centerConversationId}
+                currentConversationId={sidebarConversationId}
                 onConversationSelect={openConversation}
                 onNewChat={handleNewChat}
                 isOpen={true}
@@ -822,7 +1089,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
               <ConversationSidebar
                 conversations={conversations}
                 conversationsLoading={conversationsLoading}
-                currentConversationId={centerConversationId}
+                currentConversationId={sidebarConversationId}
                 onConversationSelect={openConversation}
                 onNewChat={handleNewChat}
                 isOpen={sidebarOpen}
@@ -835,14 +1102,30 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
               ref={centerRef}
               profileId={profileId}
               layout={isMobile ? 'mobile' : 'desktop'}
-              hidden={showingMobileList}
+              presentation="main"
+              hidden={centerHidden}
               onConversationChange={handleCenterConversationChange}
               onReport={handleCenterReport}
               headerStart={sidebarToggle}
               headerEnd={notificationControls}
-              topSlot={alerts}
+              topSlot={panelCoversCenter ? undefined : alerts}
               onBackToList={handleBackToList}
             />
+            {panel && (
+              <ConversationPane
+                ref={panelRef}
+                profileId={profileId}
+                layout={isMobile ? 'mobile' : 'desktop'}
+                presentation={panelCoversCenter ? 'main' : 'side'}
+                hidden={showingMobileList}
+                onConversationChange={handlePanelConversationChange}
+                onReport={handlePanelReport}
+                headerStart={panelCoversCenter ? sidebarToggle : undefined}
+                headerEnd={panelCoversCenter ? coveringPanelControls : panelControls}
+                topSlot={panelCoversCenter ? alerts : undefined}
+                onBackToList={handleBackToList}
+              />
+            )}
           </div>
         </div>
       </TooltipProvider>

@@ -2,9 +2,9 @@
 
 ## Status
 
-Approved. Milestone 1 (threads exist), milestone 2 apart from the right-hand panel, milestone 3
-(state and echo) on the backend, the web and iOS, and milestone 4 (Home on iOS) implemented.
-Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered:
+Approved. Milestones 1 (threads exist) and 2 (Home on web, including the right-hand panel),
+milestone 3 (state and echo) on the backend, the web and iOS, and milestone 4 (Home on iOS)
+implemented. Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered:
 [iOS](one-thread-ux/ios.png), [web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
 
 ## Problem
@@ -299,6 +299,16 @@ and each path is governed:
 
 - **Home reads facts for its recent threads only.** A status question is about live work, so Home's
   view covers the most recently active threads; older ones are in the switcher.
+
+- **The web panel is a fixed proportion, and only wide windows get it.** There is no drag handle;
+  the panel takes a fixed share of the width, and below a fixed width a thread opens in place of
+  Home instead. Whatever is hidden behind a thread (Home behind an expanded or narrow-window thread,
+  either one behind the phone's conversation list) keeps its conversation, live stream and draft,
+  but not its scroll position: it comes back at its newest message.
+
+- **A link straight to a thread lands in the centre first.** The client can't tell a thread from an
+  ordinary conversation until Home's thread list arrives, so an address naming only the thread opens
+  it in the centre and then moves it to the panel, with Home in the centre, once it is known.
 
 - **Unread is counted for Home and threads only.** Legacy conversations have no state, so they have
   no read markers either.

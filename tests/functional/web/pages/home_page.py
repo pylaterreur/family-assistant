@@ -9,6 +9,7 @@ class HomePage(ChatPage):
     """The chat with threads enabled: Home, thread cards and the grouped sidebar."""
 
     CONVERSATION_HEADING = '[data-testid="conversation-title"]'
+    CONVERSATION_PANE = '[data-testid="conversation-pane"]'
     HOME_ITEM = '[data-testid="home-item"]'
     THREAD_BANNER = '[data-testid="thread-banner"]'
     THREAD_BREADCRUMB_HOME = '[data-testid="thread-breadcrumb-home"]'
@@ -27,7 +28,36 @@ class HomePage(ChatPage):
         )
 
     def heading(self) -> Locator:
-        return self.page.locator(self.CONVERSATION_HEADING)
+        """The heading of the conversation in the main column."""
+        return self.page.locator(
+            f'{self.CONVERSATION_PANE}[data-presentation="main"] {self.CONVERSATION_HEADING}'
+        )
+
+    def pane(self, conversation_id: str) -> Locator:
+        """The pane showing a conversation: the main column or the side panel."""
+        return self.page.locator(
+            f'{self.CONVERSATION_PANE}[data-conversation-id="{conversation_id}"]'
+        )
+
+    async def send_in(self, conversation_id: str, message: str) -> None:
+        """Send a message from the composer of the pane showing a conversation."""
+        pane = self.pane(conversation_id)
+        chat_input = pane.locator(self.CHAT_INPUT)
+        await expect(chat_input).to_be_enabled(timeout=10000)
+        await chat_input.fill(message)
+        await chat_input.press("Enter")
+        await expect(
+            pane.locator(self.MESSAGE_USER).filter(has_text=message)
+        ).to_be_visible(timeout=10000)
+
+    async def close_panel(self) -> None:
+        await self.page.get_by_test_id("panel-close").click()
+
+    async def expand_panel(self) -> None:
+        await self.page.get_by_test_id("panel-expand").click()
+
+    async def collapse_panel(self) -> None:
+        await self.page.get_by_test_id("panel-collapse").click()
 
     def thread_card(self, thread_conversation_id: str) -> Locator:
         return self.page.locator(
@@ -44,8 +74,10 @@ class HomePage(ChatPage):
         return self.page.locator(self.THREAD_BANNER)
 
     async def wait_for_home(self, home_conversation_id: str) -> None:
-        """Wait until Home is the open conversation."""
-        await expect(self.heading()).to_have_text("Home", timeout=15000)
+        """Wait until Home is the open conversation, with no thread open."""
+        await expect(
+            self.pane(home_conversation_id).locator(self.CONVERSATION_HEADING)
+        ).to_have_text("Home", timeout=15000)
         await self.page.wait_for_url(
             f"**/chat?conversation_id={home_conversation_id}", timeout=15000
         )
@@ -58,11 +90,17 @@ class HomePage(ChatPage):
         )
 
     async def open_thread_from_card(self, thread_conversation_id: str) -> None:
+        """Open a thread from its card, beside Home or in its place."""
         await self.thread_card(thread_conversation_id).click()
         await self.page.wait_for_url(
-            f"**/chat?conversation_id={thread_conversation_id}", timeout=15000
+            lambda url: f"thread={thread_conversation_id}" in url, timeout=15000
         )
-        await self.thread_banner().wait_for(state="visible", timeout=15000)
+        await (
+            self
+            .pane(thread_conversation_id)
+            .locator(self.THREAD_BANNER)
+            .wait_for(state="visible", timeout=15000)
+        )
 
     async def back_to_home(self, home_conversation_id: str) -> None:
         await self.page.locator(self.THREAD_BREADCRUMB_HOME).click()

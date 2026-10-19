@@ -39,6 +39,7 @@ import { interleaveTextAndToolCalls, isToolCallDisplay, toolCallParts } from './
 import { Thread } from './Thread';
 import { ThreadBanner } from './ThreadBanner';
 import { ThreadsContext } from './threadsContext';
+import { ThreadStateDot } from './ThreadStateDot';
 import { markThreadDone } from './threadsApi';
 import { ToolConfirmationProvider } from './ToolConfirmationContext';
 import { isTerminalToolOutcome, type TerminalToolOutcome } from './toolOutcome';
@@ -480,6 +481,12 @@ export interface ConversationPaneProps {
   profileId: string;
   layout: 'mobile' | 'desktop';
   /**
+   * Where the pane sits: the main column, or the right-hand panel beside it.
+   * A thread in the main column offers the way back to Home; in the panel,
+   * Home is already beside it.
+   */
+  presentation: 'main' | 'side';
+  /**
    * A hidden pane keeps its conversation, stream and draft, renders nothing,
    * and marks nothing read.
    */
@@ -507,6 +514,7 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
   ref,
   profileId,
   layout,
+  presentation,
   hidden,
   onConversationChange,
   onReport,
@@ -2555,9 +2563,13 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
     }
     prevConversationIdRef.current = conversationId;
     // Nothing was open yet: whatever the user typed while the landing view was
-    // still being decided was written for the conversation that opens.
+    // still being decided was written for the conversation that opens. A pane
+    // that opens with an empty composer takes up the draft set aside for it.
     if (outgoingId === null) {
-      return;
+      const { text, attachments } = runtime.thread.composer.getState();
+      if (text || attachments.length > 0) {
+        return;
+      }
     }
     if (preserveComposerOnConversationSwitchRef.current) {
       preserveComposerOnConversationSwitchRef.current = false;
@@ -2601,6 +2613,29 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
       }
     });
   }, [conversationId, runtime, drafts]);
+
+  // A pane that closes sets its draft aside for its conversation, and stops
+  // following the turn it was streaming, which carries on server-side.
+  const runtimeRef = useRef(runtime);
+  runtimeRef.current = runtime;
+  const cancelStreamRef = useRef(cancelStream);
+  cancelStreamRef.current = cancelStream;
+  useEffect(
+    () => () => {
+      const convId = conversationIdRef.current;
+      if (convId) {
+        const { text, attachments } = runtimeRef.current.thread.composer.getState();
+        const unfinishedRestore = draftRestoreRef.current;
+        const draftAttachments =
+          unfinishedRestore?.convId === convId ? unfinishedRestore.draft.attachments : attachments;
+        if (text || draftAttachments.length > 0) {
+          drafts.set(convId, { text, attachments: draftAttachments });
+        }
+      }
+      cancelStreamRef.current();
+    },
+    [drafts]
+  );
 
   // Submit a steer into the running turn. While a turn runs the main composer
   // doubles as the steer input, so the text is passed in (and owned by the
@@ -2735,6 +2770,7 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
     <ThreadBanner
       thread={currentThread}
       onOpenHome={openConversation}
+      compact={presentation === 'side'}
       onMarkDone={(threadConversationId) => void handleMarkThreadDone(threadConversationId)}
       markDoneStatus={
         markDoneStatus?.convId === currentThread.conversation_id ? markDoneStatus.status : null
@@ -2824,7 +2860,12 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
 
   if (isMobile) {
     return (
-      <div className="flex flex-1 flex-col min-h-0 overflow-hidden" data-testid="conversation-pane">
+      <div
+        className="flex flex-1 flex-col min-h-0 overflow-hidden"
+        data-testid="conversation-pane"
+        data-presentation={presentation}
+        data-conversation-id={conversationId ?? undefined}
+      >
         {/* The shared top bar carries navigation and the conversation
             actions; the profile/intelligence selectors sit on a second
             row that wraps, so nothing is pushed past the viewport at
@@ -2862,8 +2903,48 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
     );
   }
 
+  if (presentation === 'side') {
+    return (
+      <section
+        className="flex min-h-0 w-[40%] min-w-[22rem] max-w-[40rem] flex-shrink-0 flex-col border-l"
+        aria-label={conversationTitle ?? 'Thread'}
+        data-testid="conversation-pane"
+        data-presentation={presentation}
+        data-conversation-id={conversationId ?? undefined}
+      >
+        <div className="flex flex-shrink-0 flex-col gap-1 border-b bg-background/95 px-4 py-2">
+          <div className="flex min-h-10 min-w-0 items-center gap-2">
+            {currentThread && <ThreadStateDot state={currentThread.state} />}
+            {conversationTitle && (
+              <h2
+                className="min-w-0 flex-1 truncate text-base font-semibold"
+                data-testid="conversation-title"
+              >
+                {conversationTitle}
+              </h2>
+            )}
+            <div className="ml-auto flex shrink-0 items-center gap-1">
+              {shareButton}
+              {headerEnd}
+            </div>
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {profileSelector}
+            {intelligenceSelector}
+          </div>
+        </div>
+        {body}
+      </section>
+    );
+  }
+
   return (
-    <div className="flex min-w-0 min-h-0 flex-1 flex-col" data-testid="conversation-pane">
+    <div
+      className="flex min-w-0 min-h-0 flex-1 flex-col"
+      data-testid="conversation-pane"
+      data-presentation={presentation}
+      data-conversation-id={conversationId ?? undefined}
+    >
       <div className="sticky top-0 z-40 flex min-h-14 items-center gap-3 border-b bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         {headerStart}
 

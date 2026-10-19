@@ -1,4 +1,4 @@
-"""The web chat lands on Home, shows each thread as a live card, and navigates between them."""
+"""The web chat lands on Home, shows each thread as a live card, and opens threads beside it."""
 
 import json
 import uuid
@@ -17,6 +17,7 @@ from family_assistant.threads.echo import announce_home_change, echo_finished_tu
 from family_assistant.web.conversation_stream_hub import ConversationStreamHub
 from tests.functional.web.conftest import WebTestFixture
 from tests.functional.web.pages.home_page import HomePage
+from tests.mocks.mock_llm import LLMOutput, RuleBasedMockLLMClient
 
 USER = "test_user"
 THREAD_PROFILE = "test_research"
@@ -192,25 +193,136 @@ async def test_home_card_follows_the_thread_from_working_to_waiting(
 
 @pytest.mark.playwright
 @pytest.mark.asyncio
-async def test_a_card_opens_its_thread_and_the_breadcrumb_returns_home(
+async def test_a_card_opens_its_thread_beside_home_and_each_pane_answers_for_itself(
+    web_test_fixture: WebTestFixture,
+    db_engine: AsyncEngine,
+    mock_llm_client: RuleBasedMockLLMClient,
+) -> None:
+    mock_llm_client.rules = [
+        (
+            lambda args: "Heat pump, please" in str(args.get("messages", [])),
+            LLMOutput(content="Asking Acme to quote a heat pump."),
+        ),
+        (
+            lambda args: "Is the bin out?" in str(args.get("messages", [])),
+            LLMOutput(content="Yes, it went out at seven."),
+        ),
+    ]
+    db = Database(engine=db_engine)
+    home = await _home_conversation_id(web_test_fixture.base_url)
+    seeded = await _seed_thread(db, home)
+    chat = await _open_home(web_test_fixture, home)
+    await _finish_first_run_with_question(web_test_fixture, db, seeded)
+    await chat.wait_for_card_state(seeded.thread, "waiting")
+
+    home_pane = chat.pane(home)
+    home_input = home_pane.locator(chat.CHAT_INPUT)
+    await home_input.fill("Is the bin out?")
+    await chat.open_thread_from_card(seeded.thread)
+
+    panel = chat.pane(seeded.thread)
+    await expect(panel).to_have_attribute("data-presentation", "side")
+    await expect(home_pane).to_be_visible()
+    await expect(home_input).to_have_value("Is the bin out?")
+    banner = panel.locator(chat.THREAD_BANNER)
+    await expect(banner.locator(chat.THREAD_ORIGIN)).to_contain_text(
+        f"Assistant asked: “{SEED_REQUEST}”"
+    )
+    await expect(banner.locator(chat.THREAD_BREADCRUMB_HOME)).to_have_count(0)
+    await expect(panel.locator(chat.CONVERSATION_HEADING)).to_have_text(
+        "Hot water system quotes"
+    )
+    await expect(
+        panel.get_by_role("combobox", name="Processing profile")
+    ).to_be_disabled()
+
+    await chat.send_in(seeded.thread, "Heat pump, please")
+    await expect(panel.get_by_text("Asking Acme to quote a heat pump.")).to_be_visible(
+        timeout=20000
+    )
+    await expect(home_input).to_have_value("Is the bin out?")
+    await home_input.press("Enter")
+    await expect(home_pane.get_by_text("Yes, it went out at seven.")).to_be_visible(
+        timeout=20000
+    )
+
+    # Each reply is only in its own transcript (Home's card previews the
+    # thread's latest message, so look at the transcripts' text, not the card).
+    home_text = home_pane.locator(".markdown-text")
+    panel_text = panel.locator(".markdown-text")
+    await expect(home_text.filter(has_text="Asking Acme")).to_have_count(0)
+    await expect(
+        home_pane.locator(chat.MESSAGE_USER).filter(has_text="Heat pump, please")
+    ).to_have_count(0)
+    await expect(panel_text.filter(has_text="it went out at seven")).to_have_count(0)
+    await expect(
+        panel.locator(chat.MESSAGE_USER).filter(has_text="Is the bin out?")
+    ).to_have_count(0)
+
+
+@pytest.mark.playwright
+@pytest.mark.asyncio
+async def test_the_panel_expands_collapses_and_survives_a_reload(
     web_test_fixture: WebTestFixture, db_engine: AsyncEngine
 ) -> None:
     db = Database(engine=db_engine)
     home = await _home_conversation_id(web_test_fixture.base_url)
     seeded = await _seed_thread(db, home)
-
     chat = await _open_home(web_test_fixture, home)
+    page = web_test_fixture.page
+    await chat.open_thread_from_card(seeded.thread)
+    thread = chat.pane(seeded.thread)
+
+    await chat.expand_panel()
+    await expect(thread).to_have_attribute("data-presentation", "main")
+    await expect(chat.pane(home)).to_have_count(0)
+    await expect(thread.locator(chat.THREAD_BREADCRUMB_HOME)).to_be_visible()
+    await page.wait_for_url(lambda url: "expanded=1" in url, timeout=15000)
+
+    await page.reload()
+    await expect(thread).to_have_attribute("data-presentation", "main", timeout=15000)
+    await expect(chat.heading()).to_have_text("Hot water system quotes")
+    await expect(chat.pane(home)).to_have_count(0)
+
+    await chat.collapse_panel()
+    await expect(thread).to_have_attribute("data-presentation", "side")
+    await expect(chat.heading()).to_have_text("Home")
+    await page.wait_for_url(
+        lambda url: f"thread={seeded.thread}" in url and "expanded" not in url,
+        timeout=15000,
+    )
+
+    await page.reload()
+    await expect(thread).to_have_attribute("data-presentation", "side", timeout=15000)
+    await expect(chat.pane(home).locator(chat.CONVERSATION_HEADING)).to_have_text(
+        "Home"
+    )
+    await expect(thread.locator(chat.THREAD_BANNER)).to_be_visible()
+
+    await chat.close_panel()
+    await expect(thread).to_have_count(0)
+    await chat.wait_for_home(home)
+
+
+@pytest.mark.playwright
+@pytest.mark.asyncio
+async def test_a_narrow_window_opens_a_thread_in_place_of_home(
+    web_test_fixture: WebTestFixture, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = await _home_conversation_id(web_test_fixture.base_url)
+    seeded = await _seed_thread(db, home)
+    page = web_test_fixture.page
+    await page.set_viewport_size({"width": 1000, "height": 800})
+    chat = await _open_home(web_test_fixture, home)
+
     await chat.open_thread_from_card(seeded.thread)
 
-    banner = chat.thread_banner()
-    await expect(banner.locator(chat.THREAD_ORIGIN)).to_contain_text(
-        f"Assistant asked: “{SEED_REQUEST}”"
-    )
-    await expect(banner.locator(chat.THREAD_WORKING_INDICATOR)).to_be_visible()
+    thread = chat.pane(seeded.thread)
+    await expect(thread).to_have_attribute("data-presentation", "main")
+    await expect(chat.pane(home)).to_have_count(0)
     await expect(chat.heading()).to_have_text("Hot water system quotes")
-    await expect(
-        web_test_fixture.page.get_by_role("combobox", name="Processing profile")
-    ).to_be_disabled()
+    await expect(thread.locator(chat.THREAD_WORKING_INDICATOR)).to_be_visible()
 
     await chat.back_to_home(home)
     await expect(chat.thread_card(seeded.thread)).to_be_visible()
@@ -381,7 +493,8 @@ async def test_opening_a_thread_clears_its_badge_and_it_can_be_marked_done(
     )
     await expect(banner.locator(chat.THREAD_MARK_DONE)).to_have_count(0)
 
-    await chat.back_to_home(home)
+    await chat.close_panel()
+    await chat.wait_for_home(home)
     await chat.wait_for_card_state(seeded.thread, "done")
     await expect(card.locator(chat.THREAD_CARD_STATE)).to_have_text(
         "You marked this done"

@@ -266,7 +266,7 @@ describe('Home and threads', () => {
     await user.click(await screen.findByTestId('thread-card'));
 
     const banner = await screen.findByTestId('thread-banner');
-    expect(window.location.search).toBe('?conversation_id=web_conv_quotes');
+    expect(window.location.search).toBe(`?conversation_id=${HOME}&thread=web_conv_quotes`);
     expect(within(banner).getByTestId('thread-origin')).toHaveTextContent(
       'Started from Home · Assistant asked: “Find three plumbers and get quotes.”'
     );
@@ -284,7 +284,7 @@ describe('Home and threads', () => {
 
   it('shows a working thread as working', async () => {
     serveThreads([{ ...QUOTES, state: 'working' }]);
-    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+    window.history.replaceState({}, '', `/chat?conversation_id=${HOME}&thread=web_conv_quotes`);
 
     await renderChatApp({ waitForReady: true });
 
@@ -602,7 +602,7 @@ describe('Thread state, unread and echoes', () => {
           )
         );
       const threads = serveThreads();
-      window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+      window.history.replaceState({}, '', `/chat?conversation_id=${HOME}&thread=web_conv_quotes`);
 
       await renderChatApp({ waitForReady: true });
       await screen.findByText('Gas or heat pump?');
@@ -642,7 +642,7 @@ describe('Thread state, unread and echoes', () => {
     ['working', false],
   ] as const)('offers Mark done on a %s thread: %s', async (state, offered) => {
     serveThreads([{ ...QUOTES, state }]);
-    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+    window.history.replaceState({}, '', `/chat?conversation_id=${HOME}&thread=web_conv_quotes`);
 
     await renderChatApp({ waitForReady: true });
     const banner = await screen.findByTestId('thread-banner');
@@ -653,7 +653,7 @@ describe('Thread state, unread and echoes', () => {
   it('marks a thread read once a reply streamed into it ends', async () => {
     const user = userEvent.setup();
     const threads = serveThreads();
-    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+    window.history.replaceState({}, '', `/chat?conversation_id=${HOME}&thread=web_conv_quotes`);
 
     await renderChatApp({ waitForReady: true });
     await screen.findByTestId('thread-banner');
@@ -707,13 +707,13 @@ describe('Thread state, unread and echoes', () => {
     await user.click(header);
 
     expect(await screen.findByTestId('thread-banner')).toBeInTheDocument();
-    expect(window.location.search).toBe('?conversation_id=web_conv_quotes');
+    expect(window.location.search).toBe(`?conversation_id=${HOME}&thread=web_conv_quotes`);
   });
 
   it('marks an open thread done from its banner', async () => {
     const user = userEvent.setup();
     serveThreads();
-    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+    window.history.replaceState({}, '', `/chat?conversation_id=${HOME}&thread=web_conv_quotes`);
 
     await renderChatApp({ waitForReady: true });
     const banner = await screen.findByTestId('thread-banner');
@@ -739,7 +739,7 @@ describe('Thread state, unread and echoes', () => {
       )
     );
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
-    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+    window.history.replaceState({}, '', `/chat?conversation_id=${HOME}&thread=web_conv_quotes`);
 
     await renderChatApp({ waitForReady: true });
     const banner = await screen.findByTestId('thread-banner');
@@ -751,5 +751,352 @@ describe('Thread state, unread and echoes', () => {
     expect(banner).toHaveAttribute('data-thread-state', 'waiting');
     expect(within(banner).getByTestId('thread-mark-done')).toBeEnabled();
     consoleError.mockRestore();
+  });
+});
+
+const WIDE = 1440;
+const NARROW = 1024;
+
+function setWindowWidth(width: number): void {
+  Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: width });
+  act(() => {
+    window.dispatchEvent(new Event('resize'));
+  });
+}
+
+/** The pane showing a conversation, or null when none is on screen. */
+function paneFor(conversationId: string): HTMLElement | null {
+  return (
+    screen
+      .queryAllByTestId('conversation-pane')
+      .find((pane) => pane.getAttribute('data-conversation-id') === conversationId) ?? null
+  );
+}
+
+async function findPane(conversationId: string): Promise<HTMLElement> {
+  return waitFor(() => {
+    const pane = paneFor(conversationId);
+    expect(pane).not.toBeNull();
+    return pane as HTMLElement;
+  });
+}
+
+/** Each turn replies naming the conversation it ran in; sends are recorded. */
+function serveTurnsNamingTheirConversation(): { conversationId: string; prompt: string }[] {
+  const sends: { conversationId: string; prompt: string }[] = [];
+  const turnIds = new Map<string, string>();
+  server.use(
+    http.post('/api/v1/chat/turns', async ({ request }) => {
+      const body = (await request.json()) as {
+        turn_id: string;
+        prompt: string;
+        conversation_id: string;
+      };
+      sends.push({ conversationId: body.conversation_id, prompt: body.prompt });
+      turnIds.set(body.conversation_id, body.turn_id);
+      return HttpResponse.json({
+        turn_id: body.turn_id,
+        conversation_id: body.conversation_id,
+        first_seq: 0,
+      });
+    }),
+    http.get('/api/v1/chat/conversations/:conversationId/stream', ({ params }) => {
+      const conversationId = String(params.conversationId);
+      const turnId = turnIds.get(conversationId) ?? 'mock-turn';
+      const encoder = new TextEncoder();
+      const events = [
+        `event: turn_started\ndata: ${JSON.stringify({ turn_id: turnId, seq: 0 })}\n\n`,
+        `event: text\ndata: ${JSON.stringify({ content: `Reply for ${conversationId}` })}\n\n`,
+        `event: turn_ended\ndata: ${JSON.stringify({ turn_id: turnId, status: 'complete' })}\n\n`,
+      ];
+      const stream = new ReadableStream({
+        start(controller) {
+          for (const event of events) {
+            controller.enqueue(encoder.encode(event));
+          }
+          controller.close();
+        },
+      });
+      return new HttpResponse(stream, { headers: { 'Content-Type': 'text/event-stream' } });
+    })
+  );
+  return sends;
+}
+
+describe('The thread panel', () => {
+  let originalWidth: number;
+
+  beforeEach(() => {
+    resetLocalStorageMock();
+    vi.clearAllMocks();
+    window.history.replaceState({}, '', '/');
+    document.documentElement.removeAttribute('data-app-ready');
+    originalWidth = window.innerWidth;
+    setWindowWidth(WIDE);
+  });
+
+  afterEach(() => {
+    setWindowWidth(originalWidth);
+  });
+
+  it('opens a thread from its card beside Home, which keeps its draft', async () => {
+    const user = userEvent.setup();
+    serveThreads();
+
+    await renderChatApp({ waitForReady: true });
+    await screen.findByText("On it. I've started a thread for it.");
+    await user.type(screen.getByRole('textbox'), 'Half-written');
+    await user.click(screen.getByTestId('thread-card'));
+
+    const panel = await findPane('web_conv_quotes');
+    const home = paneFor(HOME) as HTMLElement;
+    expect(window.location.search).toBe(`?conversation_id=${HOME}&thread=web_conv_quotes`);
+    expect(panel).toHaveAttribute('data-presentation', 'side');
+    expect(home).toHaveAttribute('data-presentation', 'main');
+    expect(within(home).getByText("On it. I've started a thread for it.")).toBeInTheDocument();
+    expect(within(home).getByRole('textbox')).toHaveValue('Half-written');
+    expect(await within(panel).findByText('Gas or heat pump?')).toBeInTheDocument();
+    expect(within(panel).getByTestId('conversation-title')).toHaveTextContent(
+      'Hot water system quotes'
+    );
+    // Home is beside it, so the panel offers no way back to it.
+    const banner = within(panel).getByTestId('thread-banner');
+    expect(within(banner).queryByTestId('thread-breadcrumb-home')).toBeNull();
+    expect(within(banner).getByTestId('thread-origin')).toHaveTextContent('Assistant asked');
+    const panelPicker = within(panel).getByRole('combobox', { name: 'Processing profile' });
+    await waitFor(() => expect(panelPicker).toHaveTextContent('Research'));
+    expect(within(home).getByRole('combobox', { name: 'Processing profile' })).toHaveTextContent(
+      'Assistant'
+    );
+  });
+
+  it('sends from each pane into its own conversation, and shows each reply in its own pane', async () => {
+    const user = userEvent.setup();
+    serveThreads();
+    const sends = serveTurnsNamingTheirConversation();
+
+    await renderChatApp({ waitForReady: true });
+    await screen.findByText("On it. I've started a thread for it.");
+    await user.click(screen.getByTestId('thread-card'));
+    const panel = await findPane('web_conv_quotes');
+    const home = paneFor(HOME) as HTMLElement;
+    await within(panel).findByText('Gas or heat pump?');
+
+    await user.type(within(panel).getByRole('textbox'), 'Heat pump, please{Enter}');
+    expect(await within(panel).findByText('Reply for web_conv_quotes')).toBeInTheDocument();
+    expect(within(home).queryByText('Reply for web_conv_quotes')).toBeNull();
+    await waitFor(() => expect(within(panel).getByTestId('send-button')).toBeInTheDocument());
+
+    await user.type(within(home).getByRole('textbox'), 'Is the bin out?{Enter}');
+    expect(await within(home).findByText('Reply for web_conv_home')).toBeInTheDocument();
+    expect(within(panel).queryByText('Reply for web_conv_home')).toBeNull();
+    expect(within(panel).queryByText('Is the bin out?')).toBeNull();
+    expect(within(home).queryByText('Heat pump, please')).toBeNull();
+
+    expect(sends).toEqual([
+      { conversationId: 'web_conv_quotes', prompt: 'Heat pump, please' },
+      { conversationId: HOME, prompt: 'Is the bin out?' },
+    ]);
+  });
+
+  it('expands the thread into the centre, collapses it back, and closes it', async () => {
+    const user = userEvent.setup();
+    serveThreads();
+
+    await renderChatApp({ waitForReady: true });
+    await screen.findByText("On it. I've started a thread for it.");
+    await user.type(screen.getByRole('textbox'), 'Draft for Home');
+    await user.click(screen.getByTestId('thread-card'));
+    await findPane('web_conv_quotes');
+
+    await user.click(screen.getByRole('button', { name: 'Expand thread' }));
+
+    await waitFor(() => expect(paneFor(HOME)).toBeNull());
+    const expanded = paneFor('web_conv_quotes') as HTMLElement;
+    expect(expanded).toHaveAttribute('data-presentation', 'main');
+    expect(within(expanded).getByTestId('thread-breadcrumb-home')).toBeInTheDocument();
+    expect(window.location.search).toBe(
+      `?conversation_id=${HOME}&thread=web_conv_quotes&expanded=1`
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Collapse thread to the side panel' }));
+
+    const home = await findPane(HOME);
+    expect(within(home).getByRole('textbox')).toHaveValue('Draft for Home');
+    expect(paneFor('web_conv_quotes')).toHaveAttribute('data-presentation', 'side');
+    expect(window.location.search).toBe(`?conversation_id=${HOME}&thread=web_conv_quotes`);
+
+    await user.click(screen.getByRole('button', { name: 'Close thread' }));
+
+    await waitFor(() => expect(paneFor('web_conv_quotes')).toBeNull());
+    expect(window.location.search).toBe(`?conversation_id=${HOME}`);
+    expect(within(paneFor(HOME) as HTMLElement).getByRole('textbox')).toHaveValue('Draft for Home');
+  });
+
+  it('keeps a draft typed in the panel when the panel closes and reopens', async () => {
+    const user = userEvent.setup();
+    serveThreads();
+
+    await renderChatApp({ waitForReady: true });
+    await user.click(await screen.findByTestId('thread-card'));
+    const panel = await findPane('web_conv_quotes');
+    await user.type(within(panel).getByRole('textbox'), 'Gas, I think');
+    await user.click(screen.getByRole('button', { name: 'Close thread' }));
+    await waitFor(() => expect(paneFor('web_conv_quotes')).toBeNull());
+
+    await user.click(screen.getByTestId('thread-card'));
+
+    const reopened = await findPane('web_conv_quotes');
+    await waitFor(() => expect(within(reopened).getByRole('textbox')).toHaveValue('Gas, I think'));
+  });
+
+  it('restores the panel from the address, and follows back and forward', async () => {
+    serveThreads();
+    window.history.replaceState(
+      {},
+      '',
+      `/chat?conversation_id=${HOME}&thread=web_conv_quotes&expanded=1`
+    );
+
+    await renderChatApp({ waitForReady: true });
+
+    const expanded = await findPane('web_conv_quotes');
+    expect(expanded).toHaveAttribute('data-presentation', 'main');
+    expect(paneFor(HOME)).toBeNull();
+
+    act(() => {
+      window.history.replaceState({}, '', `/chat?conversation_id=${HOME}`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    const home = await findPane(HOME);
+    expect(
+      await within(home).findByText("On it. I've started a thread for it.")
+    ).toBeInTheDocument();
+    expect(paneFor('web_conv_quotes')).toBeNull();
+
+    act(() => {
+      window.history.replaceState({}, '', `/chat?conversation_id=${HOME}&thread=web_conv_quotes`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    expect(await findPane('web_conv_quotes')).toHaveAttribute('data-presentation', 'side');
+    expect(paneFor(HOME)).not.toBeNull();
+  });
+
+  it('moves a thread linked to directly into the panel, with Home in the centre', async () => {
+    serveThreads();
+    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+
+    await renderChatApp({ waitForReady: true });
+
+    await waitFor(() =>
+      expect(window.location.search).toBe(`?conversation_id=${HOME}&thread=web_conv_quotes`)
+    );
+    const home = await findPane(HOME);
+    expect(
+      await within(home).findByText("On it. I've started a thread for it.")
+    ).toBeInTheDocument();
+    expect(await findPane('web_conv_quotes')).toHaveAttribute('data-presentation', 'side');
+  });
+
+  it('opens an earlier conversation in the centre, closing the panel', async () => {
+    const user = userEvent.setup();
+    serveThreads();
+
+    await renderChatApp({ waitForReady: true });
+    await user.click(await screen.findByTestId('thread-card'));
+    await findPane('web_conv_quotes');
+
+    await user.click(await screen.findByTestId('conversation-item-web_conv_old'));
+
+    const old = await findPane('web_conv_old');
+    expect(old).toHaveAttribute('data-presentation', 'main');
+    expect(await within(old).findByText('Hello from web_conv_old')).toBeInTheDocument();
+    expect(paneFor('web_conv_quotes')).toBeNull();
+    expect(window.location.search).toBe('?conversation_id=web_conv_old');
+  });
+
+  it('opens a thread in place of Home on a narrow window, and keeps it open across the breakpoint', async () => {
+    const user = userEvent.setup();
+    serveThreads();
+    setWindowWidth(NARROW);
+
+    await renderChatApp({ waitForReady: true });
+    await user.click(await screen.findByTestId('thread-card'));
+
+    const thread = await findPane('web_conv_quotes');
+    expect(thread).toHaveAttribute('data-presentation', 'main');
+    expect(paneFor(HOME)).toBeNull();
+    expect(within(thread).getByTestId('thread-breadcrumb-home')).toBeInTheDocument();
+
+    setWindowWidth(WIDE);
+    await waitFor(() =>
+      expect(paneFor('web_conv_quotes')).toHaveAttribute('data-presentation', 'side')
+    );
+    expect(paneFor(HOME)).not.toBeNull();
+
+    setWindowWidth(NARROW);
+    await waitFor(() =>
+      expect(paneFor('web_conv_quotes')).toHaveAttribute('data-presentation', 'main')
+    );
+    expect(paneFor(HOME)).toBeNull();
+
+    await user.click(screen.getByTestId('thread-breadcrumb-home'));
+    const home = await findPane(HOME);
+    expect(
+      await within(home).findByText("On it. I've started a thread for it.")
+    ).toBeInTheDocument();
+    expect(paneFor('web_conv_quotes')).toBeNull();
+    expect(window.location.search).toBe(`?conversation_id=${HOME}`);
+  });
+
+  it('marks Home and the thread beside it read, each through its own newest message', async () => {
+    const user = userEvent.setup();
+    const threads = serveThreads([{ ...QUOTES, unread_count: 2 }]);
+
+    await renderChatApp({ waitForReady: true });
+    await user.click(await screen.findByTestId('thread-card'));
+
+    await waitFor(
+      () => {
+        expect(threads.reads).toContainEqual({ conversationId: HOME, throughMessageId: 6 });
+        expect(threads.reads).toContainEqual({
+          conversationId: 'web_conv_quotes',
+          throughMessageId: 10,
+        });
+      },
+      { timeout: 3000 }
+    );
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('thread-item-web_conv_quotes')).queryByTestId(
+          'thread-unread-badge'
+        )
+      ).toBeNull()
+    );
+  });
+
+  it('does not mark Home read while a thread covers it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const threads = serveThreads();
+      setWindowWidth(NARROW);
+      window.history.replaceState({}, '', `/chat?conversation_id=${HOME}&thread=web_conv_quotes`);
+
+      await renderChatApp({ waitForReady: true });
+      await screen.findByText('Gas or heat pump?');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(MARK_READ_DELAY_MS * 3);
+      });
+
+      await waitFor(() =>
+        expect(threads.reads).toContainEqual({
+          conversationId: 'web_conv_quotes',
+          throughMessageId: 10,
+        })
+      );
+      expect(threads.reads.map((read) => read.conversationId)).not.toContain(HOME);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
