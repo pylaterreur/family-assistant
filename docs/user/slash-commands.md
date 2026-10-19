@@ -77,8 +77,13 @@ than telling you how you might do it yourself.
 - `/coder Work out the compound growth in this table and give me the year-by-year figures`
 - `/coder This regex isn't matching the third case — fix it and show me the tests passing`
 
-Four things to know:
+Five things to know:
 
+- **It runs on a fast, inexpensive model unless you ask for a stronger one.** For a hard problem, or
+  one it has already got wrong, choose **Gemini 4 Argon** from the level control beside the
+  assistant picker in the web or iOS app, or ask the assistant to "have the coder use Gemini 4
+  Argon". Argon costs many times more, so save it for jobs the usual model isn't up to. Telegram's
+  `/deep` and `/max` don't apply to `/coder`.
 - **It cannot see your data.** Your notes, calendar, documents, email, and devices are out of reach
   — it works only from what you put in the request. Use `/complex` when the task needs the
   household's own information.

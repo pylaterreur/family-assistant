@@ -2,15 +2,17 @@
 
 Three things can break silently between `defaults.yaml` and an actual agent
 run: the profile could name a model that routes to `generateContent` instead of
-the Interactions API, its `antigravity_config` could go nowhere (leaving the
-agent on whatever model the API defaults to), or a fallback could quietly
-answer from a chat model's own knowledge instead of running the task. Each is a
+the Interactions API, a tier's model could fail to reach the agent (leaving it
+on whatever model the API defaults to), or a fallback could quietly answer from
+a chat model's own knowledge instead of running the task. Each is a
 plausible-looking answer rather than an error, so each is pinned here.
 """
 
+from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
+from google.genai.interactions import Interaction
 
 from family_assistant.assistant import validate_antigravity_agent_config
 from family_assistant.config_models import (
@@ -21,7 +23,12 @@ from family_assistant.config_models import (
     ToolsConfig,
 )
 from family_assistant.delegation_security import DelegationSecurityLevel
+from family_assistant.llm.factory import LLMClientFactory
 from family_assistant.llm.messages import SystemMessage, UserMessage
+from family_assistant.llm.model_tiers import (
+    resolve_antigravity_tier_client_config,
+    validate_profile_model_tier,
+)
 from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
     is_interactions_agent_model,
@@ -46,18 +53,26 @@ from family_assistant.tools import LocalToolsProvider
 from tests.unit.conftest import shipped_profile
 
 
-def test_shipped_coder_profile_runs_gemini_37_flash_on_the_agent(
+def test_shipped_coder_profile_runs_the_agent_on_flash_by_default(
     shipped_config: AppConfig,
 ) -> None:
-    """The profile names the managed agent and pins its reasoning model."""
+    """The profile names the managed agent, and its default tier is Flash."""
     profile = shipped_profile(shipped_config, "coder")
     processing_config = profile.processing_config
 
-    assert processing_config.provider == "google"
-    assert is_interactions_agent_model(processing_config.llm_model or "") is True
     assert processing_config.antigravity_config is not None
-    assert processing_config.antigravity_config.model == "gemini-3.8-flash"
+    assert is_interactions_agent_model(processing_config.antigravity_config.agent)
+    assert processing_config.model_tier == "gemini_3_8_flash"
     assert "/coder" in profile.slash_commands
+
+
+def test_shipped_coder_profile_can_be_run_on_argon(shipped_config: AppConfig) -> None:
+    """By a person choosing it, or a delegating model asking for it -- never Auto."""
+    profile = shipped_profile(shipped_config, "coder")
+
+    assert "gemini_4_argon" in (profile.allowed_model_tiers or [])
+    assert "gemini_4_argon" in (profile.delegation_model_tiers or [])
+    assert not profile.auto_model_tiers
 
 
 def test_shipped_coder_profile_configures_no_sandbox_credentials(
@@ -156,102 +171,74 @@ def test_the_shipped_matrix_adjudicates_a_sandbox_run_untrusted_content() -> Non
     assert evaluation.fallback_outcome is TaintPolicyOutcome.CONFIRM
 
 
-def test_shipped_coder_config_reaches_the_agent_config_payload(
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tier", "reasoning_model"),
+    [("gemini_3_8_flash", "gemini-3.8-flash"), ("gemini_4_argon", "gemini-4-argon")],
+)
+async def test_each_coder_tier_submits_the_agent_with_that_tiers_model(
     shipped_config: AppConfig,
+    provider_api_keys: None,
+    tier: str,
+    reasoning_model: str,
 ) -> None:
-    """Feeding the shipped values to the client produces the API's agent_config."""
-    processing_config = shipped_profile(shipped_config, "coder").processing_config
-    assert processing_config.antigravity_config is not None
-
-    client = GoogleGenAIClient(
-        api_key="test",
-        model=processing_config.llm_model or "",
-        antigravity_model=processing_config.antigravity_config.model,
-        antigravity_max_total_tokens=processing_config.antigravity_config.max_total_tokens,
+    """A run at a tier reaches the agent, reasoning with that tier's model."""
+    antigravity_config = shipped_profile(
+        shipped_config, "coder"
+    ).processing_config.antigravity_config
+    assert antigravity_config is not None
+    client_config = resolve_antigravity_tier_client_config(
+        antigravity_config,
+        shipped_config.model_tiers[tier],
+        shipped_config.llm_parameters,
     )
 
-    kwargs = client._build_agent_create_kwargs([UserMessage(content="Do the thing.")])
-    assert kwargs["agent"] == processing_config.llm_model
-    assert kwargs["agent_config"] == {
+    with patch(
+        "family_assistant.llm.providers.google_genai_client.genai.Client"
+    ) as sdk_client:
+        create = AsyncMock(
+            return_value=Interaction(id="inter_coder", status="in_progress")
+        )
+        sdk_client.return_value.aio.interactions.create = create
+        client = LLMClientFactory.create_client(config=client_config)
+        assert isinstance(client, GoogleGenAIClient)
+        await client.start_agent_interaction([UserMessage(content="Do the thing.")])
+
+    call_kwargs = create.call_args.kwargs
+    assert call_kwargs["agent"] == "antigravity-preview-09-2026"
+    assert call_kwargs["agent_config"] == {
         "type": "antigravity",
-        "model": "gemini-3.8-flash",
+        "model": reasoning_model,
     }
 
 
 def test_shipped_coder_profile_passes_its_own_startup_validation(
     shipped_config: AppConfig,
 ) -> None:
-    """What ships must survive the guard that rejects unrunnable combinations."""
+    """What ships must survive the guards that reject unrunnable combinations."""
     profile = shipped_profile(shipped_config, "coder")
+    validate_profile_model_tier(profile, shipped_config.model_tiers)
     validate_antigravity_agent_config(
-        profile.id, profile.processing_config, profile.processing_config.llm_model or ""
+        profile.id, profile.processing_config, shipped_config.model
     )
 
 
-def test_antigravity_config_on_a_non_agent_profile_is_rejected() -> None:
-    """Settings that would be silently discarded fail at startup instead."""
-    with pytest.raises(ValueError, match="not an Antigravity managed agent"):
-        validate_antigravity_agent_config(
-            "misconfigured",
-            ProcessingConfig(
-                llm_model="gemini-3.8-flash",
-                antigravity_config={"model": "gemini-3.8-flash"},  # pyright: ignore[reportArgumentType]
-            ),
-            "gemini-3.8-flash",
-        )
+def test_the_agent_in_a_retry_chain_is_rejected() -> None:
+    """A fallback chat model would answer instead of running the task.
 
-
-def test_antigravity_profile_with_retry_config_is_rejected() -> None:
-    """A fallback chat model would answer instead of running the task."""
-    with pytest.raises(ValueError, match="retry_config, which is unsupported"):
-        validate_antigravity_agent_config(
-            "misconfigured",
-            ProcessingConfig(
-                llm_model="antigravity-preview-09-2026",
-                provider="google",
-                retry_config=RetryConfig(
-                    primary=RetryModelConfig(model="antigravity-preview-09-2026"),
-                    fallback=RetryModelConfig(model="gemini-3.8-flash"),
-                ),
-            ),
-            "antigravity-preview-09-2026",
-        )
-
-
-def test_antigravity_named_only_inside_a_retry_chain_is_rejected() -> None:
-    """`llm_model` unset leaves the profile on the app default, hiding the agent.
-
-    The retry format carries no `antigravity_config`, and the pollable-service
-    selection reads `llm_model` -- so a delegated run would quietly take the
-    inline path with the API's default reasoning model.
+    The retry format carries no `antigravity_config`, so even as the primary
+    the agent would run with none of its settings.
     """
     with pytest.raises(ValueError, match="retry_config, which is unsupported"):
         validate_antigravity_agent_config(
             "misconfigured",
             ProcessingConfig(
-                provider="google",
                 retry_config=RetryConfig(
                     primary=RetryModelConfig(model="antigravity-preview-09-2026"),
                     fallback=RetryModelConfig(model="gemini-3.8-flash"),
                 ),
             ),
-            "gemini-3.8-flash",  # the application default, not the agent
-        )
-
-
-@pytest.mark.parametrize("provider", ["openai", "anthropic", None])
-def test_antigravity_profile_on_a_non_google_provider_is_rejected(
-    provider: str | None,
-) -> None:
-    """Another provider's client would send the agent id as a chat model."""
-    with pytest.raises(ValueError, match="must be 'google'"):
-        validate_antigravity_agent_config(
-            "misconfigured",
-            ProcessingConfig(
-                llm_model="antigravity-preview-09-2026",
-                provider=provider,
-            ),
-            "antigravity-preview-09-2026",
+            "gemini-3.8-flash",
         )
 
 
@@ -263,8 +250,8 @@ def _coder_system_instruction(shipped_config: AppConfig) -> str:
 
     client = GoogleGenAIClient(
         api_key="test",
-        model=processing_config.llm_model or "",
-        antigravity_model=processing_config.antigravity_config.model,
+        model=processing_config.antigravity_config.agent,
+        antigravity_model="gemini-3.8-flash",
     )
     service = InteractionsAgentProcessingService(
         llm_client=client,

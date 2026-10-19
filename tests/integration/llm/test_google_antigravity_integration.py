@@ -202,3 +202,55 @@ async def test_poll_delivers_report_with_a_credential_bound_environment(
         await client.close()
         await store.delete("fa-issue-1301-test-env")
         await store.aclose()
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.llm_integration
+@pytest.mark.vcr(before_record_response=sanitize_response)
+async def test_the_agent_runs_to_completion_reasoning_with_gemini_4_argon(
+    llm_record_mode: str,
+) -> None:
+    """The shipped `coder` admits Argon as a tier; only the API can say it is accepted.
+
+    An unsupported reasoning model is refused at submit or fails the run, so a
+    completed run carrying the computed answer is the evidence.
+    """
+    client = GoogleGenAIClient(
+        api_key=os.getenv("GEMINI_API_KEY", "test-gemini-key"),
+        model="antigravity-preview-09-2026",
+        antigravity_model="gemini-4-argon",
+    )
+    interaction_id: str | None = None
+    try:
+        interaction = await client.start_agent_interaction([
+            SystemMessage(
+                content="Run the requested code and report its output. Do not access the network."
+            ),
+            UserMessage(
+                content="Run Python to print 17 * 2311 and report that number, then stop."
+            ),
+        ])
+        assert interaction.id
+        interaction_id = interaction.id
+
+        async def finished() -> bool:
+            nonlocal interaction
+            interaction = await client.get_agent_interaction(interaction_id)
+            return (
+                interaction.status == "completed"
+                or is_interaction_terminal_error_status(interaction.status)
+            )
+
+        await wait_for_condition(
+            finished,
+            timeout=600.0,
+            interval=0.01 if llm_record_mode == "replay" else 15.0,
+        )
+        assert interaction.status == "completed"
+        assert "39287" in (interaction.output_text or "")
+    finally:
+        if interaction_id is not None and interaction.status == "in_progress":
+            await client.cancel_agent_interaction(interaction_id)
+        await client.close()

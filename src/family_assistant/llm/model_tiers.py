@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from family_assistant.config_models import (
+        AntigravityConfig,
         ModelTierConfig,
         ProcessingConfig,
         RetryModelConfig,
@@ -54,8 +55,12 @@ def resolve_profile_llm_model(
     """The model a profile actually runs on.
 
     A tier's primary is that model, so service-class selection and the model
-    validators see it rather than the global default.
+    validators see it rather than the global default. An Antigravity profile
+    runs on its agent: the tier there names what the agent reasons with, not
+    the model the request is sent to.
     """
+    if processing_config.antigravity_config is not None:
+        return processing_config.antigravity_config.agent
     if model_tier is None:
         return processing_config.llm_model or default_model
     primary_model = model_tier.chain[0].model
@@ -124,6 +129,31 @@ def resolve_tier_client_config(
                 tier.chain[1], global_llm_parameters
             ),
         }
+    }
+
+
+def resolve_antigravity_tier_client_config(
+    antigravity_config: AntigravityConfig,
+    tier: ModelTierConfig,
+    # ast-grep-ignore: no-dict-any - LLM params are provider-specific and genuinely arbitrary
+    global_llm_parameters: dict[str, dict[str, Any]],
+    # ast-grep-ignore: no-dict-any - Factory config has varying provider keys.
+) -> dict[str, Any]:
+    """An Antigravity profile's client configuration at one tier.
+
+    The request goes to the profile's agent, under its token cap and sandbox
+    environment; the tier supplies only the reasoning model. That makes the
+    client per profile rather than per tier, unlike a chat tier's.
+    ``validate_profile_model_tier`` establishes beforehand that the tier is
+    exactly one Google model.
+    """
+    return {
+        "provider": "google",
+        "model": antigravity_config.agent,
+        "model_parameters": global_llm_parameters,
+        "antigravity_model": tier.chain[0].model,
+        "antigravity_max_total_tokens": antigravity_config.max_total_tokens,
+        "antigravity_environment": antigravity_config.environment,
     }
 
 
@@ -204,6 +234,17 @@ def validate_profile_model_tier(
         {*(allowed or ()), *(auto or ()), *(delegation or ())} - {tier_name}
     ):
         _reject_interactions_agent_tier(profile_id, selectable, model_tiers[selectable])
+
+    if processing_config.antigravity_config is not None:
+        for reachable in sorted({
+            tier_name,
+            *(allowed or ()),
+            *(auto or ()),
+            *(delegation or ()),
+        }):
+            _reject_non_reasoning_model_tier(
+                profile_id, reachable, model_tiers[reachable]
+            )
 
     # A delegation preset promises "this model's answer or a visible failure",
     # which a fallback entry would quietly break: the answer would come from
@@ -311,5 +352,38 @@ def _reject_interactions_agent_tier(
             f"chain names Interactions API agent model(s): {', '.join(agent_models)}. "
             "Those run server-side rather than as chat models, so they are "
             "configured inline on a profile, not as an interchangeable tier."
+        )
+        raise ValueError(msg)
+
+
+def _reject_non_reasoning_model_tier(
+    profile_id: str,
+    tier_name: str,
+    tier: ModelTierConfig,
+) -> None:
+    """Refuse a tier an Antigravity profile cannot send as its reasoning model.
+
+    The agent takes one Google model and nothing else: the API has no
+    fallback, so a second entry would never run, and it accepts no request
+    parameters, so an entry's ``llm_parameters`` would be dropped. Each would
+    leave the run named for a recipe it did not execute.
+    """
+    entry = tier.chain[0]
+    problem: str | None = None
+    if len(tier.chain) != 1:
+        problem = "its chain has a fallback, which the agent cannot fall back to"
+    elif entry.provider != "google":
+        problem = (
+            f"its model is on provider '{entry.provider}', and the agent "
+            "reasons only with Google models"
+        )
+    elif entry.llm_parameters:
+        problem = "its entry sets llm_parameters, which the agent does not accept"
+    if problem is not None:
+        msg = (
+            f"Profile '{profile_id}' runs the Antigravity managed agent and can "
+            f"run on model_tier '{tier_name}', but {problem}. A tier on this "
+            "profile names the agent's reasoning model, so it must be exactly "
+            "one Google model."
         )
         raise ValueError(msg)

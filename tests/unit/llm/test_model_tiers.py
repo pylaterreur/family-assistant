@@ -291,22 +291,106 @@ def test_tier_on_a_computer_use_profile_is_rejected() -> None:
         validate_profile_model_tier(profile, TIERS)
 
 
-def test_antigravity_config_on_a_tiered_profile_is_rejected() -> None:
-    """Refused by the agent validator every profile already passes through.
+AGENT = "antigravity-preview-09-2026"
+REASONING_TIERS = {
+    "flash": ModelTierConfig(
+        chain=[RetryModelConfig(provider="google", model="gemini-3.8-flash")]
+    ),
+    "argon": ModelTierConfig(
+        chain=[RetryModelConfig(provider="google", model="gemini-4-argon")]
+    ),
+    "with_fallback": ModelTierConfig(
+        chain=[
+            RetryModelConfig(provider="google", model="gemini-3.8-flash"),
+            RetryModelConfig(provider="openai", model="gpt-5.6-terra"),
+        ]
+    ),
+    "anthropic": ModelTierConfig(
+        chain=[RetryModelConfig(provider="anthropic", model="claude-opus-5-5")]
+    ),
+    "tuned": ModelTierConfig(
+        chain=[
+            RetryModelConfig(
+                provider="google",
+                model="gemini-4-argon",
+                llm_parameters={"thinking_level": "low"},
+            )
+        ]
+    ),
+}
 
-    A tier's chain cannot name an agent model, so a tiered profile's model is
-    never the managed agent and its `antigravity_config` would go nowhere.
-    """
-    processing_config = ProcessingConfig(
-        model_tier="standard",
-        antigravity_config=AntigravityConfig(model="gemini-3.8-flash"),
+
+def _antigravity_profile(
+    model_tier: str = "flash", allowed_model_tiers: list[str] | None = None
+) -> ServiceProfile:
+    return _profile(
+        ProcessingConfig(
+            model_tier=model_tier, antigravity_config=AntigravityConfig(agent=AGENT)
+        ),
+        profile_id="coder",
+        allowed_model_tiers=allowed_model_tiers,
     )
-    profile = _profile(processing_config, profile_id="coder")
-    tier = validate_profile_model_tier(profile, TIERS)
-    model = resolve_profile_llm_model(processing_config, tier, "gemini-3.8-flash")
 
-    with pytest.raises(ValueError, match="sets antigravity_config but its model is"):
-        validate_antigravity_agent_config("coder", processing_config, model)
+
+def test_an_antigravity_profile_runs_on_its_agent_not_its_tier() -> None:
+    """The tier is the reasoning model; the request still goes to the agent."""
+    profile = _antigravity_profile(allowed_model_tiers=["flash", "argon"])
+    tier = validate_profile_model_tier(profile, REASONING_TIERS)
+
+    assert (
+        resolve_profile_llm_model(profile.processing_config, tier, "gemini-3.8-flash")
+        == AGENT
+    )
+
+
+@pytest.mark.parametrize(
+    ("alternate", "problem"),
+    [
+        ("with_fallback", "has a fallback"),
+        ("anthropic", "provider 'anthropic'"),
+        ("tuned", "sets llm_parameters"),
+    ],
+)
+def test_an_antigravity_profile_refuses_a_tier_that_is_not_one_google_model(
+    alternate: str, problem: str
+) -> None:
+    """Checked over every reachable tier, not only the default."""
+    profile = _antigravity_profile(allowed_model_tiers=["flash", alternate])
+
+    with pytest.raises(ValueError, match=problem):
+        validate_profile_model_tier(profile, REASONING_TIERS)
+
+
+def test_antigravity_config_without_a_tier_is_rejected() -> None:
+    """With no tier there is no reasoning model to send."""
+    with pytest.raises(ValueError, match="without a model_tier"):
+        validate_antigravity_agent_config(
+            "coder",
+            ProcessingConfig(antigravity_config=AntigravityConfig(agent=AGENT)),
+            "gemini-3.8-flash",
+        )
+
+
+def test_the_agent_as_an_inline_model_is_rejected() -> None:
+    """It would run with none of the agent's settings."""
+    with pytest.raises(ValueError, match="Set antigravity_config.agent"):
+        validate_antigravity_agent_config(
+            "coder",
+            ProcessingConfig(provider="google", llm_model=AGENT),
+            "gemini-3.8-flash",
+        )
+
+
+def test_an_agent_id_that_is_not_antigravity_is_rejected() -> None:
+    with pytest.raises(ValueError, match="not an Antigravity managed agent"):
+        validate_antigravity_agent_config(
+            "coder",
+            ProcessingConfig(
+                model_tier="flash",
+                antigravity_config=AntigravityConfig(agent="gemini-3.8-flash"),
+            ),
+            "gemini-3.8-flash",
+        )
 
 
 def test_tier_naming_an_interactions_agent_model_is_rejected() -> None:

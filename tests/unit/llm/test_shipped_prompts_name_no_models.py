@@ -44,7 +44,7 @@ def _configured_model_ids(config: AppConfig) -> set[str]:
             entries = [entry for entry in (retry.primary, retry.fallback) if entry]
             models.update(models_in_chain(entries, lambda _model: True))
         if processing.antigravity_config is not None:
-            models.add(processing.antigravity_config.model)
+            models.add(processing.antigravity_config.agent)
     return {model for model in models if model}
 
 

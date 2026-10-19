@@ -18,7 +18,8 @@ agent", with only the submit step left agent-specific.
 Ship the agent as a profile alongside `research`/`research_max` rather than as a tool:
 
 - `coder` → agent `antigravity-preview-09-2026` reasoning with `gemini-3.8-flash`, slash command
-  `/coder`.
+  `/coder`. *(Superseded: the reasoning model is now the profile's model tier, with `gemini-4-argon`
+  selectable — see [antigravity-model-tiers.md](antigravity-model-tiers.md).)*
 
 The profile is named for the job, not the vendor: what it is for is writing and running code and
 finishing self-contained computation, and the model choosing between it, `spawn_worker` and
@@ -100,9 +101,9 @@ files, and is reached as a conversation.
 
 ## Open questions
 
-- **Reasoning-model tiers.** The agent also accepts `gemini-3.6-flash` and `gemini-3.5-flash-lite`.
-  A cheaper sibling profile is a config-only change if it turns out to be wanted; shipping one
-  speculatively would just widen the slash-command surface.
+- **Reasoning-model tiers.** Resolved in [antigravity-model-tiers.md](antigravity-model-tiers.md):
+  the reasoning model is a tier, so another model the agent accepts is a one-model tier added to the
+  profile's eligibility lists rather than a sibling profile.
 - **Wall-clock cap.** `max_async_seconds: 7200` matches `research_max` on the reasoning that an
   autonomous run can be as long as a deep investigation. Whether that is generous or stingy is
   something only real runs will tell us.

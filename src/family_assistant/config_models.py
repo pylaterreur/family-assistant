@@ -495,18 +495,19 @@ class AntigravityEnvironmentConfig(BaseModel):
 class AntigravityConfig(BaseModel):
     """Runtime configuration for a Google Antigravity managed-agent profile.
 
-    Only meaningful on a profile whose ``llm_model`` is the Antigravity agent
-    id: the agent id selects the managed agent, and these fields select the
-    model it reasons with, cap what a single run may spend, and describe the
-    sandbox environment it runs in.
+    Its presence is what makes a profile an Antigravity profile: ``agent``
+    selects the managed agent, and the other fields cap what a single run may
+    spend and describe the sandbox environment it runs in. The model the agent
+    reasons with is not configured here -- it is the profile's ``model_tier``,
+    whose single Google entry is sent as the agent's reasoning model, so a
+    request can run the agent on another model the way it would any profile.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    # The agent's reasoning model. Pinned rather than left to the API default
-    # so an upstream default change is a config change here, not a silent
-    # behaviour change in a profile users have calibrated their prompts to.
-    model: str = "gemini-3.8-flash"
+    # The agent revision, e.g. "antigravity-preview-09-2026". Required rather
+    # than defaulted so an upstream revision change is a config change here.
+    agent: str
     # Ceiling on the tokens one agent run may consume. Unset means the API's
     # own default; the agent plans and executes autonomously in a sandbox, so
     # this is the only bound on how long it iterates other than wall clock.
@@ -631,9 +632,9 @@ class ProcessingConfig(BaseModel):
             CONTEXT_PROVIDER_NAMES & set(self.excluded_context_providers)
         )
 
-    # Only read when llm_model is the Antigravity managed agent; a profile
-    # pointing anywhere else is rejected at startup rather than silently
-    # ignoring this.
+    # Runs the profile on the Antigravity managed agent, reasoning with the
+    # model its tier names. Combinations the agent cannot honour (no tier, a
+    # tier with a fallback, an inline model) are rejected at startup.
     antigravity_config: AntigravityConfig | None = None
     # The runtime-taint sink class a whole turn on this profile counts as.
     # Set it on a profile whose turn is itself a privileged operation -- a
