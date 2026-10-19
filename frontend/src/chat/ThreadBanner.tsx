@@ -16,7 +16,7 @@ interface ThreadBannerProps {
 
 /**
  * Where an open thread came from, the way back to Home, where it stands, and
- * Mark done for a thread that isn't done yet.
+ * Mark done for a thread that is waiting on the user or has failed.
  */
 export const ThreadBanner: React.FC<ThreadBannerProps> = ({
   thread,
@@ -69,7 +69,9 @@ export const ThreadBanner: React.FC<ThreadBannerProps> = ({
             {threadStatusText(thread)}
           </span>
         )}
-        {thread.state !== 'done' && (
+        {/* Work in progress outranks a close, so a working thread would stay
+            working; it can be marked done once it stops. */}
+        {(thread.state === 'waiting' || thread.state === 'failed') && (
           <Button
             variant="outline"
             size="sm"
