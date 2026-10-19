@@ -610,8 +610,15 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     const handlePopState = () => {
       const urlCenter = new URLSearchParams(window.location.search).get('conversation_id');
       const urlPanel = panelFromUrl(window.location.search);
-      if (urlCenter && urlCenter !== centerConversationIdRef.current) {
-        withHistoryMode('none', () => centerRef.current?.openConversation(urlCenter));
+      if (
+        urlCenter &&
+        urlCenter !== centerConversationIdRef.current &&
+        !withHistoryMode('none', () => centerRef.current?.openConversation(urlCenter))
+      ) {
+        // The centre is mid-send and stays where it is, so the address goes
+        // back to saying so.
+        writeHistory('push');
+        return;
       }
       const current = panelStateRef.current;
       if (urlPanel?.threadId !== current?.threadId || urlPanel?.expanded !== current?.expanded) {
@@ -621,7 +628,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [setPanelState, withHistoryMode]);
+  }, [setPanelState, withHistoryMode, writeHistory]);
 
   // The panel pane follows the thread the panel is for. It refuses to move
   // mid-send, and then the panel stays on what it shows.
@@ -810,7 +817,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
           centerRef.current?.openConversation(landingConversationId)
         );
       } else {
-        handleNewChat();
+        withHistoryMode('replace', handleNewChat);
       }
     });
     return () => {

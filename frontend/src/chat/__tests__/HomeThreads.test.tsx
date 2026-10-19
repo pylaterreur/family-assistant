@@ -982,6 +982,16 @@ describe('The thread panel', () => {
     expect(paneFor(HOME)).not.toBeNull();
   });
 
+  it('lands on a new chat without leaving the bare address behind it', async () => {
+    window.history.replaceState({}, '', '/chat');
+    const entriesBefore = window.history.length;
+
+    await renderChatApp({ waitForReady: true });
+
+    await waitFor(() => expect(window.location.search).toMatch(/^\?conversation_id=web_conv_/));
+    expect(window.history.length).toBe(entriesBefore);
+  });
+
   it('moves a thread linked to directly into the panel, with Home in the centre', async () => {
     serveThreads();
     window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
