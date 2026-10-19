@@ -19,25 +19,36 @@ struct ChatEntryView: View {
     let authManager: AuthManager
     let route: ChatRoute
 
-    @State private var home: HomeAvailability.State
+    @State private var discovery: HomeDiscovery
     @State private var hasRefreshed = false
 
     init(authManager: AuthManager, route: ChatRoute) {
         self.authManager = authManager
         self.route = route
-        _home = State(
-            initialValue: HomeAvailability.cached(serverURL: authManager.validatedServerURL()?.absoluteString)
-        )
+        _discovery = State(initialValue: HomeDiscovery(
+            serverURL: authManager.validatedServerURL()?.absoluteString,
+            lookUp: { try await ChatAPIClient(authManager: authManager).getHome() },
+            reportFailure: { ErrorReporter.shared.report($0, component: "Chat.home") }
+        ))
     }
 
     var body: some View {
         Group {
-            switch home {
+            switch discovery.state {
             case .unknown:
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .disabled:
                 ChatRootView(authManager: authManager, route: route)
+            case .failed:
+                // The conversation list keeps chat usable; the banner says
+                // Home could not be checked and offers to look again.
+                ChatRootView(authManager: authManager, route: route)
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        HomeLookupFailedBanner {
+                            Task { await discovery.retryIfFailed() }
+                        }
+                    }
             case let .enabled(homeConversationID):
                 HomeRootView(
                     authManager: authManager,
@@ -52,25 +63,36 @@ struct ChatEntryView: View {
                 return
             }
             hasRefreshed = true
-            await refresh()
+            await discovery.refresh()
         }
-    }
-
-    private func refresh() async {
-        let serverURL = authManager.validatedServerURL()?.absoluteString
-        do {
-            let fetched = HomeAvailability.state(for: try await ChatAPIClient(authManager: authManager).getHome())
-            HomeAvailability.store(fetched, serverURL: serverURL)
-            home = HomeAvailability.resolved(current: home, fetched: fetched)
-        } catch {
-            ErrorReporter.shared.report(error, component: "Chat.home")
-            // Without an answer, a first launch keeps the conversation list it
-            // has always had; a remembered Home stays until the server says
-            // otherwise.
-            if home == .unknown {
-                home = .disabled
+        .onChange(of: authManager.authRequired) { wasRequired, isRequired in
+            // A lookup refused for expired credentials is retried once the
+            // user has signed in again in place.
+            if wasRequired, !isRequired {
+                Task { await discovery.retryIfFailed() }
             }
         }
+    }
+}
+
+private struct HomeLookupFailedBanner: View {
+    let retry: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text("Couldn’t check for Home.")
+                .font(.footnote)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Retry", action: retry)
+                .font(.footnote.weight(.semibold))
+                .accessibilityIdentifier("home-lookup-retry")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.bar)
+        .accessibilityIdentifier("home-lookup-failed")
     }
 }
 

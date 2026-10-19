@@ -330,6 +330,65 @@ final class HomeThreadsTests: XCTestCase {
         )
     }
 
+    func testFailedHomeLookupIsNotThreadsOffAndRetryRecovers() async throws {
+        let suite = "HomeThreadsTests.discovery"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        var fails = true
+        var lookups = 0
+        let discovery = HomeDiscovery(
+            serverURL: serverURL,
+            defaults: defaults,
+            lookUp: {
+                lookups += 1
+                if fails {
+                    throw URLError(.notConnectedToInternet)
+                }
+                return ChatHomeResponse(enabled: true, conversationID: "web_conv_home")
+            },
+            reportFailure: { _ in }
+        )
+        XCTAssertEqual(discovery.state, .unknown)
+
+        await discovery.refresh()
+
+        XCTAssertEqual(discovery.state, .failed, "A failed lookup says nothing about whether threads are on.")
+        XCTAssertEqual(
+            HomeAvailability.cached(serverURL: serverURL, defaults: defaults),
+            .unknown,
+            "A failure is never remembered as threads off."
+        )
+
+        fails = false
+        await discovery.retryIfFailed()
+
+        XCTAssertEqual(discovery.state, .enabled(homeConversationID: "web_conv_home"))
+        XCTAssertEqual(
+            HomeAvailability.cached(serverURL: serverURL, defaults: defaults),
+            .enabled(homeConversationID: "web_conv_home")
+        )
+
+        await discovery.retryIfFailed()
+        XCTAssertEqual(lookups, 2, "Retry looks again only after a failure.")
+    }
+
+    func testFailedLookupKeepsARememberedHome() async throws {
+        let suite = "HomeThreadsTests.discoveryRemembered"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        HomeAvailability.store(.enabled(homeConversationID: "home"), serverURL: serverURL, defaults: defaults)
+        let discovery = HomeDiscovery(
+            serverURL: serverURL,
+            defaults: defaults,
+            lookUp: { throw URLError(.timedOut) },
+            reportFailure: { _ in }
+        )
+
+        await discovery.refresh()
+
+        XCTAssertEqual(discovery.state, .enabled(homeConversationID: "home"))
+    }
+
     // MARK: - API client
 
     func testGetHomeTreatsAMissingRouteAsThreadsOff() async throws {

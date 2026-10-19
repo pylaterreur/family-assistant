@@ -118,6 +118,9 @@ enum HomeAvailability {
         case unknown
         case disabled
         case enabled(homeConversationID: String)
+        /// The lookup failed, which says nothing about whether threads are on.
+        /// Never remembered: the next lookup decides.
+        case failed
     }
 
     static let serverKey = "chat.home.server"
@@ -147,6 +150,8 @@ enum HomeAvailability {
         case .unknown:
             clear(defaults: defaults)
             return
+        case .failed:
+            return
         case .disabled:
             defaults.set("", forKey: conversationKey)
         case let .enabled(homeConversationID):
@@ -164,14 +169,66 @@ enum HomeAvailability {
     /// Home that has gone or moved is replaced at once, since its routes no
     /// longer answer for it. A Home that appears while the conversation list is
     /// showing waits for the next launch rather than pulling the screen away
-    /// from someone mid-chat.
+    /// from someone mid-chat. After a failed lookup the answer is taken as it
+    /// comes: the user asked for it with Retry, or signed in again.
     static func resolved(current: State, fetched: State) -> State {
         switch current {
-        case .unknown, .enabled:
+        case .unknown, .enabled, .failed:
             return fetched
         case .disabled:
             return .disabled
         }
+    }
+
+    /// What to show when a lookup fails. A launch with nothing remembered shows
+    /// the failure (with the conversation list, so chat stays usable) rather
+    /// than reading it as threads being off; anything already showing stays.
+    static func afterLookupFailure(current: State) -> State {
+        current == .unknown ? .failed : current
+    }
+}
+
+/// Looks up the caller's Home for the chat tab, and looks again on request
+/// after a failure.
+@MainActor
+@Observable
+final class HomeDiscovery {
+    private(set) var state: HomeAvailability.State
+    @ObservationIgnored private let serverURL: String?
+    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let lookUp: @MainActor () async throws -> ChatHomeResponse
+    @ObservationIgnored private let reportFailure: @MainActor (Error) -> Void
+
+    init(
+        serverURL: String?,
+        defaults: UserDefaults = .standard,
+        lookUp: @escaping @MainActor () async throws -> ChatHomeResponse,
+        reportFailure: @escaping @MainActor (Error) -> Void
+    ) {
+        self.serverURL = serverURL
+        self.defaults = defaults
+        self.lookUp = lookUp
+        self.reportFailure = reportFailure
+        state = HomeAvailability.cached(serverURL: serverURL, defaults: defaults)
+    }
+
+    func refresh() async {
+        do {
+            let fetched = HomeAvailability.state(for: try await lookUp())
+            HomeAvailability.store(fetched, serverURL: serverURL, defaults: defaults)
+            state = HomeAvailability.resolved(current: state, fetched: fetched)
+        } catch {
+            reportFailure(error)
+            state = HomeAvailability.afterLookupFailure(current: state)
+        }
+    }
+
+    /// Look again, if the last lookup failed (Retry, or signing in again).
+    func retryIfFailed() async {
+        guard state == .failed else {
+            return
+        }
+        await refresh()
     }
 }
 
