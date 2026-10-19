@@ -27,12 +27,10 @@ if TYPE_CHECKING:
     from family_assistant.llm.messages import LLMMessage
     from family_assistant.web.conversation_stream_hub import ConversationStreamHub
 
-NOW = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
+# Anchored to the real clock: history windows are read against it, and a
+# close is compared with the rows written before it.
+NOW = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
 CALLER = "test_user"
-
-
-def _a_minute_ago() -> datetime:
-    return datetime.now(UTC) - timedelta(minutes=1)
 
 
 @pytest.fixture
@@ -476,7 +474,7 @@ async def test_a_user_marking_a_thread_done_writes_no_echo(
 ) -> None:
     db = Database(engine=db_engine)
     home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
-    thread = await _add_thread(db, home, at=_a_minute_ago())
+    thread = await _add_thread(db, home)
 
     response = await api_test_client.post(f"/api/v1/chat/home/threads/{thread}/done")
 
@@ -499,7 +497,7 @@ async def test_a_user_closed_thread_reopens_when_a_message_arrives(
 ) -> None:
     db = Database(engine=db_engine)
     home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
-    thread = await _add_thread(db, home, at=_a_minute_ago())
+    thread = await _add_thread(db, home)
     await api_test_client.post(f"/api/v1/chat/home/threads/{thread}/done")
 
     await db.message_history.add_message(
@@ -536,7 +534,7 @@ async def test_a_thread_written_under_an_alias_is_still_its_owners(
     _alias_config(app_fixture)
     db = Database(engine=db_engine)
     home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
-    thread = await _add_thread(db, home, at=_a_minute_ago())
+    thread = await _add_thread(db, home)
     await db.execute(
         conversation_threads_table
         .update()
@@ -568,7 +566,7 @@ async def test_marking_done_pings_the_login_the_caller_used(
     _alias_config(app_fixture)
     db = Database(engine=db_engine)
     home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
-    thread = await _add_thread(db, home, at=_a_minute_ago())
+    thread = await _add_thread(db, home)
 
     async def alias_user() -> dict[str, object]:
         return {"user_identifier": ALIAS}

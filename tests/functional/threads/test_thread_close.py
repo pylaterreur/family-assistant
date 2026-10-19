@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
@@ -65,7 +65,7 @@ TITLE = "Hot water system quotes"
 OUTCOME = "Booked Acme Plumbing for Tuesday at 9am."
 QUESTION = "Gas or heat pump?"
 PREAMBLE = "Wrapping this up."
-NOW = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
+NOW = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
 
 UNTRUSTED = TaintSource(
     source_type=TaintSourceType.BROWSER_SNAPSHOT,
