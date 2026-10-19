@@ -48,7 +48,9 @@ which belongs to that thread's work. The destination is written down when it is 
 to a conversation when it fires, so it reaches the Home the owner has then. "Here" remains an
 explicit choice. Telegram is unchanged, because a Telegram chat is already its own Home. The
 existing "new conversation per run" option stays a separate conversation for now; it is planned to
-become a thread off Home, reusing user-started threads (milestone 5).
+become a thread off Home, reusing user-started threads (milestone 5). Results of work started in a
+conversation, such as worker completions and delegation results, return to that conversation; only
+proactive messages default to Home.
 
 **A thread is for work that outlives the turn.** That means work that runs in the background, waits
 on someone, takes several steps the user will want to follow, or is a project the user will come
