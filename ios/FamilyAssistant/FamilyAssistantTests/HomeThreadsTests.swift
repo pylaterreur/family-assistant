@@ -523,6 +523,86 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertEqual(turnProfiles.values.count, 1, "A prompt already sent is not sent again.")
     }
 
+    func testRoutedPromptLeavesTheDraftInPlace() async throws {
+        let turnPayloads = LockedPayloads()
+        ChatMockBackendURLProtocol.respond { request in
+            switch (request.httpMethod ?? "GET", request.url?.path ?? "") {
+            case ("GET", "/api/v1/profiles"):
+                return .json(#"{"profiles":[],"default_profile_id":"default_assistant"}"#)
+            case ("GET", "/api/v1/chat/conversations/home/messages"):
+                return .json(
+                    #"{"conversation_id":"home","messages":[],"count":0,"total_messages":0,"conversation_kind":"home"}"#
+                )
+            case ("POST", "/api/v1/chat/turns"):
+                let payload = try XCTUnwrap(
+                    JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: Any]
+                )
+                turnPayloads.append(payload)
+                let turnID = try XCTUnwrap(payload["turn_id"] as? String)
+                return .json(#"{"turn_id":"\#(turnID)","conversation_id":"home","first_seq":0}"#)
+            case ("GET", "/api/v1/chat/conversations/home/stream"):
+                return .droppedStream("")
+            case ("GET", "/api/v1/chat/confirmations/pending"):
+                return .json(#"{"confirmations":[]}"#)
+            case ("GET", "/api/v1/chat/activity/stream"):
+                return .text("")
+            default:
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+            }
+        }
+        let model = makeViewModel(conversationID: "home", role: .home)
+        await model.bootstrap()
+        let draftAttachment = ChatAttachment(
+            id: "draft-photo",
+            attachmentID: "55555555-5555-5555-5555-555555555555",
+            type: .image,
+            name: "photo.jpg",
+            contentURL: "/api/attachments/55555555-5555-5555-5555-555555555555",
+            mimeType: "image/jpeg",
+            size: 10,
+            localFileURL: nil,
+            uploadState: .uploaded,
+            errorMessage: nil
+        )
+        model.draftText = "Half typed"
+        model.draftAttachments = [draftAttachment]
+
+        await model.sendPromptInPlace("Buy milk")
+        try await waitUntil { !turnPayloads.values.isEmpty }
+
+        let payload = try XCTUnwrap(turnPayloads.values.first)
+        XCTAssertEqual(payload["prompt"] as? String, "Buy milk")
+        XCTAssertTrue(
+            (payload["attachments"] as? [Any])?.isEmpty ?? true,
+            "The routed prompt goes alone, without the draft's attachments."
+        )
+        XCTAssertEqual(model.draftText, "Half typed")
+        XCTAssertEqual(model.draftAttachments, [draftAttachment])
+    }
+
+    func testOrdinaryControlsWaitUntilTheConversationIsKnownToBeOrdinary() async {
+        respondWithConversation(id: "t1", messagesJSON: "[]", extraJSON: #","conversation_kind":"thread""#)
+        let linked = makeViewModel(conversationID: "t1", role: .pushed)
+        XCTAssertFalse(
+            linked.allowsProfileChange,
+            "A conversation opened by a link is not known to be ordinary before its history loads."
+        )
+        await linked.selectConversation("t1")
+        XCTAssertFalse(linked.allowsProfileChange)
+
+        let fresh = ChatViewModel(
+            authManager: makeAuthManager(),
+            startsNewConversation: true,
+            role: .pushed,
+            errorReporter: ErrorReporter(spoolDirectory: nil),
+            pathMonitor: StubPathMonitor(isSatisfied: true)
+        )
+        models.append(fresh)
+        XCTAssertTrue(fresh.allowsProfileChange, "A conversation started here is ordinary.")
+        fresh.startNewConversation()
+        XCTAssertTrue(fresh.allowsProfileChange)
+    }
+
     func testHomeDoesNotBecomeTheRestoredConversation() {
         _ = makeViewModel(conversationID: "home", role: .home)
         _ = makeViewModel(conversationID: "t1", role: .pushed)
@@ -656,6 +736,19 @@ final class HomeThreadsTests: XCTestCase {
         UserDefaults.standard.removeObject(forKey: "lastConversationActiveAt")
         UserDefaults.standard.removeObject(forKey: "selectedProfileId")
         HomeAvailability.clear()
+    }
+}
+
+private final class LockedPayloads: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [[String: Any]] = []
+
+    var values: [[String: Any]] {
+        lock.withLock { stored }
+    }
+
+    func append(_ value: [String: Any]) {
+        lock.withLock { stored.append(value) }
     }
 }
 

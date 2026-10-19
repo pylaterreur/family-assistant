@@ -128,7 +128,15 @@ final class ChatViewModel {
     /// Routed prompts waiting for the conversation to be ready to send.
     @ObservationIgnored private var pendingInPlacePrompts: [String] = []
     var isLoadingProfiles = false
-    var isStreaming = false
+    var isStreaming = false {
+        didSet {
+            if oldValue, !isStreaming, hasBootstrapped, !pendingInPlacePrompts.isEmpty {
+                Task { [weak self] in
+                    await self?.sendPendingInPlacePromptsIfReady()
+                }
+            }
+        }
+    }
     var errorMessage: String?
     var mobileShowsConversationList = false
     var steerErrorMessage: String?
@@ -596,6 +604,10 @@ final class ChatViewModel {
             // 404-loops the reconnect backoff and pins the connection indicator
             // to `.degraded`.
             opensGeneratedLaunchDraft = true
+            if role != .standalone {
+                // Minted here, so it is an ordinary conversation by construction.
+                conversationKind = .conversation
+            }
         } else if let initialPrompt, !initialPrompt.isEmpty {
             // Launched to start a brand-new chat (share extension / App Intent).
             self.conversationID = Self.generateConversationID()
@@ -720,14 +732,19 @@ final class ChatViewModel {
     }
 
     private func sendPendingInPlacePromptsIfReady() async {
-        while hasBootstrapped, !isLoadingMessages, !pendingInPlacePrompts.isEmpty {
-            let prompt = pendingInPlacePrompts.removeFirst()
+        while hasBootstrapped, !isLoadingMessages, !isStreaming, let prompt = pendingInPlacePrompts.first {
             guard shouldProcessInitialPrompt(prompt) else {
+                pendingInPlacePrompts.removeFirst()
                 continue
             }
+            // Sent on its own: whatever the user has in the composer stays there.
+            guard await sendDraft(fallbackFromSteer: false, routedPrompt: prompt) else {
+                // Not sendable yet (a turn is running): it stays queued, and goes
+                // when the conversation next settles.
+                return
+            }
+            pendingInPlacePrompts.removeAll { $0 == prompt }
             lastProcessedInitialPrompt = prompt
-            draftText = prompt
-            await sendDraft()
         }
     }
 
@@ -1095,9 +1112,11 @@ final class ChatViewModel {
 
     /// Whether the user may move this conversation to another profile. Home
     /// stays on its profile and a thread runs on its own; switching either
-    /// would start an unrelated conversation in their place.
+    /// would start an unrelated conversation in their place. Over Home that
+    /// holds only once the conversation is known to be ordinary: until its
+    /// history has said so, a thread opened by a link must not offer it.
     var allowsProfileChange: Bool {
-        role == .standalone || (role == .pushed && conversationKind != .thread && threadSummary == nil)
+        role == .standalone || (role == .pushed && conversationKind == .conversation && threadSummary == nil)
     }
 
     /// Restore the tier the conversation just loaded is on, for its profile.
@@ -1148,6 +1167,9 @@ final class ChatViewModel {
         conversationSelection = conversationID
         setPendingDelegations([])
         clearConversationIdentity()
+        if role != .standalone {
+            conversationKind = .conversation
+        }
         messages = []
         persistedMessagesConversationID = nil
         composerFocusRequestID = UUID()
@@ -1876,13 +1898,19 @@ final class ChatViewModel {
         _ = await sendDraft(fallbackFromSteer: false)
     }
 
+    /// `routedPrompt` sends that text on its own instead of the composer's
+    /// contents, which it leaves untouched: a request routed into the
+    /// conversation must neither take the draft's attachments with it nor clear
+    /// what the user was typing. A routed prompt never steers a running turn;
+    /// it is refused (and its caller retries) until the conversation is idle.
     @discardableResult
-    private func sendDraft(fallbackFromSteer: Bool) async -> Bool {
-        let submittedDraftText = draftText
-        let submittedDraftAttachments = draftAttachments
+    private func sendDraft(fallbackFromSteer: Bool, routedPrompt: String? = nil) async -> Bool {
+        let isRouted = routedPrompt != nil
+        let submittedDraftText = routedPrompt ?? draftText
+        let submittedDraftAttachments = isRouted ? [] : draftAttachments
         let prompt = submittedDraftText.trimmingCharacters(in: .whitespacesAndNewlines)
         let hadActiveTurnAtSubmission = activeTurnIdentity != nil
-        guard !prompt.isEmpty || !draftAttachments.isEmpty else {
+        guard !prompt.isEmpty || !submittedDraftAttachments.isEmpty else {
             return false
         }
         // Defensive: the send button is disabled while a conversation loads, but
@@ -1890,14 +1918,19 @@ final class ChatViewModel {
         guard !isLoadingMessages else {
             return false
         }
-        guard draftAttachments.allSatisfy({ $0.uploadState != .uploading }) else {
+        if isRouted {
+            guard conversationID != nil, !hadActiveTurnAtSubmission, !isStreaming else {
+                return false
+            }
+        }
+        guard isRouted || draftAttachments.allSatisfy({ $0.uploadState != .uploading }) else {
             presentErrorAlert(
                 "Wait for attachments to finish uploading before sending.",
                 reason: .sendAttachmentsUploading
             )
             return false
         }
-        guard draftAttachments.allSatisfy({ $0.uploadState == .uploaded }) else {
+        guard isRouted || draftAttachments.allSatisfy({ $0.uploadState == .uploaded }) else {
             presentErrorAlert(
                 "Retry or remove failed attachments before sending.",
                 reason: .sendAttachmentFailed
@@ -1930,14 +1963,17 @@ final class ChatViewModel {
                 // The preflight introduced an await into submission. Never send
                 // the captured text if the user edited the composer meanwhile;
                 // leave the newer draft untouched for their next tap.
-                guard draftText == submittedDraftText,
-                      draftAttachments == submittedDraftAttachments
+                guard isRouted || (draftText == submittedDraftText
+                    && draftAttachments == submittedDraftAttachments)
                 else {
                     return false
                 }
                 if let runningTurn = response.activeTurns
                     .filter({ $0.status == "running" })
                     .max(by: { $0.startedAt < $1.startedAt }) {
+                    if isRouted {
+                        return false
+                    }
                     reportTurnHandleRecovery(
                         source: "active_turns_preflight",
                         turnID: runningTurn.turnID
@@ -1953,8 +1989,8 @@ final class ChatViewModel {
             } catch {
                 errorReporter.report(error, component: "Chat.activeTurnLookup")
                 guard conversationID == id,
-                      draftText == submittedDraftText,
-                      draftAttachments == submittedDraftAttachments
+                      isRouted || (draftText == submittedDraftText
+                          && draftAttachments == submittedDraftAttachments)
                 else {
                     return false
                 }
@@ -1968,6 +2004,9 @@ final class ChatViewModel {
         // the preflight was suspended. Prefer that identity over cancelling it
         // and starting a new turn from a stale idle snapshot.
         if !hadActiveTurnAtSubmission, activeTurnIdentity != nil {
+            if isRouted {
+                return false
+            }
             return await sendSteerDraftWithResult()
         }
 
@@ -1977,7 +2016,7 @@ final class ChatViewModel {
         // Past every early return: this send is happening, so it is what tells
         // the server which tier the conversation is on from here.
         let modelTier = modelTierForSend()
-        let uploadedAttachments = draftAttachments.filter { $0.uploadState == .uploaded }
+        let uploadedAttachments = submittedDraftAttachments.filter { $0.uploadState == .uploaded }
         let userMessage = ChatMessage(
             id: "local_user_\(UUID().uuidString)",
             role: .user,
@@ -2011,9 +2050,11 @@ final class ChatViewModel {
         // up: the newest bubble is now the assistant loading placeholder, so the
         // near-bottom auto-follow gate can't recognize this as user-initiated.
         requestScrollToLatest()
-        draftText = ""
-        cleanupTemporaryImports(for: draftAttachments)
-        draftAttachments = []
+        if !isRouted {
+            draftText = ""
+            cleanupTemporaryImports(for: draftAttachments)
+            draftAttachments = []
+        }
         isStreaming = true
         persistConversationID()
         // The conversation's summary before the optimistic bump below, so a turn

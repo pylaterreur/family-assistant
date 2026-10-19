@@ -354,10 +354,6 @@ private struct PushedConversationView: View {
         viewModel.threadSummary ?? store.thread(conversationID: viewModel.conversationID)
     }
 
-    private var isThread: Bool {
-        thread != nil || viewModel.conversationKind == .thread
-    }
-
     var body: some View {
         ChatThreadView(viewModel: viewModel)
             .navigationTitle(thread?.title ?? "Chat")
@@ -374,14 +370,15 @@ private struct PushedConversationView: View {
                     }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    if !isThread {
+                    // Ordinary-chat controls appear only once the conversation is
+                    // known to be ordinary (or was started here): a thread opened
+                    // by a link is unconfirmed until its history loads.
+                    if viewModel.allowsProfileChange, thread == nil {
                         ConversationShareToolbar(
                             authManager: authManager,
                             conversationID: viewModel.shareableConversationID
                         )
-                        if viewModel.allowsProfileChange {
-                            ProfilePickerView(viewModel: viewModel)
-                        }
+                        ProfilePickerView(viewModel: viewModel)
                     }
                     IntelligencePickerView(viewModel: viewModel)
                 }
