@@ -1,18 +1,29 @@
-import { ArrowLeftIcon, CornerDownRightIcon, Loader2Icon } from 'lucide-react';
+import { ArrowLeftIcon, CheckIcon, CornerDownRightIcon, Loader2Icon } from 'lucide-react';
 import React from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { getProfileDisplayName } from './profileNames';
-import { THREAD_STATE_LABELS, ThreadStateDot } from './ThreadStateDot';
+import { ThreadStateDot, threadStatusText } from './ThreadStateDot';
 import type { ThreadSummary } from './types';
 
 interface ThreadBannerProps {
   thread: ThreadSummary;
   onOpenHome: (homeConversationId: string) => void;
+  onMarkDone: (conversationId: string) => void;
+  /** A Mark done for this thread in flight, or the last one having failed. */
+  markDoneStatus: 'pending' | 'failed' | null;
 }
 
-/** Where an open thread came from, the way back to Home, and whether it is still working. */
-export const ThreadBanner: React.FC<ThreadBannerProps> = ({ thread, onOpenHome }) => (
+/**
+ * Where an open thread came from, the way back to Home, where it stands, and
+ * Mark done for a thread that isn't done yet.
+ */
+export const ThreadBanner: React.FC<ThreadBannerProps> = ({
+  thread,
+  onOpenHome,
+  onMarkDone,
+  markDoneStatus,
+}) => (
   <div
     className="flex-shrink-0 border-b border-border/50 bg-muted/20 px-4 py-2 md:px-6"
     data-testid="thread-banner"
@@ -49,11 +60,42 @@ export const ThreadBanner: React.FC<ThreadBannerProps> = ({ thread, onOpenHome }
             Working…
           </span>
         ) : (
-          <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-            {THREAD_STATE_LABELS[thread.state]}
+          <span
+            className={`ml-auto shrink-0 text-xs ${
+              thread.state === 'failed' ? 'font-medium text-destructive' : 'text-muted-foreground'
+            }`}
+            data-testid="thread-banner-state"
+          >
+            {threadStatusText(thread)}
           </span>
         )}
+        {thread.state !== 'done' && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 shrink-0 gap-1 px-2 text-xs"
+            onClick={() => onMarkDone(thread.conversation_id)}
+            disabled={markDoneStatus === 'pending'}
+            data-testid="thread-mark-done"
+          >
+            {markDoneStatus === 'pending' ? (
+              <Loader2Icon size={12} className="animate-spin" aria-hidden="true" />
+            ) : (
+              <CheckIcon size={12} aria-hidden="true" />
+            )}
+            Mark done
+          </Button>
+        )}
       </div>
+      {markDoneStatus === 'failed' && (
+        <div
+          role="alert"
+          className="text-xs text-destructive"
+          data-testid="thread-mark-done-failed"
+        >
+          Couldn't mark this thread done. Try again.
+        </div>
+      )}
       <div
         className="flex min-w-0 items-start gap-1.5 text-xs text-muted-foreground"
         data-testid="thread-origin"

@@ -36,7 +36,7 @@ import { interleaveTextAndToolCalls, isToolCallDisplay, toolCallParts } from './
 import { Thread } from './Thread';
 import { ThreadBanner } from './ThreadBanner';
 import { ThreadsContext } from './threadsContext';
-import { fetchHome } from './threadsApi';
+import { fetchHome, markThreadDone } from './threadsApi';
 import { ToolConfirmationProvider } from './ToolConfirmationContext';
 import type { PendingToolConfirmation } from './ToolConfirmationContext';
 import { isTerminalToolOutcome, type TerminalToolOutcome } from './toolOutcome';
@@ -54,6 +54,7 @@ import {
 import { useActivityStream } from './useActivityStream';
 import { useHomeThreads } from './useHomeThreads';
 import { useLiveMessageUpdates } from './useLiveMessageUpdates';
+import { useMarkRead } from './useMarkRead';
 import { useNotifications } from './useNotifications';
 import { usePendingDelegations } from './usePendingDelegations';
 import { useStreamingResponse } from './useStreamingResponse';
@@ -425,6 +426,7 @@ export function mergeConsecutiveToolOnlyAssistantMessages(messages: Message[]): 
       mergedMessages[mergedMessages.length - 1] = {
         ...previousMessage,
         content: [...previousMessage.content, ...message.content],
+        internalId: message.internalId ?? previousMessage.internalId,
         status:
           previousMessage.status?.type === 'running' || message.status?.type === 'running'
             ? { type: 'running' }
@@ -577,6 +579,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     threads: homeThreads,
     failed: homeThreadsFailed,
     refresh: refreshHomeThreads,
+    updateThread: updateHomeThread,
   } = useHomeThreads(homeConversationId);
   // The thread a foreground load reported the open conversation to be, for a
   // thread that is not (yet) in Home's list.
@@ -1857,6 +1860,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
               content: [{ type: 'text', text: errorText }],
               createdAt: new Date(msg.timestamp),
               status: { type: 'complete' },
+              internalId: Number(msg.internal_id),
             });
             return;
           }
@@ -1983,6 +1987,8 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
               createdAt: new Date(msg.timestamp),
               status: { type: 'complete' },
               reasoning_info: msg.reasoning_info ?? undefined,
+              internalId: Number(msg.internal_id),
+              echoed_from_thread: msg.echoed_from_thread ?? undefined,
             });
             return;
           }
@@ -2048,6 +2054,8 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
             createdAt: new Date(msg.timestamp),
             attachments: attachments.length > 0 ? attachments : undefined,
             status: msg.role === 'assistant' ? { type: 'complete' } : undefined,
+            internalId: Number(msg.internal_id),
+            echoed_from_thread: msg.echoed_from_thread ?? undefined,
           });
         });
 
@@ -2404,6 +2412,65 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     onActivity: handleActivity,
   });
 
+  // Home and threads keep a read marker per viewer. The open one is marked
+  // read through the newest stored message on screen, once its history has
+  // loaded and while the chat (not the mobile list) is showing.
+  const latestStoredMessageId = useMemo(() => {
+    let latest: number | null = null;
+    for (const message of messages) {
+      const id = message.internalId;
+      if (typeof id === 'number' && Number.isFinite(id) && (latest === null || id > latest)) {
+        latest = id;
+      }
+    }
+    return latest;
+  }, [messages]);
+  const readableConversationId =
+    conversationId &&
+    (isHome || currentThread) &&
+    conversationLoad?.convId !== conversationId &&
+    !(isMobile && mobileShowList)
+      ? conversationId
+      : null;
+  const handleMarkedRead = useCallback(
+    (readConversationId: string, unreadCount: number) =>
+      updateHomeThread(readConversationId, { unread_count: unreadCount }),
+    [updateHomeThread]
+  );
+  useMarkRead({
+    conversationId: readableConversationId,
+    throughMessageId: latestStoredMessageId,
+    onMarked: handleMarkedRead,
+  });
+
+  // A thread the user is marking done, or failed to.
+  const [markDoneStatus, setMarkDoneStatus] = useState<{
+    convId: string;
+    status: 'pending' | 'failed';
+  } | null>(null);
+  const handleMarkThreadDone = useCallback(
+    async (threadConversationId: string) => {
+      setMarkDoneStatus({ convId: threadConversationId, status: 'pending' });
+      try {
+        const closed = await markThreadDone(threadConversationId);
+        updateHomeThread(threadConversationId, closed);
+        setOpenedThread((prev) =>
+          prev?.convId === threadConversationId ? { convId: prev.convId, thread: closed } : prev
+        );
+        setMarkDoneStatus((prev) => (prev?.convId === threadConversationId ? null : prev));
+        refreshHomeThreads();
+      } catch (error) {
+        console.error('Error marking thread done:', error);
+        setMarkDoneStatus((prev) =>
+          prev?.convId === threadConversationId
+            ? { convId: threadConversationId, status: 'failed' }
+            : prev
+        );
+      }
+    },
+    [updateHomeThread, refreshHomeThreads]
+  );
+
   // Home is known after the first list load, which then left Home and its
   // threads in; list again without them.
   useEffect(() => {
@@ -2737,6 +2804,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
         custom: {
           processing_profile_id: message.processing_profile_id,
           reasoning_info: message.reasoning_info,
+          echoed_from_thread: message.echoed_from_thread,
         },
       },
     };
@@ -2995,13 +3063,16 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       return null;
     }
     const bySourceToolCallId = new Map<string, ThreadSummary>();
+    const byConversationId = new Map<string, ThreadSummary>();
     for (const thread of homeThreads) {
+      byConversationId.set(thread.conversation_id, thread);
       if (thread.source_tool_call_id) {
         bySourceToolCallId.set(thread.source_tool_call_id, thread);
       }
     }
     return {
       threadsBySourceToolCallId: bySourceToolCallId,
+      threadsByConversationId: byConversationId,
       openConversation: handleConversationSelect,
     };
   }, [homeConversationId, homeThreads, handleConversationSelect]);
@@ -3212,7 +3283,14 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
         </div>
       )}
       {currentThread && (
-        <ThreadBanner thread={currentThread} onOpenHome={handleConversationSelect} />
+        <ThreadBanner
+          thread={currentThread}
+          onOpenHome={handleConversationSelect}
+          onMarkDone={(threadConversationId) => void handleMarkThreadDone(threadConversationId)}
+          markDoneStatus={
+            markDoneStatus?.convId === currentThread.conversation_id ? markDoneStatus.status : null
+          }
+        />
       )}
     </>
   );

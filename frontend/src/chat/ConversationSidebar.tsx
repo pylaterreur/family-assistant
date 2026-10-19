@@ -3,7 +3,12 @@ import React, { useEffect, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { THREAD_STATE_LABELS, ThreadStateDot } from './ThreadStateDot';
+import {
+  THREAD_STATE_LABELS,
+  ThreadStateDot,
+  ThreadUnreadBadge,
+  threadStatusText,
+} from './ThreadStateDot';
 import { Conversation, ConversationSidebarProps, ThreadState } from './types';
 
 const SEARCH_DEBOUNCE_MS = 300;
@@ -160,6 +165,9 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
     );
   };
 
+  const waitingCount = home
+    ? home.threads.filter((thread) => thread.state === 'waiting').length
+    : 0;
   const homeContent = home && (
     <div className="space-y-3" data-testid="home-sidebar">
       <button
@@ -173,7 +181,16 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
         data-conversation-id={home.homeConversationId}
       >
         <HomeIcon size={14} aria-hidden="true" />
-        Home
+        <span className="flex-1">Home</span>
+        {waitingCount > 0 && (
+          <span
+            className="shrink-0 rounded-full bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:text-violet-300"
+            title={`${waitingCount} ${waitingCount === 1 ? 'thread is' : 'threads are'} waiting on you`}
+            data-testid="home-waiting-count"
+          >
+            {waitingCount} waiting
+          </span>
+        )}
       </button>
       {home.threadsFailed && (
         <div
@@ -211,15 +228,36 @@ const ConversationSidebar: React.FC<ConversationSidebarProps> = ({
                   data-testid={`thread-item-${thread.conversation_id}`}
                   data-conversation-id={thread.conversation_id}
                   data-thread-state={thread.state}
+                  data-closed-by={thread.closed_by ?? undefined}
                 >
                   <span className="flex min-w-0 items-center gap-2 text-sm">
                     <ThreadStateDot state={thread.state} />
-                    <span className="min-w-0 truncate">{thread.title}</span>
-                  </span>
-                  {thread.preview && (
-                    <span className="mt-0.5 block truncate pl-4 text-xs text-muted-foreground">
-                      {thread.preview}
+                    <span
+                      className={`min-w-0 flex-1 truncate ${
+                        state === 'done' ? 'text-muted-foreground' : ''
+                      }`}
+                    >
+                      {thread.title}
                     </span>
+                    <ThreadUnreadBadge count={thread.unread_count} />
+                  </span>
+                  {thread.state === 'done' && thread.closed_by === 'user' ? (
+                    <span
+                      className="mt-0.5 block truncate pl-4 text-xs italic text-muted-foreground"
+                      data-testid="thread-item-status"
+                    >
+                      {threadStatusText(thread)}
+                    </span>
+                  ) : (
+                    thread.preview && (
+                      <span
+                        className={`mt-0.5 block truncate pl-4 text-xs ${
+                          state === 'failed' ? 'text-destructive/80' : 'text-muted-foreground'
+                        }`}
+                      >
+                        {thread.preview}
+                      </span>
+                    )
                   )}
                 </button>
               ))}

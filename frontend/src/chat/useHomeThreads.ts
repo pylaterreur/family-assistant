@@ -8,13 +8,15 @@ const NO_THREADS: ThreadSummary[] = [];
  * The threads of Home, newest first. Fetched once Home is known (null while
  * threads are disabled or Home is still being looked up); `refresh` refetches,
  * superseding any request still in flight, and is stable so it can be handed
- * to activity pings.
+ * to activity pings. `updateThread` patches one thread from what an action on
+ * it returned, ahead of the refetch the action's activity ping causes.
  */
 export function useHomeThreads(homeConversationId: string | null): {
   threads: ThreadSummary[];
   /** Whether the latest fetch failed, leaving `threads` as they were. */
   failed: boolean;
   refresh: () => void;
+  updateThread: (conversationId: string, update: Partial<ThreadSummary>) => void;
 } {
   const [threads, setThreads] = useState<ThreadSummary[]>(NO_THREADS);
   const [failed, setFailed] = useState(false);
@@ -47,6 +49,16 @@ export function useHomeThreads(homeConversationId: string | null): {
     })();
   }, []);
 
+  const updateThread = useCallback((conversationId: string, update: Partial<ThreadSummary>) => {
+    setThreads((current) =>
+      current.some((thread) => thread.conversation_id === conversationId)
+        ? current.map((thread) =>
+            thread.conversation_id === conversationId ? { ...thread, ...update } : thread
+          )
+        : current
+    );
+  }, []);
+
   useEffect(() => {
     if (!homeConversationId) {
       setThreads(NO_THREADS);
@@ -57,5 +69,5 @@ export function useHomeThreads(homeConversationId: string | null): {
     return () => abortRef.current?.abort();
   }, [homeConversationId, refresh]);
 
-  return { threads, failed, refresh };
+  return { threads, failed, refresh, updateThread };
 }

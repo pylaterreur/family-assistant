@@ -4,6 +4,7 @@ import type { ThreadSummary } from './types';
 interface ThreadsContextValue {
   /** Each thread of Home, keyed by the Home tool call that started it. */
   threadsBySourceToolCallId: ReadonlyMap<string, ThreadSummary>;
+  threadsByConversationId: ReadonlyMap<string, ThreadSummary>;
   openConversation: (conversationId: string) => void;
 }
 
