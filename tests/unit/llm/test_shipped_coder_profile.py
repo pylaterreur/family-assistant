@@ -17,9 +17,13 @@ from family_assistant.config_models import (
     RetryConfig,
     RetryModelConfig,
 )
-from family_assistant.llm.model_tiers import (
-    validate_profile_model_tier,
+from family_assistant.llm.model_selection import (
+    ModelSelectionRequest,
+    ModelTierEligibility,
+    ModelTierNotPermitted,
+    resolve_model_selection,
 )
+from family_assistant.llm.model_tiers import validate_profile_model_tier
 from family_assistant.security.taint import (
     SinkClass,
     SourceTrustTier,
@@ -32,7 +36,40 @@ from family_assistant.security.taint import (
     TurnTaintState,
     merge_taint_policy_config,
 )
+from family_assistant.telegram.commands import normalize_slash_command
+from family_assistant.telegram.service import build_profile_slash_command_map
 from tests.unit.conftest import shipped_profile
+
+
+def _coder_eligibility(shipped_config: AppConfig) -> ModelTierEligibility:
+    return ModelTierEligibility.from_profile(
+        shipped_profile(shipped_config, "coder"), shipped_config.model_tiers
+    )
+
+
+def test_the_tier_picker_offers_argon_on_coder(shipped_config: AppConfig) -> None:
+    """The web and iOS picker lists the profile's selectable tiers, and only those.
+
+    A person's request for a delegation preset is admitted too, but nothing
+    offers it to them, so admission alone would not show the choice exists.
+    """
+    assert "gemini_4_argon" in _coder_eligibility(shipped_config).selectable_ids
+
+
+def test_auto_routing_never_puts_coder_on_argon(shipped_config: AppConfig) -> None:
+    """Argon costs many times Flash, so only someone's explicit choice reaches it."""
+    with pytest.raises(ModelTierNotPermitted):
+        resolve_model_selection(
+            _coder_eligibility(shipped_config),
+            ModelSelectionRequest(tier="gemini_4_argon", source="auto"),
+            profile_id="coder",
+        )
+
+
+def test_slash_coder_reaches_the_coder_profile(shipped_config: AppConfig) -> None:
+    command_map = build_profile_slash_command_map(shipped_config)
+
+    assert command_map[normalize_slash_command("/coder")] == "coder"
 
 
 def test_shipped_coder_profile_configures_no_sandbox_credentials(
