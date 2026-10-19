@@ -277,6 +277,17 @@ struct HomeRootView: View {
                     )
                 }
         }
+        .alert(
+            "Couldn’t Update Thread",
+            isPresented: Binding(
+                get: { store.actionErrorMessage != nil },
+                set: { if !$0 { store.actionErrorMessage = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(store.actionErrorMessage ?? "")
+        }
         .environment(\.homeThreads, store)
         .sheet(isPresented: $showsSwitcher) {
             ThreadSwitcherView(
@@ -344,7 +355,7 @@ struct HomeRootView: View {
                 Button {
                     showsSwitcher = true
                 } label: {
-                    Label("Threads", systemImage: "list.bullet.rectangle")
+                    Label("Chats", systemImage: "list.bullet.rectangle")
                 }
             } label: {
                 Label("Menu", systemImage: "line.3.horizontal")
@@ -471,7 +482,7 @@ private struct ThreadsButton: View {
             }
         }
         .accessibilityIdentifier("threads-button")
-        .accessibilityLabel(waitingCount > 0 ? "Threads, \(waitingCount) waiting on you" : "Threads")
+        .accessibilityLabel(waitingCount > 0 ? "Chats, \(waitingCount) waiting on you" : "Chats")
     }
 }
 
@@ -503,8 +514,11 @@ private struct PushedConversationView: View {
         }
     }
 
+    /// The store's copy first: it is the one activity refreshes and "Mark
+    /// done" updates. The conversation's own description covers a thread the
+    /// list has not caught up with.
     private var thread: ChatThreadSummary? {
-        viewModel.threadSummary ?? store.thread(conversationID: viewModel.conversationID)
+        store.thread(conversationID: viewModel.conversationID) ?? viewModel.threadSummary
     }
 
     var body: some View {
@@ -541,10 +555,16 @@ private struct PushedConversationView: View {
                     if viewModel.isConversationDescribed {
                         IntelligencePickerView(viewModel: viewModel)
                     }
+                    if let thread {
+                        ThreadActionsMenu(thread: thread, store: store)
+                    }
                 }
             }
             .task {
                 store.pushedModel = viewModel
+                viewModel.onMarkedRead = { [weak store] conversationID, unreadCount in
+                    store?.applyUnreadCount(unreadCount, for: conversationID)
+                }
                 await viewModel.bootstrap(initialPrompt: initialPrompt)
             }
             .alert(
@@ -610,6 +630,81 @@ struct ThreadOriginBanner: View {
     }
 }
 
+/// A pushed thread's actions. "Mark done" closes it as the user; it reopens by
+/// itself when anything new arrives in it.
+private struct ThreadActionsMenu: View {
+    let thread: ChatThreadSummary
+    let store: HomeThreadsStore
+
+    var body: some View {
+        Menu {
+            Button {
+                Task { await store.markDone(thread.conversationID) }
+            } label: {
+                Label("Mark Done", systemImage: "checkmark.circle")
+            }
+            .disabled(!thread.canMarkDone || store.markingDone.contains(thread.conversationID))
+            .accessibilityIdentifier("thread-mark-done")
+        } label: {
+            Label("Thread Actions", systemImage: "ellipsis.circle")
+        }
+        .accessibilityIdentifier("thread-actions-menu")
+    }
+}
+
+/// Atop a Home message that echoes a finished thread's outcome: where it came
+/// from, and the way into that thread.
+struct EchoedThreadHeader: View {
+    let threadID: String
+    let store: HomeThreadsStore?
+
+    var body: some View {
+        let title = store?.thread(conversationID: threadID)?.title
+        let text = title.map { "From thread: \($0)" } ?? "From a thread"
+        if let store {
+            Button {
+                store.open(threadID)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.turn.down.left")
+                    Text(text)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(text)
+            .accessibilityHint("Opens the thread")
+            .accessibilityIdentifier("echo-header-\(threadID)")
+        } else {
+            Label(text, systemImage: "arrow.turn.down.left")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// The caller's unread count on a card or switcher row; nothing when zero.
+struct UnreadBadge: View {
+    let count: Int
+
+    var body: some View {
+        if count > 0 {
+            Text(count > 99 ? "99+" : "\(count)")
+                .font(.caption2.bold())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 5)
+                .frame(minWidth: 18, minHeight: 18)
+                .background(Color.accentColor, in: Capsule())
+                .accessibilityLabel("\(count) unread")
+                .accessibilityIdentifier("unread-badge")
+        }
+    }
+}
+
 /// Colours for `ThreadPresentationState`; nil is a thread not loaded yet.
 enum ThreadStateStyle {
     static let waitingColor = Color(red: 0.49, green: 0.36, blue: 1.0)
@@ -635,6 +730,10 @@ struct ThreadStateDot: View {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.green)
+            } else if state == .failed {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
             } else {
                 Circle()
                     .fill(ThreadStateStyle.color(for: state))
@@ -676,12 +775,21 @@ struct ThreadCardView: View {
                         .lineLimit(1)
                         .fixedSize()
                 }
-                if let line = thread?.previewLine {
-                    Text(String(line.prefix(Self.previewLimit)))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .padding(.leading, 22)
+                if let line = thread?.detailLine {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(String(line.prefix(Self.previewLimit)))
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if let thread {
+                            UnreadBadge(count: thread.unreadCount)
+                        }
+                    }
+                    .padding(.leading, 22)
+                } else if let thread, thread.unreadCount > 0 {
+                    UnreadBadge(count: thread.unreadCount)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
             .padding(12)
@@ -694,8 +802,20 @@ struct ThreadCardView: View {
         }
         .buttonStyle(.plain)
         .disabled(thread == nil)
+        .contextMenu {
+            if let thread, thread.canMarkDone {
+                Button {
+                    Task { await store.markDone(thread.conversationID) }
+                } label: {
+                    Label("Mark Done", systemImage: "checkmark.circle")
+                }
+            }
+        }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title), \(ThreadPresentationState.label(for: thread?.presentationState))")
+        .accessibilityLabel(
+            thread?.accessibilitySummary
+                ?? "\(title), \(ThreadPresentationState.label(for: nil))"
+        )
         .accessibilityIdentifier("thread-card-\(call.id)")
     }
 }
@@ -728,7 +848,7 @@ struct ThreadSwitcherView: View {
                     searchSection
                 }
             }
-            .navigationTitle("Threads")
+            .navigationTitle("Chats")
             .navigationBarTitleDisplayMode(.large)
             .searchable(text: $searchText, prompt: "Search chats")
             .task(id: searchQuery) {
@@ -901,14 +1021,17 @@ private struct ThreadSwitcherRow: View {
                         .lineLimit(1)
                         .fixedSize()
                 }
-                if let line = thread.previewLine {
-                    Text(String(line.prefix(200)))
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(String((thread.detailLine ?? "").prefix(200)))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    UnreadBadge(count: thread.unreadCount)
                 }
             }
         }
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(thread.accessibilitySummary)
     }
 }

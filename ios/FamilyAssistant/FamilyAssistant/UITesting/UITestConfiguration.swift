@@ -175,6 +175,9 @@ private final class UITestBackendURLProtocol: URLProtocol {
     private static var followConnectCount = 0
     private static var activityConnectCount = 0
     private static var burst503Count = 0
+    // Threads the user marked done, and threads they have read, this launch.
+    private static var markedDoneThreadIDs: Set<String> = []
+    private static var readThreadIDs: Set<String> = []
 
     private let stopLock = NSLock()
     private var stopped = false
@@ -248,6 +251,8 @@ private final class UITestBackendURLProtocol: URLProtocol {
             ]
             pendingChatReplies = [:]
             pendingChatTurnIDs = [:]
+            markedDoneThreadIDs = []
+            readThreadIDs = []
             if threadsEnabled {
                 chatMessages.merge(UITestThreadsFixture.conversations) { current, _ in current }
             }
@@ -258,6 +263,48 @@ private final class UITestBackendURLProtocol: URLProtocol {
     /// the server it always has: no Home, and the conversation list.
     private static var threadsEnabled: Bool {
         ProcessInfo.processInfo.environment["FAMILY_ASSISTANT_UITEST_THREADS"] == "1"
+    }
+
+    /// The fixture's threads as this launch has left them: marked done by the
+    /// user, or read.
+    private static func currentThreads() -> [UITestThreadSummary] {
+        let (done, read) = lock.withLock { (markedDoneThreadIDs, readThreadIDs) }
+        return UITestThreadsFixture.threads.map { thread in
+            var thread = thread
+            if done.contains(thread.conversationID) {
+                thread.state = "done"
+                thread.closedBy = "user"
+                thread.closedAt = "2026-06-08T10:00:00Z"
+                thread.echoMessageID = nil
+            }
+            if read.contains(thread.conversationID) {
+                thread.unreadCount = 0
+            }
+            return thread
+        }
+    }
+
+    /// `POST /api/v1/chat/home/threads/{id}/done` and
+    /// `POST /api/v1/chat/conversations/{id}/read`.
+    private static func threadAction(for request: URLRequest) -> UITestResponse? {
+        guard threadsEnabled, request.httpMethod == "POST", let path = request.url?.path else {
+            return nil
+        }
+        let components = path.split(separator: "/").map(String.init)
+        if components.count == 7, path.hasPrefix("/api/v1/chat/home/threads/"), components[6] == "done" {
+            let conversationID = components[5]
+            _ = lock.withLock { markedDoneThreadIDs.insert(conversationID) }
+            guard let closed = currentThreads().first(where: { $0.conversationID == conversationID }) else {
+                return .json(#"{"detail":"Not Found"}"#, statusCode: 404)
+            }
+            return encode(closed)
+        }
+        if components.count == 6, path.hasPrefix("/api/v1/chat/conversations/"), components[5] == "read" {
+            let conversationID = components[4]
+            _ = lock.withLock { readThreadIDs.insert(conversationID) }
+            return encode(UITestMarkReadResponse(conversationID: conversationID, unreadCount: 0))
+        }
+        return nil
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -362,7 +409,7 @@ private final class UITestBackendURLProtocol: URLProtocol {
             }
             return encode(UITestHomeThreadsResponse(
                 homeConversationID: UITestThreadsFixture.homeID,
-                threads: UITestThreadsFixture.threads
+                threads: currentThreads()
             ))
         case ("GET", "/api/v1/chat/confirmations/pending"):
             return .json(#"{"confirmations":[]}"#)
@@ -377,6 +424,9 @@ private final class UITestBackendURLProtocol: URLProtocol {
         case ("POST", "/api/notes"), ("POST", "/api/notes/"):
             return saveNote(from: request)
         default:
+            if let action = threadAction(for: request) {
+                return action
+            }
             if request.httpMethod == "GET", shareConversationID(from: request) != nil {
                 return .json(#"{"active":false}"#)
             }
@@ -400,7 +450,7 @@ private final class UITestBackendURLProtocol: URLProtocol {
                     hasMoreAfter: false
                 )
                 if threadsEnabled, request.url?.query?.contains("include_conversation_profile=true") == true {
-                    let thread = UITestThreadsFixture.threads.first { $0.conversationID == conversationID }
+                    let thread = currentThreads().first { $0.conversationID == conversationID }
                     response.thread = thread
                     response.latestUserProfileID = thread?.profileID ?? "default_assistant"
                     response.conversationKind = thread != nil
@@ -970,12 +1020,16 @@ private struct UITestThreadSummary: Codable {
     let homeConversationID: String
     let title: String
     let profileID: String
-    let state: String
+    var state: String
     let sourceToolCallID: String?
     let seedRequest: String?
     let preview: String?
     let createdAt: String
     let updatedAt: String
+    var closedBy: String? = nil
+    var closedAt: String? = nil
+    var echoMessageID: Int? = nil
+    var unreadCount = 0
 
     enum CodingKeys: String, CodingKey {
         case conversationID = "conversation_id"
@@ -988,6 +1042,20 @@ private struct UITestThreadSummary: Codable {
         case preview
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+        case closedBy = "closed_by"
+        case closedAt = "closed_at"
+        case echoMessageID = "echo_message_id"
+        case unreadCount = "unread_count"
+    }
+}
+
+private struct UITestMarkReadResponse: Codable {
+    let conversationID: String
+    let unreadCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case conversationID = "conversation_id"
+        case unreadCount = "unread_count"
     }
 }
 
@@ -1008,10 +1076,12 @@ private enum UITestThreadsFixture {
     static let homeID = "web_conv_home"
     static let quotesThreadID = "web_conv_thread_quotes"
     static let flightsThreadID = "web_conv_thread_flights"
+    static let guttersThreadID = "web_conv_thread_gutters"
     static let startQuotesCallID = "call-start-quotes"
+    static let guttersOutcome = "Booked Sam's Gutters for Saturday at 9am."
 
     static var nonOrdinaryIDs: Set<String> {
-        [homeID, quotesThreadID, flightsThreadID]
+        [homeID, quotesThreadID, flightsThreadID, guttersThreadID]
     }
 
     static let threads = [
@@ -1025,7 +1095,8 @@ private enum UITestThreadsFixture {
             seedRequest: "Find a plumber and get a couple of quotes for the hot water system.",
             preview: "Gas or electric heat pump?",
             createdAt: "2026-06-08T09:14:00Z",
-            updatedAt: "2026-06-08T09:40:00Z"
+            updatedAt: "2026-06-08T09:40:00Z",
+            unreadCount: 1
         ),
         UITestThreadSummary(
             conversationID: flightsThreadID,
@@ -1038,6 +1109,21 @@ private enum UITestThreadsFixture {
             preview: "Checking Qantas",
             createdAt: "2026-06-08T09:20:00Z",
             updatedAt: "2026-06-08T09:42:00Z"
+        ),
+        UITestThreadSummary(
+            conversationID: guttersThreadID,
+            homeConversationID: homeID,
+            title: "Gutter cleaning",
+            profileID: "research",
+            state: "done",
+            sourceToolCallID: nil,
+            seedRequest: "Book someone to clean the gutters.",
+            preview: guttersOutcome,
+            createdAt: "2026-06-07T08:00:00Z",
+            updatedAt: "2026-06-07T08:30:00Z",
+            closedBy: "assistant",
+            closedAt: "2026-06-07T08:30:00Z",
+            echoMessageID: 5
         ),
     ]
 
@@ -1089,6 +1175,16 @@ private enum UITestThreadsFixture {
                     toolCallID: nil,
                     attachments: nil
                 ),
+                UITestChatMessage(
+                    internalID: 5,
+                    role: "assistant",
+                    content: guttersOutcome,
+                    timestamp: "2026-06-08T09:15:00Z",
+                    toolCalls: nil,
+                    toolCallID: nil,
+                    attachments: nil,
+                    echoedFromThread: guttersThreadID
+                ),
             ],
             quotesThreadID: [
                 UITestChatMessage(
@@ -1112,6 +1208,17 @@ private enum UITestThreadsFixture {
                     attachments: nil
                 ),
             ],
+            guttersThreadID: [
+                UITestChatMessage(
+                    internalID: 1,
+                    role: "assistant",
+                    content: "Sam's Gutters can come Saturday at 9am. Booked.",
+                    timestamp: "2026-06-07T08:30:00Z",
+                    toolCalls: nil,
+                    toolCallID: nil,
+                    attachments: nil
+                ),
+            ],
         ]
     }
 }
@@ -1124,6 +1231,7 @@ private struct UITestChatMessage: Codable {
     let toolCalls: [UITestToolCall]?
     let toolCallID: String?
     let attachments: [UITestAttachment]?
+    var echoedFromThread: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case internalID = "internal_id"
@@ -1133,6 +1241,7 @@ private struct UITestChatMessage: Codable {
         case toolCalls = "tool_calls"
         case toolCallID = "tool_call_id"
         case attachments
+        case echoedFromThread = "echoed_from_thread"
     }
 }
 

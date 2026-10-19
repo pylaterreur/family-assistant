@@ -408,6 +408,10 @@ struct ChatThreadView: View {
             Divider()
             ChatComposerView(viewModel: viewModel)
         }
+        // A view pushed over this one, or another tab, takes it off screen,
+        // so nothing read underneath is marked read.
+        .onAppear { viewModel.setOnScreen(true) }
+        .onDisappear { viewModel.setOnScreen(false) }
     }
 
     private var messageScrollArea: some View {
@@ -428,7 +432,8 @@ struct ChatThreadView: View {
             followTrigger: viewModel.visibleGroupedMessages.last?.id,
             forceFollowTrigger: viewModel.scrollToLatestRequestID,
             canFollow: { UIApplication.shared.applicationState == .active },
-            landsAtBottomOnlyOnFirstAppear: keepsScrollPositionOnReappear
+            landsAtBottomOnlyOnFirstAppear: keepsScrollPositionOnReappear,
+            onNearBottomChange: { viewModel.setScrolledToLatest($0) }
         ) {
             VStack(spacing: 14) {
                 if !viewModel.hasEarlierMessages {
@@ -640,6 +645,9 @@ struct MessageBubble: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let threadID = message.echoedFromThread {
+                EchoedThreadHeader(threadID: threadID, store: homeThreads)
+            }
             HStack(spacing: 6) {
                 Label(roleTitle, systemImage: isUser ? "person.crop.circle" : "sparkles")
                     .font(.caption.bold())
@@ -850,6 +858,8 @@ struct StickyBottomScroll<Content: View>: View {
     /// Land at the bottom only the first time the list appears, so a list that
     /// stays mounted under a pushed view keeps its place when shown again.
     let landsAtBottomOnlyOnFirstAppear: Bool
+    /// Told whenever the reader arrives at or leaves the bottom.
+    let onNearBottomChange: ((Bool) -> Void)?
     @ViewBuilder let content: () -> Content
 
     @State private var isNearBottom = true
@@ -862,6 +872,7 @@ struct StickyBottomScroll<Content: View>: View {
         shouldFollow: @escaping (_ isNearBottom: Bool) -> Bool = { $0 },
         canFollow: @escaping () -> Bool = { true },
         landsAtBottomOnlyOnFirstAppear: Bool = false,
+        onNearBottomChange: ((Bool) -> Void)? = nil,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.followTrigger = followTrigger
@@ -869,6 +880,7 @@ struct StickyBottomScroll<Content: View>: View {
         self.shouldFollow = shouldFollow
         self.canFollow = canFollow
         self.landsAtBottomOnlyOnFirstAppear = landsAtBottomOnlyOnFirstAppear
+        self.onNearBottomChange = onNearBottomChange
         self.content = content
     }
 
@@ -884,8 +896,14 @@ struct StickyBottomScroll<Content: View>: View {
                     .frame(height: 1)
                     .id(Self.bottomAnchorID)
                     .accessibilityHidden(true)
-                    .onAppear { isNearBottom = true }
-                    .onDisappear { isNearBottom = false }
+                    .onAppear {
+                        isNearBottom = true
+                        onNearBottomChange?(true)
+                    }
+                    .onDisappear {
+                        isNearBottom = false
+                        onNearBottomChange?(false)
+                    }
             }
             .onAppear {
                 // The list can mount already populated (a restored thread, or
