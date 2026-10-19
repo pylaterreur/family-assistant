@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from family_assistant.llm.messages import AssistantMessage, ToolMessage, UserMessage
 from family_assistant.llm.tool_call import ToolCallFunction, ToolCallItem
 from family_assistant.storage.database import Database
+from family_assistant.threads.echo import announce_home_change, echo_finished_turn
+from family_assistant.web.conversation_stream_hub import ConversationStreamHub
 from tests.functional.web.conftest import WebTestFixture
 from tests.functional.web.pages.home_page import HomePage
 
@@ -213,3 +215,176 @@ async def test_a_card_opens_its_thread_and_the_breadcrumb_returns_home(
     await chat.back_to_home(home)
     await expect(chat.thread_card(seeded.thread)).to_be_visible()
     await expect(chat.thread_banner()).to_have_count(0)
+
+
+async def _finish_first_run_with_question(
+    fixture: WebTestFixture, db: Database, seeded: SeededThread
+) -> None:
+    """The thread's first run ends on a question, leaving it waiting on the user."""
+    now = datetime.now(UTC)
+    assert await db.delegation_runs.mark_completed(
+        delegation_id=seeded.delegation_id,
+        result_text=None,
+        result_attachment_ids=[],
+        completed_at=now,
+    )
+    await _add_thread_reply(db, seeded, "Gas or heat pump?")
+    await _hub(fixture).publish_activity(
+        seeded.thread, user_id=USER, reason="thread_run_ended"
+    )
+
+
+async def _add_thread_reply(
+    db: Database, seeded: SeededThread, content: str, turn_id: str | None = None
+) -> None:
+    await db.message_history.add_message(
+        AssistantMessage(content=content),
+        interface_type="web",
+        conversation_id=seeded.thread,
+        timestamp=datetime.now(UTC),
+        processing_profile_id=THREAD_PROFILE,
+        turn_id=turn_id,
+    )
+
+
+def _hub(fixture: WebTestFixture) -> ConversationStreamHub:
+    app = fixture.assistant.fastapi_app
+    assert app is not None
+    return app.state.conversation_stream_hub
+
+
+async def _home_threads(base_url: str) -> list[dict]:
+    async with httpx.AsyncClient(base_url=base_url) as client:
+        response = await client.get("/api/v1/chat/home/threads")
+    response.raise_for_status()
+    return response.json()["threads"]
+
+
+@pytest.mark.playwright
+@pytest.mark.asyncio
+async def test_card_follows_a_thread_to_done_with_its_echo_and_back_when_it_reopens(
+    web_test_fixture: WebTestFixture, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = await _home_conversation_id(web_test_fixture.base_url)
+    seeded = await _seed_thread(db, home)
+    chat = await _open_home(web_test_fixture, home)
+    await _finish_first_run_with_question(web_test_fixture, db, seeded)
+    await chat.wait_for_card_state(seeded.thread, "waiting")
+
+    # The thread's assistant finishes the job: its closing turn's reply is
+    # echoed into Home, as the end of a real closing turn does.
+    closing_turn = str(uuid.uuid4())
+    await _add_thread_reply(
+        db, seeded, "Acme is cheapest at $2,400; booked for Tuesday.", closing_turn
+    )
+    await db.conversation_threads.close_thread(
+        seeded.thread,
+        outcome="done",
+        closed_by="assistant",
+        turn_id=closing_turn,
+        now=datetime.now(UTC),
+    )
+    default_service = web_test_fixture.assistant.default_processing_service
+    assert default_service is not None
+    echo = await echo_finished_turn(
+        db,
+        conversation_id=seeded.thread,
+        turn_id=closing_turn,
+        home_profile=default_service.service_config,
+    )
+    assert echo is not None
+    await announce_home_change(
+        _hub(web_test_fixture),
+        home_conversation_id=home,
+        user_id=USER,
+        reason="thread_echo",
+    )
+
+    card = chat.thread_card(seeded.thread)
+    await chat.wait_for_card_state(seeded.thread, "done")
+    await expect(card.locator(chat.THREAD_CARD_STATE)).to_have_text("Done")
+    await expect(card).to_contain_text("Acme is cheapest at $2,400")
+    await expect(
+        chat.sidebar_group("done").get_by_test_id(f"thread-item-{seeded.thread}")
+    ).to_be_visible()
+    echoed = chat.echo_of(seeded.thread)
+    await expect(echoed).to_contain_text(
+        "Acme is cheapest at $2,400; booked for Tuesday.", timeout=15000
+    )
+    await expect(echoed.get_by_test_id("thread-echo-header")).to_have_text(
+        "From thread: Hot water system quotes"
+    )
+
+    # Something new arriving in the thread reopens it.
+    await _add_thread_reply(db, seeded, "Acme asked to move to Wednesday. Is that OK?")
+    await _hub(web_test_fixture).publish_activity(
+        seeded.thread, user_id=USER, reason="message"
+    )
+
+    await chat.wait_for_card_state(seeded.thread, "waiting")
+    await expect(card).to_contain_text("Acme asked to move to Wednesday")
+    await expect(
+        chat.sidebar_group("waiting").get_by_test_id(f"thread-item-{seeded.thread}")
+    ).to_be_visible()
+
+
+@pytest.mark.playwright
+@pytest.mark.asyncio
+async def test_opening_a_thread_clears_its_badge_and_it_can_be_marked_done(
+    web_test_fixture: WebTestFixture, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = await _home_conversation_id(web_test_fixture.base_url)
+    seeded = await _seed_thread(db, home)
+    chat = await _open_home(web_test_fixture, home)
+    await _finish_first_run_with_question(web_test_fixture, db, seeded)
+    await chat.wait_for_card_state(seeded.thread, "waiting")
+
+    card = chat.thread_card(seeded.thread)
+    await expect(card.locator(chat.THREAD_UNREAD_BADGE)).to_have_text("1")
+    await expect(
+        chat.sidebar_thread(seeded.thread).locator(chat.THREAD_UNREAD_BADGE)
+    ).to_have_text("1")
+
+    page = web_test_fixture.page
+    async with page.expect_response(
+        lambda response: (
+            f"/api/v1/chat/conversations/{seeded.thread}/read" in response.url
+            and response.ok
+        ),
+        timeout=15000,
+    ):
+        await chat.open_thread_from_card(seeded.thread)
+    await expect(
+        chat.sidebar_thread(seeded.thread).locator(chat.THREAD_UNREAD_BADGE)
+    ).to_have_count(0)
+    [summary] = await _home_threads(web_test_fixture.base_url)
+    assert summary["unread_count"] == 0
+
+    banner = chat.thread_banner()
+    mark_done = banner.locator(chat.THREAD_MARK_DONE)
+    # Mark done stays reachable on the narrowest phone screen.
+    desktop = page.viewport_size
+    assert desktop is not None
+    await page.set_viewport_size({"width": 320, "height": 640})
+    await expect(mark_done).to_be_in_viewport(ratio=1)
+    assert not await page.evaluate(
+        "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+    )
+    await page.set_viewport_size(desktop)
+
+    await mark_done.click()
+    await expect(banner).to_have_attribute("data-thread-state", "done")
+    await expect(banner.locator(chat.THREAD_BANNER_STATE)).to_have_text(
+        "You marked this done"
+    )
+    await expect(banner.locator(chat.THREAD_MARK_DONE)).to_have_count(0)
+
+    await chat.back_to_home(home)
+    await chat.wait_for_card_state(seeded.thread, "done")
+    await expect(card.locator(chat.THREAD_CARD_STATE)).to_have_text(
+        "You marked this done"
+    )
+    await expect(card.locator(chat.THREAD_UNREAD_BADGE)).to_have_count(0)
+    await expect(chat.echo_of(seeded.thread)).to_have_count(0)

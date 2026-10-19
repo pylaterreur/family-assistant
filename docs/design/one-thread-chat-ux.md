@@ -2,8 +2,8 @@
 
 ## Status
 
-Approved. Milestone 1 (threads exist), milestone 2 apart from the right-hand panel, the backend of
-milestone 3 (state and echo), and milestone 4 (Home on iOS) implemented. Mockups:
+Approved. Milestone 1 (threads exist), milestone 2 apart from the right-hand panel, milestone 3
+(state and echo) on the backend and the web, and milestone 4 (Home on iOS) implemented. Mockups:
 [one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered: [iOS](one-thread-ux/ios.png),
 [web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
 
@@ -273,6 +273,13 @@ and each path is governed:
 - **Some profiles cannot finish their threads.** Closing a job is a tool call, so a profile with no
   Family Assistant tools (`coder`), or one that withholds every global grant, leaves its threads
   waiting until the user marks them done.
+- **A working thread can't be marked done.** Work in progress outranks a close, so a thread marked
+  done mid-turn would still read as working, and the turn's reply would reopen it. The web client
+  offers Mark done only once the thread is waiting or has failed.
+- **Read marks follow the newest message on screen.** The web client marks a conversation read while
+  its newest message is scrolled into view in a visible tab. When a turn sent from that tab ends, it
+  marks through the conversation's newest message, because a streamed reply has no stored id on the
+  client yet, so a message landing from elsewhere in that instant is marked read too.
 - **A closing turn that never ends cleanly echoes nothing.** The echo is the message the closing
   turn ends with. A turn that ends without one, or is stopped after the close, leaves the thread
   closed with no echo; the next thing to arrive reopens it as usual.

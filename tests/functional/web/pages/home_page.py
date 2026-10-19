@@ -14,6 +14,17 @@ class HomePage(ChatPage):
     THREAD_BREADCRUMB_HOME = '[data-testid="thread-breadcrumb-home"]'
     THREAD_ORIGIN = '[data-testid="thread-origin"]'
     THREAD_WORKING_INDICATOR = '[data-testid="thread-working-indicator"]'
+    THREAD_UNREAD_BADGE = '[data-testid="thread-unread-badge"]'
+    THREAD_CARD_STATE = '[data-testid="thread-card-state"]'
+    THREAD_MARK_DONE = '[data-testid="thread-mark-done"]'
+    THREAD_BANNER_STATE = '[data-testid="thread-banner-state"]'
+
+    def echo_of(self, thread_conversation_id: str) -> Locator:
+        """The Home message echoing a thread's outcome."""
+        return self.page.locator(
+            '[data-testid="assistant-message"]'
+            f'[data-echoed-from-thread="{thread_conversation_id}"]'
+        )
 
     def heading(self) -> Locator:
         return self.page.locator(self.CONVERSATION_HEADING)

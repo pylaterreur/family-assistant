@@ -126,6 +126,10 @@ export const handlers = [
     return HttpResponse.json({ home_conversation_id: null, threads: [] });
   }),
 
+  http.post('/api/v1/chat/conversations/:conversationId/read', ({ params }) => {
+    return HttpResponse.json({ conversation_id: params.conversationId, unread_count: 0 });
+  }),
+
   http.get('/api/v1/chat/conversations/:conversationId/share', () => {
     return HttpResponse.json({ active: false });
   }),

@@ -25,6 +25,13 @@ export interface ThreadSummary {
   title: string;
   profile_id: string;
   state: ThreadState;
+  /** Who closed the thread, while that close is what `state` shows. */
+  closed_by?: 'assistant' | 'user' | null;
+  closed_at?: string | null;
+  /** The Home message echoing the outcome of the assistant's close. */
+  echo_message_id?: number | null;
+  /** Messages in the thread the caller has not read. */
+  unread_count?: number;
   /** The Home tool call that started the thread, if any. */
   source_tool_call_id?: string | null;
   /** The request the thread was started with. */
@@ -95,6 +102,10 @@ export interface Message {
   }>;
   processing_profile_id?: string;
   reasoning_info?: MessageReasoningInfo;
+  /** The stored row this message was built from; absent until it is stored. */
+  internalId?: number;
+  /** On a Home message echoing a thread's outcome: that thread's conversation. */
+  echoed_from_thread?: string;
 }
 
 export interface MessageContent {
@@ -170,6 +181,8 @@ export interface BackendConversationMessage extends Record<string, unknown> {
   tool_outcome?: TerminalToolOutcome | null;
   processing_profile_id?: string | null;
   reasoning_info?: MessageReasoningInfo | null;
+  /** On a Home message echoing a thread's outcome: that thread's conversation. */
+  echoed_from_thread?: string | null;
 }
 
 export interface ActiveTurnInfo {

@@ -5,6 +5,7 @@ import {
   ThreadPrimitive,
   useAui,
   useAuiState,
+  useThreadViewport,
 } from '@assistant-ui/react';
 import {
   ArrowDownIcon,
@@ -35,6 +36,8 @@ import { LOADING_MARKER } from './constants';
 import { DynamicToolUI } from './DynamicToolUI';
 import { MarkdownText } from './MarkdownText';
 import { PendingDelegationsChip } from './PendingDelegationsChip';
+import { ThreadEchoHeader } from './ThreadEchoHeader';
+import { useThreadsContext } from './threadsContext';
 import { useProfiles } from './profilesContext';
 import { ToolGroup } from './ToolGroup';
 import { TooltipIconButton } from './TooltipIconButton';
@@ -62,6 +65,7 @@ const ThreadContent: React.FC = () => {
       <div className="relative flex min-h-0 flex-1 flex-col">
         <ThreadPrimitive.Viewport
           ref={viewportRef}
+          data-testid="thread-viewport"
           className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-thin scrollbar-thumb-muted-foreground/20 min-h-0"
         >
           <div className="pb-6">
@@ -87,6 +91,7 @@ const ThreadContent: React.FC = () => {
           </div>
         </ThreadPrimitive.Viewport>
         <ThreadScrollToBottom />
+        <ReportViewportAtBottom />
       </div>
 
       <div
@@ -192,6 +197,16 @@ const ThreadConversationLoad: React.FC<{ status: ConversationLoadStatus }> = ({ 
       </Button>
     </div>
   );
+};
+
+/** Tells a Home or thread whether its newest message is scrolled into view. */
+const ReportViewportAtBottom: React.FC = () => {
+  const isAtBottom = useThreadViewport((state) => state.isAtBottom);
+  const setViewportAtBottom = useThreadsContext()?.setViewportAtBottom;
+  useEffect(() => {
+    setViewportAtBottom?.(isAtBottom);
+  }, [isAtBottom, setViewportAtBottom]);
+  return null;
 };
 
 const ThreadScrollToBottom: React.FC = () => {
@@ -553,10 +568,14 @@ const AssistantMessage: React.FC = () => {
   const custom = (message?.metadata?.custom ?? {}) as {
     processing_profile_id?: string;
     reasoning_info?: MessageReasoningInfo;
+    echoed_from_thread?: string;
   };
-  const profileId = custom.processing_profile_id;
+  // An echo of a thread's outcome is attributed to the thread rather than to
+  // the Home profile and turn its copy was stored under.
+  const echoedFromThread = custom.echoed_from_thread;
+  const profileId = echoedFromThread ? undefined : custom.processing_profile_id;
   const profile = profileId ? profilesById[profileId] : null;
-  const reasoningInfo = custom.reasoning_info;
+  const reasoningInfo = echoedFromThread ? undefined : custom.reasoning_info;
   const tierId = reasoningInfo?.model_tier;
   // The label comes from the configured tiers; an id with no configured label
   // (a tier removed since the turn ran) still names what served the turn.
@@ -567,6 +586,7 @@ const AssistantMessage: React.FC = () => {
     <MessagePrimitive.Root
       className="px-4 py-2 md:px-6 animate-in slide-in-from-bottom-2 duration-200 group"
       data-testid="assistant-message"
+      data-echoed-from-thread={echoedFromThread}
     >
       <div className="max-w-3xl mx-auto relative">
         <div className="flex items-start gap-2.5">
@@ -575,7 +595,14 @@ const AssistantMessage: React.FC = () => {
               <BotIcon size={16} className="text-primary" />
             </AvatarFallback>
           </Avatar>
-          <div className="flex-1 min-w-0">
+          <div
+            className={
+              echoedFromThread
+                ? 'flex-1 min-w-0 rounded-r-lg border-l-2 border-emerald-500/60 bg-muted/30 py-1.5 pl-3 pr-2'
+                : 'flex-1 min-w-0'
+            }
+          >
+            {echoedFromThread && <ThreadEchoHeader threadConversationId={echoedFromThread} />}
             {profile && (
               <Badge
                 variant="secondary"

@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { HttpResponse, http } from 'msw';
 import { vi } from 'vitest';
@@ -7,6 +7,7 @@ import { mockLocalStorage, resetLocalStorageMock } from '../../test/mocks/localS
 import { server } from '../../test/setup.js';
 import { renderChatApp } from '../../test/utils/renderChatApp';
 import type { ThreadSummary } from '../types';
+import { MARK_READ_DELAY_MS } from '../useMarkRead';
 
 const HOME = 'web_conv_home';
 
@@ -30,15 +31,38 @@ const QUOTES = thread({ conversation_id: 'web_conv_quotes', source_tool_call_id:
 interface ThreadsServer {
   threads: ThreadSummary[];
   conversationListUrls: string[];
+  /** Each read marker the client moved, in order. */
+  reads: { conversationId: string; throughMessageId: number | null }[];
+  /** Messages appended to Home after its start_thread turn. */
+  homeExtra: Record<string, unknown>[];
 }
 
 /** Threads on, with Home holding a start_thread call whose thread is QUOTES. */
 function serveThreads(threads: ThreadSummary[] = [QUOTES]): ThreadsServer {
-  const state: ThreadsServer = { threads, conversationListUrls: [] };
+  const state: ThreadsServer = { threads, conversationListUrls: [], reads: [], homeExtra: [] };
   server.use(
     http.get('/api/v1/chat/home', () =>
       HttpResponse.json({ enabled: true, conversation_id: HOME })
     ),
+    http.post('/api/v1/chat/conversations/:conversationId/read', async ({ params, request }) => {
+      const conversationId = String(params.conversationId);
+      const body = (await request.json()) as { through_message_id?: number | null };
+      state.reads.push({ conversationId, throughMessageId: body.through_message_id ?? null });
+      state.threads = state.threads.map((entry) =>
+        entry.conversation_id === conversationId ? { ...entry, unread_count: 0 } : entry
+      );
+      return HttpResponse.json({ conversation_id: conversationId, unread_count: 0 });
+    }),
+    http.post('/api/v1/chat/home/threads/:conversationId/done', ({ params }) => {
+      const conversationId = String(params.conversationId);
+      state.threads = state.threads.map((entry) =>
+        entry.conversation_id === conversationId
+          ? { ...entry, state: 'done', closed_by: 'user', closed_at: '2026-10-18T10:00:00Z' }
+          : entry
+      );
+      const closed = state.threads.find((entry) => entry.conversation_id === conversationId);
+      return closed ? HttpResponse.json(closed) : new HttpResponse(null, { status: 404 });
+    }),
     http.get('/api/v1/chat/home/threads', () =>
       HttpResponse.json({ home_conversation_id: HOME, threads: state.threads })
     ),
@@ -141,6 +165,7 @@ function serveThreads(threads: ThreadSummary[] = [QUOTES]): ThreadsServer {
               content: "On it. I've started a thread for it.",
               timestamp: '2026-10-18T09:00:03Z',
             },
+            ...state.homeExtra,
           ],
         });
       }
@@ -456,5 +481,275 @@ describe('Home and threads', () => {
 
     expect(await screen.findByTestId('thread-group-working')).toBeInTheDocument();
     expect(screen.queryByTestId('thread-group-waiting')).not.toBeInTheDocument();
+  });
+});
+
+describe('Thread state, unread and echoes', () => {
+  beforeEach(() => {
+    resetLocalStorageMock();
+    vi.clearAllMocks();
+    window.history.replaceState({}, '', '/');
+    document.documentElement.removeAttribute('data-app-ready');
+  });
+
+  it.each([
+    { name: 'working', update: { state: 'working' }, status: 'Working' },
+    { name: 'waiting', update: { state: 'waiting' }, status: 'Waiting on you' },
+    {
+      name: 'done by the assistant',
+      update: { state: 'done', closed_by: 'assistant', preview: 'Booked Acme for Tuesday.' },
+      status: 'Done',
+    },
+    {
+      name: 'done by the user',
+      update: { state: 'done', closed_by: 'user' },
+      status: 'You marked this done',
+    },
+    { name: 'failed', update: { state: 'failed' }, status: 'Failed' },
+  ] as { name: string; update: Partial<ThreadSummary>; status: string }[])(
+    'shows a $name thread on its card and in the sidebar',
+    async ({ update, status }) => {
+      const quotes = { ...QUOTES, ...update };
+      serveThreads([quotes]);
+
+      await renderChatApp({ waitForReady: true });
+
+      const card = await screen.findByTestId('thread-card');
+      expect(card).toHaveAttribute('data-thread-state', quotes.state);
+      expect(within(card).getByTestId('thread-card-state')).toHaveTextContent(status);
+      expect(within(card).getByTestId('thread-card-preview')).toHaveTextContent(
+        quotes.preview ?? ''
+      );
+      const row = within(screen.getByTestId(`thread-group-${quotes.state}`)).getByTestId(
+        'thread-item-web_conv_quotes'
+      );
+      if (update.closed_by === 'user') {
+        expect(within(row).getByTestId('thread-item-status')).toHaveTextContent(
+          'You marked this done'
+        );
+      } else {
+        expect(within(row).queryByTestId('thread-item-status')).toBeNull();
+      }
+    }
+  );
+
+  it('shows unread counts on cards and sidebar rows, and how many threads wait on you', async () => {
+    serveThreads([
+      { ...QUOTES, unread_count: 3 },
+      thread({ conversation_id: 'web_conv_flights', title: 'Flights', state: 'working' }),
+      thread({ conversation_id: 'web_conv_rego', title: 'Car rego', unread_count: 1 }),
+    ]);
+
+    await renderChatApp({ waitForReady: true });
+
+    const card = await screen.findByTestId('thread-card');
+    expect(within(card).getByTestId('thread-unread-badge')).toHaveTextContent('3');
+    expect(
+      within(screen.getByTestId('thread-item-web_conv_quotes')).getByTestId('thread-unread-badge')
+    ).toHaveTextContent('3');
+    expect(
+      within(screen.getByTestId('thread-item-web_conv_flights')).queryByTestId(
+        'thread-unread-badge'
+      )
+    ).toBeNull();
+    expect(screen.getByTestId('home-waiting-count')).toHaveTextContent('2 waiting');
+  });
+
+  it('marks Home read through its newest message once it is on screen', async () => {
+    const threads = serveThreads();
+
+    await renderChatApp({ waitForReady: true });
+
+    await waitFor(
+      () => expect(threads.reads).toEqual([{ conversationId: HOME, throughMessageId: 6 }]),
+      {
+        timeout: 3000,
+      }
+    );
+  });
+
+  it('opening a thread marks it read and clears its badge', async () => {
+    const user = userEvent.setup();
+    const threads = serveThreads([{ ...QUOTES, unread_count: 2 }]);
+
+    await renderChatApp({ waitForReady: true });
+    const card = await screen.findByTestId('thread-card');
+    expect(within(card).getByTestId('thread-unread-badge')).toHaveTextContent('2');
+
+    await user.click(card);
+
+    const row = screen.getByTestId('thread-item-web_conv_quotes');
+    await waitFor(() => expect(within(row).queryByTestId('thread-unread-badge')).toBeNull(), {
+      timeout: 3000,
+    });
+    expect(threads.reads).toContainEqual({
+      conversationId: 'web_conv_quotes',
+      throughMessageId: 10,
+    });
+  });
+
+  it('holds off marking a thread read while the reader is scrolled up', async () => {
+    // Real time still passes, so loading works as usual; the debounce is
+    // jumped over explicitly below.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      // The read request goes out synchronously when the debounce fires.
+      const readRequests = () =>
+        fetchSpy.mock.calls.filter(([input]) =>
+          String(input instanceof Request ? input.url : input).endsWith(
+            '/conversations/web_conv_quotes/read'
+          )
+        );
+      const threads = serveThreads();
+      window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+
+      await renderChatApp({ waitForReady: true });
+      await screen.findByText('Gas or heat pump?');
+      const viewport = screen.getByTestId('thread-viewport');
+      const scrollTo = (scrollTop: number) => {
+        Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 2000 });
+        Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 500 });
+        viewport.scrollTop = scrollTop;
+        fireEvent.scroll(viewport);
+      };
+      // Opened at the newest message, then scrolled up to older ones.
+      scrollTo(1500);
+      scrollTo(0);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(MARK_READ_DELAY_MS * 2);
+      });
+      expect(readRequests()).toHaveLength(0);
+
+      scrollTo(1500);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(MARK_READ_DELAY_MS);
+      });
+
+      expect(readRequests()).toHaveLength(1);
+      await waitFor(() =>
+        expect(threads.reads).toEqual([{ conversationId: 'web_conv_quotes', throughMessageId: 10 }])
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['waiting', true],
+    ['failed', true],
+    ['working', false],
+  ] as const)('offers Mark done on a %s thread: %s', async (state, offered) => {
+    serveThreads([{ ...QUOTES, state }]);
+    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+
+    await renderChatApp({ waitForReady: true });
+    const banner = await screen.findByTestId('thread-banner');
+
+    expect(within(banner).queryByTestId('thread-mark-done') !== null).toBe(offered);
+  });
+
+  it('marks a thread read once a reply streamed into it ends', async () => {
+    const user = userEvent.setup();
+    const threads = serveThreads();
+    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+
+    await renderChatApp({ waitForReady: true });
+    await screen.findByTestId('thread-banner');
+    await waitFor(
+      () =>
+        expect(threads.reads).toEqual([
+          { conversationId: 'web_conv_quotes', throughMessageId: 10 },
+        ]),
+      { timeout: 3000 }
+    );
+
+    await user.type(screen.getByRole('textbox'), 'Heat pump, please');
+    await user.keyboard('{Enter}');
+
+    await waitFor(
+      () =>
+        expect(threads.reads).toContainEqual({
+          conversationId: 'web_conv_quotes',
+          throughMessageId: null,
+        }),
+      { timeout: 5000 }
+    );
+  });
+
+  it('shows an echoed outcome attributed to its thread, opening it on click', async () => {
+    const user = userEvent.setup();
+    const threads = serveThreads([{ ...QUOTES, state: 'done', closed_by: 'assistant' }]);
+    threads.homeExtra = [
+      {
+        internal_id: 7,
+        role: 'assistant',
+        content: 'Three quotes are in; Acme is cheapest at $2,400.',
+        timestamp: '2026-10-18T10:00:00Z',
+        processing_profile_id: 'default_assistant',
+        echoed_from_thread: 'web_conv_quotes',
+      },
+    ];
+
+    await renderChatApp({ waitForReady: true });
+
+    const outcome = await screen.findByText('Three quotes are in; Acme is cheapest at $2,400.');
+    const message = outcome.closest('[data-testid="assistant-message"]') as HTMLElement;
+    expect(message).toHaveAttribute('data-echoed-from-thread', 'web_conv_quotes');
+    const header = within(message).getByTestId('thread-echo-header');
+    expect(header).toHaveTextContent('From thread: Hot water system quotes');
+    const ordinary = screen
+      .getByText("On it. I've started a thread for it.")
+      .closest('[data-testid="assistant-message"]') as HTMLElement;
+    expect(within(ordinary).queryByTestId('thread-echo-header')).toBeNull();
+
+    await user.click(header);
+
+    expect(await screen.findByTestId('thread-banner')).toBeInTheDocument();
+    expect(window.location.search).toBe('?conversation_id=web_conv_quotes');
+  });
+
+  it('marks an open thread done from its banner', async () => {
+    const user = userEvent.setup();
+    serveThreads();
+    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+
+    await renderChatApp({ waitForReady: true });
+    const banner = await screen.findByTestId('thread-banner');
+    await user.click(within(banner).getByTestId('thread-mark-done'));
+
+    await waitFor(() => expect(banner).toHaveAttribute('data-thread-state', 'done'));
+    expect(within(banner).getByTestId('thread-banner-state')).toHaveTextContent(
+      'You marked this done'
+    );
+    expect(within(banner).queryByTestId('thread-mark-done')).toBeNull();
+    expect(
+      within(screen.getByTestId('thread-group-done')).getByTestId('thread-item-web_conv_quotes')
+    ).toBeInTheDocument();
+  });
+
+  it('says so when marking a thread done fails, and leaves it as it was', async () => {
+    const user = userEvent.setup();
+    serveThreads();
+    server.use(
+      http.post(
+        '/api/v1/chat/home/threads/:conversationId/done',
+        () => new HttpResponse(null, { status: 500 })
+      )
+    );
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+
+    await renderChatApp({ waitForReady: true });
+    const banner = await screen.findByTestId('thread-banner');
+    await user.click(within(banner).getByTestId('thread-mark-done'));
+
+    expect(await within(banner).findByTestId('thread-mark-done-failed')).toHaveTextContent(
+      "Couldn't mark this thread done"
+    );
+    expect(banner).toHaveAttribute('data-thread-state', 'waiting');
+    expect(within(banner).getByTestId('thread-mark-done')).toBeEnabled();
+    consoleError.mockRestore();
   });
 });
