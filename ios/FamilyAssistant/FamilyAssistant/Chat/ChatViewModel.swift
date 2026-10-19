@@ -167,8 +167,12 @@ final class ChatViewModel {
     /// A composer send has been accepted but its turn has not started yet:
     /// `sendDraft` is asking the server whether a turn is already running
     /// before it shows the message. The composer shows it as sending and takes
-    /// no second send meanwhile.
-    private(set) var isSubmittingDraft = false {
+    /// no second send meanwhile. Scoped to the conversation the send was made
+    /// in, so opening another one mid-preflight leaves its composer free.
+    var isSubmittingDraft: Bool {
+        submittingDraftConversationID != nil && submittingDraftConversationID == conversationID
+    }
+    private var submittingDraftConversationID: String? {
         didSet { routedPromptReadinessMayHaveChanged() }
     }
     var errorMessage: String?
@@ -2056,11 +2060,12 @@ final class ChatViewModel {
         // steer fallback) runs under the outer call's submission.
         let ownsSubmission = !isRouted && !isSubmittingDraft
         if ownsSubmission {
-            isSubmittingDraft = true
+            submittingDraftConversationID = id
         }
         defer {
-            if ownsSubmission {
-                isSubmittingDraft = false
+            // A send started since in another conversation owns the state now.
+            if ownsSubmission, submittingDraftConversationID == id {
+                submittingDraftConversationID = nil
             }
         }
 

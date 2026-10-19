@@ -546,6 +546,40 @@ final class HomeThreadsTests: XCTestCase {
         try await assertSendShowsSendingWhileItsPreflightRuns(role: .standalone, extraJSON: "")
     }
 
+    func testASendStillStartingDoesNotHoldAConversationOpenedMeanwhile() async throws {
+        let preflight = HangingStream()
+        let preflights = LockedStrings()
+        ChatMockBackendURLProtocol.respond { request in
+            let path = request.url?.path ?? ""
+            guard request.httpMethod == "GET", path.hasSuffix("/messages") else {
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+            }
+            let id = path.split(separator: "/").dropLast().last.map(String.init) ?? ""
+            let page = #"{"conversation_id":"\#(id)","messages":[],"count":0,"total_messages":0}"#
+            guard (request.url?.query ?? "").split(separator: "&").contains("limit=1") else {
+                return .json(page)
+            }
+            preflights.append(path)
+            return .hangingStream(page, controller: preflight)
+        }
+        let model = makeViewModel(conversationID: "a", role: .standalone)
+        await model.selectConversation("a")
+        model.draftText = "Hello"
+        let send = Task { await model.sendDraft() }
+        try await waitUntil { preflights.values.count == 1 }
+        XCTAssertTrue(model.isSubmittingDraft)
+
+        await model.selectConversation("b")
+        model.draftText = "Other"
+
+        XCTAssertFalse(model.isSubmittingDraft, "The send in progress belongs to the conversation left behind.")
+        XCTAssertTrue(model.canSendDraft)
+        preflight.finish()
+        await send.value
+        XCTAssertFalse(model.isSubmittingDraft)
+        XCTAssertTrue(model.messages.isEmpty, "The abandoned send is not shown in the conversation opened since.")
+    }
+
     /// The send path asks the server whether a turn is already running before
     /// it shows the message. Over a slow network that round trip is the gap in
     /// which the button looked dead, so hold it open and check what the user
