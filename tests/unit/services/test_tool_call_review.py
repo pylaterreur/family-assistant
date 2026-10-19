@@ -2490,9 +2490,7 @@ def _execute_script_descriptor() -> ToolDescriptor:
 _PROGRAM_SOURCE = 'send_email(to="friend@example.test", body=llm("summarise"))'
 
 
-def _program_review_input(
-    *, program_approval_requested: bool = False
-) -> ToolCallReviewInput:
+def _program_review_input() -> ToolCallReviewInput:
     return replace(
         _review_input(descriptor=_execute_script_descriptor()),
         arguments={"script": _PROGRAM_SOURCE},
@@ -2502,7 +2500,6 @@ def _program_review_input(
             tools=(_descriptor().definition,),
             external_functions=("llm", "json_*", "keychute_http_request"),
         ),
-        program_approval_requested=program_approval_requested,
     )
 
 
@@ -2559,8 +2556,6 @@ def test_program_review_is_offered_allow_watched() -> None:
     [
         # Not a program review.
         (_review_input(), None),
-        # A review that also decides an enclosing program.
-        (_program_review_input(program_approval_requested=True), None),
         # Allow is not offered, so neither is a watched allow.
         (
             _program_review_input(),
@@ -2837,16 +2832,5 @@ def test_program_review_prompt_offers_and_explains_watching() -> None:
     system_text = str(system.content)
     assert "- allow_watched:" in system_text
     assert "Code the source spells out" in system_text
-    assert "program_approval_requested" not in system_text
+    assert "This call is made inside a running program" not in system_text
     assert '"allow_watched"' in _prompt([user])
-
-
-@pytest.mark.no_db
-def test_nested_program_decision_keeps_the_script_addendum() -> None:
-    review_input = _program_review_input(program_approval_requested=True)
-    system, _ = assemble_tool_call_review_messages(
-        review_input, program_review_constraints(review_input, _constraints())
-    )
-    system_text = str(system.content)
-    assert "program_approval_requested" in system_text
-    assert "allow_watched" not in system_text

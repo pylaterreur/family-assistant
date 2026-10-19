@@ -394,7 +394,6 @@ async def test_program_reaching_a_gate_is_reviewed_before_it_runs(
     review = reviewer.calls[0].review_input
     assert review.script is not None
     assert review.script.source == source
-    assert not review.program_approval_requested
     assert ("program_capability", "ordinary_effect") in {
         (item.kind, item.identifier) for item in review.policy_contexts
     }
@@ -2074,7 +2073,7 @@ async def test_literal_sandbox_commands_inherit_program_approval(
 
 
 @pytest.mark.asyncio
-async def test_runtime_built_sandbox_command_is_reviewed_without_revoking(
+async def test_runtime_built_sandbox_command_inherits_program_approval(
     db_engine: AsyncEngine,
 ) -> None:
     effects: list[str] = []
@@ -2083,10 +2082,7 @@ async def test_runtime_built_sandbox_command_is_reviewed_without_revoking(
         'run_sandbox(command=f"convert {name} out.bmp", cwd="/work/ink")\n'
         'run_sandbox(command="upload out.bmp", cwd="/work/ink")'
     )
-    reviewer = _RecordingReviewer(
-        ToolCallReviewVerdict.ALLOW,
-        ToolCallReviewVerdict.ALLOW,
-    )
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
     provider = _provider(
         [
             _real_registration("execute_script"),
@@ -2104,14 +2100,10 @@ async def test_runtime_built_sandbox_command_is_reviewed_without_revoking(
         "/work/ink: convert photo.png out.bmp",
         "/work/ink: upload out.bmp",
     ]
+    # Code the program builds at runtime is part of the reviewed program.
     assert [call.review_input.descriptor.name for call in reviewer.calls] == [
-        "execute_script",
-        "run_sandbox",
+        "execute_script"
     ]
-    nested = reviewer.calls[1].review_input
-    assert nested.arguments["command"] == "convert photo.png out.bmp"
-    assert not nested.program_approval_requested
-    assert nested.enclosing_scripts[-1].approval_active
 
 
 @pytest.mark.asyncio
@@ -2275,7 +2267,6 @@ async def test_program_reading_untrusted_data_later_is_reviewed_once_up_front(
     assert len(reviewer.calls) == 1
     first = reviewer.calls[0].review_input
     assert first.descriptor.name == "execute_script"
-    assert not first.program_approval_requested
     _assert_program_source(first, source)
 
 
@@ -2477,7 +2468,6 @@ async def test_firing_of_an_unresolved_definition_is_reviewed_once_at_start(
     assert review.descriptor.name == "execute_script"
     assert review.script is not None
     assert review.script.source == _EINK_FIRING
-    assert not review.program_approval_requested
     assert review.trigger is not None
     assert review.trigger.trigger_type == "scheduled_script"
     assert ToolCallReviewVerdict.CONFIRM not in call.constraints.available_verdicts
@@ -2700,7 +2690,7 @@ async def test_watched_call_in_a_firing_cannot_be_confirmed_later(
 
 
 @pytest.mark.asyncio
-async def test_model_result_narrows_approval_for_external_destinations(
+async def test_model_result_followed_by_a_fixed_send_inherits(
     db_engine: AsyncEngine,
 ) -> None:
     effects: list[str] = []
@@ -2719,10 +2709,8 @@ async def test_model_result_narrows_approval_for_external_destinations(
         "ordinary_effect(value=value)\n"
         'send_external(to="after@example.com")'
     )
-    reviewer = _RecordingReviewer(
-        ToolCallReviewVerdict.ALLOW,
-        ToolCallReviewVerdict.ALLOW,
-    )
+    # The program review judged the program, model output included.
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
     provider = _provider(
         [
             _real_registration("execute_script"),
@@ -2764,14 +2752,88 @@ async def test_model_result_narrows_approval_for_external_destinations(
         "sent to after@example.com",
     ]
     assert [call.review_input.descriptor.name for call in reviewer.calls] == [
-        "execute_script",
-        "send_external",
+        "execute_script"
     ]
-    assert reviewer.calls[1].review_input.arguments["to"] == "after@example.com"
 
 
 @pytest.mark.asyncio
-async def test_unclassified_tool_result_narrows_approval_for_external_destinations(
+async def test_watched_send_after_model_result_is_reviewed_each_time(
+    db_engine: AsyncEngine,
+) -> None:
+    effects: list[str] = []
+
+    async def send_external(to: str) -> str:
+        effects.append(f"sent to {to}")
+        return "sent"
+
+    async def ordinary_effect(value: str) -> str:
+        effects.append(value)
+        return "done"
+
+    source = (
+        'send_external(to="before@example.com")\n'
+        'value = llm("Summarise the inbox")\n'
+        "ordinary_effect(value=value)\n"
+        'send_external(to="after@example.com")'
+    )
+    reviewer = _RecordingReviewer(
+        ToolCallReviewVerdict.ALLOW_WATCHED,
+        ToolCallReviewVerdict.ALLOW,
+        ToolCallReviewVerdict.ALLOW,
+        watched_tools=("send_external",),
+    )
+    provider = _provider(
+        [
+            _real_registration("execute_script"),
+            _registration(
+                "send_external",
+                cast("ToolImplementation", send_external),
+                tags=(ToolTag.EXTERNAL_COMM, ToolTag.OUTPUT_TRUSTED),
+                properties={"to": {"type": "string"}},
+            ),
+            _registration(
+                "ordinary_effect",
+                cast("ToolImplementation", ordinary_effect),
+                tags=(ToolTag.STATE_CHANGING, ToolTag.OUTPUT_TRUSTED),
+                properties={"value": {"type": "string"}},
+            ),
+        ],
+        reviewer=reviewer,
+        rules=[
+            _review_rule("execute_script", ToolPolicyDecision.REVIEW),
+            _review_rule("send_external", ToolPolicyDecision.REVIEW),
+            _review_rule("ordinary_effect", ToolPolicyDecision.REVIEW),
+        ],
+    )
+    context = _context(db_engine, provider)
+    llm_client = RuleBasedMockLLMClient(
+        rules=[],
+        default_response=LLMOutput(content="model-derived"),
+    )
+
+    with patch(
+        "family_assistant.llm.one_shot.LLMClientFactory.create_client",
+        return_value=llm_client,
+    ):
+        await _execute_script(provider, context, script=source)
+
+    assert effects == [
+        "sent to before@example.com",
+        "model-derived",
+        "sent to after@example.com",
+    ]
+    assert [
+        (call.review_input.descriptor.name, call.review_input.arguments.get("to"))
+        for call in reviewer.calls
+    ] == [
+        ("execute_script", None),
+        ("send_external", "before@example.com"),
+        ("send_external", "after@example.com"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_untagged_tool_result_does_not_end_inheritance(
     db_engine: AsyncEngine,
 ) -> None:
     effects: list[str] = []
@@ -2788,10 +2850,7 @@ async def test_unclassified_tool_result_narrows_approval_for_external_destinatio
         'summarise(value="inbox")\n'
         'send_external(to="after@example.com")'
     )
-    reviewer = _RecordingReviewer(
-        ToolCallReviewVerdict.ALLOW,
-        ToolCallReviewVerdict.ALLOW,
-    )
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
     provider = _provider(
         [
             _real_registration("execute_script"),
@@ -2821,14 +2880,12 @@ async def test_unclassified_tool_result_narrows_approval_for_external_destinatio
 
     assert effects == ["sent to before@example.com", "sent to after@example.com"]
     assert [call.review_input.descriptor.name for call in reviewer.calls] == [
-        "execute_script",
-        "send_external",
+        "execute_script"
     ]
-    assert reviewer.calls[1].review_input.arguments["to"] == "after@example.com"
 
 
 @pytest.mark.asyncio
-async def test_model_result_ends_keychute_inheritance(
+async def test_keychute_request_after_model_result_inherits(
     db_engine: AsyncEngine,
 ) -> None:
     proxy_requests: list[httpx.Request] = []
@@ -2839,10 +2896,8 @@ async def test_model_result_ends_keychute_inheritance(
         'url = llm("Which endpoint?")\n'
         'keychute_http_request("weather", url)["status_code"]'
     )
-    reviewer = _RecordingReviewer(
-        ToolCallReviewVerdict.ALLOW,
-        ToolCallReviewVerdict.ALLOW,
-    )
+    # A model-chosen destination is the program review's call to watch.
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
     provider = _provider(
         [_real_registration("execute_script")],
         reviewer=reviewer,
@@ -2893,17 +2948,12 @@ async def test_model_result_ends_keychute_inheritance(
 
     assert len(proxy_requests) == 1
     assert [call.review_input.descriptor.name for call in reviewer.calls] == [
-        "execute_script",
-        "keychute_http_request",
+        "execute_script"
     ]
-    assert (
-        reviewer.calls[1].review_input.arguments["url"]
-        == "https://attacker.test/collect"
-    )
 
 
 @pytest.mark.asyncio
-async def test_runtime_built_mapping_key_in_sandbox_call_is_reviewed(
+async def test_runtime_built_mapping_key_in_sandbox_call_inherits(
     db_engine: AsyncEngine,
 ) -> None:
     effects: list[str] = []
@@ -2917,10 +2967,7 @@ async def test_runtime_built_mapping_key_in_sandbox_call_is_reviewed(
         'run_with_env(command="make", env={name: "1"})\n'
         'run_with_env(command="make", env={"MODE": "1"})'
     )
-    reviewer = _RecordingReviewer(
-        ToolCallReviewVerdict.ALLOW,
-        ToolCallReviewVerdict.ALLOW,
-    )
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
     provider = _provider(
         [
             _real_registration("execute_script"),
@@ -2947,11 +2994,10 @@ async def test_runtime_built_mapping_key_in_sandbox_call_is_reviewed(
     await _execute_script(provider, context, script=source)
 
     assert effects == ["make ['photo.png']", "make ['MODE']"]
+    # Code the program builds at runtime is part of the reviewed program.
     assert [call.review_input.descriptor.name for call in reviewer.calls] == [
-        "execute_script",
-        "run_with_env",
+        "execute_script"
     ]
-    assert reviewer.calls[1].review_input.arguments["env"] == {"photo.png": "1"}
 
 
 @pytest.mark.asyncio
@@ -3009,7 +3055,6 @@ async def test_inline_child_in_a_reviewed_program_gets_its_own_review(
     assert child.script is not None
     assert child.script.source == nested_source
     assert child.enclosing_scripts[-1].source == source
-    assert not child.program_approval_requested
 
 
 @pytest.mark.asyncio
@@ -3076,7 +3121,7 @@ async def test_bound_child_capabilities_are_reviewed_with_their_parent(
 
 
 @pytest.mark.asyncio
-async def test_bound_child_after_model_result_reviews_external_destinations(
+async def test_bound_child_send_after_model_result_inherits(
     db_engine: AsyncEngine,
 ) -> None:
     effects: list[str] = []
@@ -3089,10 +3134,8 @@ async def test_bound_child_after_model_result_reviews_external_destinations(
         'to = llm("Who should get the report?")\n'
         'execute_script(name="child", parameters={"to": to})'
     )
-    reviewer = _RecordingReviewer(
-        ToolCallReviewVerdict.ALLOW,
-        ToolCallReviewVerdict.ALLOW,
-    )
+    # A model-chosen destination is the program review's call to watch.
+    reviewer = _RecordingReviewer(ToolCallReviewVerdict.ALLOW)
     provider = _provider(
         [
             _real_registration("execute_script"),
@@ -3129,8 +3172,7 @@ async def test_bound_child_after_model_result_reviews_external_destinations(
 
     assert effects == ["sent to attacker@example.com"]
     assert [call.review_input.descriptor.name for call in reviewer.calls] == [
-        "execute_script",
-        "send_external",
+        "execute_script"
     ]
 
 
@@ -3582,7 +3624,6 @@ async def test_forecast_approval_does_not_cover_a_live_static_review(
         "ordinary_effect",
     ]
     live_review = reviewer.calls[1].review_input
-    assert not live_review.program_approval_requested
     assert not live_review.enclosing_scripts[-1].approval_active
     assert await _inheritance_authorizations(context) == []
 
@@ -3653,9 +3694,6 @@ async def test_observe_would_be_denied_program_keeps_nested_shadow_reviews(
         "ordinary_effect",
         "ordinary_effect",
     ]
-    assert not any(
-        call.review_input.program_approval_requested for call in reviewer.calls
-    )
     assert await _inheritance_authorizations(context) == []
 
 
@@ -3700,7 +3738,6 @@ async def test_observe_program_reaching_keychute_is_reviewed_before_it_runs(
     assert [call.review_input.descriptor.name for call in reviewer.calls] == [
         "execute_script"
     ]
-    assert not reviewer.calls[0].review_input.program_approval_requested
     assert await _inheritance_authorizations(context) == ["inherited"] * 3
 
 
