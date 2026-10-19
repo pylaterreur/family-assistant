@@ -4,9 +4,8 @@
 
 Approved. Milestone 1 (threads exist), milestone 2 apart from the right-hand panel, milestone 3
 (state and echo) on the backend, the web and iOS, and milestone 4 (Home on iOS) implemented.
-Mockups:
-[one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered: [iOS](one-thread-ux/ios.png),
-[web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
+Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered:
+[iOS](one-thread-ux/ios.png), [web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
 
 ## Problem
 
