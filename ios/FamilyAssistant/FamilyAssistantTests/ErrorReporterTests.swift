@@ -361,13 +361,73 @@ final class ErrorReporterTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func makeReporter() -> ErrorReporter {
+    func testSharedReporterSendsNothingWhileHostingUnitTests() async {
+        // Code under test that defaults to `.shared` must not reach whichever
+        // test's URL mock is installed when its detached delivery lands.
+        URLProtocol.registerClass(MockErrorURLProtocol.self)
+        defer { URLProtocol.unregisterClass(MockErrorURLProtocol.self) }
+        MockErrorURLProtocol.respond { _ in .init(statusCode: 200) }
+        ErrorReporter.shared.configure { self.baseURL }
+
+        await ErrorReporter.shared.deliver(
+            message: "Boom",
+            component: "ErrorReporterTests.shared",
+            errorType: .handled,
+            stack: nil,
+            extraData: [:],
+            bypassDedupe: true
+        )
+        await ErrorReporter.shared.flushPersisted()
+
+        XCTAssertTrue(MockErrorURLProtocol.requests.isEmpty)
+    }
+
+    func testNonDeliveringReporterNeitherSendsNorSpools() async {
+        MockErrorURLProtocol.respond { _ in .init(statusCode: 200) }
+        let reporter = makeReporter(deliversReports: false)
+        reporter.configure { self.baseURL }
+
+        await reporter.deliver(
+            message: "Boom",
+            component: "Notes.editor.save",
+            errorType: .handled,
+            stack: nil,
+            extraData: [:]
+        )
+
+        XCTAssertTrue(MockErrorURLProtocol.requests.isEmpty)
+        XCTAssertTrue(spooledFiles().isEmpty)
+    }
+
+    func testNonDeliveringReporterFlushLeavesSpoolUntouched() async throws {
+        MockErrorURLProtocol.respond { _ in .init(statusCode: 200) }
+        let spooler = makeReporter()
+        await spooler.deliver(
+            message: "Spooled",
+            component: "Notes.editor.save",
+            errorType: .handled,
+            stack: nil,
+            extraData: [:]
+        )
+        try Data("not json".utf8).write(to: spoolDirectory.appendingPathComponent("malformed.json"))
+        XCTAssertEqual(spooledFiles().count, 2)
+        let reporter = makeReporter(deliversReports: false)
+        reporter.configure { self.baseURL }
+
+        await reporter.flushPersisted()
+
+        XCTAssertTrue(MockErrorURLProtocol.requests.isEmpty)
+        XCTAssertEqual(spooledFiles().count, 2)
+    }
+
+    private func makeReporter(deliversReports: Bool = true) -> ErrorReporter {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockErrorURLProtocol.self]
         return ErrorReporter(
             session: URLSession(configuration: configuration),
             spoolDirectory: spoolDirectory,
-            dedupeWindow: 60
+            dedupeWindow: 60,
+            deliversReports: deliversReports
         )
     }
 

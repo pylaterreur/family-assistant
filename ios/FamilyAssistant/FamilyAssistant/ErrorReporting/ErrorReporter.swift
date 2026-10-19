@@ -19,7 +19,15 @@ import os
 /// a separate telemetry lane so they do not drown genuine errors in the engineer's error view. See
 /// `docs/design/ios-frontend-telemetry-lane.md`.
 final class ErrorReporter: @unchecked Sendable {
-    static let shared = ErrorReporter()
+    /// The process-wide reporter, inert while this process hosts the unit-test bundle.
+    ///
+    /// App-hosted unit tests run inside the app, whose `init()` configures this instance with a
+    /// base URL read from stored auth — which is the tests' mocked host whenever an earlier run
+    /// (UI tests, or a unit test that crashed before its tearDown) left it in UserDefaults. Code
+    /// under test that defaults to `.shared` would then deliver its fire-and-forget reports to
+    /// whichever test's `URLProtocol` mock is installed when the detached task lands, and spool
+    /// the rest into the app's real cache. Tests that observe reports inject their own instance.
+    static let shared = ErrorReporter(deliversReports: !isHostingUnitTests)
 
     enum ErrorType: String {
         case uncaught
@@ -44,6 +52,7 @@ final class ErrorReporter: @unchecked Sendable {
     private let session: URLSession
     private let spoolDirectory: URL?
     private let dedupeWindow: TimeInterval
+    private let deliversReports: Bool
     private let logger = Logger(subsystem: "com.familyassistant.app", category: "error-reporting")
 
     private let lock = NSLock()
@@ -59,11 +68,13 @@ final class ErrorReporter: @unchecked Sendable {
     init(
         session: URLSession = .shared,
         spoolDirectory: URL? = ErrorReporter.defaultSpoolDirectory,
-        dedupeWindow: TimeInterval = 60
+        dedupeWindow: TimeInterval = 60,
+        deliversReports: Bool = true
     ) {
         self.session = session
         self.spoolDirectory = spoolDirectory
         self.dedupeWindow = dedupeWindow
+        self.deliversReports = deliversReports
     }
 
     // MARK: - Configuration
@@ -158,7 +169,8 @@ final class ErrorReporter: @unchecked Sendable {
     /// Retry any reports spooled to disk by a previous launch or a failed send. Stops on the first
     /// failure so a persistent outage does not hammer the server.
     func flushPersisted() async {
-        guard let directory = spoolDirectory,
+        guard deliversReports,
+              let directory = spoolDirectory,
               let files = try? FileManager.default.contentsOfDirectory(
                   at: directory,
                   includingPropertiesForKeys: nil
@@ -199,7 +211,11 @@ final class ErrorReporter: @unchecked Sendable {
         }
     }
 
+    // `post` and `persist` are the only places a report leaves the process or is written to disk,
+    // and `flushPersisted` the only place spool files are removed; gating all three makes a
+    // non-delivering reporter inert on every path.
     private func post(_ payload: ErrorReportPayload, to baseURL: URL) async throws {
+        guard deliversReports else { throw ReporterError.deliveryDisabled }
         guard let url = URL(string: "/api/errors/", relativeTo: baseURL)?.absoluteURL else {
             throw ReporterError.invalidURL
         }
@@ -266,7 +282,7 @@ final class ErrorReporter: @unchecked Sendable {
     }
 
     private func persist(_ payload: ErrorReportPayload) {
-        guard let directory = spoolDirectory else { return }
+        guard deliversReports, let directory = spoolDirectory else { return }
         do {
             try FileManager.default.createDirectory(
                 at: directory,
@@ -373,10 +389,17 @@ final class ErrorReporter: @unchecked Sendable {
             .appendingPathComponent("PendingErrorReports", isDirectory: true)
     }
 
+    /// Xcode sets `XCTestConfigurationFilePath` in the environment of an app hosting a unit-test
+    /// bundle, but not in an app launched by a UI test, which keeps its real reporter.
+    private static var isHostingUnitTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+
     private enum ReporterError: Error {
         case invalidURL
         case badResponse
         case authWall
+        case deliveryDisabled
     }
 }
 
