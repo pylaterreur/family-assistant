@@ -750,6 +750,22 @@ final class ChatViewModel {
         await drainRoutedPrompts()
     }
 
+    /// What the composer holds.
+    var currentDraft: ChatDraft {
+        ChatDraft(text: draftText, attachments: draftAttachments)
+    }
+
+    /// Take over a draft written somewhere this model replaces (the fallback
+    /// conversation list, when Retry finds Home), unless something is already
+    /// being written here.
+    func inheritDraft(_ draft: ChatDraft) {
+        guard draftText.isEmpty, draftAttachments.isEmpty else {
+            return
+        }
+        draftText = draft.text
+        draftAttachments = draft.attachments
+    }
+
     /// The one condition a routed prompt waits for: the conversation has been
     /// bootstrapped, loaded and described (so it sends on the right profile),
     /// and no turn is running in it, here or on another device. Every input is a
@@ -2083,7 +2099,9 @@ final class ChatViewModel {
         let turnID = UUID().uuidString
         // Past every early return: this send is happening, so it is what tells
         // the server which tier the conversation is on from here.
-        let modelTier = modelTierForSend()
+        // A routed prompt runs at the default tier: the composer's choice is
+        // for what the user sends from it, like its text and attachments.
+        let modelTier = isRouted ? nil : modelTierForSend()
         let uploadedAttachments = submittedDraftAttachments.filter { $0.uploadState == .uploaded }
         let userMessage = ChatMessage(
             id: "local_user_\(UUID().uuidString)",
@@ -6028,6 +6046,12 @@ extension ChatViewModel: ResyncHost {
     func resyncPhaseDidFinish() {
         syncCoordinator.apply(.syncFinished)
     }
+}
+
+/// A composer's contents, handed between models.
+struct ChatDraft: Equatable {
+    var text: String
+    var attachments: [ChatAttachment]
 }
 
 /// What the composer held when the user left a conversation.

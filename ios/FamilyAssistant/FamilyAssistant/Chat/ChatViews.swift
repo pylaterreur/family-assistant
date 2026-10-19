@@ -15,10 +15,12 @@ struct ChatRootView: View {
     @State private var preferredColumn: NavigationSplitViewColumn
     let authManager: AuthManager
     let route: ChatRoute
+    private let draftSource: ProvisionalDraftSource?
 
     init(
         authManager: AuthManager,
-        route: ChatRoute
+        route: ChatRoute,
+        draftSource: ProvisionalDraftSource? = nil
     ) {
         let model = ChatViewModel(
             authManager: authManager,
@@ -30,6 +32,7 @@ struct ChatRootView: View {
         _preferredColumn = State(initialValue: model.conversationSelection == nil ? .sidebar : .detail)
         self.authManager = authManager
         self.route = route
+        self.draftSource = draftSource
     }
 
     var body: some View {
@@ -66,6 +69,7 @@ struct ChatRootView: View {
                 }
         }
         .task {
+            draftSource?.model = viewModel
             await viewModel.bootstrap(initialPrompt: route.initialPrompt)
             await importSharedAttachments(for: route)
             // `onChange` below does not fire for a hint already pending at mount

@@ -12472,6 +12472,20 @@ final class ChatViewModelTests: XCTestCase {
         )
     }
 
+    func testRoutedPromptRunsAtTheDefaultTierAndLeavesTheChoice() async throws {
+        let recorder = respondRecordingModelTiers(conversationID: "web_conv_home_routed_tier")
+        let model = makeViewModel(conversationID: "web_conv_home_routed_tier", role: .home)
+        model.profiles = [Self.tieredProfile()]
+        await model.bootstrap()
+        model.selectModelTier("deep")
+
+        await model.sendPromptInPlace("Buy milk")
+        try await waitUntil { !recorder.tiers.isEmpty }
+
+        XCTAssertEqual(recorder.tiers, [nil], "A routed prompt names no tier.")
+        XCTAssertEqual(model.modelTierChoice, "deep", "The composer keeps the tier chosen for what it sends.")
+    }
+
     func testThreadKeepsItsChosenTier() async throws {
         let recorder = respondRecordingModelTiers(conversationID: "web_conv_thread_tier")
         let model = makeViewModel(conversationID: "web_conv_thread_tier", role: .pushed)

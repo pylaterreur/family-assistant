@@ -236,7 +236,15 @@ final class HomeDiscovery {
         }
     }
 
-    /// Look again, if the last lookup failed (Retry, or signing in again).
+    /// Forget what is showing and look Home up afresh, as after signing in
+    /// again, which may be as someone else. The remembered Home is ignored: it
+    /// may be the previous account's.
+    func restart() async {
+        state = .unknown
+        await refresh()
+    }
+
+    /// Look again, if the last lookup failed.
     func retryIfFailed() async {
         guard state == .failed else {
             return

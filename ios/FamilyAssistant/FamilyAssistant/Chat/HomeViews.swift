@@ -21,6 +21,11 @@ struct ChatEntryView: View {
 
     @State private var discovery: HomeDiscovery
     @State private var hasRefreshed = false
+    /// The conversation list shown while the lookup has failed, so what the
+    /// user typed there can move into Home if Retry finds it.
+    @State private var provisionalDraft = ProvisionalDraftSource()
+    /// What the conversation list held when Retry found Home.
+    @State private var inheritedDraft: ChatDraft?
 
     init(authManager: AuthManager, route: ChatRoute) {
         self.authManager = authManager
@@ -46,12 +51,13 @@ struct ChatEntryView: View {
                 // settles on (`HomeDiscovery.deliverableRoute`).
                 ChatRootView(
                     authManager: authManager,
-                    route: HomeDiscovery.deliverableRoute(route, state: discovery.state)
+                    route: HomeDiscovery.deliverableRoute(route, state: discovery.state),
+                    draftSource: provisionalDraft
                 )
                 .safeAreaInset(edge: .top, spacing: 0) {
                     if discovery.state == .failed {
                         HomeLookupFailedBanner(holdsRoute: route != ChatRoute()) {
-                            Task { await discovery.retryIfFailed() }
+                            Task { await retry() }
                         }
                     }
                 }
@@ -59,7 +65,8 @@ struct ChatEntryView: View {
                 HomeRootView(
                     authManager: authManager,
                     route: route,
-                    homeConversationID: homeConversationID
+                    homeConversationID: homeConversationID,
+                    inheritedDraft: inheritedDraft
                 )
                 .id(homeConversationID)
             }
@@ -72,13 +79,31 @@ struct ChatEntryView: View {
             await discovery.refresh()
         }
         .onChange(of: authManager.authRequired) { wasRequired, isRequired in
-            // A lookup refused for expired credentials is retried once the
-            // user has signed in again in place.
+            // Signing in again in place may be as someone else, whose Home is
+            // not the one showing. Start over: tear the root down, look Home up
+            // afresh, and carry nothing across.
             if wasRequired, !isRequired {
-                Task { await discovery.retryIfFailed() }
+                provisionalDraft.model = nil
+                inheritedDraft = nil
+                Task { await discovery.restart() }
             }
         }
     }
+
+    private func retry() async {
+        let draft = provisionalDraft.model?.currentDraft
+        await discovery.retryIfFailed()
+        if case .enabled = discovery.state {
+            inheritedDraft = draft
+        }
+    }
+}
+
+/// The conversation model behind the fallback conversation list, held weakly
+/// so its draft can be read when Retry replaces it with Home.
+@MainActor
+final class ProvisionalDraftSource {
+    weak var model: ChatViewModel?
 }
 
 /// A routed prompt is held until Home can take it; say so rather than hold it
@@ -170,14 +195,23 @@ struct HomeRootView: View {
     let authManager: AuthManager
     let route: ChatRoute
 
-    init(authManager: AuthManager, route: ChatRoute, homeConversationID: String) {
+    init(
+        authManager: AuthManager,
+        route: ChatRoute,
+        homeConversationID: String,
+        inheritedDraft: ChatDraft? = nil
+    ) {
         self.authManager = authManager
         self.route = route
-        _viewModel = State(initialValue: ChatViewModel(
+        let model = ChatViewModel(
             authManager: authManager,
             conversationID: homeConversationID,
             role: .home
-        ))
+        )
+        if let inheritedDraft {
+            model.inheritDraft(inheritedDraft)
+        }
+        _viewModel = State(initialValue: model)
         _store = State(initialValue: HomeThreadsStore(
             homeConversationID: homeConversationID,
             apiClient: ChatAPIClient(authManager: authManager)

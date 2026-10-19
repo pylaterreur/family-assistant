@@ -414,6 +414,64 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertEqual(HomeDiscovery.deliverableRoute(share, state: .disabled), share)
     }
 
+    func testSigningInAgainLooksHomeUpAfresh() async throws {
+        let suite = "HomeThreadsTests.restart"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        HomeAvailability.store(.enabled(homeConversationID: "home-a"), serverURL: serverURL, defaults: defaults)
+        let responses = LockedStrings()
+        let discovery = HomeDiscovery(
+            serverURL: serverURL,
+            defaults: defaults,
+            lookUp: {
+                guard let next = responses.values.last else {
+                    throw URLError(.notConnectedToInternet)
+                }
+                return ChatHomeResponse(enabled: true, conversationID: next)
+            },
+            reportFailure: { _ in }
+        )
+        XCTAssertEqual(discovery.state, .enabled(homeConversationID: "home-a"))
+
+        // Signed in again as someone else: their Home replaces the previous one.
+        responses.append("home-b")
+        await discovery.restart()
+        XCTAssertEqual(discovery.state, .enabled(homeConversationID: "home-b"))
+
+        // A failed lookup after signing in again never falls back to the
+        // previous account's Home.
+        responses.reset()
+        await discovery.restart()
+        XCTAssertEqual(discovery.state, .failed)
+    }
+
+    func testHomeTakesOverTheFallbackListsDraft() {
+        let fallback = makeViewModel(conversationID: "web_conv_old", role: .standalone)
+        let attachment = ChatAttachment(
+            id: "draft-file",
+            attachmentID: "66666666-6666-6666-6666-666666666666",
+            type: .document,
+            name: "quote.pdf",
+            contentURL: "/api/attachments/66666666-6666-6666-6666-666666666666",
+            mimeType: "application/pdf",
+            size: 10,
+            localFileURL: nil,
+            uploadState: .uploaded,
+            errorMessage: nil
+        )
+        fallback.draftText = "Typed before Retry"
+        fallback.draftAttachments = [attachment]
+
+        let home = makeViewModel(conversationID: "home", role: .home)
+        home.inheritDraft(fallback.currentDraft)
+
+        XCTAssertEqual(home.currentDraft, ChatDraft(text: "Typed before Retry", attachments: [attachment]))
+
+        home.draftText = "Already here"
+        home.inheritDraft(ChatDraft(text: "Other", attachments: []))
+        XCTAssertEqual(home.draftText, "Already here", "A draft being written is not overwritten.")
+    }
+
     func testFailedLookupKeepsARememberedHome() async throws {
         let suite = "HomeThreadsTests.discoveryRemembered"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
