@@ -3511,6 +3511,77 @@ async def test_observe_keeps_a_statically_gated_program_review_live(
     ]
 
 
+_PRINTER_PROGRAM = (
+    "read_external()\n"
+    'run_sandbox(command="convert in.png -dither out.bmp", cwd="/work/ink")\n'
+    'run_sandbox(command="upload out.bmp", cwd="/work/ink")'
+)
+
+
+async def _printer_run(
+    db_engine: AsyncEngine,
+    mode: TaintPolicyMode,
+    verdicts: Sequence[ToolCallReviewVerdict],
+    watched: tuple[str, ...],
+) -> tuple[list[tuple[str, str | None]], list[str]]:
+    """Run the printer slice-and-upload; return its recorded reviews and effects."""
+    effects: list[str] = []
+    reviewer = _RecordingReviewer(*verdicts, watched_tools=watched)
+    provider = _provider(
+        [
+            _real_registration("execute_script"),
+            _read_external_registration(),
+            _sandbox_registration(effects),
+        ],
+        reviewer=reviewer,
+        rules=[],
+        taint_policy=TaintPolicyConfig(mode=mode),
+    )
+    turn_id = f"printer-{mode.value}"
+    context = replace(_context(db_engine, provider), turn_id=turn_id)
+
+    await _execute_script(provider, context, script=_PRINTER_PROGRAM)
+    await provider.close()
+
+    events = await context.db_context.taint_audit_events.list_for_turn(turn_id)
+    reviews = sorted(
+        (event["tool_name"], event["review_verdict"])
+        for event in events
+        if event["event_type"] == "tool_call_review"
+    )
+    return reviews, effects
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("verdicts", "watched"),
+    [
+        ((ToolCallReviewVerdict.ALLOW,), ()),
+        (
+            (
+                ToolCallReviewVerdict.ALLOW_WATCHED,
+                ToolCallReviewVerdict.ALLOW,
+                ToolCallReviewVerdict.ALLOW,
+            ),
+            ("run_sandbox",),
+        ),
+    ],
+    ids=["allow", "allow-watched"],
+)
+async def test_observe_records_the_reviews_enforce_makes_for_the_printer_upload(
+    db_engine: AsyncEngine,
+    verdicts: tuple[ToolCallReviewVerdict, ...],
+    watched: tuple[str, ...],
+) -> None:
+    enforce = await _printer_run(db_engine, TaintPolicyMode.ENFORCE, verdicts, watched)
+    observe = await _printer_run(db_engine, TaintPolicyMode.OBSERVE, verdicts, watched)
+
+    assert observe == enforce
+    reviews, effects = enforce
+    assert len(effects) == 2
+    assert len(reviews) == len(verdicts)
+
+
 @pytest.mark.asyncio
 async def test_observe_program_allow_covers_nested_gates_once(
     db_engine: AsyncEngine,

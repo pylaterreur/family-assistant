@@ -236,8 +236,9 @@ design unless the program reviewer chose to watch it.
    send to a fixed recipient inherits unless watched); the eval re-run.
 5. **Observe parity carries over.** Observe already follows enforce's path, so it records these
    decisions without further design. _Verify:_ an observe-mode test showing the same review count
-   and recorded outcomes as enforce for the printer scenario, then a re-measured projected prompt
-   rate on clean production data before the next go/no-go.
+   and recorded outcomes as enforce for the printer scenario (done, plain and watched allow), then a
+   re-measured projected prompt rate on at least three clean production days after milestone 4 is
+   deployed, before the next go/no-go.
 
 ## Appendix: evaluation
 
