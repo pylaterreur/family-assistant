@@ -71,15 +71,17 @@ def derive_state(
     work_in_progress: bool,
     latest_visible_at: datetime | None,
     latest_visible_turn_id: str | None = None,
+    latest_visible_is_error: bool = False,
     close: ThreadClose | None = None,
 ) -> DerivedState:
     """A thread's state from what is known about it.
 
     Working while anything is in progress in it: its starting run, a turn, or
     background work a turn handed off. Otherwise the latest terminal event --
-    an explicit close, or the starting run failing -- holds until something
-    visible arrives in the thread after it, which reopens the thread. Anything
-    else leaves the next move with the user.
+    an explicit close, a turn whose error is the last thing in the thread, or
+    the starting run failing -- holds until something visible arrives in the
+    thread after it, which reopens the thread. Anything else leaves the next
+    move with the user.
     """
     if work_in_progress or run_status in _ACTIVE_RUN_STATUSES:
         return DerivedState("working")
@@ -89,15 +91,23 @@ def derive_state(
         or run_completed_at is None
         or _as_utc(close.closed_at) >= _as_utc(run_completed_at)
     )
-    if close is not None and close_is_latest:
-        if _said_since(
+    if (
+        close is not None
+        and close_is_latest
+        and not _said_since(
             close.closed_at,
             latest_visible_at=latest_visible_at,
             latest_visible_turn_id=latest_visible_turn_id,
             own_turn_id=close.turn_id,
-        ):
-            return DerivedState("waiting")
+        )
+    ):
         return DerivedState(close.outcome, close)
+    if latest_visible_is_error:
+        # A turn failed and nothing has been said since: an infrastructure
+        # failure, which is never presented as a request for input.
+        return DerivedState("failed")
+    if close is not None and close_is_latest:
+        return DerivedState("waiting")
     if run_failed:
         if run_completed_at is not None and _said_since(
             run_completed_at,
@@ -201,6 +211,7 @@ async def summarize_threads(
             or turn_running(thread.conversation_id),
             latest_visible_at=message.timestamp if message else None,
             latest_visible_turn_id=message.turn_id if message else None,
+            latest_visible_is_error=message is not None and message.role == "error",
             close=thread.close,
         )
         summaries.append(

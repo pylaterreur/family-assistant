@@ -17,6 +17,9 @@ from family_assistant.storage.conversation_threads import (
 )
 from family_assistant.storage.message_history import message_history_table
 from family_assistant.storage.repositories.base import BaseRepository
+from family_assistant.storage.repositories.message_history import (
+    THREAD_VISIBLE_ROLES,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
@@ -352,8 +355,9 @@ class ConversationThreadsRepository(BaseRepository):
     ) -> dict[str, int]:
         """How many visible messages each conversation has that the viewer has not read.
 
-        Visible is what a reader of the conversation sees: non-internal user
-        and assistant rows with content, at its top level. A message the viewer
+        Visible is what a reader of the conversation sees: non-internal rows of
+        ``THREAD_VISIBLE_ROLES`` with content, at its top level, a failed
+        turn's error included. A message the viewer
         wrote themselves -- a user row under any of ``viewer_keys``, the ids
         their logins store -- is never unread to them. Conversations with
         nothing unread are absent.
@@ -377,7 +381,7 @@ class ConversationThreadsRepository(BaseRepository):
             .where(
                 history.c.conversation_id.in_(list(conversation_ids)),
                 history.c.is_internal.is_(False),
-                history.c.role.in_(["user", "assistant"]),
+                history.c.role.in_(THREAD_VISIBLE_ROLES),
                 history.c.content.isnot(None),
                 history.c.subconversation_id.is_(None),
                 or_(

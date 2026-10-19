@@ -49,7 +49,7 @@ from family_assistant.tools import (
 from tests.mocks.mock_llm import LLMOutput, MatcherArgs, RuleBasedMockLLMClient
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncIterator, Mapping
 
     from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -431,6 +431,45 @@ async def test_a_job_the_assistant_gives_up_on_is_failed(world: World) -> None:
     summary = await world.summary()
     assert (summary.state, summary.closed_by) == ("failed", "assistant")
     assert len(await world.echoes()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_turn_that_errors_fails_the_thread(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider failure is never presented as the user's move, and is unread."""
+    await world.in_thread("ask me which system I want")
+
+    def provider_down(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        async def stream() -> AsyncIterator[object]:
+            raise RuntimeError("The provider is down.")
+            yield  # pragma: no cover - makes this an async generator
+
+        return stream()
+
+    monkeypatch.setattr(world.thread_llm, "generate_response_stream", provider_down)
+    result = await world.thread_service.handle_chat_interaction(
+        db_context=world.db,
+        interface_type="web",
+        conversation_id=THREAD,
+        trigger_content_parts=[{"type": "text", "text": "Gas, please."}],
+        trigger_interface_message_id=None,
+        user_name="Alice",
+        user_id=USER,
+        chat_interface=MagicMock(spec=ChatInterface),
+    )
+    latest = (await world.db.message_history.latest_visible_messages([THREAD]))[THREAD]
+    await world.db.conversation_threads.mark_read(
+        THREAD, viewer_user_id=USER, through_message_id=latest.internal_id - 1, now=NOW
+    )
+
+    summary = await world.summary()
+    unread = await world.db.conversation_threads.unread_counts(
+        [THREAD], viewer_user_id=USER, viewer_keys={USER}
+    )
+    assert result.error_traceback is not None
+    assert (latest.role, summary.state) == ("error", "failed")
+    assert unread == {THREAD: 1}
 
 
 @pytest.mark.asyncio

@@ -569,9 +569,10 @@ class ThreadSummaryResponse(BaseModel):
         ...,
         description=(
             "working while a turn, the starting run or background work is in "
-            "progress; done or failed when the thread was closed (or its "
-            "starting run failed) and nothing visible has arrived since -- "
-            "anything that does reopens it; waiting otherwise"
+            "progress; done or failed when the thread was closed, or failed "
+            "when its latest turn or starting run failed, and nothing visible "
+            "has arrived since -- anything that does reopens it; waiting "
+            "otherwise"
         ),
     )
     closed_by: Literal["assistant", "user"] | None = Field(

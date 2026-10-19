@@ -127,6 +127,46 @@ def test_a_close_after_a_failed_run_wins() -> None:
     assert derived.state == "done"
 
 
+def test_a_turn_whose_error_is_the_latest_thing_is_failed() -> None:
+    derived = derive_state(
+        run_status="completed",
+        run_completed_at=FAILED_AT,
+        work_in_progress=False,
+        latest_visible_at=FAILED_AT + MINUTE,
+        latest_visible_is_error=True,
+    )
+
+    assert derived.state == "failed"
+
+
+def test_an_error_in_a_later_turn_fails_a_closed_thread() -> None:
+    derived = derive_state(
+        run_status="completed",
+        run_completed_at=FAILED_AT,
+        work_in_progress=False,
+        latest_visible_at=CLOSED_AT + MINUTE,
+        latest_visible_turn_id="turn-later",
+        latest_visible_is_error=True,
+        close=_close(),
+    )
+
+    assert (derived.state, derived.close) == ("failed", None)
+
+
+def test_an_error_in_the_closing_turn_leaves_the_thread_closed() -> None:
+    derived = derive_state(
+        run_status="completed",
+        run_completed_at=FAILED_AT,
+        work_in_progress=False,
+        latest_visible_at=CLOSED_AT + MINUTE,
+        latest_visible_turn_id=CLOSING_TURN,
+        latest_visible_is_error=True,
+        close=_close(),
+    )
+
+    assert derived.state == "done"
+
+
 def test_a_run_failing_after_its_turn_closed_the_thread_is_failed() -> None:
     derived = derive_state(
         run_status="failed",

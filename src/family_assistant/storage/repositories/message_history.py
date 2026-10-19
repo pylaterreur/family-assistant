@@ -407,6 +407,14 @@ class ToolHistoryExample:
     tool_call_id: str
 
 
+THREAD_VISIBLE_ROLES: tuple[str, ...] = ("user", "assistant", "error")
+"""Roles a reader of a thread sees: its messages, and a failed turn's error.
+
+One definition for a thread's latest message, the failure it implies, and the
+reader's unread count, so they cannot disagree about what is visible.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class LatestVisibleMessage:
     """A conversation's newest visible message."""
@@ -2500,15 +2508,16 @@ class MessageHistoryRepository(BaseRepository):
     ) -> dict[str, LatestVisibleMessage]:
         """Each conversation's newest message a reader of it would see.
 
-        Visible means what the conversation list shows: a non-internal user or
-        assistant row with content, at the top level of the conversation.
+        Visible means a non-internal row of :data:`THREAD_VISIBLE_ROLES` with
+        content, at the top level of the conversation. A failed turn's error
+        row counts: it is what the reader sees, and it is how a failure shows.
         """
         if not conversation_ids:
             return {}
         visible = (
             message_history_table.c.conversation_id.in_(list(conversation_ids)),
             message_history_table.c.is_internal.is_(False),
-            message_history_table.c.role.in_(["user", "assistant"]),
+            message_history_table.c.role.in_(THREAD_VISIBLE_ROLES),
             message_history_table.c.content.isnot(None),
             message_history_table.c.subconversation_id.is_(None),
         )
