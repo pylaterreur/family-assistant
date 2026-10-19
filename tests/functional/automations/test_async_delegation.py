@@ -2895,6 +2895,7 @@ class FakePollableService:
         # taint metadata from the sources, a local pollable one reads the state.
         self.submitted_taint_sources: list[object] = []
         self.submitted_taint_states: list[object] = []
+        self.submitted_model_selections: list[ResolvedModelSelection | None] = []
         self.cancelled: list[str] = []
         self.inline_calls = 0
 
@@ -2932,10 +2933,12 @@ class FakePollableService:
         acting_user_id: str | None = None,
         initial_taint_state: object | None = None,
         source_turn_id: str | None = None,
+        model_selection: ResolvedModelSelection | None = None,
     ) -> RemoteSubmission:
         _ = (content_parts, user_name, db_context, acting_user_id, source_turn_id)
         self.submitted_taint_sources.append(initial_taint_sources)
         self.submitted_taint_states.append(initial_taint_state)
+        self.submitted_model_selections.append(model_selection)
         error = self._submit_error
         if self._submit_errors is not None:
             error = self._submit_errors.pop(0) if self._submit_errors else None
@@ -3420,6 +3423,44 @@ async def test_a_pollable_submit_carries_the_parent_taint_as_sources_and_state(
     ] == [SourceTrustTier.UNKNOWN_EXTERNAL]
     submitted_state = cast("TurnTaintState", target.submitted_taint_states[0])
     assert submitted_state.max_tier is SourceTrustTier.UNKNOWN_EXTERNAL
+
+
+@pytest.mark.asyncio
+async def test_a_pollable_submit_carries_the_runs_frozen_tier(
+    db_engine: AsyncEngine,
+) -> None:
+    """A delegation that asked for a tier is submitted at that tier.
+
+    On an Antigravity target the tier is the agent's reasoning model, so a
+    submit that dropped it would run a request for one model on another.
+    """
+    target = FakePollableService()
+    processing_service = _source_processing_service(
+        cast("FakeDelegatableService", target)
+    )
+    chat_interface = AsyncMock(spec=ChatInterface)
+    selection = ResolvedModelSelection(
+        tier="gemini_4_argon", requested="gemini_4_argon", source="model"
+    )
+
+    db_context = Database(engine=db_engine)
+    await _create_run(
+        db_context,
+        delegation_id="delegation_tier_carried",
+        model_selection=selection,
+    )
+    await db_context.delegation_runs.mark_handed_off(
+        "delegation_tier_carried", SystemClock().now()
+    )
+    worker = _build_worker(db_engine, processing_service, chat_interface)
+    await worker.handle_delegated_profile_run(
+        _tool_context(Database(engine=db_engine), processing_service, chat_interface),
+        _payload("delegation_tier_carried"),
+    )
+
+    submitted = target.submitted_model_selections[0]
+    assert submitted is not None
+    assert submitted.tier == "gemini_4_argon"
 
 
 @pytest.mark.asyncio

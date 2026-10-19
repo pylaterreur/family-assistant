@@ -176,6 +176,7 @@ def _make_service(
     taint_policy: TaintPolicyConfig | None = None,
     tools_provider: ToolsProvider | None = None,
     clock: Clock | None = None,
+    tier_llm_clients: dict[str, LLMInterface] | None = None,
 ) -> InteractionsAgentProcessingService:
     config = ProcessingServiceConfig(
         prompts={"system_prompt": "You are a research assistant for {user_name}."},
@@ -197,6 +198,7 @@ def _make_service(
         attachment_registry=attachment_registry,
         taint_policy=taint_policy,
         clock=clock,
+        tier_llm_clients=tier_llm_clients,
     )
 
 
@@ -209,6 +211,45 @@ def _state_from(sources: list[TaintSource]) -> TurnTaintState:
 
 def _google_client() -> GoogleGenAIClient:
     return GoogleGenAIClient(api_key="test", model="deep-research-preview-04-2026")
+
+
+def _antigravity_client(reasoning_model: str) -> GoogleGenAIClient:
+    client = GoogleGenAIClient(
+        api_key="test",
+        model="antigravity-preview-09-2026",
+        antigravity_model=reasoning_model,
+    )
+    interaction = AsyncMock()
+    interaction.id = f"inter_{reasoning_model}"
+    client.start_agent_interaction = AsyncMock(return_value=interaction)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_submit_async_starts_the_run_on_its_frozen_tier(
+    db_engine: AsyncEngine,
+) -> None:
+    """A delegation that asked for a tier is started by that tier's client.
+
+    On an Antigravity profile the tier is the agent's reasoning model, so
+    starting it on the default client would run a request for Argon on Flash.
+    """
+    flash = _antigravity_client("gemini-3.8-flash")
+    argon = _antigravity_client("gemini-4-argon")
+    service = _make_service(flash, tier_llm_clients={"flash": flash, "argon": argon})
+
+    submission = await service.submit_async(
+        [{"type": "text", "text": "Prove the bound."}],
+        conversation_id="conv-1",
+        subconversation_id="sub-1",
+        user_name="Andrew",
+        db_context=Database(db_engine),
+        model_selection=ResolvedModelSelection(
+            tier="argon", requested="argon", source="model"
+        ).freeze(),
+    )
+
+    assert submission.remote_task_id == "inter_gemini-4-argon"
 
 
 @pytest.mark.asyncio

@@ -64,8 +64,10 @@ if TYPE_CHECKING:
 
     from google.genai.interactions import Interaction
 
+    from family_assistant.llm import LLMInterface
     from family_assistant.llm.content_parts import ContentPartDict
     from family_assistant.llm.messages import LLMMessage, MessageReasoningInfo
+    from family_assistant.llm.model_selection import ResolvedModelSelection
     from family_assistant.services.attachment_registry import AttachmentMetadata
     from family_assistant.storage.database import Database
 
@@ -255,8 +257,14 @@ class InteractionsAgentProcessingService(ProcessingService):
         prompt = super().format_system_prompt(user_name=user_name)
         return f"{prompt}\n\nCurrent time: {self.current_time_str()}".strip()
 
-    def _google_client(self) -> GoogleGenAIClient:
-        client = self.llm_client
+    def _google_client(self, client: LLMInterface | None = None) -> GoogleGenAIClient:
+        """The Google client *client* is, the default tier's when omitted.
+
+        Reading, polling and cancelling an interaction go by its id alone, so
+        any of the profile's clients serves them; only starting one depends on
+        the run's tier, which picks the agent's reasoning model.
+        """
+        client = client or self.llm_client
         if not isinstance(client, GoogleGenAIClient):
             raise TypeError(
                 "InteractionsAgentProcessingService requires a GoogleGenAIClient, "
@@ -286,6 +294,7 @@ class InteractionsAgentProcessingService(ProcessingService):
         acting_user_id: str | None,
         db_context: Database,
         messages: Sequence[LLMMessage],
+        llm_client: LLMInterface,
     ) -> None:
         """Authorize a pollable submit through the shared reviewer chokepoint.
 
@@ -322,9 +331,7 @@ class InteractionsAgentProcessingService(ProcessingService):
             turn_id=turn_id,
             db_context=db_context,
             processing_service=self,
-            # An Interactions API agent is configured inline on its profile,
-            # never as an interchangeable tier.
-            llm_client=self.llm_client,
+            llm_client=llm_client,
             clock=self.clock,
             plugins=self.plugins,
             event_sources=self.event_sources,
@@ -450,6 +457,7 @@ class InteractionsAgentProcessingService(ProcessingService):
         acting_user_id: str | None = None,
         initial_taint_state: TurnTaintState | None = None,
         source_turn_id: str | None = None,
+        model_selection: ResolvedModelSelection | None = None,
     ) -> RemoteSubmission:
         """Start the agent interaction without blocking on its result.
 
@@ -466,7 +474,11 @@ class InteractionsAgentProcessingService(ProcessingService):
         Attachments are mounted into the sandbox and their taint folded into
         the sink evaluation, which happens *after* they are resolved so a file
         the caller routed counts toward the tier that gates the run.
+
+        ``model_selection`` is the run's frozen tier envelope; on an Antigravity
+        profile the tier is the model the agent reasons with.
         """
+        _, llm_client = self._run_binding(model_selection)
         environment_sources, attachment_taint = await self._build_environment_sources(
             content_parts, db_context=db_context, acting_user_id=acting_user_id
         )
@@ -498,6 +510,7 @@ class InteractionsAgentProcessingService(ProcessingService):
             acting_user_id=acting_user_id,
             db_context=db_context,
             messages=messages,
+            llm_client=llm_client,
         )
 
         previous_interaction_id: str | None = None
@@ -515,7 +528,7 @@ class InteractionsAgentProcessingService(ProcessingService):
         # so the profile it should be attributed to is established here.
         token = set_processing_profile(self.service_config.id)
         try:
-            interaction = await self._google_client().start_agent_interaction(
+            interaction = await self._google_client(llm_client).start_agent_interaction(
                 messages,
                 previous_interaction_id=previous_interaction_id,
                 environment_sources=environment_sources or None,
@@ -739,9 +752,8 @@ class InteractionsAgentProcessingService(ProcessingService):
         """
         client = self._google_client()
         record_llm_call(
-            # An Interactions API agent is configured inline on its profile,
-            # never as an interchangeable tier, so the attribution carries no
-            # model selection.
+            # The terminal hooks see the interaction, not the run, so the
+            # attribution carries no model selection.
             attribution=CallAttribution(profile_id=self.service_config.id),
             provider="google",
             model=client.model_name,
@@ -806,9 +818,8 @@ class InteractionsAgentProcessingService(ProcessingService):
             duration_seconds = _interaction_duration_seconds(interaction)
 
         record_llm_call(
-            # An Interactions API agent is configured inline on its profile,
-            # never as an interchangeable tier, so the attribution carries no
-            # model selection.
+            # The terminal hooks see the interaction, not the run, so the
+            # attribution carries no model selection.
             attribution=CallAttribution(profile_id=self.service_config.id),
             provider="google",
             model=self._google_client().model_name,

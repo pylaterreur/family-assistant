@@ -404,9 +404,10 @@ def delegation_sink_class(
     under that taint, and its result taint folds back into the caller, so the
     handoff itself sends nothing anywhere the delegate's own sinks do not
     already account for. A remote A2A agent or a server-side Interactions API
-    agent -- named inline, inherited as the global default, or anywhere in the
-    retry chain; a model tier cannot name one -- is outside that loop, so it
-    declares nothing here and keeps the conservative tag-only classification.
+    agent -- configured through ``antigravity_config``, named inline, inherited
+    as the global default, or anywhere in the retry chain; a model tier cannot
+    name one -- is outside that loop, so it declares nothing here and keeps the
+    conservative tag-only classification.
     """
     declared = profile.processing_config.taint_sink_class
     if declared is not None:
@@ -420,6 +421,7 @@ def delegation_sink_class(
     )
     if (
         profile.remote_a2a
+        or processing_config.antigravity_config is not None
         or (
             processing_config.model_tier is None
             and is_interactions_agent_model(
@@ -520,51 +522,72 @@ def _antigravity_models_in_retry_config(retry_config: RetryConfig | None) -> lis
 def validate_antigravity_agent_config(
     profile_id: str,
     processing_config: ProcessingConfig,
-    llm_model: str,
+    default_model: str,
 ) -> None:
     """Reject Antigravity profile settings that would fail silently at runtime.
 
-    The agent exists only on the Interactions API, reached through the Google
-    client, so three configurations produce a plausible-looking answer instead
-    of an error and are refused here:
+    ``antigravity_config`` is the only way to run the agent: its ``agent``
+    names the managed agent, and the profile's ``model_tier`` names the model
+    it reasons with. Each configuration refused here would otherwise produce a
+    plausible-looking answer instead of an error:
 
-    - ``antigravity_config`` on a profile that is not the agent, where the
-      settings would simply be discarded;
+    - the agent id as an inline ``llm_model`` (or as the application default),
+      which runs it with no reasoning model, sandbox or token cap of its own;
     - the agent anywhere in a ``retry_config`` chain -- as a fallback it would
-      never run, and as a primary the profile is built from the retry format,
-      which carries neither ``antigravity_config`` nor (when ``llm_model`` is
-      left unset) the model id the pollable-service selection reads, so a
-      delegated run would silently take the inline path;
-    - a non-Google ``provider`` alongside the agent's model id, which builds an
-      OpenAI or Anthropic client and sends the agent id as an ordinary chat
-      model.
-    """
-    is_antigravity_profile = is_antigravity_model(llm_model)
-    if processing_config.antigravity_config and not is_antigravity_profile:
-        raise ValueError(
-            f"Profile '{profile_id}' sets antigravity_config but its model is "
-            f"'{llm_model}', which is not an Antigravity managed agent"
-        )
+      never run, and as a primary the retry format carries none of the agent's
+      settings, so a delegated run would silently take the inline path;
+    - ``antigravity_config`` with an inline model or no tier, where either the
+      settings or the model would simply be discarded;
+    - an ``agent`` that is not an Antigravity id, which the client would send
+      as an ordinary chat model.
 
+    What a tier must look like to be the agent's reasoning model is checked
+    with the rest of tier eligibility, in ``validate_profile_model_tier``.
+    """
     retry_chain_models = _antigravity_models_in_retry_config(
         processing_config.retry_config
     )
-    if retry_chain_models or (
-        is_antigravity_profile and processing_config.retry_config is not None
-    ):
-        named = ", ".join(retry_chain_models) or llm_model
+    if retry_chain_models:
         raise ValueError(
-            f"Profile '{profile_id}' uses the Antigravity managed agent "
-            f"('{named}') with retry_config, which is unsupported (the agent "
-            "requires the single Google GenAI client). Set it as llm_model with "
-            "no retry_config instead."
+            f"Profile '{profile_id}' names the Antigravity managed agent "
+            f"({', '.join(retry_chain_models)}) in retry_config, which is "
+            "unsupported (the agent requires the single Google GenAI client). "
+            "Configure it with antigravity_config and a model_tier instead."
         )
 
-    if is_antigravity_profile and processing_config.provider != "google":
+    antigravity_config = processing_config.antigravity_config
+    if antigravity_config is None:
+        inline_model = processing_config.llm_model or default_model
+        if processing_config.model_tier is None and is_antigravity_model(inline_model):
+            raise ValueError(
+                f"Profile '{profile_id}' names the Antigravity managed agent "
+                f"'{inline_model}' as its model. Set antigravity_config.agent "
+                "to it and choose the reasoning model with model_tier instead."
+            )
+        return
+
+    if not is_antigravity_model(antigravity_config.agent):
         raise ValueError(
-            f"Profile '{profile_id}' uses the Antigravity managed agent but "
-            f"provider is '{processing_config.provider}' (must be 'google' -- the "
-            "agent only exists on Google's Interactions API)"
+            f"Profile '{profile_id}' sets antigravity_config.agent to "
+            f"'{antigravity_config.agent}', which is not an Antigravity "
+            "managed agent"
+        )
+    inline = [
+        key
+        for key in ("provider", "llm_model", "retry_config")
+        if getattr(processing_config, key) is not None
+    ]
+    if inline:
+        raise ValueError(
+            f"Profile '{profile_id}' sets antigravity_config alongside "
+            f"{', '.join(inline)}. The agent's reasoning model comes from "
+            "model_tier, so an inline model would be discarded."
+        )
+    if processing_config.model_tier is None:
+        raise ValueError(
+            f"Profile '{profile_id}' sets antigravity_config without a "
+            "model_tier, so the agent has no reasoning model. Name a tier "
+            "whose chain is a single Google model."
         )
 
 
@@ -1791,7 +1814,7 @@ class Assistant:
         if profile_override is None:
             self._validate_computer_use_config(profile_conf, profile_llm_model)
             validate_antigravity_agent_config(
-                profile_id, profile_conf.processing_config, profile_llm_model
+                profile_id, profile_conf.processing_config, self.config.model
             )
 
         default_tier = tier_eligibility.default_tier
@@ -1821,7 +1844,11 @@ class Assistant:
             if override is not None:
                 clients[option.id] = override
                 continue
-            clients[option.id] = self._tier_llm_client(option.id)
+            clients[option.id] = (
+                self._antigravity_tier_llm_client(profile_conf, option.id)
+                if profile_conf.processing_config.antigravity_config is not None
+                else self._tier_llm_client(option.id)
+            )
             logger.info(
                 "Profile '%s' tier '%s' using client: %s",
                 profile_id,
@@ -1840,6 +1867,38 @@ class Assistant:
             client = LLMClientFactory.create_client(config=client_config)
             self._tier_llm_clients[tier_id] = client
         return client
+
+    def _antigravity_tier_llm_client(
+        self, profile_conf: ServiceProfile, tier_id: str
+    ) -> LLMInterface:
+        """The agent, reasoning with *tier_id*'s model, for this profile alone.
+
+        Not shared like a chat tier's client: the request goes to the profile's
+        agent, under its token cap and sandbox environment, and the tier only
+        supplies the reasoning model. ``validate_profile_model_tier`` has
+        already established that the tier is exactly one Google model.
+        """
+        antigravity_config = profile_conf.processing_config.antigravity_config
+        assert antigravity_config is not None
+        reasoning_model = self.config.model_tiers[tier_id].chain[0].model
+        logger.info(
+            "Creating Antigravity client for profile '%s' tier '%s' "
+            "(agent '%s', reasoning model '%s')",
+            profile_conf.id,
+            tier_id,
+            antigravity_config.agent,
+            reasoning_model,
+        )
+        return LLMClientFactory.create_client(
+            config={
+                "provider": "google",
+                "model": antigravity_config.agent,
+                "model_parameters": self.config.llm_parameters,
+                "antigravity_model": reasoning_model,
+                "antigravity_max_total_tokens": antigravity_config.max_total_tokens,
+                "antigravity_environment": antigravity_config.environment,
+            }
+        )
 
     @staticmethod
     def _validate_computer_use_config(
@@ -1895,16 +1954,6 @@ class Assistant:
             client_config["computer_use_excluded_functions"] = (
                 profile_proc_conf.computer_use_excluded_functions
             )
-        if profile_proc_conf.antigravity_config:
-            client_config.update({
-                "antigravity_model": profile_proc_conf.antigravity_config.model,
-                "antigravity_max_total_tokens": (
-                    profile_proc_conf.antigravity_config.max_total_tokens
-                ),
-                "antigravity_environment": (
-                    profile_proc_conf.antigravity_config.environment
-                ),
-            })
         logger.info(
             "Creating LLM client for profile '%s' with model='%s'%s",
             profile_conf.id,

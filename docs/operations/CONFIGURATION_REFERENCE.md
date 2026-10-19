@@ -1118,13 +1118,19 @@ Refused at startup, because the runtime is coupled to one provider or one API su
 offers to replace it:
 
 - `enable_computer_use` profiles (Google GenAI client only).
-- profiles with `antigravity_config`, and any tier whose chain names an Interactions API agent
-  (Antigravity or Deep Research) — those run server-side rather than as chat models.
+- any tier whose chain names an Interactions API agent (Antigravity or Deep Research) — those run
+  server-side rather than as chat models.
 - `remote_a2a` profiles, where the remote agent chooses its own model. A remote profile inherits no
   model selection at all — neither a tier nor an inline model reaches it from
   `default_profile_settings` — so only a `model_tier` written on the profile itself is refused.
 - profiles pinned for perception reasons rather than by a config flag, such as `media_analyst` (only
   the Gemini adapter represents audio and video), which stay on an inline model by choice.
+
+Profiles with `antigravity_config` are the exception: they **require** a tier, and the tier names
+the model the agent reasons with rather than the model a request is sent to. Every tier such a
+profile can reach — default, `allowed_model_tiers`, `auto_model_tiers`, `delegation_model_tiers` —
+must be exactly one Google model with no `llm_parameters`; see
+[antigravity_config](#antigravity_config).
 
 ______________________________________________________________________
 
@@ -3480,22 +3486,29 @@ ______________________________________________________________________
 
 ### antigravity_config
 
-Per-profile `processing_config` block tuning the Google Antigravity managed agent. Read only when
-`llm_model` names the agent (`antigravity-preview-09-2026` or a later `antigravity-*` revision);
-setting it on any other profile is a startup error rather than a silently discarded block.
+Per-profile `processing_config` block that runs the profile on the Google Antigravity managed agent.
+`agent` names the agent revision (`antigravity-preview-09-2026` or a later `antigravity-*`
+revision); a value that is not an Antigravity id is a startup error.
 
 | Property  | Value                                                                   |
 | --------- | ----------------------------------------------------------------------- |
 | Required  | No                                                                      |
-| Default   | `model: gemini-3.8-flash`, no token cap, no environment                 |
+| Default   | Unset (the profile is not an Antigravity profile)                       |
 | Sensitive | No (credentials are named by env var, never written here)               |
-| Values    | `model` (string), `max_total_tokens` (int > 0), `environment` (mapping) |
+| Values    | `agent` (string, required), `max_total_tokens` (int > 0), `environment` |
 
-`model` is the model the agent reasons with — the Gemini 3.x Flash family, `gemini-3.8-flash` being
-the current default. It is pinned in `defaults.yaml` rather than left to the API, so an upstream
-default change shows up as a config change. `max_total_tokens` caps what a single run may spend;
-unset leaves the API's own default, which together with `max_async_seconds` is the only bound on how
-long an autonomous run iterates.
+**The reasoning model is the profile's `model_tier`.** The agent takes its model from the caller,
+and on an Antigravity profile a tier's single chain entry is that model. So the profile must name a
+tier and must not set `provider`, `llm_model` or `retry_config`, and every tier it can reach must be
+exactly one Google model with no `llm_parameters` (the agent has no fallback and takes no request
+parameters). The shipped `coder` defaults to `gemini_3_8_flash` and admits `gemini_4_argon` from a
+person (`allowed_model_tiers`) and from a delegating model (`delegation_model_tiers`); a deployment
+can add another model the agent accepts as a one-model tier and list it the same way.
+
+`max_total_tokens` caps what a single run may spend; unset leaves the API's own default, which
+together with `max_async_seconds` is the only bound on how long an autonomous run iterates. A
+stronger reasoning model spends faster, so a cap is worth considering on a deployment that admits
+one.
 
 #### `environment`: sandbox egress and injected credentials
 
@@ -3587,10 +3600,9 @@ reads the open web (`[A]`). Three layers bound that, in the order they take effe
 See
 [antigravity-environment-and-credentials.md](../design/antigravity-environment-and-credentials.md).
 
-The agent runs server-side on the Interactions API, so the profile must use `provider: "google"` and
-must not set `retry_config` — a fallback would be an ordinary chat completion answering from the
-model's own knowledge instead of running the task, which is why that combination is rejected at
-startup. It needs `GEMINI_API_KEY` like any other Google profile.
+The agent runs server-side on the Interactions API, so naming it anywhere in a `retry_config` is
+rejected at startup — a fallback would be an ordinary chat completion answering from the model's own
+knowledge instead of running the task. It needs `GEMINI_API_KEY` like any other Google profile.
 
 The shipped profile using it is `coder` (slash command `/coder`), which holds no tools at all: the
 agent works in a Google-hosted sandbox with no access to household data. See
@@ -3600,10 +3612,9 @@ agent works in a Google-hosted sandbox with no access to household data. See
 service_profiles:
   - id: "coder"
     processing_config:
-      provider: "google"
-      llm_model: "antigravity-preview-09-2026"
+      model_tier: "gemini_3_8_flash"
       antigravity_config:
-        model: "gemini-3.8-flash"
+        agent: "antigravity-preview-09-2026"
         max_total_tokens: 250000
         environment:
           network: "allowlist"

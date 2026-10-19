@@ -161,10 +161,14 @@ llm_parameters:
 #
 # Profiles whose runtime is coupled to one provider or one API surface stay
 # pinned to an inline model and are refused a tier at startup: computer use
-# (Google only), the Antigravity managed agent and the Deep Research agents
-# (Interactions API, not chat), media analysis (only the Gemini adapter
-# represents audio and video), and remote A2A profiles (the remote agent picks
-# its own model).
+# (Google only), the Deep Research agents (Interactions API, not chat), media
+# analysis (only the Gemini adapter represents audio and video), and remote A2A
+# profiles (the remote agent picks its own model).
+#
+# The Antigravity managed agent is the exception, because the caller chooses
+# its reasoning model: on a profile with `antigravity_config`, a tier names that
+# model, so every tier such a profile can reach must be exactly one Google
+# model with no fallback (the agent has none) and no `llm_parameters`.
 model_tiers:
   standard:
     label: "Standard"
@@ -290,6 +294,14 @@ model_tiers:
     chain:
       - provider: "google"
         model: "gemini-4-argon"
+  # `standard` minus its fallback, for a profile that cannot fall back: coder's
+  # default, where the tier is the Antigravity agent's reasoning model.
+  gemini_3_8_flash:
+    label: "Gemini 3.8 Flash"
+    description: "Google's fast, inexpensive Gemini model."
+    chain:
+      - provider: "google"
+        model: "gemini-3.8-flash"
 
 # The Auto classifier: a cheap call before the turn that picks which of a
 # profile's `auto_model_tiers` the request deserves. It runs only for profiles
@@ -1685,12 +1697,16 @@ service_profiles:
       - "/research_max"
   - id: "coder"
     user_selectable: true
-    description: "Coding agent. Writes and runs code, works with files, and reads the web to get a self-contained programming or computation task DONE — write and test a script, transform or analyse data, debug a snippet, work out a result — returning the finished output rather than instructions. Runs on the Google Antigravity managed agent (Gemini 3.8 Flash) in a throwaway Google-hosted Linux sandbox, so it sees nothing but the text of the request: no notes, calendar, documents, Home Assistant or other Family Assistant tools, and no shared workspace. Attachments you pass are mounted as files in its sandbox under /workspace, so hand it the file rather than pasting the contents. Choose it over spawn_worker when the task needs no files from the shared workspace and you want the result back in the conversation; choose spawn_worker when the agent must read or write shared workspace files, and complex_tasks when the task needs the family's own data."
+    description: "Coding agent. Writes and runs code, works with files, and reads the web to get a self-contained programming or computation task DONE — write and test a script, transform or analyse data, debug a snippet, work out a result — returning the finished output rather than instructions. Runs on the Google Antigravity managed agent in a throwaway Google-hosted Linux sandbox,, so it sees nothing but the text of the request: no notes, calendar, documents, Home Assistant or other Family Assistant tools, and no shared workspace. Attachments you pass are mounted as files in its sandbox under /workspace, so hand it the file rather than pasting the contents. Choose it over spawn_worker when the task needs no files from the shared workspace and you want the result back in the conversation; choose spawn_worker when the agent must read or write shared workspace files, and complex_tasks when the task needs the family's own data. It reasons with a fast, inexpensive model by default; ask for a stronger model_tier only for a problem the default has failed at or is plainly not up to, since it costs many times more."
+    # The tier is the model the agent reasons with. Flash is the default
+    # because it is a fraction of Argon's cost and enough for most requests;
+    # Argon is a choice someone makes, never Auto's.
+    allowed_model_tiers: ["gemini_3_8_flash", "gemini_4_argon"]
+    delegation_model_tiers: ["gemini_4_argon"]
     processing_config:
-      provider: "google"
-      llm_model: "antigravity-preview-09-2026"
+      model_tier: "gemini_3_8_flash"
       antigravity_config:
-        model: "gemini-3.8-flash"
+        agent: "antigravity-preview-09-2026"
       # A whole turn here runs code in a sandbox with network access, which is
       # the same privilege spawn_worker holds -- so it is gated the same way,
       # by the runtime taint matrix rather than by trusting the caller. The

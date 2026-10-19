@@ -186,6 +186,7 @@ class PollableDelegationService(Protocol):
         acting_user_id: str | None = None,
         initial_taint_state: TurnTaintState | None = None,
         source_turn_id: str | None = None,
+        model_selection: ResolvedModelSelection | None = None,
     ) -> RemoteSubmission:
         """Submit without a client-supplied task id; the remote assigns one.
 
@@ -199,6 +200,8 @@ class PollableDelegationService(Protocol):
         implementation that resolves owner-scoped artifacts (attachments)
         rather than only text. ``source_turn_id`` is the delegating turn, for
         an implementation that audits a decision on that turn's behalf.
+        ``model_selection`` is the tier envelope frozen with the run, for an
+        implementation whose models are selectable; ``None`` is its default.
         """
         ...
 

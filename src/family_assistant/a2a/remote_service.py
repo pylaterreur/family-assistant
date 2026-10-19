@@ -200,6 +200,7 @@ class RemoteA2AService:
         acting_user_id: str | None = None,
         initial_taint_state: TurnTaintState | None = None,
         source_turn_id: str | None = None,
+        model_selection: ResolvedModelSelection | None = None,
     ) -> RemoteSubmission:
         """Submit to the remote agent without blocking; the remote assigns the id.
 
@@ -211,13 +212,15 @@ class RemoteA2AService:
         in ``terminal_result`` so the caller can complete without polling.
         ``acting_user_id`` scopes the attachments this turn may send and owns
         any file the remote returns terminally. ``user_name``, ``db_context``,
-        ``initial_taint_state`` and ``source_turn_id`` are unused: the remote agent's own
+        ``initial_taint_state``, ``source_turn_id`` and ``model_selection`` are
+        unused (the remote agent chooses its own model): the remote agent's own
         context_id already carries continuity, unlike a local pollable target,
         and this service reads attachments through its own registry handle.
         """
         _ = user_name
         _ = db_context
         _ = initial_taint_state
+        _ = model_selection
         context_id = self._context_id(conversation_id, subconversation_id)
         logger.info(
             "Submitting async request to remote A2A agent '%s' (context_id=%s)",

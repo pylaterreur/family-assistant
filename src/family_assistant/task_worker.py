@@ -2719,6 +2719,7 @@ class TaskWorker:
                 acting_user_id=run["user_id"],
                 initial_taint_state=_taint_state_from_delegation_run(run),
                 source_turn_id=run["source_turn_id"],
+                model_selection=_model_selection_from_delegation_run(run),
             )
         except Exception as exc:
             await self._handle_submit_failure(
@@ -2851,6 +2852,7 @@ class TaskWorker:
                 acting_user_id=run["user_id"],
                 initial_taint_state=_taint_state_from_delegation_run(run),
                 source_turn_id=run["source_turn_id"],
+                model_selection=_model_selection_from_delegation_run(run),
             )
         except Exception as exc:
             await self._handle_submit_failure(
