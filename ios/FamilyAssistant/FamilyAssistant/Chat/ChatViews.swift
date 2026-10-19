@@ -814,6 +814,28 @@ struct ChatMessageListLayoutProbe: View {
 }
 #endif
 
+/// Reports whether the bottom sentinel is actually in the viewport. An eager
+/// child of a `ScrollView` stays mounted when scrolled out of view, so its
+/// appearance alone cannot say the reader is at the bottom; iOS 18's scroll
+/// visibility can. iOS 17 falls back to appearance.
+private struct BottomVisibilityReporter: ViewModifier {
+    let report: ((Bool) -> Void)?
+
+    func body(content: Content) -> some View {
+        if let report {
+            if #available(iOS 18.0, *) {
+                content.onScrollVisibilityChange(threshold: 0.01) { report($0) }
+            } else {
+                content
+                    .onAppear { report(true) }
+                    .onDisappear { report(false) }
+            }
+        } else {
+            content
+        }
+    }
+}
+
 /// A vertically scrolling container that keeps the newest content pinned to the
 /// bottom as it grows — but only when the caller's `shouldFollow` gate allows,
 /// and NEVER with animation.
@@ -896,14 +918,9 @@ struct StickyBottomScroll<Content: View>: View {
                     .frame(height: 1)
                     .id(Self.bottomAnchorID)
                     .accessibilityHidden(true)
-                    .onAppear {
-                        isNearBottom = true
-                        onNearBottomChange?(true)
-                    }
-                    .onDisappear {
-                        isNearBottom = false
-                        onNearBottomChange?(false)
-                    }
+                    .onAppear { isNearBottom = true }
+                    .onDisappear { isNearBottom = false }
+                    .modifier(BottomVisibilityReporter(report: onNearBottomChange))
             }
             .onAppear {
                 // The list can mount already populated (a restored thread, or

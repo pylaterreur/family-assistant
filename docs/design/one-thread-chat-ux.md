@@ -320,7 +320,9 @@ and each path is governed:
 - **iOS marks read only what is on screen, a moment after it settles.** Home or a thread is marked
   read through its newest saved message once the reader has been at the bottom, with the app in the
   foreground, for about a second. A reply still streaming is marked when it is saved. A failed mark
-  is retried only when a newer message arrives, never in a loop.
+  is retried only when a newer message arrives, never in a loop. "At the bottom" comes from the
+  scroll view's own visibility report, which iOS 17 lacks. There it falls back to the bottom of the
+  transcript having appeared, which can stay true after scrolling up within the loaded page.
 
 ## Decisions
 
