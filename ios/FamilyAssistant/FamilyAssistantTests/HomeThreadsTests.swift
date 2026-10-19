@@ -470,19 +470,19 @@ final class HomeThreadsTests: XCTestCase {
 
         model.setOnScreen(true)
         model.setScrolledToLatest(true)
+        await model.settleReadMarker()
 
-        try await waitUntil { reads.values.count == 1 }
         XCTAssertEqual(reads.values, [#"{"through_message_id":3}"#])
         XCTAssertEqual(reported.map(\.0), ["home"])
         XCTAssertEqual(reported.map(\.1), [0])
 
         // A streamed token changes no persisted message: nothing more to mark.
         model.messages[model.messages.count - 1].text += " more"
-        try await Task.sleep(for: .milliseconds(150))
+        await model.settleReadMarker()
         XCTAssertEqual(reads.values.count, 1, "Marking read never follows streamed tokens.")
 
         model.messages.append(persistedMessage(id: 7))
-        try await waitUntil { reads.values.count == 2 }
+        await model.settleReadMarker()
         XCTAssertEqual(reads.values.last, #"{"through_message_id":7}"#)
     }
 
@@ -494,21 +494,20 @@ final class HomeThreadsTests: XCTestCase {
 
         model.setOnScreen(true)
         model.setScrolledToLatest(false)
-        try await Task.sleep(for: .milliseconds(150))
-        XCTAssertTrue(reads.values.isEmpty, "Scrolled up: the newest message is not in view.")
+        XCTAssertFalse(model.hasPendingReadCheck, "Scrolled up: the newest message is not in view.")
 
         model.setOnScreen(false)
         model.setScrolledToLatest(true)
-        try await Task.sleep(for: .milliseconds(150))
-        XCTAssertTrue(reads.values.isEmpty, "Covered by another view.")
+        XCTAssertFalse(model.hasPendingReadCheck, "Covered by another view.")
 
         model.setOnScreen(true)
         model.scenePhaseChanged(old: .active, new: .background)
-        try await Task.sleep(for: .milliseconds(150))
-        XCTAssertTrue(reads.values.isEmpty, "Backgrounded.")
+        XCTAssertFalse(model.hasPendingReadCheck, "Backgrounded: a check already scheduled is dropped.")
+        XCTAssertTrue(reads.values.isEmpty)
 
         model.scenePhaseChanged(old: .background, new: .active)
-        try await waitUntil { reads.values.count == 1 }
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values.count, 1)
     }
 
     func testHomeIsNotMarkedReadUnderTheChatSwitcher() async throws {
@@ -520,11 +519,11 @@ final class HomeThreadsTests: XCTestCase {
         model.setCoveredBySheet(true)
         model.setOnScreen(true)
         model.setScrolledToLatest(true)
-        try await Task.sleep(for: .milliseconds(150))
-        XCTAssertTrue(reads.values.isEmpty, "Home behind the switcher sheet is not being read.")
+        XCTAssertFalse(model.hasPendingReadCheck, "Home behind the switcher sheet is not being read.")
 
         model.setCoveredBySheet(false)
-        try await waitUntil { reads.values.count == 1 }
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values.count, 1)
     }
 
     func testOrdinaryConversationIsNeverMarkedRead() async throws {
@@ -535,8 +534,8 @@ final class HomeThreadsTests: XCTestCase {
 
         model.setOnScreen(true)
         model.setScrolledToLatest(true)
-        try await Task.sleep(for: .milliseconds(150))
 
+        XCTAssertFalse(model.hasPendingReadCheck)
         XCTAssertTrue(reads.values.isEmpty)
     }
 
@@ -548,13 +547,50 @@ final class HomeThreadsTests: XCTestCase {
 
         model.setOnScreen(true)
         model.setScrolledToLatest(true)
-        try await waitUntil { reads.values.count == 1 }
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values.count, 1)
+
         model.messages[model.messages.count - 1].text += " more"
-        try await Task.sleep(for: .milliseconds(150))
+        await model.settleReadMarker()
         XCTAssertEqual(reads.values.count, 1, "The same position is not retried on every change.")
 
         model.messages.append(persistedMessage(id: 8))
-        try await waitUntil { reads.values.count == 2 }
+        await model.settleReadMarker()
+        XCTAssertEqual(reads.values.count, 2)
+    }
+
+    func testMessageArrivingWhileAReadFailsIsMarkedAfterIt() async throws {
+        let pending = HangingStream()
+        let reads = LockedStrings()
+        ChatMockBackendURLProtocol.respond { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST", path == "/api/v1/chat/conversations/t1/read" {
+                reads.append(String(decoding: Self.body(of: request), as: UTF8.self))
+                if reads.values.count == 1 {
+                    // Not a read response: the first request fails once released.
+                    return .hangingStream(#"{"detail":"boom"}"#, controller: pending)
+                }
+                return .json(#"{"conversation_id":"t1","unread_count":0}"#)
+            }
+            return .json("""
+            {"conversation_id":"t1","messages":[
+              {"internal_id":3,"role":"assistant","content":"Anything else?","timestamp":"2026-06-08T12:00:02Z"}
+            ],"count":1,"total_messages":1,"latest_user_profile_id":"research",
+             "conversation_kind":"thread","thread":\(self.threadJSON(id: "t1", state: "waiting"))}
+            """)
+        }
+        let model = makeViewModel(conversationID: "t1", role: .pushed)
+        model.markReadDelay = .milliseconds(20)
+        await model.selectConversation("t1")
+        model.setOnScreen(true)
+        model.setScrolledToLatest(true)
+        try await waitUntil { reads.values.count == 1 }
+
+        model.messages.append(persistedMessage(id: 9))
+        pending.finish()
+        await model.settleReadMarker()
+
+        XCTAssertEqual(reads.values, [#"{"through_message_id":3}"#, #"{"through_message_id":9}"#])
     }
 
     /// A conversation of `kind` holding messages 1–3, with a read endpoint that

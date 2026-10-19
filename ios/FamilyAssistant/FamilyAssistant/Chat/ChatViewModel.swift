@@ -4181,20 +4181,37 @@ final class ChatViewModel {
             guard !Task.isCancelled, let self else {
                 return
             }
-            let recorded = await self.markReadIfReading()
+            let requested = await self.markReadIfReading()
             guard !Task.isCancelled else {
                 return
             }
             self.markReadTask = nil
-            // What arrived while the request was out is checked again.
-            if recorded {
+            // What arrived while the request was out is checked again, whether
+            // or not it succeeded. A position already sent is not sent again,
+            // so this ends once nothing newer has arrived.
+            if requested {
                 self.readPositionMayHaveChanged()
             }
         }
     }
 
+    /// Whether a read-position check is scheduled or running.
+    var hasPendingReadCheck: Bool {
+        markReadTask != nil
+    }
+
+    /// Waits until no read-position check is scheduled or running.
+    func settleReadMarker() async {
+        while let task = markReadTask {
+            await task.value
+            if markReadTask == task {
+                return
+            }
+        }
+    }
+
     /// Records the read through the newest persisted message, if the reader
-    /// can see it and it is past the marker. Returns whether one was recorded.
+    /// can see it and it is past the marker. Returns whether a request was made.
     private func markReadIfReading() async -> Bool {
         guard let conversationID else {
             return false
@@ -4229,7 +4246,7 @@ final class ChatViewModel {
             // tries again.
             failedReadThrough = through
             errorReporter.report(error, component: "Chat.markRead")
-            return false
+            return true
         }
     }
 
