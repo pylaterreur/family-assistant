@@ -30,7 +30,6 @@ from family_assistant.services.attachment_registry import AttachmentRegistry
 from family_assistant.storage.database import Database
 from family_assistant.storage.repositories.notes import NoteReadPolicy
 from family_assistant.tools import (
-    LOCAL_TOOL_REGISTRATIONS,
     CompositeToolsProvider,
     LocalToolsProvider,
     PolicyEnforcingToolsProvider,
@@ -38,6 +37,12 @@ from family_assistant.tools import (
     ToolPolicyConfig,
     ToolPolicyDecision,
 )
+from family_assistant.tools.metadata import (
+    ToolRegistration,
+    ToolTag,
+    make_local_tool_metadata,
+)
+from family_assistant.tools.types import ToolDefinition, ToolResult
 from family_assistant.utils.clock import MockClock
 from family_assistant.web.app_creator import app
 from family_assistant.web.web_chat_interface import WebChatInterface
@@ -45,11 +50,42 @@ from family_assistant.web.web_chat_interface import WebChatInterface
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
-# Stable tool set for replay-backed tests. Using an explicit allowlist prevents
-# cassette breakage when unrelated tools are added to the global registry.
-_REPLAY_TOOL_NAMES = frozenset({"execute_script"})
+# Record/replay matches on the request body, which includes every tool
+# definition, so the replay tests use a tool defined here rather than a
+# production tool whose description changes whenever that tool is edited.
+_REPLAY_TOOL_NAME = "add_numbers"
+
+
+async def _add_numbers(a: int, b: int) -> ToolResult:
+    return ToolResult(text=str(a + b))
+
+
 _REPLAY_REGISTRATIONS = [
-    r for r in LOCAL_TOOL_REGISTRATIONS if r.name in _REPLAY_TOOL_NAMES
+    ToolRegistration(
+        definition=cast(
+            "ToolDefinition",
+            {
+                "type": "function",
+                "function": {
+                    "name": _REPLAY_TOOL_NAME,
+                    "description": "Add two integers and return their sum.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "a": {"type": "integer", "description": "First addend."},
+                            "b": {"type": "integer", "description": "Second addend."},
+                        },
+                        "required": ["a", "b"],
+                    },
+                },
+            },
+        ),
+        implementation=_add_numbers,
+        metadata=make_local_tool_metadata([
+            ToolTag.READ_ONLY,
+            ToolTag.OUTPUT_TRUSTED,
+        ]),
+    )
 ]
 
 
@@ -126,8 +162,6 @@ async def llm_integration_processing_service(
         debug_config=gemini_http_api_debug_config,
     )
 
-    # Use a stable, explicit tool set so replay cassettes don't break when
-    # unrelated tools are added to the global registry.
     local_tools = LocalToolsProvider(registrations=_REPLAY_REGISTRATIONS)
     composite_tools = CompositeToolsProvider(providers=[local_tools])
     tools_provider = PolicyEnforcingToolsProvider(
@@ -251,7 +285,7 @@ async def test_multiturn_conversation_with_tool_calls_preserves_thought_signatur
     """An API turn persists Gemini's tool call and its opaque signature."""
     response1 = await llm_integration_client.post(
         "/api/v1/chat/send_message",
-        json={"prompt": "Use Python to calculate 5 + 5. Use the execute_script tool."},
+        json={"prompt": "Calculate 5 + 5. Use the add_numbers tool."},
     )
     assert response1.status_code == 200, f"Turn 1 failed: {response1.text}"
     data1 = response1.json()
@@ -267,7 +301,7 @@ async def test_multiturn_conversation_with_tool_calls_preserves_thought_signatur
         isinstance(message, AssistantMessage)
         and message.tool_calls
         and any(
-            call.function.name == "execute_script"
+            call.function.name == _REPLAY_TOOL_NAME
             and isinstance(call.provider_metadata, GeminiProviderMetadata)
             and call.provider_metadata.thought_signature is not None
             for call in message.tool_calls
@@ -292,7 +326,7 @@ async def test_streaming_multiturn_with_tool_calls_reproduces_bug(
         json={
             "turn_id": turn1_id,
             "conversation_id": conversation_id,
-            "prompt": "Use Python to calculate 5 + 5. Use the execute_script tool.",
+            "prompt": "Calculate 5 + 5. Use the add_numbers tool.",
         },
     )
     assert post1.status_code == 200, f"Turn 1 start failed: {post1.text}"
@@ -303,7 +337,7 @@ async def test_streaming_multiturn_with_tool_calls_reproduces_bug(
     assert any(
         event["type"] == "tool_call"
         and (tool_call := event["data"].get("tool_call")) is not None
-        and tool_call["function"]["name"] == "execute_script"
+        and tool_call["function"]["name"] == _REPLAY_TOOL_NAME
         for event in turn1_events
     )
     assert (
@@ -320,7 +354,7 @@ async def test_streaming_multiturn_with_tool_calls_reproduces_bug(
         json={
             "turn_id": turn2_id,
             "conversation_id": conversation_id,
-            "prompt": "Now calculate 10 + 10 using Python.",
+            "prompt": "Now calculate 10 + 10 the same way.",
         },
     )
     assert post2.status_code == 200, f"Turn 2 start failed: {post2.text}"

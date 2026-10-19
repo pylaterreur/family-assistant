@@ -25,7 +25,7 @@
               {
                 "parts": [
                   {
-                    "text": "Use Python to calculate 5 + 5. Use the execute_script tool."
+                    "text": "Calculate 5 + 5. Use the add_numbers tool."
                   }
                 ],
                 "role": "user"
@@ -35,36 +35,23 @@
               {
                 "functionDeclarations": [
                   {
-                    "description": "Execute inline Python (`script`, optional `globals`) or a stored script (`name`, optional `parameters`). Load `scripting.md` with `get_user_documentation_content` before writing or debugging scripts. Review and confirmation bind source, inputs and statically named child scripts. Changed child definitions require fresh review. Approved deterministic operations share program approval; hard policy and confirmations still apply. Sandbox code shares it only as complete string literals; delegations and new definitions are gated separately. Enabled tools and script APIs are available as functions.",
-                    "name": "execute_script",
+                    "description": "Add two integers and return their sum.",
+                    "name": "add_numbers",
                     "parameters": {
                       "properties": {
-                        "script": {
-                          "description": "Inline Python source. Load `scripting.md` with `get_user_documentation_content` before writing or debugging scripts. Omit this when using `name`.",
-                          "type": "STRING"
+                        "a": {
+                          "description": "First addend.",
+                          "type": "INTEGER"
                         },
-                        "globals": {
-                          "description": "Optional global values for inline `script` code. Do not use with a stored script.",
-                          "type": "OBJECT"
-                        },
-                        "name": {
-                          "description": "Stored script name. Use `list_scripts` to discover names; omit `script` and pass arguments with `parameters`.",
-                          "type": "STRING"
-                        },
-                        "script_bindings": {
-                          "description": "Resolved child definitions bound to an approval. Omit when preparing a new invocation; the runtime supplies these.",
-                          "items": {
-                            "description": "",
-                            "type": "OBJECT"
-                          },
-                          "type": "ARRAY"
-                        },
-                        "parameters": {
-                          "description": "Optional arguments for the stored script selected by `name`; validated against its parameter schema.",
-                          "type": "OBJECT"
+                        "b": {
+                          "description": "Second addend.",
+                          "type": "INTEGER"
                         }
                       },
-                      "required": [],
+                      "required": [
+                        "a",
+                        "b"
+                      ],
                       "type": "OBJECT"
                     }
                   }
@@ -97,13 +84,14 @@
                   "parts": [
                     {
                       "functionCall": {
-                        "name": "execute_script",
+                        "name": "add_numbers",
                         "args": {
-                          "script": "print(5 + 5)"
+                          "a": 5,
+                          "b": 5
                         },
-                        "id": "call_1010769"
+                        "id": "call_4490764"
                       },
-                      "thoughtSignature": "EpMCCpACAWkUfRMpMfaDWblu4NnmRxgjRxwnfe5gLcF8ROFvHRw4k4VfUmrxcCK2IPnDqiNo69tB/Bb7H9kw1fePIdXHcSAAdU+EOuH3CyT1r3wCguZpHsqX9u7S8aadKZ9jnVOllOGPUjO7AJkOxtHGCEJUA/jFACZBPXFVm7kkgXixlPQasUybXvUk9Lz9XtExQD8gFUe0RfJV0Xm6O7v8o4YeeTs0KRnnLZSv3i2Ed1lnNr1DUEpTkjLXnVQ48x/RT9FKzD1aQstoT2jZeBKxORE+GdPcA70pVe29oJaA20DZySuSkg80gUElGOzW42hKX8ljyHBarM5LC7tXPR6tIL5kNqJDYQLcVngvJchQHA0Q/WE="
+                      "thoughtSignature": "EqkDCqYDAWkUfRN1orlpB8CE3gk/ONBY+WO0iRAtt8Ii2bdVA3gHWCfZPvbfqYaCLGl9RB/P0YJ5p1F5+a7+wMWknGlDKoo/Rh4gWxV2U/oh/uQjmHxwIayjQjh6hl0c9qzxvwCa3fd1ZnwD0LeKgSyt7ROSGDuYHQWx7qZJsG3SoAoVp9F2ASasJidNJSmRlswuTN/oOD8Mtsxj/NpNy0XgFrqNWCwG3PWwnhkFtfSIkTxMexGlGU68VIcz4A59E3Uti4w2bOVVHHwI5qV7Co9ghR4HxXWo6JMMOalNvSDn/uyRXi8mQib/CQlau8RDylp749Psl+lbGF6NdVC2zYr505+gdEpIUORsVAruP6lIDcvR1EYVY32UoGYtLgIBG3bWWQx4ShbtzVJhfMTBvgFc35Uk+7GCskpcCnOupqjUqVCGexJgG2Dg1+THl78Cf/c5qAf8VRxiWULW0eRazutj6LgT+/3iuCRXUsZ/NFIIlVJ7GLKMUiuocrBw41QHgT+NoncpHv3mnYhQqWfGRlJrJ427nvs7XdhNOVCGCvAYxwJZmfgOKt9E1T8="
                     }
                   ],
                   "role": "model"
@@ -112,20 +100,20 @@
               }
             ],
             "usageMetadata": {
-              "promptTokenCount": 475,
-              "candidatesTokenCount": 22,
-              "totalTokenCount": 540,
+              "promptTokenCount": 227,
+              "candidatesTokenCount": 18,
+              "totalTokenCount": 315,
               "promptTokensDetails": [
                 {
                   "modality": "TEXT",
-                  "tokenCount": 475
+                  "tokenCount": 227
                 }
               ],
-              "thoughtsTokenCount": 43,
+              "thoughtsTokenCount": 70,
               "serviceTier": "standard"
             },
             "modelVersion": "gemini-3.8-flash",
-            "responseId": "2sLBapCkCIinsOIPh92kcQ"
+            "responseId": "HIvVapTYKZfmytMP0Pv4iAs"
           },
           {
             "candidates": [
@@ -143,20 +131,20 @@
               }
             ],
             "usageMetadata": {
-              "promptTokenCount": 475,
-              "candidatesTokenCount": 22,
-              "totalTokenCount": 540,
+              "promptTokenCount": 227,
+              "candidatesTokenCount": 18,
+              "totalTokenCount": 315,
               "promptTokensDetails": [
                 {
                   "modality": "TEXT",
-                  "tokenCount": 475
+                  "tokenCount": 227
                 }
               ],
-              "thoughtsTokenCount": 43,
+              "thoughtsTokenCount": 70,
               "serviceTier": "standard"
             },
             "modelVersion": "gemini-3.8-flash",
-            "responseId": "2sLBapCkCIinsOIPh92kcQ"
+            "responseId": "HIvVapTYKZfmytMP0Pv4iAs"
           }
         ],
         "byte_segments": [],
@@ -180,13 +168,14 @@
                   "parts": [
                     {
                       "function_call": {
-                        "id": "call_1010769",
+                        "id": "call_4490764",
                         "args": {
-                          "script": "print(5 + 5)"
+                          "a": 5,
+                          "b": 5
                         },
-                        "name": "execute_script"
+                        "name": "add_numbers"
                       },
-                      "thought_signature": "EpMCCpACAWkUfRMpMfaDWblu4NnmRxgjRxwnfe5gLcF8ROFvHRw4k4VfUmrxcCK2IPnDqiNo69tB_Bb7H9kw1fePIdXHcSAAdU-EOuH3CyT1r3wCguZpHsqX9u7S8aadKZ9jnVOllOGPUjO7AJkOxtHGCEJUA_jFACZBPXFVm7kkgXixlPQasUybXvUk9Lz9XtExQD8gFUe0RfJV0Xm6O7v8o4YeeTs0KRnnLZSv3i2Ed1lnNr1DUEpTkjLXnVQ48x_RT9FKzD1aQstoT2jZeBKxORE-GdPcA70pVe29oJaA20DZySuSkg80gUElGOzW42hKX8ljyHBarM5LC7tXPR6tIL5kNqJDYQLcVngvJchQHA0Q_WE="
+                      "thought_signature": "EqkDCqYDAWkUfRN1orlpB8CE3gk_ONBY-WO0iRAtt8Ii2bdVA3gHWCfZPvbfqYaCLGl9RB_P0YJ5p1F5-a7-wMWknGlDKoo_Rh4gWxV2U_oh_uQjmHxwIayjQjh6hl0c9qzxvwCa3fd1ZnwD0LeKgSyt7ROSGDuYHQWx7qZJsG3SoAoVp9F2ASasJidNJSmRlswuTN_oOD8Mtsxj_NpNy0XgFrqNWCwG3PWwnhkFtfSIkTxMexGlGU68VIcz4A59E3Uti4w2bOVVHHwI5qV7Co9ghR4HxXWo6JMMOalNvSDn_uyRXi8mQib_CQlau8RDylp749Psl-lbGF6NdVC2zYr505-gdEpIUORsVAruP6lIDcvR1EYVY32UoGYtLgIBG3bWWQx4ShbtzVJhfMTBvgFc35Uk-7GCskpcCnOupqjUqVCGexJgG2Dg1-THl78Cf_c5qAf8VRxiWULW0eRazutj6LgT-_3iuCRXUsZ_NFIIlVJ7GLKMUiuocrBw41QHgT-NoncpHv3mnYhQqWfGRlJrJ427nvs7XdhNOVCGCvAYxwJZmfgOKt9E1T8="
                     }
                   ],
                   "role": "model"
@@ -195,18 +184,18 @@
               }
             ],
             "model_version": "gemini-3.8-flash",
-            "response_id": "2sLBapCkCIinsOIPh92kcQ",
+            "response_id": "HIvVapTYKZfmytMP0Pv4iAs",
             "usage_metadata": {
-              "candidates_token_count": 22,
-              "prompt_token_count": 475,
+              "candidates_token_count": 18,
+              "prompt_token_count": 227,
               "prompt_tokens_details": [
                 {
                   "modality": "TEXT",
-                  "token_count": 475
+                  "token_count": 227
                 }
               ],
-              "thoughts_token_count": 43,
-              "total_token_count": 540
+              "thoughts_token_count": 70,
+              "total_token_count": 315
             }
           },
           {
@@ -237,18 +226,18 @@
               }
             ],
             "model_version": "gemini-3.8-flash",
-            "response_id": "2sLBapCkCIinsOIPh92kcQ",
+            "response_id": "HIvVapTYKZfmytMP0Pv4iAs",
             "usage_metadata": {
-              "candidates_token_count": 22,
-              "prompt_token_count": 475,
+              "candidates_token_count": 18,
+              "prompt_token_count": 227,
               "prompt_tokens_details": [
                 {
                   "modality": "TEXT",
-                  "token_count": 475
+                  "token_count": 227
                 }
               ],
-              "thoughts_token_count": 43,
-              "total_token_count": 540
+              "thoughts_token_count": 70,
+              "total_token_count": 315
             }
           }
         ]
@@ -278,7 +267,7 @@
               {
                 "parts": [
                   {
-                    "text": "Use Python to calculate 5 + 5. Use the execute_script tool."
+                    "text": "Calculate 5 + 5. Use the add_numbers tool."
                   }
                 ],
                 "role": "user"
@@ -287,13 +276,14 @@
                 "parts": [
                   {
                     "functionCall": {
-                      "id": "call_1010769",
+                      "id": "call_4490764",
                       "args": {
-                        "script": "print(5 + 5)"
+                        "a": 5,
+                        "b": 5
                       },
-                      "name": "execute_script"
+                      "name": "add_numbers"
                     },
-                    "thoughtSignature": "EpMCCpACAWkUfRMpMfaDWblu4NnmRxgjRxwnfe5gLcF8ROFvHRw4k4VfUmrxcCK2IPnDqiNo69tB_Bb7H9kw1fePIdXHcSAAdU-EOuH3CyT1r3wCguZpHsqX9u7S8aadKZ9jnVOllOGPUjO7AJkOxtHGCEJUA_jFACZBPXFVm7kkgXixlPQasUybXvUk9Lz9XtExQD8gFUe0RfJV0Xm6O7v8o4YeeTs0KRnnLZSv3i2Ed1lnNr1DUEpTkjLXnVQ48x_RT9FKzD1aQstoT2jZeBKxORE-GdPcA70pVe29oJaA20DZySuSkg80gUElGOzW42hKX8ljyHBarM5LC7tXPR6tIL5kNqJDYQLcVngvJchQHA0Q_WE="
+                    "thoughtSignature": "EqkDCqYDAWkUfRN1orlpB8CE3gk_ONBY-WO0iRAtt8Ii2bdVA3gHWCfZPvbfqYaCLGl9RB_P0YJ5p1F5-a7-wMWknGlDKoo_Rh4gWxV2U_oh_uQjmHxwIayjQjh6hl0c9qzxvwCa3fd1ZnwD0LeKgSyt7ROSGDuYHQWx7qZJsG3SoAoVp9F2ASasJidNJSmRlswuTN_oOD8Mtsxj_NpNy0XgFrqNWCwG3PWwnhkFtfSIkTxMexGlGU68VIcz4A59E3Uti4w2bOVVHHwI5qV7Co9ghR4HxXWo6JMMOalNvSDn_uyRXi8mQib_CQlau8RDylp749Psl-lbGF6NdVC2zYr505-gdEpIUORsVAruP6lIDcvR1EYVY32UoGYtLgIBG3bWWQx4ShbtzVJhfMTBvgFc35Uk-7GCskpcCnOupqjUqVCGexJgG2Dg1-THl78Cf_c5qAf8VRxiWULW0eRazutj6LgT-_3iuCRXUsZ_NFIIlVJ7GLKMUiuocrBw41QHgT-NoncpHv3mnYhQqWfGRlJrJ427nvs7XdhNOVCGCvAYxwJZmfgOKt9E1T8="
                   }
                 ],
                 "role": "model"
@@ -302,10 +292,10 @@
                 "parts": [
                   {
                     "functionResponse": {
-                      "id": "call_1010769",
-                      "name": "execute_script",
+                      "id": "call_4490764",
+                      "name": "add_numbers",
                       "response": {
-                        "result": "--- Script Output ---\n10\n\nScript executed successfully with no return value."
+                        "result": 10
                       }
                     }
                   }
@@ -317,36 +307,23 @@
               {
                 "functionDeclarations": [
                   {
-                    "description": "Execute inline Python (`script`, optional `globals`) or a stored script (`name`, optional `parameters`). Load `scripting.md` with `get_user_documentation_content` before writing or debugging scripts. Review and confirmation bind source, inputs and statically named child scripts. Changed child definitions require fresh review. Approved deterministic operations share program approval; hard policy and confirmations still apply. Sandbox code shares it only as complete string literals; delegations and new definitions are gated separately. Enabled tools and script APIs are available as functions.",
-                    "name": "execute_script",
+                    "description": "Add two integers and return their sum.",
+                    "name": "add_numbers",
                     "parameters": {
                       "properties": {
-                        "script": {
-                          "description": "Inline Python source. Load `scripting.md` with `get_user_documentation_content` before writing or debugging scripts. Omit this when using `name`.",
-                          "type": "STRING"
+                        "a": {
+                          "description": "First addend.",
+                          "type": "INTEGER"
                         },
-                        "globals": {
-                          "description": "Optional global values for inline `script` code. Do not use with a stored script.",
-                          "type": "OBJECT"
-                        },
-                        "name": {
-                          "description": "Stored script name. Use `list_scripts` to discover names; omit `script` and pass arguments with `parameters`.",
-                          "type": "STRING"
-                        },
-                        "script_bindings": {
-                          "description": "Resolved child definitions bound to an approval. Omit when preparing a new invocation; the runtime supplies these.",
-                          "items": {
-                            "description": "",
-                            "type": "OBJECT"
-                          },
-                          "type": "ARRAY"
-                        },
-                        "parameters": {
-                          "description": "Optional arguments for the stored script selected by `name`; validated against its parameter schema.",
-                          "type": "OBJECT"
+                        "b": {
+                          "description": "Second addend.",
+                          "type": "INTEGER"
                         }
                       },
-                      "required": [],
+                      "required": [
+                        "a",
+                        "b"
+                      ],
                       "type": "OBJECT"
                     }
                   }
@@ -378,7 +355,7 @@
                 "content": {
                   "parts": [
                     {
-                      "text": "The result of 5 + 5 is 10."
+                      "text": "5 + 5 = 10."
                     }
                   ],
                   "role": "model"
@@ -387,20 +364,20 @@
               }
             ],
             "usageMetadata": {
-              "promptTokenCount": 526,
-              "candidatesTokenCount": 13,
-              "totalTokenCount": 565,
+              "promptTokenCount": 258,
+              "candidatesTokenCount": 9,
+              "totalTokenCount": 288,
               "promptTokensDetails": [
                 {
                   "modality": "TEXT",
-                  "tokenCount": 526
+                  "tokenCount": 258
                 }
               ],
-              "thoughtsTokenCount": 26,
+              "thoughtsTokenCount": 21,
               "serviceTier": "standard"
             },
             "modelVersion": "gemini-3.8-flash",
-            "responseId": "2sLBauDrOPir-8YPntTA0Q8"
+            "responseId": "H4vVauS1Aa-H1sgP14eWkAk"
           },
           {
             "candidates": [
@@ -409,7 +386,7 @@
                   "parts": [
                     {
                       "text": "",
-                      "thoughtSignature": "Eu0BCuoBAWkUfRPAlTA+/cmO3r37DIK9s09LNhzRHXWJoI48gG0ZfiMNDpEeafw4Fz37OfmQ0/l/mH5NNdQUnEihiSUwMeMRvIpj1+DGFi86eB+quYZ3R4zYWpFhOypj5jgQ2ECLWXU7DyxzEz/18LKibBZsv/DKwpVGgJFhTf6IyX9sEfut+rnebYBB9kO/HunY8BtSKS/GsvV5zqcXRTOzBzFT/bdhzpMLy/VvbUkW882Ip7XoH/E+JQE3qIPv+dSNaLSN4jpwjeahwFE9W9sM5n7JTToD+ODbK4BSkdQ+NbezpMJvHa5hx6CrcoCf"
+                      "thoughtSignature": "EuIBCt8BAWkUfROc76ydr85y4/C69SKzXbBs6xSP6TBF1isjB6kzovQtJ1/B33mJ6c/GDZr1mXq7ROt2FSAI1+V6FbBzo8J3htMgaPJQ1Hfpfzs/lBi9NEtt3cRl/ETgygnLC+ml4gGhKdVQse/hCuRBms13z+Jz/kMyNQlr8hzmwWiXLNkHDS78I1wkttA1D8595OLyotg5Vptmr7HhFNmJBaK3wbGw+R0NBNMtVEEmCZGnMknHUrtQRPAOhcH7xPL0vjY6UHCYD4loANY3wiyaWlQFWY7y4VaThs4j9JpFBLtLfg=="
                     }
                   ],
                   "role": "model"
@@ -419,20 +396,20 @@
               }
             ],
             "usageMetadata": {
-              "promptTokenCount": 569,
-              "candidatesTokenCount": 13,
-              "totalTokenCount": 608,
+              "promptTokenCount": 328,
+              "candidatesTokenCount": 9,
+              "totalTokenCount": 358,
               "promptTokensDetails": [
                 {
                   "modality": "TEXT",
-                  "tokenCount": 569
+                  "tokenCount": 328
                 }
               ],
-              "thoughtsTokenCount": 26,
+              "thoughtsTokenCount": 21,
               "serviceTier": "standard"
             },
             "modelVersion": "gemini-3.8-flash",
-            "responseId": "2sLBauDrOPir-8YPntTA0Q8"
+            "responseId": "H4vVauS1Aa-H1sgP14eWkAk"
           }
         ],
         "byte_segments": [],
@@ -455,7 +432,7 @@
                 "content": {
                   "parts": [
                     {
-                      "text": "The result of 5 + 5 is 10."
+                      "text": "5 + 5 = 10."
                     }
                   ],
                   "role": "model"
@@ -464,18 +441,18 @@
               }
             ],
             "model_version": "gemini-3.8-flash",
-            "response_id": "2sLBauDrOPir-8YPntTA0Q8",
+            "response_id": "H4vVauS1Aa-H1sgP14eWkAk",
             "usage_metadata": {
-              "candidates_token_count": 13,
-              "prompt_token_count": 526,
+              "candidates_token_count": 9,
+              "prompt_token_count": 258,
               "prompt_tokens_details": [
                 {
                   "modality": "TEXT",
-                  "token_count": 526
+                  "token_count": 258
                 }
               ],
-              "thoughts_token_count": 26,
-              "total_token_count": 565
+              "thoughts_token_count": 21,
+              "total_token_count": 288
             }
           },
           {
@@ -497,7 +474,7 @@
                   "parts": [
                     {
                       "text": "",
-                      "thought_signature": "Eu0BCuoBAWkUfRPAlTA-_cmO3r37DIK9s09LNhzRHXWJoI48gG0ZfiMNDpEeafw4Fz37OfmQ0_l_mH5NNdQUnEihiSUwMeMRvIpj1-DGFi86eB-quYZ3R4zYWpFhOypj5jgQ2ECLWXU7DyxzEz_18LKibBZsv_DKwpVGgJFhTf6IyX9sEfut-rnebYBB9kO_HunY8BtSKS_GsvV5zqcXRTOzBzFT_bdhzpMLy_VvbUkW882Ip7XoH_E-JQE3qIPv-dSNaLSN4jpwjeahwFE9W9sM5n7JTToD-ODbK4BSkdQ-NbezpMJvHa5hx6CrcoCf"
+                      "thought_signature": "EuIBCt8BAWkUfROc76ydr85y4_C69SKzXbBs6xSP6TBF1isjB6kzovQtJ1_B33mJ6c_GDZr1mXq7ROt2FSAI1-V6FbBzo8J3htMgaPJQ1Hfpfzs_lBi9NEtt3cRl_ETgygnLC-ml4gGhKdVQse_hCuRBms13z-Jz_kMyNQlr8hzmwWiXLNkHDS78I1wkttA1D8595OLyotg5Vptmr7HhFNmJBaK3wbGw-R0NBNMtVEEmCZGnMknHUrtQRPAOhcH7xPL0vjY6UHCYD4loANY3wiyaWlQFWY7y4VaThs4j9JpFBLtLfg=="
                     }
                   ],
                   "role": "model"
@@ -507,18 +484,18 @@
               }
             ],
             "model_version": "gemini-3.8-flash",
-            "response_id": "2sLBauDrOPir-8YPntTA0Q8",
+            "response_id": "H4vVauS1Aa-H1sgP14eWkAk",
             "usage_metadata": {
-              "candidates_token_count": 13,
-              "prompt_token_count": 569,
+              "candidates_token_count": 9,
+              "prompt_token_count": 328,
               "prompt_tokens_details": [
                 {
                   "modality": "TEXT",
-                  "token_count": 569
+                  "token_count": 328
                 }
               ],
-              "thoughts_token_count": 26,
-              "total_token_count": 608
+              "thoughts_token_count": 21,
+              "total_token_count": 358
             }
           }
         ]
