@@ -13,6 +13,8 @@ import pytest
 from family_assistant.config_models import AppConfig, ConversationThreadsConfig
 from family_assistant.llm.messages import AssistantMessage, UserMessage
 from family_assistant.processing import ProcessingService
+from family_assistant.services.user_identity import UserIdentityResolver
+from family_assistant.storage import conversation_threads_table, message_history_table
 from family_assistant.storage.database import Database
 from family_assistant.web.dependencies import get_current_user
 from tests.mocks.mock_llm import LLMOutput, MatcherArgs, RuleBasedMockLLMClient
@@ -23,6 +25,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from family_assistant.llm.messages import LLMMessage
+    from family_assistant.web.conversation_stream_hub import ConversationStreamHub
 
 NOW = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
 CALLER = "test_user"
@@ -509,6 +512,80 @@ async def test_a_user_closed_thread_reopens_when_a_message_arrives(
 
     [entry] = (await api_test_client.get("/api/v1/chat/home/threads")).json()["threads"]
     assert (entry["state"], entry["closed_by"]) == ("waiting", None)
+
+
+ALIAS = "123456789"
+
+
+def _alias_config(app_fixture: FastAPI) -> None:
+    """Map a Telegram login id to the caller, as an operator does."""
+    config = AppConfig.model_validate({
+        "database_url": app_fixture.state.config.database_url,
+        "conversation_threads": {"enabled": True},
+        "users": [{"id": CALLER, "telegram": {"user_ids": [int(ALIAS)]}}],
+    })
+    app_fixture.state.config = config
+    app_fixture.state.user_identity_resolver = UserIdentityResolver(config)
+
+
+@pytest.mark.asyncio
+async def test_a_thread_written_under_an_alias_is_still_its_owners(
+    app_fixture: FastAPI, api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    """A thread recorded before a login was mapped to its owner stays theirs."""
+    _alias_config(app_fixture)
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(db, home, at=_a_minute_ago())
+    await db.execute(
+        conversation_threads_table
+        .update()
+        .where(conversation_threads_table.c.conversation_id == thread)
+        .values(owner_user_id=ALIAS)
+    )
+    await db.execute(
+        message_history_table
+        .update()
+        .where(message_history_table.c.conversation_id == thread)
+        .where(message_history_table.c.user_id == CALLER)
+        .values(user_id=ALIAS)
+    )
+
+    done = await api_test_client.post(f"/api/v1/chat/home/threads/{thread}/done")
+    read = await api_test_client.post(
+        f"/api/v1/chat/conversations/{thread}/read", json={}
+    )
+
+    assert (done.status_code, read.status_code) == (200, 200)
+    assert done.json()["state"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_marking_done_pings_the_login_the_caller_used(
+    app_fixture: FastAPI, api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    """The activity stream subscribes under the caller's own login id."""
+    _alias_config(app_fixture)
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(db, home, at=_a_minute_ago())
+
+    async def alias_user() -> dict[str, object]:
+        return {"user_identifier": ALIAS}
+
+    hub: ConversationStreamHub = app_fixture.state.conversation_stream_hub
+    handle = hub.subscribe_activity(ALIAS)
+    app_fixture.dependency_overrides[get_current_user] = alias_user
+    try:
+        done = await api_test_client.post(f"/api/v1/chat/home/threads/{thread}/done")
+    finally:
+        app_fixture.dependency_overrides.pop(get_current_user, None)
+
+    pinged = set()
+    while not handle.queue.empty():
+        pinged.add(handle.queue.get_nowait().conversation_id)
+    assert done.status_code == 200
+    assert pinged == {home, thread}
 
 
 @pytest.mark.asyncio

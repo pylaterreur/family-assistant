@@ -1732,11 +1732,14 @@ class ProcessingService:
         conversation_id: str,
         subconversation_id: str | None,
         turn_id: str,
+        user_id: str | None,
     ) -> None:
         """Echo a thread's outcome into its Home if this turn finished the thread.
 
         Called as every turn ends, which is what makes the echo independent of
-        which surface or task ran the turn (see ``threads.echo``).
+        which surface or task ran the turn (see ``threads.echo``). ``user_id``
+        is the login the turn ran as, which open clients may be subscribed
+        under rather than the canonical owner.
         """
         if subconversation_id is not None or not (
             self.app_config.conversation_threads.enabled
@@ -1753,7 +1756,9 @@ class ProcessingService:
             await announce_home_change(
                 self.home_activity_publisher,
                 home_conversation_id=echo.home_conversation_id,
-                owner_user_id=echo.owner_user_id,
+                # The login the turn ran as, which is what its owner's
+                # activity stream subscribes under.
+                user_id=user_id or echo.owner_user_id,
                 reason="thread_echo",
             )
 
@@ -2499,6 +2504,7 @@ class ProcessingService:
                 conversation_id=conversation_id,
                 subconversation_id=subconversation_id,
                 turn_id=turn_id,
+                user_id=user_id,
             )
             if ended_quietly:
                 return ChatInteractionResult.quiet(
@@ -2763,6 +2769,7 @@ class ProcessingService:
                 conversation_id=conversation_id,
                 subconversation_id=subconversation_id,
                 turn_id=turn_id,
+                user_id=user_id,
             )
 
         events = interaction_events()

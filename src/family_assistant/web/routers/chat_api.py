@@ -1365,6 +1365,23 @@ async def _ensure_user_owns_persisted_conversation(
     return user_id
 
 
+async def ensure_caller_owns_conversation(
+    request: Request,
+    current_user: Mapping[str, object],
+    conversation_id: str,
+) -> str:
+    """The ownership check the conversation endpoints apply, for other routers.
+
+    Identity-aware like every endpoint here: stored owner ids are
+    canonicalized, so a conversation written under a login's own id before an
+    operator mapped it stays its owner's. Returns the caller's raw login id,
+    which is also the id their activity stream subscribes under.
+    """
+    return await _ensure_user_owns_persisted_conversation(
+        request, current_user, conversation_id
+    )
+
+
 def _share_token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 

@@ -367,6 +367,26 @@ async def test_finishing_echoes_the_final_message_into_home(world: World) -> Non
 
 
 @pytest.mark.asyncio
+async def test_an_echo_pings_the_login_the_turn_ran_as(world: World) -> None:
+    """The activity feed matches the exact id a client subscribed under."""
+    result = await world.thread_service.handle_chat_interaction(
+        db_context=world.db,
+        interface_type="web",
+        conversation_id=THREAD,
+        trigger_content_parts=[{"type": "text", "text": "please finish up"}],
+        trigger_interface_message_id=None,
+        user_name="Alice",
+        user_id="alice-phone",
+        chat_interface=MagicMock(spec=ChatInterface),
+    )
+
+    assert result.error_traceback is None
+    assert [entry for entry in world.publisher.activity if entry[0] == HOME] == [
+        (HOME, "alice-phone:thread_echo")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_an_echo_keeps_its_taint(world: World) -> None:
     await world.in_thread("please finish up", tainted=True)
 

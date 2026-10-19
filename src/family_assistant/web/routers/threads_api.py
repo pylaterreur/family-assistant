@@ -18,13 +18,13 @@ from family_assistant.threads.echo import announce_home_change
 from family_assistant.threads.home import (
     ensure_web_home,
     find_home,
-    home_owner_id,
     viewer_for,
 )
 from family_assistant.threads.listing import list_home_threads, summarize_threads
 from family_assistant.web.dependencies import get_current_user, get_db
 from family_assistant.web.routers.chat_api import (
     ThreadSummaryResponse,
+    ensure_caller_owns_conversation,
     get_stream_hub,
     thread_summary_response,
     turn_running_in,
@@ -83,14 +83,22 @@ def _user_id(current_user: dict) -> str:
 
 
 async def _owned_thread(
-    db: Database, config: AppConfig, conversation_id: str, user_id: str
+    request: Request,
+    current_user: dict,
+    db: Database,
+    conversation_id: str,
 ) -> ConversationThread:
-    """The caller's own thread, or 404 for anything else."""
-    if not config.conversation_threads.enabled:
+    """The caller's own thread, or 404 for anything else.
+
+    Ownership is the check every conversation endpoint applies, so marking a
+    thread done or read is allowed exactly where reading or sending into it is.
+    """
+    if not _app_config(request).conversation_threads.enabled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     thread = await db.conversation_threads.get_thread(conversation_id)
-    if thread is None or thread.owner_user_id != home_owner_id(config, user_id):
+    if thread is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    await ensure_caller_owns_conversation(request, current_user, conversation_id)
     return thread
 
 
@@ -155,7 +163,7 @@ async def mark_thread_done(
     """
     config = _app_config(request)
     user_id = _user_id(current_user)
-    thread = await _owned_thread(db_context, config, conversation_id, user_id)
+    thread = await _owned_thread(request, current_user, db_context, conversation_id)
     await db_context.conversation_threads.close_thread(
         conversation_id,
         outcome="done",
@@ -164,15 +172,15 @@ async def mark_thread_done(
         now=datetime.now(UTC),
     )
     hub = get_stream_hub(request)
+    # Under the caller's own login id, which is what their activity stream
+    # subscribes under, as every conversation endpoint publishes.
     await announce_home_change(
         hub,
         home_conversation_id=thread.home_conversation_id,
-        owner_user_id=thread.owner_user_id,
+        user_id=user_id,
         reason="thread_closed",
     )
-    await hub.publish_activity(
-        conversation_id, user_id=thread.owner_user_id, reason="thread_closed"
-    )
+    await hub.publish_activity(conversation_id, user_id=user_id, reason="thread_closed")
     closed = await db_context.conversation_threads.get_thread(conversation_id)
     assert closed is not None
     [summary] = await summarize_threads(
@@ -207,7 +215,7 @@ async def mark_conversation_read(
         else None
     )
     if home != conversation_id:
-        await _owned_thread(db_context, config, conversation_id, user_id)
+        await _owned_thread(request, current_user, db_context, conversation_id)
     latest = (
         await db_context.message_history.latest_visible_messages([conversation_id])
     ).get(conversation_id)
@@ -226,7 +234,7 @@ async def mark_conversation_read(
             now=datetime.now(UTC),
         )
         await get_stream_hub(request).publish_activity(
-            conversation_id, user_id=viewer.user_id, reason="read"
+            conversation_id, user_id=user_id, reason="read"
         )
     unread = await db_context.conversation_threads.unread_counts(
         [conversation_id], viewer_user_id=viewer.user_id, viewer_keys=viewer.keys

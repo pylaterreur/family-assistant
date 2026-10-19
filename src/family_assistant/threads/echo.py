@@ -74,10 +74,14 @@ async def announce_home_change(
     publisher: HomeActivityPublisher | None,
     *,
     home_conversation_id: str,
-    owner_user_id: str,
+    user_id: str,
     reason: str,
 ) -> None:
-    """Tell a Home's open clients that it, or one of its threads' cards, changed."""
+    """Tell a Home's open clients that it, or one of its threads' cards, changed.
+
+    ``user_id`` is a raw login id: the activity feed matches subscribers by the
+    exact id their login carries, as every other publisher addresses it.
+    """
     if publisher is None:
         return
     await publisher.publish(
@@ -87,7 +91,7 @@ async def announce_home_change(
         payload={"conversation_id": home_conversation_id, "new_messages": True},
     )
     await publisher.publish_activity(
-        home_conversation_id, user_id=owner_user_id, reason=reason
+        home_conversation_id, user_id=user_id, reason=reason
     )
 
 
