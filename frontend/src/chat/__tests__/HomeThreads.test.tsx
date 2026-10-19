@@ -589,37 +589,51 @@ describe('Thread state, unread and echoes', () => {
   });
 
   it('holds off marking a thread read while the reader is scrolled up', async () => {
-    const threads = serveThreads();
-    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+    // Real time still passes, so loading works as usual; the debounce is
+    // jumped over explicitly below.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      // The read request goes out synchronously when the debounce fires.
+      const readRequests = () =>
+        fetchSpy.mock.calls.filter(([input]) =>
+          String(input instanceof Request ? input.url : input).endsWith(
+            '/conversations/web_conv_quotes/read'
+          )
+        );
+      const threads = serveThreads();
+      window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
 
-    await renderChatApp({ waitForReady: true });
-    await screen.findByText('Gas or heat pump?');
-    const viewport = screen.getByTestId('thread-viewport');
-    const scrollTo = (scrollTop: number) => {
-      Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 2000 });
-      Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 500 });
-      viewport.scrollTop = scrollTop;
-      fireEvent.scroll(viewport);
-    };
-    // Opened at the newest message, then scrolled up to older ones.
-    scrollTo(1500);
-    scrollTo(0);
+      await renderChatApp({ waitForReady: true });
+      await screen.findByText('Gas or heat pump?');
+      const viewport = screen.getByTestId('thread-viewport');
+      const scrollTo = (scrollTop: number) => {
+        Object.defineProperty(viewport, 'scrollHeight', { configurable: true, value: 2000 });
+        Object.defineProperty(viewport, 'clientHeight', { configurable: true, value: 500 });
+        viewport.scrollTop = scrollTop;
+        fireEvent.scroll(viewport);
+      };
+      // Opened at the newest message, then scrolled up to older ones.
+      scrollTo(1500);
+      scrollTo(0);
 
-    // Long enough for an ungated read to have gone out.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, MARK_READ_DELAY_MS * 2));
-    });
-    expect(threads.reads).toEqual([]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(MARK_READ_DELAY_MS * 2);
+      });
+      expect(readRequests()).toHaveLength(0);
 
-    scrollTo(1500);
+      scrollTo(1500);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(MARK_READ_DELAY_MS);
+      });
 
-    await waitFor(
-      () =>
-        expect(threads.reads).toEqual([
-          { conversationId: 'web_conv_quotes', throughMessageId: 10 },
-        ]),
-      { timeout: 3000 }
-    );
+      expect(readRequests()).toHaveLength(1);
+      await waitFor(() =>
+        expect(threads.reads).toEqual([{ conversationId: 'web_conv_quotes', throughMessageId: 10 }])
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([
