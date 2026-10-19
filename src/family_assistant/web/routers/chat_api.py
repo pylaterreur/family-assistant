@@ -555,6 +555,15 @@ class ConversationMessage(BaseModel):
             "thread's conversation id, so the message is shown attributed to it"
         ),
     )
+    moved_to_thread: str | None = Field(
+        None,
+        description=(
+            "On a Home message marking a turn the user moved into a thread: "
+            "that thread's conversation id. Render it as 'Moved to <thread "
+            "title>' rather than showing its content; the turn itself is now "
+            "in the thread"
+        ),
+    )
     metadata: dict | None = Field(None, description="Additional message metadata")
 
 
@@ -928,7 +937,7 @@ def get_stream_hub(request: Request) -> ConversationStreamHub:
     return hub
 
 
-def _resolve_requested_model_tier(
+def resolve_requested_model_tier(
     service: ProcessingService,
     model_tier: str | None,
 ) -> ResolvedModelSelection:
@@ -1433,6 +1442,29 @@ async def api_chat_create_turn(
     exists for this conversation, the existing identity is returned and no
     new producer is started.
     """
+    return await start_chat_turn(
+        payload,
+        request,
+        current_user,
+        default_processing_service=default_processing_service,
+        web_chat_interface=web_chat_interface,
+    )
+
+
+async def start_chat_turn(
+    payload: ChatTurnRequest,
+    request: Request,
+    current_user: Mapping[str, object],
+    *,
+    default_processing_service: ProcessingService,
+    web_chat_interface: "WebChatInterface",
+) -> ChatTurnResponse:
+    """Start a streaming turn, as ``POST /v1/chat/turns`` does.
+
+    For other routers whose action begins with a user turn -- a thread the user
+    starts runs its first turn through here -- so it streams, steers and
+    resumes exactly like any turn the user sends.
+    """
     conversation_id = payload.conversation_id or str(uuid.uuid4())
     pinned_thread = await _thread_for(request, conversation_id)
     interface_type = (
@@ -1557,7 +1589,7 @@ async def api_chat_create_turn(
     # Resolved here rather than inside the producer: the producer's refusals
     # can only reach the client as a stream error, and a tier the profile does
     # not accept is an answer about the request itself.
-    resolved_model_selection = _resolve_requested_model_tier(
+    resolved_model_selection = resolve_requested_model_tier(
         selected_processing_service, payload.model_tier
     )
 
@@ -2488,6 +2520,15 @@ class ServiceProfile(BaseModel):
             "one recorded on a past message. The default profile is always true."
         ),
     )
+    receives_household_context: bool = Field(
+        default=False,
+        description=(
+            "Whether Home conversation turns may enter this profile. A client "
+            "offers 'Continue in a thread' with context, and 'Move to thread...' "
+            "into a thread, only on a profile where this is true; elsewhere the "
+            "server refuses them with 409"
+        ),
+    )
 
 
 class ProfilesResponse(BaseModel):
@@ -2703,7 +2744,7 @@ async def run_non_streaming_turn(
         if existing_response is not None:
             return existing_response
 
-    resolved_model_selection = _resolve_requested_model_tier(
+    resolved_model_selection = resolve_requested_model_tier(
         processing_service, payload.model_tier
     )
 
@@ -3124,6 +3165,7 @@ def _serialize_conversation_messages(
                 processing_profile_id=msg.get("processing_profile_id"),
                 reasoning_info=msg.get("reasoning_info"),
                 echoed_from_thread=msg.get("echoed_from_conversation_id"),
+                moved_to_thread=msg.get("moved_to_conversation_id"),
                 metadata=None,
             )
         )
@@ -3981,6 +4023,7 @@ async def get_available_profiles(
                     service_config.user_selectable
                     or profile_id == default_processing_service.service_config.id
                 ),
+                receives_household_context=service_config.receives_household_context,
                 llm_model=getattr(service_config, "llm_model", None),
                 available_tools=sorted(available_tools),
                 enabled_mcp_servers=sorted(enabled_mcp_servers),

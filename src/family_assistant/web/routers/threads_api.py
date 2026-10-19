@@ -3,34 +3,71 @@
 See docs/design/one-thread-chat-ux.md.
 """
 
+import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from family_assistant.config_models import AppConfig
-from family_assistant.storage.database import Database
+from family_assistant.processing import ProcessingService
+from family_assistant.security.taint import TurnTaintState
+from family_assistant.storage.database import Database, DatabaseTransaction
 from family_assistant.storage.repositories.conversation_threads import (
     ConversationThread,
+)
+from family_assistant.storage.types import MessageHistoryRow
+from family_assistant.threads.boundary import (
+    BoundaryDestination,
+    CopiedTurns,
+    CrossBoundaryCopyRefusedError,
+    MovedTurn,
+    move_turn_across_boundary,
+)
+from family_assistant.threads.creation import (
+    CONTINUE_CONTEXT_TURNS,
+    NewThread,
+    create_thread,
+    new_thread_conversation_id,
 )
 from family_assistant.threads.echo import announce_home_change
 from family_assistant.threads.home import (
     ensure_web_home,
     find_home,
+    home_owner_id,
     viewer_for,
 )
 from family_assistant.threads.listing import list_home_threads, summarize_threads
-from family_assistant.web.dependencies import get_current_user, get_db
+from family_assistant.web.conversation_stream_hub import ConversationStreamHub
+from family_assistant.web.dependencies import (
+    get_current_user,
+    get_db,
+    get_processing_service,
+    get_web_chat_interface,
+)
+from family_assistant.web.models import ChatAttachmentRequest
 from family_assistant.web.routers.chat_api import (
+    ChatTurnRequest,
+    ChatTurnResponse,
     ThreadSummaryResponse,
     ensure_caller_owns_conversation,
     get_stream_hub,
+    resolve_requested_model_tier,
+    start_chat_turn,
     thread_summary_response,
     turn_running_in,
 )
 
+if TYPE_CHECKING:
+    from family_assistant.web.web_chat_interface import WebChatInterface
+
 threads_api_router = APIRouter()
+
+CONTINUED_THREAD_TITLE = "Continued from Home"
+"""The title of a thread continued with neither a title nor an opening message."""
+
+_DERIVED_TITLE_LENGTH = 60
 
 
 class HomeResponse(BaseModel):
@@ -69,6 +106,111 @@ class MarkReadResponse(BaseModel):
 
     conversation_id: str
     unread_count: int
+
+
+class StartThreadRequest(BaseModel):
+    """Body for starting a thread of the caller's Home.
+
+    One call serves "New thread", send-as-thread and "Continue in a thread":
+    name an ``anchor_message_id`` to continue from a Home message.
+    """
+
+    profile_id: str = Field(..., description="The profile the thread runs on")
+    prompt: str | None = Field(
+        default=None,
+        description=(
+            "The user's opening message, stored as their own words and run as "
+            "the thread's first turn. Required unless continuing with context, "
+            "where the copied Home turns can stand on their own"
+        ),
+    )
+    turn_id: str | None = Field(
+        default=None,
+        description=(
+            "Client-supplied UUIDv4 for the first turn, as on POST "
+            "/v1/chat/turns. A retry with the same turn_id returns the thread "
+            "it already started instead of starting another. Generated when "
+            "omitted"
+        ),
+    )
+    title: str | None = Field(
+        default=None,
+        description=(
+            "The thread's title. Derived from the opening message when "
+            f"omitted, or '{CONTINUED_THREAD_TITLE}' when there is none"
+        ),
+    )
+    anchor_message_id: int | None = Field(
+        default=None,
+        description=(
+            "Continue in a thread: the Home message the thread grows from. It "
+            "becomes the thread's anchor, for the client's 'Started from' quote"
+        ),
+    )
+    include_context: bool = Field(
+        default=True,
+        description=(
+            "With anchor_message_id: copy the anchor's turn and up to "
+            f"{CONTINUE_CONTEXT_TURNS - 1} Home turns before it into the thread. "
+            "Refused with 409 on a profile that does not receive household "
+            "context (see receives_household_context on /v1/profiles); send "
+            "false there to start from the opening message alone"
+        ),
+    )
+    model_tier: str | None = Field(
+        default=None,
+        description="Optional model tier for the thread, from the profile's model_tiers",
+    )
+    attachments: list[ChatAttachmentRequest] | None = Field(
+        default=None, description="Attachments sent with the opening message"
+    )
+
+
+class StartThreadResponse(BaseModel):
+    """The thread that was started, and its first turn if it has one."""
+
+    thread: ThreadSummaryResponse
+    turn: ChatTurnResponse | None = Field(
+        default=None,
+        description=(
+            "The first turn, running the opening message. Subscribe to "
+            "/v1/chat/conversations/{thread}/stream from turn.first_seq to "
+            "watch it, as after POST /v1/chat/turns. None when the thread was "
+            "continued with no opening message: it waits for the user"
+        ),
+    )
+    copied_message_ids: list[int] = Field(
+        default_factory=list,
+        description="The thread's copies of the Home rows it was continued with",
+    )
+
+
+class MoveTurnRequest(BaseModel):
+    """Which Home turn to move into a thread."""
+
+    message_id: int = Field(
+        ...,
+        description=(
+            "Any message of the Home turn to move. The whole turn moves: the "
+            "user's message, its tool rows and the reply"
+        ),
+    )
+
+
+class MoveTurnResponse(BaseModel):
+    """Where a moved turn went."""
+
+    thread: ThreadSummaryResponse
+    marker_message_id: int = Field(
+        ...,
+        description=(
+            "The Home message marking the move. It carries moved_to_thread, "
+            "naming the thread the turn is in now"
+        ),
+    )
+    moved_message_ids: list[int] = Field(
+        ..., description="The turn's messages, as they are now in the thread"
+    )
 
 
 def _app_config(request: Request) -> AppConfig:
@@ -242,4 +384,331 @@ async def mark_conversation_read(
     return MarkReadResponse(
         conversation_id=conversation_id,
         unread_count=unread.get(conversation_id, 0),
+    )
+
+
+def _local_profile(request: Request, profile_id: str) -> ProcessingService:
+    """A profile a thread can run on: local, as direct chat requires."""
+    registry = getattr(request.app.state, "processing_services", {})
+    service = registry.get(profile_id)
+    if not isinstance(service, ProcessingService):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Profile '{profile_id}' is not available for a thread.",
+        )
+    return service
+
+
+def _derived_title(prompt: str | None) -> str:
+    """A thread's title from the user's opening message: its first line, shortened."""
+    if prompt is None:
+        return CONTINUED_THREAD_TITLE
+    line = " ".join(prompt.splitlines()[0].split())
+    if len(line) <= _DERIVED_TITLE_LENGTH:
+        return line
+    cut = line[:_DERIVED_TITLE_LENGTH].rsplit(" ", 1)[0]
+    return f"{cut}…"
+
+
+async def _home_turn_row(
+    db: Database, home: str, message_id: int, hub: ConversationStreamHub
+) -> MessageHistoryRow:
+    """A message of a finished, top-level Home turn, or the 4xx saying why not.
+
+    A message anywhere but the caller's Home is 404, however it exists.
+    """
+    row = await db.message_history.get_row_by_internal_id(message_id)
+    if (
+        row is None
+        or row["conversation_id"] != home
+        or row["subconversation_id"] is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No such message in your Home.",
+        )
+    if row["turn_id"] is None or row["moved_to_conversation_id"] is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This message is not part of a turn that can be carried.",
+        )
+    turn = hub.get_turn(home, row["turn_id"])
+    if turn is not None and turn.status == "running":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="That reply is still in progress.",
+        )
+    return row
+
+
+async def _thread_summary(
+    db: Database,
+    config: AppConfig,
+    hub: ConversationStreamHub,
+    *,
+    user_id: str,
+    conversation_id: str,
+) -> ThreadSummaryResponse:
+    thread = await db.conversation_threads.get_thread(conversation_id)
+    assert thread is not None
+    [summary] = await summarize_threads(
+        db,
+        [thread],
+        turn_running=turn_running_in(hub),
+        viewer=viewer_for(config, user_id),
+    )
+    return thread_summary_response(summary, thread.home_conversation_id)
+
+
+@threads_api_router.post("/v1/chat/home/threads")
+async def start_home_thread(
+    payload: StartThreadRequest,
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db_context: Annotated[Database, Depends(get_db)],
+    default_processing_service: Annotated[
+        ProcessingService, Depends(get_processing_service)
+    ],
+    web_chat_interface: Annotated["WebChatInterface", Depends(get_web_chat_interface)],
+) -> StartThreadResponse:
+    """Start a thread of the caller's Home on a profile they choose.
+
+    "New thread" and send-as-thread name a profile and an opening message.
+    "Continue in a thread" also names the Home message to continue from; with
+    ``include_context`` the anchor's turn and the Home turns just before it are
+    copied in, keeping their taint, which only a profile receiving household
+    context accepts (409 otherwise).
+
+    The opening message runs at once as the thread's first turn, as the user's
+    own turn: subscribe to the thread's stream from ``turn.first_seq``. Picking
+    the profile is the user's choice, as it is in direct chat, so the target's
+    delegation policy -- which admits the assistant's ``start_thread`` -- does
+    not apply.
+
+    404 while threads are disabled, and for an anchor outside the caller's Home.
+    """
+    config = _app_config(request)
+    if not config.conversation_threads.enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    user_id = _user_id(current_user)
+    hub = get_stream_hub(request)
+    prompt = (payload.prompt or "").strip() or None
+    if prompt is None and (
+        payload.anchor_message_id is None or not payload.include_context
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="A thread needs an opening message.",
+        )
+    if prompt is None and payload.attachments:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Attachments are sent with an opening message.",
+        )
+    profile = _local_profile(request, payload.profile_id)
+    resolve_requested_model_tier(profile, payload.model_tier)
+    home = await ensure_web_home(
+        db_context, config, user_id=user_id, now=datetime.now(UTC)
+    )
+    turn_id = payload.turn_id or str(uuid.uuid4())
+
+    existing = await db_context.message_history.get_user_row_by_turn_id(turn_id)
+    if existing is not None:
+        # A retry of a start that already happened: answer with that thread.
+        thread = await db_context.conversation_threads.get_thread(
+            existing["conversation_id"]
+        )
+        if thread is None or thread.home_conversation_id != home:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="That turn_id is already in use.",
+            )
+        conversation_id = thread.conversation_id
+        copied: list[int] = []
+    else:
+        conversation_id = new_thread_conversation_id("web")
+        copied = await _create_user_thread(
+            db_context,
+            config,
+            hub,
+            payload=payload,
+            prompt=prompt,
+            profile=profile,
+            user_id=user_id,
+            home=home,
+            conversation_id=conversation_id,
+        )
+
+    turn = (
+        await start_chat_turn(
+            ChatTurnRequest(
+                turn_id=turn_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+                interface_type="web",
+                attachments=payload.attachments,
+                model_tier=payload.model_tier,
+            ),
+            request,
+            current_user,
+            default_processing_service=default_processing_service,
+            web_chat_interface=web_chat_interface,
+        )
+        if prompt is not None
+        else None
+    )
+    if turn is None:
+        await hub.publish_activity(
+            conversation_id, user_id=user_id, reason="thread_started"
+        )
+    await announce_home_change(
+        hub, home_conversation_id=home, user_id=user_id, reason="thread_started"
+    )
+    return StartThreadResponse(
+        thread=await _thread_summary(
+            db_context, config, hub, user_id=user_id, conversation_id=conversation_id
+        ),
+        turn=turn,
+        copied_message_ids=copied,
+    )
+
+
+async def _create_user_thread(
+    db: Database,
+    config: AppConfig,
+    hub: ConversationStreamHub,
+    *,
+    payload: StartThreadRequest,
+    prompt: str | None,
+    profile: ProcessingService,
+    user_id: str,
+    home: str,
+    conversation_id: str,
+) -> list[int]:
+    """Record a thread the user started, with the Home turns it continues."""
+    seed: CopiedTurns | None = None
+    if payload.anchor_message_id is not None:
+        anchor = await _home_turn_row(db, home, payload.anchor_message_id, hub)
+        if payload.include_context:
+            assert anchor["turn_id"] is not None
+            seed = CopiedTurns(
+                source_interface_type=anchor["interface_type"],
+                source_conversation_id=home,
+                turn_ids=tuple(
+                    await db.message_history.turn_ids_leading_to(
+                        interface_type=anchor["interface_type"],
+                        conversation_id=home,
+                        turn_id=anchor["turn_id"],
+                        limit=CONTINUE_CONTEXT_TURNS,
+                    )
+                ),
+            )
+    title = (payload.title or "").strip() or _derived_title(prompt)
+    new_thread = NewThread(
+        conversation_id=conversation_id,
+        home_conversation_id=home,
+        interface_type="web",
+        owner_user_id=home_owner_id(config, user_id),
+        user_id=user_id,
+        profile=profile.service_config,
+        title=title,
+        # The user wrote it, or it is fixed text: either way it is the user's.
+        title_taint=TurnTaintState.empty().to_metadata(),
+        anchor_message_id=payload.anchor_message_id,
+    )
+    now = datetime.now(UTC)
+
+    async def _create(txn: DatabaseTransaction) -> list[int]:
+        return await create_thread(
+            txn, thread=new_thread, seed=seed, turn_id=str(uuid.uuid4()), now=now
+        )
+
+    try:
+        return await db.atomic(_create)
+    except CrossBoundaryCopyRefusedError as refusal:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Profile '{profile.service_config.id}' does not receive household "
+                "context, so Home conversation can't be carried into it. Continue "
+                "without context, or choose another profile."
+            ),
+        ) from refusal
+
+
+@threads_api_router.post("/v1/chat/home/threads/{conversation_id}/moved-turns")
+async def move_turn_to_thread(
+    conversation_id: str,
+    payload: MoveTurnRequest,
+    request: Request,
+    current_user: Annotated[dict, Depends(get_current_user)],
+    db_context: Annotated[Database, Depends(get_db)],
+) -> MoveTurnResponse:
+    """Move a whole Home turn into one of the caller's threads.
+
+    The turn -- the user's message, its tool rows and the reply -- leaves Home
+    and becomes the newest turn in the thread, keeping its taint. Home keeps a
+    marker in its place (``moved_to_thread`` on the message) so its readers see
+    where the turn went, and Home's assistant no longer sees the turn.
+
+    404 while threads are disabled, for a thread or message that isn't the
+    caller's, and for a message outside their Home. 409 for a thread whose
+    profile does not receive household context, and while Home or the thread
+    has a reply in progress.
+    """
+    config = _app_config(request)
+    user_id = _user_id(current_user)
+    thread = await _owned_thread(request, current_user, db_context, conversation_id)
+    home = await find_home(db_context, config, user_id=user_id, interface_type="web")
+    if home is None or thread.home_conversation_id != home:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    hub = get_stream_hub(request)
+    row = await _home_turn_row(db_context, home, payload.message_id, hub)
+    assert row["turn_id"] is not None
+    # A row landing in either conversation mid-turn would sort into the middle
+    # of that turn's own rows.
+    if hub.has_running_turn(home) or hub.has_running_turn(conversation_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Wait for the reply in progress to finish, then move the turn.",
+        )
+    profile = _local_profile(request, thread.profile_id)
+    destination = BoundaryDestination(
+        interface_type=thread.interface_type,
+        conversation_id=conversation_id,
+        profile=profile.service_config,
+        user_id=user_id,
+    )
+    try:
+        moved = await move_turn_across_boundary(
+            db_context,
+            destination=destination,
+            turn=MovedTurn(
+                source_interface_type=row["interface_type"],
+                source_conversation_id=home,
+                turn_id=row["turn_id"],
+            ),
+            now=datetime.now(UTC),
+        )
+    except CrossBoundaryCopyRefusedError as refusal:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This thread runs on '{thread.profile_id}', which does not "
+                "receive household context, so a Home turn can't be moved into it."
+            ),
+        ) from refusal
+
+    await announce_home_change(
+        hub, home_conversation_id=home, user_id=user_id, reason="turn_moved"
+    )
+    await announce_home_change(
+        hub, home_conversation_id=conversation_id, user_id=user_id, reason="turn_moved"
+    )
+    return MoveTurnResponse(
+        thread=await _thread_summary(
+            db_context, config, hub, user_id=user_id, conversation_id=conversation_id
+        ),
+        marker_message_id=moved.marker_id,
+        moved_message_ids=list(moved.copied_ids),
     )

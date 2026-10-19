@@ -3,9 +3,10 @@
 ## Status
 
 Approved. Milestones 1 (threads exist) and 2 (Home on web, including the right-hand panel),
-milestone 3 (state and echo) on the backend, the web and iOS, and milestone 4 (Home on iOS)
-implemented. Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered:
-[iOS](one-thread-ux/ios.png), [web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
+milestone 3 (state and echo) on the backend, the web and iOS, milestone 4 (Home on iOS), and the
+backend of milestone 5 (user overrides) implemented. Mockups:
+[one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered: [iOS](one-thread-ux/ios.png),
+[web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
 
 ## Problem
 
@@ -340,6 +341,21 @@ and each path is governed:
   rebuilds the chat tab, even for the same account, so an unsent draft there is dropped. A draft
   written in the fallback conversation list moves into Home when Retry finds it, but nothing carries
   across a re-sign-in, which may be as someone else.
+
+- **"Continue in a thread" carries a fixed window.** It copies the anchor's turn and at most four
+  Home turns before it. That covers the exchange being continued and what led up to it; anything
+  older stays in Home, and the user can say more in the opening message.
+
+- **Continuing into a profile without household context carries the request only.** With context it
+  is refused, and the client offers "continue without context" there instead: a thread that starts
+  from the user's opening message and keeps the anchor for its "Started from" quote, like an
+  assistant-started seed.
+
+- **A moved turn is a copy, then a removal.** Its rows are copied into the thread, stamped with the
+  time of the move so the turn is the thread's newest, and deleted from Home in the same
+  transaction. Home keeps one marker row naming the thread, which clients render as "Moved to …" and
+  which Home's assistant reads only as "an exchange was moved". A turn is moved only while neither
+  conversation has a reply in progress, so its rows never land inside another turn.
 
 - **iOS lists every done thread under "Done".** The switcher has no "Done today" cut-off. A done
   thread stays there until something reopens it, and older conversations stay under Earlier, so the
