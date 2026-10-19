@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from playwright.async_api import expect
+from playwright.async_api import ViewportSize, expect
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from family_assistant.llm.messages import AssistantMessage, ToolMessage, UserMessage
@@ -22,6 +22,8 @@ from tests.mocks.mock_llm import LLMOutput, RuleBasedMockLLMClient
 USER = "test_user"
 THREAD_PROFILE = "test_research"
 SEED_REQUEST = "Find three plumbers and get quotes for a new hot water system."
+# Wide enough for the thread panel beside Home, with both sidebars open.
+WIDE_VIEWPORT: ViewportSize = {"width": 1600, "height": 900}
 
 
 @pytest.fixture
@@ -211,6 +213,7 @@ async def test_a_card_opens_its_thread_beside_home_and_each_pane_answers_for_its
     db = Database(engine=db_engine)
     home = await _home_conversation_id(web_test_fixture.base_url)
     seeded = await _seed_thread(db, home)
+    await web_test_fixture.page.set_viewport_size(WIDE_VIEWPORT)
     chat = await _open_home(web_test_fixture, home)
     await _finish_first_run_with_question(web_test_fixture, db, seeded)
     await chat.wait_for_card_state(seeded.thread, "waiting")
@@ -268,6 +271,7 @@ async def test_the_panel_expands_collapses_and_survives_a_reload(
     db = Database(engine=db_engine)
     home = await _home_conversation_id(web_test_fixture.base_url)
     seeded = await _seed_thread(db, home)
+    await web_test_fixture.page.set_viewport_size(WIDE_VIEWPORT)
     chat = await _open_home(web_test_fixture, home)
     page = web_test_fixture.page
     await chat.open_thread_from_card(seeded.thread)
@@ -449,6 +453,7 @@ async def test_opening_a_thread_clears_its_badge_and_it_can_be_marked_done(
     db = Database(engine=db_engine)
     home = await _home_conversation_id(web_test_fixture.base_url)
     seeded = await _seed_thread(db, home)
+    await web_test_fixture.page.set_viewport_size(WIDE_VIEWPORT)
     chat = await _open_home(web_test_fixture, home)
     await _finish_first_run_with_question(web_test_fixture, db, seeded)
     await chat.wait_for_card_state(seeded.thread, "waiting")

@@ -2864,7 +2864,7 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
         className="flex flex-1 flex-col min-h-0 overflow-hidden"
         data-testid="conversation-pane"
         data-presentation={presentation}
-        data-conversation-id={conversationId ?? undefined}
+        data-pane-conversation-id={conversationId ?? undefined}
       >
         {/* The shared top bar carries navigation and the conversation
             actions; the profile/intelligence selectors sit on a second
@@ -2906,11 +2906,11 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
   if (presentation === 'side') {
     return (
       <section
-        className="flex min-h-0 w-[40%] min-w-[22rem] max-w-[40rem] flex-shrink-0 flex-col border-l"
+        className="flex min-h-0 w-[38%] min-w-[22rem] max-w-[40rem] flex-shrink-0 flex-col border-l"
         aria-label={conversationTitle ?? 'Thread'}
         data-testid="conversation-pane"
         data-presentation={presentation}
-        data-conversation-id={conversationId ?? undefined}
+        data-pane-conversation-id={conversationId ?? undefined}
       >
         <div className="flex flex-shrink-0 flex-col gap-1 border-b bg-background/95 px-4 py-2">
           <div className="flex min-h-10 min-w-0 items-center gap-2">
@@ -2943,9 +2943,9 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
       className="flex min-w-0 min-h-0 flex-1 flex-col"
       data-testid="conversation-pane"
       data-presentation={presentation}
-      data-conversation-id={conversationId ?? undefined}
+      data-pane-conversation-id={conversationId ?? undefined}
     >
-      <div className="sticky top-0 z-40 flex min-h-14 items-center gap-3 border-b bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+      <div className="sticky top-0 z-40 flex min-h-14 flex-wrap items-center gap-x-3 gap-y-2 border-b bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         {headerStart}
 
         {conversationTitle && (

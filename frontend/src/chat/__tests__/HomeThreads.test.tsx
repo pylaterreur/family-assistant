@@ -754,7 +754,7 @@ describe('Thread state, unread and echoes', () => {
   });
 });
 
-const WIDE = 1440;
+const WIDE = 1600;
 const NARROW = 1024;
 
 function setWindowWidth(width: number): void {
@@ -769,7 +769,7 @@ function paneFor(conversationId: string): HTMLElement | null {
   return (
     screen
       .queryAllByTestId('conversation-pane')
-      .find((pane) => pane.getAttribute('data-conversation-id') === conversationId) ?? null
+      .find((pane) => pane.getAttribute('data-pane-conversation-id') === conversationId) ?? null
   );
 }
 

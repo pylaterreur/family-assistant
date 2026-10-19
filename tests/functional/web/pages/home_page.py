@@ -36,7 +36,7 @@ class HomePage(ChatPage):
     def pane(self, conversation_id: str) -> Locator:
         """The pane showing a conversation: the main column or the side panel."""
         return self.page.locator(
-            f'{self.CONVERSATION_PANE}[data-conversation-id="{conversation_id}"]'
+            f'{self.CONVERSATION_PANE}[data-pane-conversation-id="{conversation_id}"]'
         )
 
     async def send_in(self, conversation_id: str, message: str) -> None:

@@ -113,7 +113,7 @@ interface PanelState {
 
 // Below this width the panel would squeeze Home and the thread, so a thread
 // opens in place of Home, as on a phone.
-const PANEL_MIN_WIDTH = 1280;
+const PANEL_MIN_WIDTH = 1440;
 
 /** The chat's address: what the centre shows, and the thread open beside it. */
 function chatUrl(centerConversationId: string | null, panel: PanelState | null): string {
