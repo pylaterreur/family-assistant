@@ -269,6 +269,14 @@ and each path is governed:
   on you" is carried by the switcher badge, the sidebar and push notifications.
 - **Tier choices don't stick in Home.** Home is everlasting, so a sticky tier would quietly apply to
   every later quick question.
+- **iOS: routed requests and drafts on rare paths are correct, not seamless.** A prompt or shared
+  file routed in while the app cannot yet tell whether Home exists is held and delivered once it
+  can. A prompt routed into Home waits until Home is loaded and idle, showing a short "Will send
+  when ready" note. Beyond that the app does not try to preserve everything. If several routes
+  arrive while the Home lookup is failing, only the latest is delivered. Signing in again in place
+  rebuilds the chat tab, even for the same account, so an unsent draft there is dropped. A draft
+  written in the fallback conversation list moves into Home when Retry finds it, but nothing carries
+  across a re-sign-in, which may be as someone else.
 
 ## Decisions
 

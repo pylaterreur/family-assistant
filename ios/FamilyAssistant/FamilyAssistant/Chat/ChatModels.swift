@@ -57,6 +57,8 @@ struct ChatConversationSummary: Codable, Equatable, Identifiable {
     var summary: String?
     /// Present only on search results: a snippet of a message that matched.
     var matchExcerpt: String?
+    /// `home`, `thread` or `conversation`; absent from a server without threads.
+    var kind: String?
 
     var id: String { conversationID }
 
@@ -75,6 +77,7 @@ struct ChatConversationSummary: Codable, Equatable, Identifiable {
         case lastTimestamp = "last_timestamp"
         case messageCount = "message_count"
         case matchExcerpt = "match_excerpt"
+        case kind
     }
 }
 
@@ -926,6 +929,12 @@ struct ChatConversationMessagesResponse: Decodable {
     let hasMoreBefore: Bool
     let hasMoreAfter: Bool
     let activeTurns: [ChatActiveTurnInfo]
+    /// The profile the conversation's history is under, sent only when the
+    /// request asks for it (`include_conversation_profile`). For a thread it is
+    /// the thread's own profile.
+    let latestUserProfileID: String?
+    let conversationKind: ChatConversationKind?
+    let thread: ChatThreadSummary?
 
     enum CodingKeys: String, CodingKey {
         case conversationID = "conversation_id"
@@ -935,6 +944,9 @@ struct ChatConversationMessagesResponse: Decodable {
         case hasMoreBefore = "has_more_before"
         case hasMoreAfter = "has_more_after"
         case activeTurns = "active_turns"
+        case latestUserProfileID = "latest_user_profile_id"
+        case conversationKind = "conversation_kind"
+        case thread
     }
 
     init(from decoder: Decoder) throws {
@@ -946,6 +958,11 @@ struct ChatConversationMessagesResponse: Decodable {
         hasMoreBefore = try container.decodeIfPresent(Bool.self, forKey: .hasMoreBefore) ?? false
         hasMoreAfter = try container.decodeIfPresent(Bool.self, forKey: .hasMoreAfter) ?? false
         activeTurns = try container.decodeIfPresent([ChatActiveTurnInfo].self, forKey: .activeTurns) ?? []
+        latestUserProfileID = try container.decodeIfPresent(String.self, forKey: .latestUserProfileID)
+        conversationKind = ChatConversationKind(
+            rawValue: try container.decodeIfPresent(String.self, forKey: .conversationKind)
+        )
+        thread = try container.decodeIfPresent(ChatThreadSummary.self, forKey: .thread)
     }
 }
 

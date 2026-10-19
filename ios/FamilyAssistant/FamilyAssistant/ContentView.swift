@@ -76,6 +76,7 @@ struct ContentView: View {
         Task {
             await notificationManager.disableNotifications(authManager: authManager)
             await authManager.logout()
+            HomeAvailability.clear()
             appRouter.reset()
         }
     }

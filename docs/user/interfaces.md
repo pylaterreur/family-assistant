@@ -276,6 +276,17 @@ conversation where the assistant offers a choice of them (see
 approve/reject confirmations, and uploads images, PDFs, plain text, and Markdown up to 100 MB. Very
 long messages render a section at a time behind a **Show more** control.
 
+**Home and threads.** Where your assistant has threads turned on, Chat opens on **Home**, one
+ongoing conversation for quick questions and everyday requests. When the assistant moves a bigger
+job into a thread, the thread appears in Home as a card showing its title, whether it is working,
+waiting on you or failed, and its latest line. Tap the card to open the thread; Back returns you to
+Home where you left it. A thread keeps its own profile, so it has no profile picker, and its top
+shows the request the assistant started it with. The threads button at the top right counts threads
+waiting on you and opens the thread list: Home, your threads grouped by state, and your other
+conversations under **Earlier**, with search and **New Chat**. Something you share into the app
+lands in Home's composer. An intelligence level picked in Home applies to that one message. See
+[Home and threads](#home-and-threads) for how threads work.
+
 **Getting content in:** share a supported file from the iOS share sheet or Files "Open In" and it
 opens a new Chat draft with the file attached. A copied image can be pasted with the paste button
 beside the composer. The Photos share sheet does not list Family Assistant — copy the photo and
