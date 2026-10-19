@@ -164,29 +164,42 @@ rather than adding a message for every step. It shows:
   **Failed**
 - the thread's title, and which assistant is running it
 - the thread's latest message, such as a question it needs you to answer
-- how many of its messages you haven't read yet
+- a count of the thread's messages you haven't read yet
+
+A finished thread's card looks finished. A **Done** card is greyed out with a tick and shows the
+outcome the assistant reported. If you closed the thread yourself, the card says **You marked this
+done** instead. A **Failed** card is outlined in red.
 
 When the thread's assistant finishes the job, it marks the thread **Done** (or **Failed**, if the
-job can't be done) and its final message, the outcome, also appears in Home, labelled with the
-thread it came from. A thread that ends on a question isn't done: it is **Waiting on you**. You can
-mark a thread done yourself; nothing is added to Home then. A finished thread reopens by itself when
-something new arrives in it, such as your reply, a reminder it set, or a late result, and goes back
-to **Working** or **Waiting on you**. When it finishes again, the new outcome appears in Home.
+job can't be done). Its final message, the outcome, also appears in Home under a **From thread:**
+line naming the thread; click that line to open the thread. A thread that ends on a question isn't
+done: it is **Waiting on you**. A finished thread reopens by itself when something new arrives in
+it, such as your reply, a reminder it set, or a late result, and goes back to **Working** or
+**Waiting on you**. When it finishes again, the new outcome appears in Home.
 
 To catch up without opening each thread, ask in Home, for example *"How are the quotes going?"* The
 assistant answers from each thread's title, where it stands and the outcome it reported. It doesn't
 read the threads' conversations, so for the detail, open the thread.
 
-Unread counts are your own: someone else in the household reading a thread doesn't clear yours.
-
 Click the card to open the thread. An open thread is an ordinary chat: read what the assistant has
 done, answer its questions, and ask for more. The bar above it shows **← Home** to go back, what the
-assistant asked the thread to do when it started it, and **Working…** while the thread is busy. The
-thread's assistant is fixed, so the profile picker is locked here too.
+assistant asked the thread to do when it started it, and where the thread stands (**Working…** while
+it is busy). The thread's assistant is fixed, so the profile picker is locked here too.
 
-The sidebar lists **Home** first, then your threads grouped by where they stand, with whatever needs
-you at the top. Conversations from before threads, and any you start with the new-chat button, are
-listed under **Earlier**. Searching looks through all of them.
+To close a thread yourself, select **Mark done** in the bar above it. You can do this whatever state
+the thread is in. Nothing is added to Home when you do, because the thread's last message may be a
+question rather than an outcome. If the thread can't be marked done, the bar says so and the thread
+stays as it was.
+
+**Unread counts.** Opening Home or a thread marks what's on screen as read, a moment after it
+appears, and the thread's unread count clears. A browser tab in the background doesn't mark anything
+read, so the count is still there when you come back to it. Unread counts are your own: someone else
+in the household reading a thread doesn't clear yours.
+
+The sidebar lists **Home** first, with a count of the threads waiting on you, then your threads
+grouped by where they stand, with whatever needs you at the top. Each thread shows its unread count,
+and one you closed yourself says so. Conversations from before threads, and any you start with the
+new-chat button, are listed under **Earlier**. Searching looks through all of them.
 
 ### Voice
 
