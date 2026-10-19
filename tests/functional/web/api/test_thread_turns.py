@@ -24,6 +24,7 @@ from sqlalchemy import select, update
 
 from family_assistant.config_models import AppConfig, ConversationThreadsConfig
 from family_assistant.interfaces import ChatInterface
+from family_assistant.llm import ToolCallFunction, ToolCallItem
 from family_assistant.processing import ProcessingService
 from family_assistant.storage import delegation_runs_table, tasks_table
 from family_assistant.storage.database import Database
@@ -473,3 +474,53 @@ async def test_cancelling_the_worker_stops_the_turn(
     record = queued_thread.hub.get_turn(THREAD, queued_thread.turn_id)
     assert record is not None
     assert record.status != "running"
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_turn_that_finishes_the_thread_echoes_into_home(
+    queued_thread: QueuedThread,
+    api_test_processing_service: ProcessingService,
+) -> None:
+    """A thread's turns on the web stream; the echo follows them there too."""
+    registry = {
+        TARGET: queued_thread.target_service,
+        "default_assistant": api_test_processing_service,
+    }
+    queued_thread.target_service.processing_services_registry = registry
+    queued_thread.target_llm.rules = [
+        (
+            lambda kwargs: getattr(kwargs["messages"][-1], "role", None) == "tool",
+            lambda _kwargs: LLMOutput(content=THREAD_REPLY),
+        ),
+        (
+            lambda _kwargs: True,
+            lambda _kwargs: LLMOutput(
+                content=None,
+                tool_calls=[
+                    ToolCallItem(
+                        id="call_finish",
+                        type="function",
+                        function=ToolCallFunction(
+                            name="finish_thread", arguments='{"outcome": "done"}'
+                        ),
+                    )
+                ],
+            ),
+        ),
+    ]
+    queued_thread.target_gate.set()
+
+    await queued_thread.run_worker()
+
+    thread = await queued_thread.db.conversation_threads.get_thread(THREAD)
+    assert thread is not None and thread.close is not None
+    assert thread.close.echo_message_id is not None
+    echo = await queued_thread.db.message_history.get_row_by_internal_id(
+        thread.close.echo_message_id
+    )
+    assert echo is not None
+    assert (
+        echo["conversation_id"],
+        echo["content"],
+        echo["echoed_from_conversation_id"],
+    ) == (thread.home_conversation_id, THREAD_REPLY, THREAD)
