@@ -444,6 +444,46 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertFalse(model.allowsProfileChange)
     }
 
+    func testPushedThreadStaysUnsendableUntilItsLoadSucceeds() async {
+        PreferredProfile.store("research")
+        let loads = LockedStrings()
+        let turnPosts = LockedStrings()
+        let threadJSON = threadJSON(id: "t1", state: "waiting", profileID: "browser_profile")
+        ChatMockBackendURLProtocol.respond { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST", path == "/api/v1/chat/turns" {
+                turnPosts.append(path)
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 500)
+            }
+            guard request.httpMethod == "GET", path.hasSuffix("/messages") else {
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+            }
+            loads.append(path)
+            if loads.values.count == 1 {
+                return .json(#"{"detail":"upstream unavailable"}"#, statusCode: 503)
+            }
+            return .json("""
+            {"conversation_id":"t1","messages":[],"count":0,"total_messages":0,
+             "latest_user_profile_id":"browser_profile","conversation_kind":"thread","thread":\(threadJSON)}
+            """)
+        }
+        let model = makeViewModel(conversationID: "t1", role: .pushed)
+
+        await model.selectConversation("t1")
+        model.draftText = "Either, but flag the rebate"
+
+        XCTAssertTrue(model.conversationMetadataLoadFailed)
+        XCTAssertFalse(model.canSendDraft, "A thread whose description failed to load must not send.")
+        await model.sendDraft()
+        XCTAssertTrue(turnPosts.values.isEmpty, "Nothing is posted under a guessed profile.")
+
+        await model.retryConversationLoad()
+
+        XCTAssertFalse(model.conversationMetadataLoadFailed)
+        XCTAssertEqual(model.selectedProfileID, "browser_profile")
+        XCTAssertTrue(model.canSendDraft)
+    }
+
     func testHomeWithoutHistoryRunsOnTheDefaultProfile() async {
         PreferredProfile.store("research")
         respondWithConversation(

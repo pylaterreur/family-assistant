@@ -12451,6 +12451,8 @@ final class ChatViewModelTests: XCTestCase {
         let recorder = respondRecordingModelTiers(conversationID: "web_conv_home_tier")
         let model = makeViewModel(conversationID: "web_conv_home_tier", role: .home)
         model.profiles = [Self.tieredProfile()]
+        // Over Home a conversation sends only once the server has described it.
+        await model.selectConversation("web_conv_home_tier")
         model.selectModelTier("deep")
 
         model.draftText = "Think hard about this"
@@ -12474,6 +12476,8 @@ final class ChatViewModelTests: XCTestCase {
         let recorder = respondRecordingModelTiers(conversationID: "web_conv_thread_tier")
         let model = makeViewModel(conversationID: "web_conv_thread_tier", role: .pushed)
         model.profiles = [Self.tieredProfile()]
+        // Over Home a conversation sends only once the server has described it.
+        await model.selectConversation("web_conv_thread_tier")
         model.selectModelTier("deep")
 
         model.draftText = "First"

@@ -27,6 +27,20 @@ final class ChatViewModel {
     private(set) var threadSummary: ChatThreadSummary?
     /// The profile the server says the open conversation's history is under.
     @ObservationIgnored private var serverConversationProfileID: String?
+    /// Whether the server has described the open conversation (its kind and
+    /// profile). Home and conversations pushed over it cannot send until it
+    /// has: the profile a send runs under, and so the history it sees, comes
+    /// from that description, not from a guess.
+    private(set) var hasConversationMetadata = false
+    /// The load that would have described the open conversation failed. The
+    /// composer stays closed until `retryConversationLoad` succeeds.
+    private(set) var conversationMetadataLoadFailed = false
+
+    /// Whether sending waits on the server describing the conversation: true
+    /// for an existing conversation shown as Home or over it, until it has.
+    private var awaitsConversationMetadata: Bool {
+        role != .standalone && !hasConversationMetadata && !opensGeneratedLaunchDraft
+    }
     /// Called whenever the model refreshes its conversation list for an
     /// activity ping or a resync, after its own refresh, so the owner can
     /// refresh what it shows alongside (the thread list). A resync matters as
@@ -201,7 +215,7 @@ final class ChatViewModel {
         // completes, `selectConversation` hasn't adopted the thread's profile yet,
         // so a send would post under the previous profile and the backend would
         // filter this thread's history out of the turn's context.
-        return hasContent && attachmentsReady && !isLoadingMessages
+        return hasContent && attachmentsReady && !isLoadingMessages && !awaitsConversationMetadata
     }
 
     /// Owner-side share controls mirror the web app and appear only after this
@@ -607,6 +621,7 @@ final class ChatViewModel {
             if role != .standalone {
                 // Minted here, so it is an ordinary conversation by construction.
                 conversationKind = .conversation
+                hasConversationMetadata = true
             }
         } else if let initialPrompt, !initialPrompt.isEmpty {
             // Launched to start a brand-new chat (share extension / App Intent).
@@ -1099,6 +1114,11 @@ final class ChatViewModel {
         let conversationProfile = messages.last {
             $0.role == .user && $0.processingProfileID != nil
         }?.processingProfileID
+        if role != .standalone, !hasConversationMetadata {
+            // Nothing to adopt yet; sending stays closed until the server has
+            // described the conversation (see `awaitsConversationMetadata`).
+            return
+        }
         switch role {
         case .standalone:
             selectedProfileID = conversationProfile ?? preferredProfileID
@@ -1169,6 +1189,7 @@ final class ChatViewModel {
         clearConversationIdentity()
         if role != .standalone {
             conversationKind = .conversation
+            hasConversationMetadata = true
         }
         messages = []
         persistedMessagesConversationID = nil
@@ -1202,6 +1223,17 @@ final class ChatViewModel {
         conversationKind = nil
         threadSummary = nil
         serverConversationProfileID = nil
+        hasConversationMetadata = false
+        conversationMetadataLoadFailed = false
+    }
+
+    /// Load the open conversation again after the load that would have
+    /// described it failed, adopting its profile once it succeeds.
+    func retryConversationLoad() async {
+        guard let conversationID else {
+            return
+        }
+        await selectConversation(conversationID, shouldLoadMessages: true)
     }
 
     private func resetTurnControlState() {
@@ -1396,6 +1428,8 @@ final class ChatViewModel {
                 conversationKind = response.conversationKind
                 threadSummary = response.thread
                 serverConversationProfileID = response.latestUserProfileID
+                hasConversationMetadata = true
+                conversationMetadataLoadFailed = false
             }
             replaceMessagesPreservingPagedBackWindow(withLiveFollowBubbles(Self.renderMessages(
                 from: response.messages,
@@ -1413,6 +1447,9 @@ final class ChatViewModel {
         } catch {
             guard self.conversationID == id else {
                 return
+            }
+            if role != .standalone, !hasConversationMetadata {
+                conversationMetadataLoadFailed = true
             }
             if userInitiated {
                 handleUserReadFailure(
@@ -1915,7 +1952,7 @@ final class ChatViewModel {
         }
         // Defensive: the send button is disabled while a conversation loads, but
         // never post a turn before its profile is adopted (see `canSendDraft`).
-        guard !isLoadingMessages else {
+        guard !isLoadingMessages, !awaitsConversationMetadata else {
             return false
         }
         if isRouted {

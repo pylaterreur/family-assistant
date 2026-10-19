@@ -75,6 +75,34 @@ struct ChatEntryView: View {
     }
 }
 
+/// Shown when the load that describes Home or a conversation over it failed:
+/// sending stays closed until it loads, so the user needs a way to try again.
+private struct ConversationLoadRetryBanner: View {
+    var viewModel: ChatViewModel
+
+    var body: some View {
+        if viewModel.conversationMetadataLoadFailed {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("Couldn’t load this conversation. Sending is paused until it loads.")
+                    .font(.footnote)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button("Retry") {
+                    Task { await viewModel.retryConversationLoad() }
+                }
+                .font(.footnote.weight(.semibold))
+                .disabled(viewModel.isLoadingMessages)
+                .accessibilityIdentifier("conversation-load-retry")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(.bar)
+            .accessibilityIdentifier("conversation-load-failed")
+        }
+    }
+}
+
 private struct HomeLookupFailedBanner: View {
     let retry: () -> Void
 
@@ -140,6 +168,9 @@ struct HomeRootView: View {
     var body: some View {
         NavigationStack(path: $path) {
             ChatThreadView(viewModel: viewModel, keepsScrollPositionOnReappear: true)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    ConversationLoadRetryBanner(viewModel: viewModel)
+                }
                 .navigationTitle("Home")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { homeToolbar }
@@ -378,6 +409,9 @@ private struct PushedConversationView: View {
 
     var body: some View {
         ChatThreadView(viewModel: viewModel)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                ConversationLoadRetryBanner(viewModel: viewModel)
+            }
             .navigationTitle(thread?.title ?? "Chat")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
