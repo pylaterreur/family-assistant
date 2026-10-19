@@ -15,7 +15,7 @@ import json
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
@@ -54,6 +54,18 @@ TARGET = "complex_tasks"
 OWNER = "test_user"
 THREAD = "web_conv_thread"
 THREAD_REPLY = "Here are three quotes."
+
+
+class _EnteredGate(asyncio.Event):
+    """A response gate that says when a model call first waits on it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def wait(self) -> Literal[True]:
+        self.entered.set()
+        return await super().wait()
 
 
 @dataclass
@@ -459,15 +471,14 @@ async def test_the_first_turn_gets_the_attachments_it_was_started_with(
 async def test_cancelling_the_worker_stops_the_turn(
     queued_thread: QueuedThread,
 ) -> None:
+    # The run reads as running once claimed, a step before the turn itself
+    # starts; cancelling in between abandons a turn that never began. Wait
+    # for the model call so the cancellation lands on a turn in progress.
+    gate = _EnteredGate()
+    queued_thread.target_llm.response_gate = gate
     handler = asyncio.create_task(queued_thread.run_worker())
-    live = LiveThread(
-        client=queued_thread.client,
-        db=queued_thread.db,
-        target_gate=queued_thread.target_gate,
-        turn_id=queued_thread.turn_id,
-    )
-    await live.wait_until_running()
 
+    await asyncio.wait_for(gate.entered.wait(), timeout=30)
     handler.cancel()
     await asyncio.wait([handler])
 
