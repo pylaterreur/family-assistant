@@ -15,8 +15,8 @@ export interface Conversation {
 
 export type ConversationKind = 'home' | 'thread' | 'conversation';
 
-/** Where a thread stands: running, waiting on the user, or failed. */
-export type ThreadState = 'working' | 'waiting' | 'failed';
+/** Where a thread stands: running, waiting on the user, done, or failed. */
+export type ThreadState = 'working' | 'waiting' | 'done' | 'failed';
 
 /** One thread of a Home, as its card and the sidebar show it. */
 export interface ThreadSummary {

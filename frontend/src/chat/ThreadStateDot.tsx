@@ -5,12 +5,14 @@ import type { ThreadState } from './types';
 export const THREAD_STATE_LABELS: Record<ThreadState, string> = {
   waiting: 'Waiting on you',
   working: 'Working',
+  done: 'Done',
   failed: 'Failed',
 };
 
 const DOT_CLASSES: Record<ThreadState, string> = {
   waiting: 'bg-violet-500',
   working: 'bg-amber-500 animate-pulse',
+  done: 'bg-emerald-500',
   failed: 'bg-destructive',
 };
 
