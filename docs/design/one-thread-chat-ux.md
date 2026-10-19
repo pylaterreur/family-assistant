@@ -2,9 +2,10 @@
 
 ## Status
 
-Approved. Milestone 1 (threads exist) and the backend of milestone 2 implemented. Mockups:
-[one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered: [iOS](one-thread-ux/ios.png),
-[web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
+Approved. Milestone 1 (threads exist), milestone 2 apart from the right-hand panel, and milestone 4
+(Home on iOS) implemented. Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html)
+(rendered: [iOS](one-thread-ux/ios.png), [web](one-thread-ux/web.png),
+[notes](one-thread-ux/notes.png)).
 
 ## Problem
 
