@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -28,6 +28,10 @@ NOW = datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
 CALLER = "test_user"
 
 
+def _a_minute_ago() -> datetime:
+    return datetime.now(UTC) - timedelta(minutes=1)
+
+
 @pytest.fixture
 def threads_enabled(app_fixture: FastAPI) -> None:
     app_fixture.state.config = AppConfig(
@@ -43,8 +47,8 @@ async def _as_other_user(app_fixture: FastAPI) -> None:
     app_fixture.dependency_overrides[get_current_user] = other_user
 
 
-async def _add_thread(db: Database, home: str) -> str:
-    """A thread of ``home`` whose starting run has finished with a reply."""
+async def _add_thread(db: Database, home: str, *, at: datetime = NOW) -> str:
+    """A thread of ``home`` whose starting run has finished with a reply at ``at``."""
     thread = "web_conv_thread"
     await db.conversation_threads.create_thread(
         conversation_id=thread,
@@ -56,24 +60,24 @@ async def _add_thread(db: Database, home: str) -> str:
         title_taint=None,
         anchor_message_id=None,
         delegation_id=None,
-        now=NOW,
+        now=at,
         source_tool_call_id="call_123",
     )
     seed = await db.message_history.add_message(
         UserMessage.from_trusted_user(content="Find three plumbers."),
         interface_type="web",
         conversation_id=thread,
-        timestamp=NOW,
+        timestamp=at,
         processing_profile_id="browser_profile",
         user_id=CALLER,
         is_internal=True,
     )
-    await db.conversation_threads.set_seed_message(thread, seed, NOW)
+    await db.conversation_threads.set_seed_message(thread, seed, at)
     await db.message_history.add_message(
         AssistantMessage(content="Gas or heat pump?"),
         interface_type="web",
         conversation_id=thread,
-        timestamp=NOW,
+        timestamp=at,
         processing_profile_id="browser_profile",
     )
     return thread
@@ -460,3 +464,171 @@ async def test_a_home_turn_runs_on_the_default_profile_whatever_it_names(
     )
     assert row is not None
     assert row["processing_profile_id"] == api_test_processing_service.service_config.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_a_user_marking_a_thread_done_writes_no_echo(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(db, home, at=_a_minute_ago())
+
+    response = await api_test_client.post(f"/api/v1/chat/home/threads/{thread}/done")
+
+    body = response.json()
+    assert (body["state"], body["closed_by"], body["echo_message_id"]) == (
+        "done",
+        "user",
+        None,
+    )
+    messages = (
+        await api_test_client.get(f"/api/v1/chat/conversations/{home}/messages")
+    ).json()["messages"]
+    assert messages == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_a_user_closed_thread_reopens_when_a_message_arrives(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(db, home, at=_a_minute_ago())
+    await api_test_client.post(f"/api/v1/chat/home/threads/{thread}/done")
+
+    await db.message_history.add_message(
+        AssistantMessage(content="Reminder: the plumber comes today."),
+        interface_type="web",
+        conversation_id=thread,
+        timestamp=datetime.now(UTC),
+        processing_profile_id="browser_profile",
+    )
+
+    [entry] = (await api_test_client.get("/api/v1/chat/home/threads")).json()["threads"]
+    assert (entry["state"], entry["closed_by"]) == ("waiting", None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_only_the_owner_can_mark_a_thread_done(
+    app_fixture: FastAPI, api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(db, home)
+
+    await _as_other_user(app_fixture)
+    try:
+        done = await api_test_client.post(f"/api/v1/chat/home/threads/{thread}/done")
+        read = await api_test_client.post(
+            f"/api/v1/chat/conversations/{thread}/read", json={}
+        )
+    finally:
+        app_fixture.dependency_overrides.pop(get_current_user, None)
+
+    stored = await db.conversation_threads.get_thread(thread)
+    assert (done.status_code, read.status_code) == (404, 404)
+    assert stored is not None
+    assert stored.close is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_reading_a_thread_clears_the_readers_unread_count(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(db, home)
+    await db.message_history.add_message(
+        UserMessage.from_trusted_user(content="Gas, please."),
+        interface_type="web",
+        conversation_id=thread,
+        timestamp=NOW,
+        processing_profile_id="browser_profile",
+        user_id=CALLER,
+    )
+
+    before = (await api_test_client.get("/api/v1/chat/home/threads")).json()
+    read = await api_test_client.post(
+        f"/api/v1/chat/conversations/{thread}/read", json={}
+    )
+    after = (await api_test_client.get("/api/v1/chat/home/threads")).json()
+
+    # The caller's own message is never unread to them.
+    assert [entry["unread_count"] for entry in before["threads"]] == [1]
+    assert read.json()["unread_count"] == 0
+    assert [entry["unread_count"] for entry in after["threads"]] == [0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_unread_is_counted_per_viewer(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(db, home)
+
+    await api_test_client.post(f"/api/v1/chat/conversations/{thread}/read", json={})
+
+    mine = await db.conversation_threads.unread_counts(
+        [thread], viewer_user_id=CALLER, viewer_keys={CALLER}
+    )
+    theirs = await db.conversation_threads.unread_counts(
+        [thread], viewer_user_id="partner", viewer_keys={"partner"}
+    )
+    assert (mine.get(thread, 0), theirs.get(thread, 0)) == (0, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_a_read_marker_never_moves_backward(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(db, home)
+    thread_record = await db.conversation_threads.get_thread(thread)
+    assert thread_record is not None and thread_record.seed_message_id is not None
+
+    await api_test_client.post(f"/api/v1/chat/conversations/{thread}/read", json={})
+    stale = await api_test_client.post(
+        f"/api/v1/chat/conversations/{thread}/read",
+        json={"through_message_id": thread_record.seed_message_id},
+    )
+
+    assert stale.json()["unread_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("threads_enabled")
+async def test_an_echo_is_attributed_to_its_thread(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
+    thread = await _add_thread(db, home)
+    rows = (
+        await api_test_client.get(f"/api/v1/chat/conversations/{thread}/messages")
+    ).json()["messages"]
+    [reply_id] = [row["internal_id"] for row in rows if row["role"] == "assistant"]
+    await db.message_history.copy_message_as_echo(
+        source_internal_id=reply_id,
+        destination_conversation_id=home,
+        destination_profile_id="default_assistant",
+        echoed_from_conversation_id=thread,
+        turn_id="turn-echo",
+        timestamp=NOW,
+    )
+
+    messages = (
+        await api_test_client.get(f"/api/v1/chat/conversations/{home}/messages")
+    ).json()["messages"]
+
+    assert [(m["content"], m["echoed_from_thread"]) for m in messages] == [
+        ("Gas or heat pump?", thread)
+    ]

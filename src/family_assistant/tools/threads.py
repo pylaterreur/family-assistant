@@ -464,7 +464,7 @@ async def _echoed_outcome(
     )
     if row is None or not isinstance(row["content"], str):
         return None
-    taint = row["taint_metadata"]
+    taint = row["taint_metadata_json"]
     if taint is None:
         return None
     _merge_fact_taint(exec_context, taint)
