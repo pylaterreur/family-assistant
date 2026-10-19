@@ -8407,7 +8407,11 @@ final class ChatViewModelTests: XCTestCase {
             if request.httpMethod == "GET", path == "/api/v1/chat/conversations" {
                 return .json(#"{"conversations":[],"count":0}"#)
             }
-            if request.httpMethod == "GET", path.hasSuffix("/stream") {
+            // Only this conversation's follow stream counts as a leg. A reconnect
+            // still winding down from an earlier test's model reaches this
+            // handler on a slow runner; letting it take the first leg left this
+            // model with only " more" to stream.
+            if request.httpMethod == "GET", path == "/api/v1/chat/conversations/web_conv_empty/stream" {
                 let n = streamConnects.increment()
                 return .hangingStream(
                     n == 1
