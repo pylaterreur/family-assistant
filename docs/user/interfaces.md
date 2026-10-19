@@ -186,15 +186,16 @@ done, answer its questions, and ask for more. The bar above it shows **← Home*
 assistant asked the thread to do when it started it, and where the thread stands (**Working…** while
 it is busy). The thread's assistant is fixed, so the profile picker is locked here too.
 
-To close a thread yourself, select **Mark done** in the bar above it. You can do this whatever state
-the thread is in. Nothing is added to Home when you do, because the thread's last message may be a
-question rather than an outcome. If the thread can't be marked done, the bar says so and the thread
-stays as it was.
+To close a thread yourself, select **Mark done** in the bar above it. It's there while the thread is
+**Waiting on you** or **Failed**; a thread that is still working can be marked done once it stops.
+Nothing is added to Home when you do, because the thread's last message may be a question rather
+than an outcome. If the thread can't be marked done, the bar says so and the thread stays as it was.
 
 **Unread counts.** Opening Home or a thread marks what's on screen as read, a moment after it
-appears, and the thread's unread count clears. A browser tab in the background doesn't mark anything
-read, so the count is still there when you come back to it. Unread counts are your own: someone else
-in the household reading a thread doesn't clear yours.
+appears, and the thread's unread count clears. While you are scrolled up reading older messages,
+anything new below stays unread until you scroll down to it. A browser tab in the background doesn't
+mark anything read, so the count is still there when you come back to it. Unread counts are your
+own: someone else in the household reading a thread doesn't clear yours.
 
 The sidebar lists **Home** first, with a count of the threads waiting on you, then your threads
 grouped by where they stand, with whatever needs you at the top. Each thread shows its unread count,

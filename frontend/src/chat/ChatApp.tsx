@@ -2433,7 +2433,9 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
 
   // Home and threads keep a read marker per viewer. The open one is marked
   // read through the newest stored message on screen, once its history has
-  // loaded and while the chat (not the mobile list) is showing.
+  // loaded and while the chat (not the mobile list) is showing, scrolled down
+  // to that message.
+  const [viewportAtBottom, setViewportAtBottom] = useState(true);
   const latestStoredMessageId = useMemo(() => {
     let latest: number | null = null;
     for (const message of messages) {
@@ -2448,6 +2450,7 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
     conversationId &&
     (isHome || currentThread) &&
     conversationLoad?.convId !== conversationId &&
+    viewportAtBottom &&
     !(isMobile && mobileShowList)
       ? conversationId
       : null;
@@ -3097,8 +3100,9 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
       threadsBySourceToolCallId: bySourceToolCallId,
       threadsByConversationId: byConversationId,
       openConversation: handleConversationSelect,
+      setViewportAtBottom,
     };
-  }, [homeConversationId, homeThreads, handleConversationSelect]);
+  }, [homeConversationId, homeThreads, handleConversationSelect, setViewportAtBottom]);
 
   const homeSidebar = useMemo(
     () =>

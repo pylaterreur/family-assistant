@@ -5,6 +5,7 @@ import {
   ThreadPrimitive,
   useAui,
   useAuiState,
+  useThreadViewport,
 } from '@assistant-ui/react';
 import {
   ArrowDownIcon,
@@ -36,6 +37,7 @@ import { DynamicToolUI } from './DynamicToolUI';
 import { MarkdownText } from './MarkdownText';
 import { PendingDelegationsChip } from './PendingDelegationsChip';
 import { ThreadEchoHeader } from './ThreadEchoHeader';
+import { useThreadsContext } from './threadsContext';
 import { useProfiles } from './profilesContext';
 import { ToolGroup } from './ToolGroup';
 import { TooltipIconButton } from './TooltipIconButton';
@@ -63,6 +65,7 @@ const ThreadContent: React.FC = () => {
       <div className="relative flex min-h-0 flex-1 flex-col">
         <ThreadPrimitive.Viewport
           ref={viewportRef}
+          data-testid="thread-viewport"
           className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-thin scrollbar-thumb-muted-foreground/20 min-h-0"
         >
           <div className="pb-6">
@@ -88,6 +91,7 @@ const ThreadContent: React.FC = () => {
           </div>
         </ThreadPrimitive.Viewport>
         <ThreadScrollToBottom />
+        <ReportViewportAtBottom />
       </div>
 
       <div
@@ -193,6 +197,16 @@ const ThreadConversationLoad: React.FC<{ status: ConversationLoadStatus }> = ({ 
       </Button>
     </div>
   );
+};
+
+/** Tells a Home or thread whether its newest message is scrolled into view. */
+const ReportViewportAtBottom: React.FC = () => {
+  const isAtBottom = useThreadViewport((state) => state.isAtBottom);
+  const setViewportAtBottom = useThreadsContext()?.setViewportAtBottom;
+  useEffect(() => {
+    setViewportAtBottom?.(isAtBottom);
+  }, [isAtBottom, setViewportAtBottom]);
+  return null;
 };
 
 const ThreadScrollToBottom: React.FC = () => {

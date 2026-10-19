@@ -6,6 +6,8 @@ interface ThreadsContextValue {
   threadsBySourceToolCallId: ReadonlyMap<string, ThreadSummary>;
   threadsByConversationId: ReadonlyMap<string, ThreadSummary>;
   openConversation: (conversationId: string) => void;
+  /** Whether the open conversation's newest message is scrolled into view. */
+  setViewportAtBottom: (atBottom: boolean) => void;
 }
 
 export const ThreadsContext = createContext<ThreadsContextValue | null>(null);
