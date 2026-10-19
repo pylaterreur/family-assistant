@@ -6,6 +6,7 @@ across the boundary".
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -747,6 +748,62 @@ async def test_moving_into_a_thread_of_another_home_is_not_found(
 
     assert response.status_code == 404
     assert await db.message_history.get_row_by_internal_id(moved["reply"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
+async def test_a_turn_awaiting_recovery_is_neither_moved_nor_continued(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    """Interrupted by a restart: in no hub, its reply not yet written."""
+    db = Database(engine=db_engine)
+    home = await _home(api_test_client)
+    thread = await _thread_on(api_test_client, CONTEXT_PROFILE)
+    interrupted = await db.message_history.add_message(
+        UserMessage.from_trusted_user(content="half done"),
+        interface_type="web",
+        conversation_id=home,
+        turn_id=str(uuid.uuid4()),
+        processing_profile_id="chat_api_test_profile",
+        timestamp=NOW,
+        user_id=CALLER,
+    )
+
+    move = await api_test_client.post(
+        f"/api/v1/chat/home/threads/{thread}/moved-turns",
+        json={"message_id": interrupted},
+    )
+    resume = await api_test_client.post(
+        "/api/v1/chat/home/threads",
+        json={"profile_id": CONTEXT_PROFILE, "anchor_message_id": interrupted},
+    )
+
+    assert (move.status_code, resume.status_code) == (409, 409)
+    assert await db.message_history.get_row_by_internal_id(interrupted) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
+async def test_overlapping_retries_of_a_start_share_one_thread(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(engine=db_engine)
+    home = await _home(api_test_client)
+    anchor = await _home_turn(db, home, words="the quote", at=NOW)
+    request = {
+        "profile_id": CONTEXT_PROFILE,
+        "anchor_message_id": anchor["reply"],
+        "turn_id": str(uuid.uuid4()),
+    }
+
+    responses = await asyncio.gather(
+        api_test_client.post("/api/v1/chat/home/threads", json=request),
+        api_test_client.post("/api/v1/chat/home/threads", json=request),
+    )
+
+    listed = (await api_test_client.get("/api/v1/chat/home/threads")).json()
+    assert [response.status_code for response in responses] == [200, 200]
+    assert len(listed["threads"]) == 1
 
 
 @pytest.mark.asyncio
