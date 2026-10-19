@@ -22,8 +22,11 @@ from family_assistant.security.definition_records import (
 from family_assistant.security.taint import TurnTaintTracker
 from family_assistant.storage.database import Database
 from family_assistant.storage.tasks import TaskPriority
+from family_assistant.threads.home import ensure_web_home
 
 if TYPE_CHECKING:
+    from family_assistant.config_models import AppConfig
+    from family_assistant.storage.database import DatabaseExecutor
     from family_assistant.task_worker import LlmCallbackPayload
 
 logger = logging.getLogger(__name__)
@@ -75,34 +78,68 @@ def assert_wake_llm_allowed(
         )
 
 
-# Values of a wake_llm action config's ``conversation`` key: wake the
-# conversation the automation was created in, or start a fresh one per firing.
+# Values of an action config's ``conversation`` key, naming where its wakes
+# land: the conversation the automation was created in, the owner's Home, or a
+# fresh conversation per firing. A script action takes source or home, for its
+# wake_llm() calls and failure notices; a script asks for a new conversation
+# per call instead.
+#
+# An absent key means source. That is what keeps automations created before
+# Home existed where they were: a new automation does not rely on the absence,
+# but has its destination written into its config when it is created (see
+# with_default_wake_destination).
 WAKE_CONVERSATION_SOURCE = "source"
+WAKE_CONVERSATION_HOME = "home"
 WAKE_CONVERSATION_NEW = "new"
+WAKE_CONVERSATION_DESTINATIONS = (
+    WAKE_CONVERSATION_HOME,
+    WAKE_CONVERSATION_SOURCE,
+    WAKE_CONVERSATION_NEW,
+)
+
+# Surfaces whose owners have a web Home: voice sessions are saved as web
+# conversations, and the iOS app is a web client. A Telegram chat is already
+# its own Home, so its wakes stay in it.
+HOME_INTERFACE_TYPES = frozenset({"web", "voice"})
 
 
-class NewConversationError(ValueError):
-    """Raised when a wake asks for a new conversation it cannot have.
+class WakeDestinationError(ValueError):
+    """Raised when a wake names a destination it cannot have.
 
     Only web conversations exist as separate threads: a Telegram chat is one
-    conversation, so there is nothing new to open there. A new conversation
-    also needs an owner, because a conversation with no owning user row is
-    listed for every user.
+    conversation, so there is nothing new to open there and no Home apart from
+    it. A new conversation or a Home also needs an owner, because a
+    conversation with no owning user row is listed for every user and a Home
+    is one user's.
     """
+
+
+def wake_destination(action_config: Mapping[str, object]) -> str:
+    """The destination an action config names, ``source`` when it names none."""
+    destination = action_config.get("conversation", WAKE_CONVERSATION_SOURCE)
+    if (
+        not isinstance(destination, str)
+        or destination not in WAKE_CONVERSATION_DESTINATIONS
+    ):
+        raise WakeDestinationError(
+            "action_config.conversation must be 'home', 'source' or 'new', "
+            f"got {destination!r}."
+        )
+    return destination
 
 
 def wants_new_conversation(action_config: Mapping[str, object]) -> bool:
     """Whether a wake_llm action config asks for a new conversation per firing."""
-    destination = action_config.get("conversation", WAKE_CONVERSATION_SOURCE)
-    if not isinstance(destination, str) or destination not in {
-        WAKE_CONVERSATION_SOURCE,
-        WAKE_CONVERSATION_NEW,
-    }:
-        raise NewConversationError(
-            f"action_config.conversation must be '{WAKE_CONVERSATION_SOURCE}' or "
-            f"'{WAKE_CONVERSATION_NEW}', got {destination!r}."
-        )
-    return destination == WAKE_CONVERSATION_NEW
+    return wake_destination(action_config) == WAKE_CONVERSATION_NEW
+
+
+def home_owner_for(
+    action_config: Mapping[str, object], owner_user_id: str | None
+) -> str | None:
+    """The user whose Home an action's wakes land in, or None for elsewhere."""
+    if wake_destination(action_config) != WAKE_CONVERSATION_HOME:
+        return None
+    return owner_user_id
 
 
 def assert_new_conversation_allowed(
@@ -110,15 +147,118 @@ def assert_new_conversation_allowed(
 ) -> None:
     """Refuse a new-conversation wake outside the web interface or without an owner."""
     if interface_type != "web":
-        raise NewConversationError(
+        raise WakeDestinationError(
             "Starting a new conversation is only supported for automations "
             f"created in the web app, not from {interface_type}."
         )
     if owner_user_id is None:
-        raise NewConversationError(
+        raise WakeDestinationError(
             "Starting a new conversation needs a recorded owner, and this "
             "automation has none."
         )
+
+
+def assert_home_allowed(
+    *, interface_type: str, owner_user_id: str | None, threads_enabled: bool
+) -> None:
+    """Refuse a Home destination where the owner has no web Home to land in."""
+    if not threads_enabled:
+        raise WakeDestinationError(
+            "Delivering to Home needs conversation threads, which are not "
+            "enabled; use 'source' instead."
+        )
+    if interface_type not in HOME_INTERFACE_TYPES:
+        raise WakeDestinationError(
+            "Delivering to Home is only supported for the web app, the iOS app "
+            f"and voice, not from {interface_type}, whose chat is already its "
+            "Home; use 'source' instead."
+        )
+    if owner_user_id is None:
+        raise WakeDestinationError(
+            "Delivering to Home needs a recorded owner, and this has none; use "
+            "'source' instead."
+        )
+
+
+def threads_enabled(processing_service: object | None) -> bool:
+    """Whether conversation threads, and so Homes to deliver into, are on."""
+    # Read by attribute, and compared with ``is True``, because tool tests
+    # hand in stand-in services whose attributes are mocks.
+    app_config = getattr(processing_service, "app_config", None)
+    threads = getattr(app_config, "conversation_threads", None)
+    return getattr(threads, "enabled", False) is True
+
+
+async def default_wake_destination(
+    db: "DatabaseExecutor",
+    *,
+    conversation_id: str,
+    interface_type: str,
+    owner_user_id: str | None,
+    threads_enabled: bool,
+) -> str:
+    """Where a wake created now lands when its author names no destination.
+
+    A web or voice owner's wakes land in their Home, except those created in
+    a thread: a thread's reminder or callback belongs to its work, and
+    arriving there is what reopens it.
+    """
+    if not (
+        threads_enabled
+        and interface_type in HOME_INTERFACE_TYPES
+        and owner_user_id is not None
+    ):
+        return WAKE_CONVERSATION_SOURCE
+    if await db.conversation_threads.get_thread(conversation_id) is not None:
+        return WAKE_CONVERSATION_SOURCE
+    return WAKE_CONVERSATION_HOME
+
+
+async def with_default_wake_destination(
+    db: "DatabaseExecutor",
+    action_config: Mapping[str, object],
+    *,
+    conversation_id: str,
+    interface_type: str,
+    owner_user_id: str | None,
+    threads_enabled: bool,
+) -> dict[str, object]:
+    """The config a new automation is stored with, its destination written in.
+
+    Writing the default down, rather than reading an absent key as Home, is
+    what lets an absent key keep meaning source for automations stored before
+    Home existed. A source default is left absent, which means the same.
+    """
+    if "conversation" in action_config:
+        return dict(action_config)
+    destination = await default_wake_destination(
+        db,
+        conversation_id=conversation_id,
+        interface_type=interface_type,
+        owner_user_id=owner_user_id,
+        threads_enabled=threads_enabled,
+    )
+    if destination == WAKE_CONVERSATION_SOURCE:
+        return dict(action_config)
+    return {**action_config, "conversation": destination}
+
+
+def carry_wake_destination(
+    new_config: Mapping[str, object],
+    existing_config: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """An updated action config, keeping the stored destination unless it names one.
+
+    Without this, editing an automation's prompt would quietly move it back
+    to its source conversation, since an absent key means source.
+    """
+    if (
+        "conversation" in new_config
+        or not existing_config
+        or "conversation" not in existing_config
+    ):
+        return dict(new_config)
+    return {**new_config, "conversation": existing_config["conversation"]}
 
 
 def validate_wake_destination(
@@ -127,18 +267,70 @@ def validate_wake_destination(
     *,
     interface_type: str,
     owner_user_id: str | None,
+    threads_enabled: bool,
 ) -> None:
-    """Check a wake_llm action's conversation choice at creation or update.
+    """Check an action's conversation choice at creation or update.
 
-    The worker enforces the same rule when the wake fires; this gives the
+    The worker resolves the same choice when the wake fires; this gives the
     author the error while they can still fix it.
     """
-    if ActionType(action_type) != ActionType.WAKE_LLM:
-        return
-    if wants_new_conversation(action_config):
+    destination = wake_destination(action_config)
+    if destination == WAKE_CONVERSATION_HOME:
+        assert_home_allowed(
+            interface_type=interface_type,
+            owner_user_id=owner_user_id,
+            threads_enabled=threads_enabled,
+        )
+    elif destination == WAKE_CONVERSATION_NEW:
+        if ActionType(action_type) == ActionType.SCRIPT:
+            raise WakeDestinationError(
+                "A script action takes 'home' or 'source'. To start a new "
+                "conversation, call wake_llm(..., new_conversation=True) in "
+                "the script."
+            )
         assert_new_conversation_allowed(
             interface_type=interface_type, owner_user_id=owner_user_id
         )
+
+
+async def resolve_home_target(
+    db: "DatabaseExecutor",
+    app_config: "AppConfig | None",
+    *,
+    interface_type: str,
+    conversation_id: str,
+    home_owner_user_id: str,
+    now: datetime,
+) -> tuple[str, str]:
+    """The ``(interface_type, conversation_id)`` a Home-bound wake fires in.
+
+    Resolved when the wake fires, so it lands in the Home the owner has then,
+    designating one if they have none yet. Where no Home applies any more --
+    threads switched off since the wake was created -- it fires in the
+    conversation it was created in, which is where it would have gone before
+    Home existed.
+    """
+    if app_config is None or not app_config.conversation_threads.enabled:
+        logger.info(
+            "Wake for %s's Home fires in its source conversation %s:%s: "
+            "conversation threads are not enabled.",
+            home_owner_user_id,
+            interface_type,
+            conversation_id,
+        )
+        return interface_type, conversation_id
+    if interface_type not in HOME_INTERFACE_TYPES:
+        logger.warning(
+            "Wake for %s's Home fires in its source conversation %s:%s: "
+            "%s has no web Home.",
+            home_owner_user_id,
+            interface_type,
+            conversation_id,
+            interface_type,
+        )
+        return interface_type, conversation_id
+    home = await ensure_web_home(db, app_config, user_id=home_owner_user_id, now=now)
+    return "web", home
 
 
 async def execute_action(
@@ -256,6 +448,9 @@ async def execute_action(
             payload["processing_profile_id"] = processing_profile_id
         if wants_new_conversation(action_config):
             payload["new_conversation"] = True
+        home_owner = home_owner_for(action_config, created_by_user_id)
+        if home_owner is not None:
+            payload["home_owner_user_id"] = home_owner
 
         register_definition_write(
             definition_gate,

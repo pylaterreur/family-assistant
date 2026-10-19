@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Any, cast
 from family_assistant.actions import (
     WakeLlmProfileError,
     assert_wake_llm_allowed,
+    carry_wake_destination,
+    threads_enabled,
     validate_wake_destination,
+    with_default_wake_destination,
 )
 from family_assistant.scripting.apis.keychute import (
     get_keychute_config,
@@ -134,13 +137,14 @@ For schedule automations:
                         "description": """Configuration for the action.
 For wake_llm:
   - context: string with optional context for the LLM
-  - conversation: 'source' (default) wakes this conversation; 'new' starts a fresh conversation each time it fires. 'new' only works in the web app, and the new conversation has no history, so the context must say everything the woken turn needs.
+  - conversation: where each firing wakes you. Omit it for the default: the user's Home in the web and iOS apps when they have one, otherwise this conversation (always this chat in Telegram). 'source' wakes this conversation instead -- choose it when the automation only makes sense next to this conversation's history. 'home' asks for Home explicitly. 'new' starts a fresh conversation each time it fires; it only works in the web app, and the new conversation has no history, so the context must say everything the woken turn needs.
 
 For script:
   - script_code: Python code to execute (inline), OR
   - script_name: name of a stored script from the script library (use list_scripts to see available)
   - parameters: optional dict of parameters to pass to the stored script
-  - task_name: optional name for the script execution""",
+  - task_name: optional name for the script execution
+  - conversation: where the script's wake_llm() calls and failure notices land: omit for the default (as for wake_llm), or 'source' or 'home'.""",
                     },
                     "description": {
                         "type": "string",
@@ -522,11 +526,21 @@ async def create_automation_tool(
             except WakeLlmProfileError as err:
                 return ToolResult(text=f"Error: {err}", data={"error": str(err)})
 
+        threads_on = threads_enabled(exec_context.processing_service)
         validate_wake_destination(
             action_type,
             action_config,
             interface_type=exec_context.interface_type,
             owner_user_id=exec_context.user_id,
+            threads_enabled=threads_on,
+        )
+        stored_config = await with_default_wake_destination(
+            exec_context.db_context,
+            action_config,
+            conversation_id=exec_context.conversation_id,
+            interface_type=exec_context.interface_type,
+            owner_user_id=exec_context.user_id,
+            threads_enabled=threads_on,
         )
 
         # Validate script action_config
@@ -578,7 +592,7 @@ async def create_automation_tool(
                 source_id=source_id,
                 match_conditions=match_conditions,
                 action_type=action_type,
-                action_config=cast("ActionConfig", action_config),
+                action_config=cast("ActionConfig", stored_config),
                 conversation_id=exec_context.conversation_id,
                 interface_type=exec_context.interface_type,
                 description=description,
@@ -613,7 +627,7 @@ async def create_automation_tool(
                 name=name,
                 recurrence_rule=recurrence_rule,
                 action_type=action_type,
-                action_config=cast("ActionConfig", action_config),
+                action_config=cast("ActionConfig", stored_config),
                 conversation_id=exec_context.conversation_id,
                 interface_type=exec_context.interface_type,
                 description=description,
@@ -938,6 +952,7 @@ async def update_automation_tool(
         # script validators.
         restamp_profile_id: str | None = None
         restamp_user_id: str | None = None
+        updated_config: dict[str, object] | None = None
         if action_config is not None:
             restamp_profile_id = exec_context.processing_profile_id
             restamp_user_id = exec_context.user_id
@@ -946,6 +961,10 @@ async def update_automation_tool(
                 action_config,
                 interface_type=existing.interface_type,
                 owner_user_id=restamp_user_id or existing.created_by_user_id,
+                threads_enabled=threads_enabled(exec_context.processing_service),
+            )
+            updated_config = carry_wake_destination(
+                action_config, existing.action_config
             )
             if existing.action_type == "script":
                 script_error = await validate_script_action_config(
@@ -995,8 +1014,8 @@ async def update_automation_tool(
                 match_conditions=match_conditions,
                 action_config=cast(
                     "ActionConfig",
-                    action_config
-                    if action_config is not None
+                    updated_config
+                    if updated_config is not None
                     else existing.action_config,
                 ),
                 one_time=existing.one_time or False,
@@ -1025,8 +1044,8 @@ async def update_automation_tool(
             }
             if recurrence_rule is not None:
                 update_kwargs["recurrence_rule"] = recurrence_rule
-            if action_config is not None:
-                update_kwargs["action_config"] = action_config
+            if updated_config is not None:
+                update_kwargs["action_config"] = updated_config
                 if restamp_profile_id is not None:
                     update_kwargs["processing_profile_id"] = restamp_profile_id
                 if restamp_user_id is not None:

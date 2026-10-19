@@ -25,7 +25,8 @@ class ActionConfig(TypedDict, total=False):
     # wake_llm fields
     context: str
     include_event_data: bool
-    # "source" (default) or "new"; see family_assistant.actions.
+    # Where the action's wakes land: "home", "source" (also what an absent key
+    # means) or "new" (wake_llm only); see family_assistant.actions.
     conversation: str
     # script fields (inline)
     script_code: str

@@ -25,10 +25,12 @@ from sqlalchemy import func, select, update
 # Removed storage import - using repository pattern
 from family_assistant.actions import (
     ActionType,
-    NewConversationError,
+    WakeDestinationError,
     WakeLlmProfileError,
     assert_new_conversation_allowed,
     assert_wake_llm_allowed,
+    home_owner_for,
+    resolve_home_target,
 )
 from family_assistant.llm.messages import (
     AssistantMessage,
@@ -504,6 +506,13 @@ class LlmCallbackPayload(TypedDict, total=False):
     # which then only records where the wake was defined. The id is derived
     # from the task id, so retries reuse it and each recurrence gets its own.
     new_conversation: bool
+    # Run the wake in this user's Home, resolved when it fires, rather than
+    # conversation_id, which then only records where the wake was defined.
+    # Kept apart from created_by_user_id because a deliberately ownerless wake
+    # (a script failure notice) still lands in its automation's Home. Absent
+    # means conversation_id, which is what every wake queued before Home
+    # existed keeps doing.
+    home_owner_user_id: str
 
 
 class ScriptExecutionPayload(TypedDict, total=False):
@@ -5216,7 +5225,7 @@ class TaskWorker:
                                 interface_type=raw_interface_type,
                                 owner_user_id=payload_dict.get("created_by_user_id"),
                             )
-                        except NewConversationError as err:
+                        except WakeDestinationError as err:
                             callback_target_error = str(err)
                     if callback_target_error is not None:
                         logger.error(
@@ -5236,11 +5245,26 @@ class TaskWorker:
                         return None  # Stop processing
                     assert raw_interface_type and raw_conversation_id
                     final_interface_type = raw_interface_type
-                    final_conversation_id = (
-                        _new_conversation_id_for_task(task["task_id"])
-                        if payload_dict.get("new_conversation")
-                        else raw_conversation_id
-                    )
+                    final_conversation_id = raw_conversation_id
+                    home_owner_user_id = payload_dict.get("home_owner_user_id")
+                    if payload_dict.get("new_conversation"):
+                        final_conversation_id = _new_conversation_id_for_task(
+                            task["task_id"]
+                        )
+                    elif home_owner_user_id:
+                        (
+                            final_interface_type,
+                            final_conversation_id,
+                        ) = await resolve_home_target(
+                            db_context,
+                            self.processing_service.app_config
+                            if self.processing_service
+                            else None,
+                            interface_type=raw_interface_type,
+                            conversation_id=raw_conversation_id,
+                            home_owner_user_id=home_owner_user_id,
+                            now=self.clock.now(),
+                        )
                 else:
                     # For other task types, provide defaults if None, to satisfy linter if it expects str
                     final_interface_type = (
@@ -5735,6 +5759,14 @@ class TaskWorker:
         # policy and visibility confinement carry over to the woken turn.
         if script_profile_id:
             notification_payload["processing_profile_id"] = script_profile_id
+        # The notice lands where the script's own wakes do. Naming the Home's
+        # owner here does not make the turn theirs: created_by_user_id stays
+        # unset, as above.
+        notice_home_owner = home_owner_for(
+            payload_dict.get("config") or {}, payload_dict.get("created_by_user_id")
+        )
+        if notice_home_owner is not None:
+            notification_payload["home_owner_user_id"] = notice_home_owner
 
         try:
             await db_context.tasks.enqueue(
@@ -6144,17 +6176,21 @@ async def _process_script_wake_llm(
     # ast-grep-ignore: no-dict-any - Event data from external sources (Home Assistant, webhooks) with arbitrary structure
     event_data: dict[str, Any],
     listener_id: str | None,
+    home_owner_user_id: str | None,
 ) -> None:
     """Process wake_llm calls accumulated during script execution.
 
     Calls are batched into one wake per destination: those that asked for a new
-    conversation share one fresh conversation, the rest wake the script's own.
+    conversation share one fresh conversation, the rest wake the script's own
+    destination -- its owner's Home when its action config names Home, else
+    the conversation it was created in.
 
     Args:
         exec_context: The execution context with DB access
         wake_contexts: List of wake context dictionaries from script
         event_data: The original event data that triggered the script
         listener_id: ID of the event listener that ran the script
+        home_owner_user_id: Whose Home the script's own wakes land in, if any
     """
 
     # A script's built-in wake_llm() enqueues an llm_callback stamped with the
@@ -6176,15 +6212,25 @@ async def _process_script_wake_llm(
                 interface_type=exec_context.interface_type,
                 owner_user_id=exec_context.user_id,
             )
-        except NewConversationError as err:
+        except WakeDestinationError as err:
             raise NonRetryableTaskError(str(err)) from err
     if to_source:
         await _enqueue_script_wake(
-            exec_context, to_source, event_data, listener_id, new_conversation=False
+            exec_context,
+            to_source,
+            event_data,
+            listener_id,
+            new_conversation=False,
+            home_owner_user_id=home_owner_user_id,
         )
     if to_new:
         await _enqueue_script_wake(
-            exec_context, to_new, event_data, listener_id, new_conversation=True
+            exec_context,
+            to_new,
+            event_data,
+            listener_id,
+            new_conversation=True,
+            home_owner_user_id=None,
         )
 
 
@@ -6196,6 +6242,7 @@ async def _enqueue_script_wake(
     listener_id: str | None,
     *,
     new_conversation: bool,
+    home_owner_user_id: str | None,
 ) -> None:
     """Enqueue one llm_callback carrying a batch of a script's wake_llm calls."""
     listener_id = listener_id or "scheduled"
@@ -6350,6 +6397,8 @@ async def _enqueue_script_wake(
         payload["processing_profile_id"] = exec_context.processing_profile_id
     if new_conversation:
         payload["new_conversation"] = True
+    elif home_owner_user_id is not None:
+        payload["home_owner_user_id"] = home_owner_user_id
 
     # Add attachments to payload if any were found
     if trigger_attachments:
@@ -6761,6 +6810,9 @@ async def handle_script_execution(
                     wake_contexts=wake_contexts,
                     event_data=event_data,
                     listener_id=listener_id,
+                    home_owner_user_id=home_owner_for(
+                        payload.get("config") or {}, exec_context.user_id
+                    ),
                 )
 
         tool_errors = engine.get_tool_errors()
