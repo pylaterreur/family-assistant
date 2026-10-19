@@ -587,6 +587,34 @@ describe('Thread state, unread and echoes', () => {
     });
   });
 
+  it('marks a thread read once a reply streamed into it ends', async () => {
+    const user = userEvent.setup();
+    const threads = serveThreads();
+    window.history.replaceState({}, '', '/chat?conversation_id=web_conv_quotes');
+
+    await renderChatApp({ waitForReady: true });
+    await screen.findByTestId('thread-banner');
+    await waitFor(
+      () =>
+        expect(threads.reads).toEqual([
+          { conversationId: 'web_conv_quotes', throughMessageId: 10 },
+        ]),
+      { timeout: 3000 }
+    );
+
+    await user.type(screen.getByRole('textbox'), 'Heat pump, please');
+    await user.keyboard('{Enter}');
+
+    await waitFor(
+      () =>
+        expect(threads.reads).toContainEqual({
+          conversationId: 'web_conv_quotes',
+          throughMessageId: null,
+        }),
+      { timeout: 5000 }
+    );
+  });
+
   it('shows an echoed outcome attributed to its thread, opening it on click', async () => {
     const user = userEvent.setup();
     const threads = serveThreads([{ ...QUOTES, state: 'done', closed_by: 'assistant' }]);

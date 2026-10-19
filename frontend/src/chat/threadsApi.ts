@@ -41,18 +41,21 @@ export async function markThreadDone(conversationId: string): Promise<ThreadSumm
 
 /**
  * Move the caller's read marker in Home or a thread forward to
- * `throughMessageId`; returns how many messages are still unread.
+ * `throughMessageId`, or to its newest message when that is omitted; returns
+ * how many messages are still unread.
  */
 export async function markConversationRead(
   conversationId: string,
-  throughMessageId: number
+  throughMessageId?: number
 ): Promise<number> {
   const response = await fetch(
     `/api/v1/chat/conversations/${encodeURIComponent(conversationId)}/read`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ through_message_id: throughMessageId }),
+      body: JSON.stringify(
+        throughMessageId === undefined ? {} : { through_message_id: throughMessageId }
+      ),
     }
   );
   if (!response.ok) {

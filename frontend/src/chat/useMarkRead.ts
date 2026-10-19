@@ -8,30 +8,41 @@ function pageIsVisible(): boolean {
   return document.visibilityState === 'visible';
 }
 
+interface MarkedPosition {
+  through: number;
+  localTurnEnd: number | null;
+}
+
 /**
- * Marks the open Home or thread read through its newest stored message, once
- * that message has been on screen in a visible tab for a moment.
+ * Marks the open Home or thread read, once what it shows has been on screen in
+ * a visible tab for a moment.
  *
- * Keyed on the stored message id rather than on the transcript, so a streaming
- * reply costs nothing until its rows are stored, and each position is sent at
- * most once per conversation. A background tab never marks anything read; it
+ * Two things move the position. A stored message loaded from history marks the
+ * conversation read through that message. A reply streamed here carries no
+ * stored id, so when a turn sent from this client ends (`localTurnEnd`
+ * changes), the conversation is marked read through its newest message, which
+ * is that reply. Neither changes while tokens stream, and each position is sent
+ * at most once per conversation. A background tab never marks anything read; it
  * catches up when it becomes visible again. A failed request is logged and
- * retried with the next message, while the unread badge it would have cleared
+ * retried with the next change, while the unread badge it would have cleared
  * stays as it was.
  */
 export function useMarkRead({
   conversationId,
   throughMessageId,
+  localTurnEnd,
   onMarked,
 }: {
   /** The open conversation, when it is one that keeps read markers. */
   conversationId: string | null;
   /** The newest stored message on screen in it. */
   throughMessageId: number | null;
+  /** Changes each time a turn sent from this client ends in it; null if none has. */
+  localTurnEnd: number | null;
   onMarked: (conversationId: string, unreadCount: number) => void;
 }): void {
   const [visible, setVisible] = useState(pageIsVisible);
-  const markedThroughRef = useRef(new Map<string, number>());
+  const markedRef = useRef(new Map<string, MarkedPosition>());
   const onMarkedRef = useRef(onMarked);
   onMarkedRef.current = onMarked;
 
@@ -42,10 +53,13 @@ export function useMarkRead({
   }, []);
 
   useEffect(() => {
-    if (!conversationId || throughMessageId === null || !visible) {
+    if (!conversationId || !visible) {
       return undefined;
     }
-    if ((markedThroughRef.current.get(conversationId) ?? -1) >= throughMessageId) {
+    const marked = markedRef.current.get(conversationId);
+    const turnEnded = localTurnEnd !== null && localTurnEnd !== (marked?.localTurnEnd ?? null);
+    const advanced = throughMessageId !== null && throughMessageId > (marked?.through ?? -1);
+    if (!turnEnded && !advanced) {
       return undefined;
     }
     const timer = setTimeout(() => {
@@ -54,9 +68,15 @@ export function useMarkRead({
       }
       void (async () => {
         try {
-          const unreadCount = await markConversationRead(conversationId, throughMessageId);
-          const marked = markedThroughRef.current;
-          marked.set(conversationId, Math.max(marked.get(conversationId) ?? -1, throughMessageId));
+          const unreadCount = await markConversationRead(
+            conversationId,
+            turnEnded ? undefined : (throughMessageId ?? undefined)
+          );
+          const previous = markedRef.current.get(conversationId);
+          markedRef.current.set(conversationId, {
+            through: Math.max(previous?.through ?? -1, throughMessageId ?? -1),
+            localTurnEnd: turnEnded ? localTurnEnd : (previous?.localTurnEnd ?? null),
+          });
           onMarkedRef.current(conversationId, unreadCount);
         } catch (error) {
           console.error('Error marking conversation read:', error);
@@ -64,5 +84,5 @@ export function useMarkRead({
       })();
     }, MARK_READ_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [conversationId, throughMessageId, visible]);
+  }, [conversationId, throughMessageId, localTurnEnd, visible]);
 }

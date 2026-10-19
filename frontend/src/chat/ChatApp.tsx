@@ -583,6 +583,10 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   } = useHomeThreads(homeConversationId);
   // The thread a foreground load reported the open conversation to be, for a
   // thread that is not (yet) in Home's list.
+  // The latest turn sent from here that ended in the conversation on screen.
+  const [localTurnEnded, setLocalTurnEnded] = useState<{ convId: string; seq: number } | null>(
+    null
+  );
   const [openedThread, setOpenedThread] = useState<{
     convId: string;
     thread: ThreadSummary;
@@ -1221,6 +1225,21 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
             return msg;
           })
         );
+      }
+
+      // A turn that ran to its end in the conversation on screen was read as
+      // it streamed, though none of its rows have stored ids here yet.
+      const streamedConversationId = activeStreamConversationIdRef.current;
+      if (
+        completed &&
+        !kickoffFailed &&
+        streamedConversationId &&
+        streamedConversationId === conversationIdRef.current
+      ) {
+        setLocalTurnEnded((prev) => ({
+          convId: streamedConversationId,
+          seq: (prev?.seq ?? 0) + 1,
+        }));
       }
 
       // Always clean up refs and refresh conversations
@@ -2440,6 +2459,10 @@ const ChatAppContent: React.FC<ChatAppProps> = ({ profileId = 'default_assistant
   useMarkRead({
     conversationId: readableConversationId,
     throughMessageId: latestStoredMessageId,
+    localTurnEnd:
+      localTurnEnded && localTurnEnded.convId === readableConversationId
+        ? localTurnEnded.seq
+        : null,
     onMarked: handleMarkedRead,
   });
 

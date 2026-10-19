@@ -9,7 +9,11 @@ vi.mock('../threadsApi', () => ({
 
 const markRead = vi.mocked(markConversationRead);
 
-type Props = { conversationId: string | null; throughMessageId: number | null };
+type Props = {
+  conversationId: string | null;
+  throughMessageId: number | null;
+  localTurnEnd?: number | null;
+};
 
 function setVisibility(state: DocumentVisibilityState) {
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
@@ -17,9 +21,12 @@ function setVisibility(state: DocumentVisibilityState) {
 }
 
 function renderMarkRead(initial: Props, onMarked = vi.fn()) {
-  const hook = renderHook((props: Props) => useMarkRead({ ...props, onMarked }), {
-    initialProps: initial,
-  });
+  const hook = renderHook(
+    (props: Props) => useMarkRead({ localTurnEnd: null, ...props, onMarked }),
+    {
+      initialProps: initial,
+    }
+  );
   return { ...hook, onMarked };
 }
 
@@ -100,6 +107,25 @@ describe('useMarkRead', () => {
     await elapse(MARK_READ_DELAY_MS);
 
     expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it('marks read through the newest message when a turn sent from here ends', async () => {
+    const { rerender } = renderMarkRead({ conversationId: 'c1', throughMessageId: 7 });
+    await elapse(MARK_READ_DELAY_MS);
+
+    // The streamed reply has no stored id, so only the turn ending moves the position.
+    rerender({ conversationId: 'c1', throughMessageId: 7, localTurnEnd: 1 });
+    await elapse(MARK_READ_DELAY_MS);
+    rerender({ conversationId: 'c1', throughMessageId: 7, localTurnEnd: 1 });
+    await elapse(MARK_READ_DELAY_MS);
+    rerender({ conversationId: 'c1', throughMessageId: 7, localTurnEnd: 2 });
+    await elapse(MARK_READ_DELAY_MS);
+
+    expect(markRead.mock.calls).toEqual([
+      ['c1', 7],
+      ['c1', undefined],
+      ['c1', undefined],
+    ]);
   });
 
   it('retries a failed position with the next message', async () => {
