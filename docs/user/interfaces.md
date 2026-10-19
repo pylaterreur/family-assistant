@@ -160,19 +160,33 @@ such as research or browsing, and keeps that choice for as long as it runs.
 Where the assistant started a thread, Home shows a card for it. The card keeps itself up to date
 rather than adding a message for every step. It shows:
 
-- a coloured dot for where the thread stands: **Working** (amber), **Waiting on you** (purple), or
-  **Failed** (red)
+- a coloured dot for where the thread stands: **Working**, **Waiting on you**, **Done**, or
+  **Failed**
 - the thread's title, and which assistant is running it
 - the thread's latest message, such as a question it needs you to answer
+- how many of its messages you haven't read yet
+
+When the thread's assistant finishes the job, it marks the thread **Done** (or **Failed**, if the
+job can't be done) and its final message, the outcome, also appears in Home, labelled with the
+thread it came from. A thread that ends on a question isn't done: it is **Waiting on you**. You can
+mark a thread done yourself; nothing is added to Home then. A finished thread reopens by itself when
+something new arrives in it, such as your reply, a reminder it set, or a late result, and goes back
+to **Working** or **Waiting on you**. When it finishes again, the new outcome appears in Home.
+
+To catch up without opening each thread, ask in Home, for example *"How are the quotes going?"* The
+assistant answers from each thread's title, where it stands and the outcome it reported. It doesn't
+read the threads' conversations, so for the detail, open the thread.
+
+Unread counts are your own: someone else in the household reading a thread doesn't clear yours.
 
 Click the card to open the thread. An open thread is an ordinary chat: read what the assistant has
 done, answer its questions, and ask for more. The bar above it shows **← Home** to go back, what the
 assistant asked the thread to do when it started it, and **Working…** while the thread is busy. The
 thread's assistant is fixed, so the profile picker is locked here too.
 
-The sidebar lists **Home** first, then your threads grouped as **Waiting on you**, **Working**, and
-**Failed**, so whatever needs you is at the top. Conversations from before threads, and any you
-start with the new-chat button, are listed under **Earlier**. Searching looks through all of them.
+The sidebar lists **Home** first, then your threads grouped by where they stand, with whatever needs
+you at the top. Conversations from before threads, and any you start with the new-chat button, are
+listed under **Earlier**. Searching looks through all of them.
 
 ### Voice
 

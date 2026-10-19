@@ -2,10 +2,10 @@
 
 ## Status
 
-Approved. Milestone 1 (threads exist), milestone 2 apart from the right-hand panel, and milestone 4
-(Home on iOS) implemented. Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html)
-(rendered: [iOS](one-thread-ux/ios.png), [web](one-thread-ux/web.png),
-[notes](one-thread-ux/notes.png)).
+Approved. Milestone 1 (threads exist), milestone 2 apart from the right-hand panel, the backend of
+milestone 3 (state and echo), and milestone 4 (Home on iOS) implemented. Mockups:
+[one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered: [iOS](one-thread-ux/ios.png),
+[web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
 
 ## Problem
 
@@ -270,6 +270,16 @@ and each path is governed:
   on you" is carried by the switcher badge, the sidebar and push notifications.
 - **Tier choices don't stick in Home.** Home is everlasting, so a sticky tier would quietly apply to
   every later quick question.
+- **Some profiles cannot finish their threads.** Closing a job is a tool call, so a profile with no
+  Family Assistant tools (`coder`), or one that withholds every global grant, leaves its threads
+  waiting until the user marks them done.
+- **A closing turn that never ends cleanly echoes nothing.** The echo is the message the closing
+  turn ends with. A turn stopped or failing after the close leaves the thread closed with no echo;
+  the next thing to arrive reopens it as usual.
+- **Home reads facts for its recent threads only.** A status question is about live work, so Home's
+  view covers the most recently active threads; older ones are in the switcher.
+- **Unread is counted for Home and threads only.** Legacy conversations have no state, so they have
+  no read markers either.
 - **iOS: routed requests and drafts on rare paths are correct, not seamless.** A prompt or shared
   file routed in while the app cannot yet tell whether Home exists is held and delivered once it
   can. A prompt routed into Home waits until Home is loaded and idle, showing a short "Will send
