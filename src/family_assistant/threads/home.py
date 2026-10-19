@@ -12,6 +12,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from family_assistant.services.user_identity import UserIdentityResolver
+from family_assistant.threads.listing import Viewer
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -40,6 +41,14 @@ def _home_keys(app_config: AppConfig, user_id: str) -> set[str]:
     resolver = UserIdentityResolver(app_config)
     canonical = resolver.canonicalize_owner_id(user_id)
     return {canonical, *resolver.owner_ids_canonicalizing_to(canonical)}
+
+
+def viewer_for(app_config: AppConfig, user_id: str) -> Viewer:
+    """The viewer a login is, for read markers and unread counts."""
+    return Viewer(
+        user_id=home_owner_id(app_config, user_id),
+        keys=frozenset(_home_keys(app_config, user_id) | {user_id}),
+    )
 
 
 async def find_home(

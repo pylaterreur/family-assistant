@@ -13,7 +13,8 @@ applies three:
 3. **Authorship.** Only text the user typed is stored as a user row. A request
    the assistant wrote is stored as machine-authored data -- an internal user
    row, as delegation results are -- so it never counts as user activity or as
-   evidence of what the user said.
+   evidence of what the user said. A finished thread's echo is the thread
+   assistant's own message, so it stays an assistant row.
 
 See docs/design/one-thread-chat-ux.md, "Moving content across the boundary".
 """
@@ -65,6 +66,14 @@ class CopiedTurns:
 
 
 @dataclass(frozen=True, slots=True)
+class ThreadEcho:
+    """A finished thread's final assistant message, echoed into its Home."""
+
+    thread_conversation_id: str
+    message_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class BoundaryDestination:
     """Where content is going: a conversation and the profile that reads it."""
 
@@ -78,14 +87,15 @@ async def copy_across_boundary(
     db: DatabaseExecutor,
     *,
     destination: BoundaryDestination,
-    payload: AssistantRequest | CopiedTurns,
+    payload: AssistantRequest | CopiedTurns | ThreadEcho,
     turn_id: str,
     now: datetime,
 ) -> list[int]:
     """Write ``payload`` into ``destination`` under the three rules.
 
-    ``turn_id`` is the turn an assistant request is written under; copied turns
-    each get a fresh turn of their own. Returns the new rows' ids in order.
+    ``turn_id`` is the turn an assistant request or an echo is written under;
+    copied turns each get a fresh turn of their own. Returns the new rows' ids
+    in order.
 
     Raises:
         CrossBoundaryCopyRefusedError: ``payload`` carries conversation turns
@@ -100,6 +110,19 @@ async def copy_across_boundary(
                     request=payload,
                     turn_id=turn_id,
                     now=now,
+                )
+            ]
+        case ThreadEcho():
+            # Thread content entering Home, which receives household context
+            # already: the context gate guards Home content leaving it.
+            return [
+                await db.message_history.copy_message_as_echo(
+                    source_internal_id=payload.message_id,
+                    destination_conversation_id=destination.conversation_id,
+                    destination_profile_id=destination.profile.id,
+                    echoed_from_conversation_id=payload.thread_conversation_id,
+                    turn_id=turn_id,
+                    timestamp=now,
                 )
             ]
         case CopiedTurns():

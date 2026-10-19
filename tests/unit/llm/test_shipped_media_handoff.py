@@ -136,11 +136,11 @@ def test_the_handoff_profile_can_reach_no_tool_that_acts(
     cannot deny these at any priority.
 
     `excluded_global_tools` is what makes the deny effective, by denying in that
-    same layer at a higher priority. All three globally granted tools are
-    withheld: `read_text_attachment` and `jq_query` resolve any attachment id the
-    acting user owns rather than only this turn's artifacts, so injected media
-    naming an id could read private content [B]; `report_technical_problem`
-    persists model-supplied text [C].
+    same layer at a higher priority. Every globally granted tool is withheld:
+    `read_text_attachment` and `jq_query` resolve any attachment id the acting
+    user owns rather than only this turn's artifacts, so injected media naming
+    an id could read private content [B]; `report_technical_problem` persists
+    model-supplied text and `finish_thread` echoes a reply into Home [C].
 
     Asserting the empty set rather than a list of tolerated names is the point —
     a tool added to the global policy has to fail this test rather than quietly
@@ -215,6 +215,7 @@ _SHIPPED_GLOBAL_GRANTS = (
     '          - "read_text_attachment"\n'
     '          - "jq_query"\n'
     '          - "report_technical_problem"\n'
+    '          - "finish_thread"\n'
     '      decision: "allow"\n'
     "      priority: 50\n"
 )

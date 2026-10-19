@@ -270,6 +270,8 @@ from family_assistant.tools.tasks import (
 )
 from family_assistant.tools.threads import (
     THREAD_TOOLS_DEFINITION,
+    finish_thread_tool,
+    list_threads_tool,
     start_thread_tool,
 )
 from family_assistant.tools.types import (
@@ -431,6 +433,7 @@ __all__ = [
     "drive_write_file_tool",
     "execute_script_tool",
     "find_provider_by_type",
+    "finish_thread_tool",
     "generate_image_tool",
     "generate_video_tool",
     "get_attachment_info_tool",
@@ -460,6 +463,7 @@ __all__ = [
     "list_notes_tool",
     "list_pending_callbacks_tool",
     "list_scripts_tool",
+    "list_threads_tool",
     "mock_camera_snapshot_tool",
     "modify_pending_callback_tool",
     "mqtt_publish_tool",
@@ -599,6 +603,8 @@ _LOCAL_TOOL_IMPLEMENTATIONS: dict[str, ToolImplementation] = {
     "delete_calendar_event": delete_calendar_event_tool,
     "delegate_to_service": delegate_to_service_tool,
     "start_thread": start_thread_tool,
+    "finish_thread": finish_thread_tool,
+    "list_threads": list_threads_tool,
     "get_delegation_status": get_delegation_status_tool,
     "list_delegations": list_delegations_tool,
     "list_pending_callbacks": list_pending_callbacks_tool,
@@ -769,6 +775,19 @@ _CORE_TOOL_METADATA_BY_NAME: dict[str, LocalToolMetadata] = {
     # that govern delegate_to_service govern it too.
     "start_thread": _metadata(
         ToolTag.DELEGATION,
+        ToolTag.OUTPUT_TRUSTED,
+    ),
+    # Closes the thread the turn runs in; the echo it leads to is a copy of the
+    # thread's own message into the user's own Home, carrying its taint.
+    "finish_thread": _metadata(
+        ToolTag.STATE_CHANGING,
+        ToolTag.OUTPUT_TRUSTED,
+    ),
+    # OUTPUT_TRUSTED: like list_delegations, the tool adds each fact's own taint
+    # to the turn -- a title its creating turn's, an outcome its echo's.
+    "list_threads": _metadata(
+        ToolTag.READ_ONLY,
+        ToolTag.SENSITIVE_DATA,
         ToolTag.OUTPUT_TRUSTED,
     ),
     # OUTPUT_TRUSTED: like delegate_to_service, both status tools add each run's

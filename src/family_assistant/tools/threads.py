@@ -1,11 +1,15 @@
-"""Starting a conversation thread from a user's Home.
+"""Conversation threads: starting them from Home, finishing them, and Home's view.
 
 A thread is an ordinary conversation, spun off Home for work that outlives the
 turn, running on whichever profile suits the work. Starting one is a delegation
 whose result is delivered differently: the first turn runs on the delegation
 machinery, admitted by the same policy, but it runs at the top level of the
 thread's own conversation and wakes nobody when it ends -- the user talks to
-the thread directly from then on. See docs/design/one-thread-chat-ux.md.
+the thread directly from then on.
+
+A thread's assistant ends the job with ``finish_thread``, and Home's assistant
+reads each thread's title and state -- facts, never transcripts -- with
+``list_threads``. See docs/design/one-thread-chat-ux.md.
 """
 
 from __future__ import annotations
@@ -20,6 +24,10 @@ from family_assistant.llm.model_selection import (
     ModelTierNotPermitted,
     resolve_model_selection,
 )
+from family_assistant.security.taint import (
+    TurnTaintState,
+    merge_taint_state_into_tracker,
+)
 from family_assistant.storage.tasks import TaskPriority
 from family_assistant.threads.boundary import (
     AssistantRequest,
@@ -27,6 +35,7 @@ from family_assistant.threads.boundary import (
     copy_across_boundary,
 )
 from family_assistant.threads.home import find_home, home_owner_id
+from family_assistant.threads.listing import summarize_threads
 from family_assistant.tools.services import (
     DELEGATED_PROFILE_RUN_TASK_TYPE,
     current_taint_metadata,
@@ -40,6 +49,7 @@ from family_assistant.utils.clock import SystemClock
 
 if TYPE_CHECKING:
     from family_assistant.config_models import AppConfig
+    from family_assistant.security.taint import TaintMetadata
     from family_assistant.storage.database import (
         DatabaseExecutor,
         DatabaseTransaction,
@@ -49,6 +59,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 TOOL_NAME = "start_thread"
+FINISH_TOOL_NAME = "finish_thread"
+LIST_TOOL_NAME = "list_threads"
+THREAD_TOOL_NAMES = frozenset({TOOL_NAME, FINISH_TOOL_NAME, LIST_TOOL_NAME})
+"""Tools that only make sense in one kind of conversation, and are hidden elsewhere."""
+
+# Home's assistant reads the most recently active threads; older ones are in
+# the switcher, and a long tail of finished jobs is not what a status question
+# is about.
+LIST_THREADS_LIMIT = 20
 
 THREAD_TOOLS_DEFINITION: list[ToolDefinition] = [
     {
@@ -96,6 +115,56 @@ THREAD_TOOLS_DEFINITION: list[ToolDefinition] = [
                 },
                 "required": ["target_service_id", "title", "request"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": FINISH_TOOL_NAME,
+            "description": (
+                "Closes this thread's job. You are working in a thread: a "
+                "conversation spun off the user's Home for one piece of work. "
+                "Call this once the job is complete (outcome 'done'), or once it "
+                "turns out it cannot be done (outcome 'failed').\n\n"
+                "After calling it, end your turn with a final message that "
+                "states the outcome on its own -- what was found, decided or "
+                "done, or why it could not be. That message is copied into the "
+                "user's Home as the thread's result, so write it to be read "
+                "there without the rest of the thread.\n\n"
+                "Do not call it when your reply asks the user something or "
+                "waits on them: a thread that ends on a question is waiting on "
+                "the user, not done. Do not call it for progress updates. If "
+                "something new arrives in the thread later, it reopens, and you "
+                "can finish it again."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["done", "failed"],
+                        "description": "'done' when the job is complete; 'failed' when it cannot be done.",
+                    },
+                },
+                "required": ["outcome"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": LIST_TOOL_NAME,
+            "description": (
+                "Lists the threads of the user's Home, most recently active "
+                "first: each one's title, the profile that runs it, and its "
+                "state -- working, waiting on the user, done or failed -- plus, "
+                "for a thread its assistant finished, the outcome it reported. "
+                "Use it to answer questions about work that was moved into "
+                "threads ('how are the quotes going?'). It does not show what "
+                "was said in a thread; if the user wants the detail, point them "
+                "to the thread."
+            ),
+            "parameters": {"type": "object", "properties": {}},
         },
     },
 ]
@@ -147,6 +216,259 @@ async def thread_start_refusal(
     if home != conversation_id:
         return "A thread can only be started from the user's Home."
     return None
+
+
+async def home_read_refusal(
+    db: DatabaseExecutor,
+    *,
+    app_config: AppConfig | None,
+    interface_type: str,
+    conversation_id: str,
+    subconversation_id: str | None,
+    user_id: str | None,
+) -> str | None:
+    """Why a turn cannot read its Home's threads, or None if it can.
+
+    Only Home's own assistant sees its threads: a thread does not see its
+    siblings.
+    """
+    if app_config is None or not app_config.conversation_threads.enabled:
+        return "Threads are not enabled."
+    if subconversation_id is not None or not user_id:
+        return "Threads can only be listed from the user's Home."
+    home = await find_home(
+        db, app_config, user_id=user_id, interface_type=interface_type
+    )
+    if home != conversation_id:
+        return "Threads can only be listed from the user's Home."
+    return None
+
+
+async def thread_finish_refusal(
+    db: DatabaseExecutor,
+    *,
+    app_config: AppConfig | None,
+    conversation_id: str,
+    subconversation_id: str | None,
+) -> str | None:
+    """Why a turn cannot finish a thread, or None if it can.
+
+    Only the thread's own top-level turn finishes it: a delegate working inside
+    a thread reports back to the thread's assistant, which decides.
+    """
+    if app_config is None or not app_config.conversation_threads.enabled:
+        return "Threads are not enabled."
+    if subconversation_id is not None:
+        return "Only the thread's own assistant can finish a thread."
+    if await db.conversation_threads.get_thread(conversation_id) is None:
+        return "This conversation is not a thread, so there is nothing to finish."
+    return None
+
+
+async def thread_tool_refusal(
+    tool_name: str,
+    db: DatabaseExecutor,
+    *,
+    app_config: AppConfig | None,
+    async_delegation_enabled: bool,
+    in_script: bool,
+    interface_type: str,
+    conversation_id: str,
+    subconversation_id: str | None,
+    user_id: str | None,
+) -> str | None:
+    """Why a turn cannot use one of :data:`THREAD_TOOL_NAMES`, or None if it can.
+
+    The model loop asks this for each of them and does not advertise one a turn
+    would refuse; each tool asks again when called.
+    """
+    if tool_name == TOOL_NAME:
+        return await thread_start_refusal(
+            db,
+            app_config=app_config,
+            async_delegation_enabled=async_delegation_enabled,
+            in_script=in_script,
+            interface_type=interface_type,
+            conversation_id=conversation_id,
+            subconversation_id=subconversation_id,
+            user_id=user_id,
+        )
+    if tool_name == FINISH_TOOL_NAME:
+        return await thread_finish_refusal(
+            db,
+            app_config=app_config,
+            conversation_id=conversation_id,
+            subconversation_id=subconversation_id,
+        )
+    if tool_name == LIST_TOOL_NAME:
+        return await home_read_refusal(
+            db,
+            app_config=app_config,
+            interface_type=interface_type,
+            conversation_id=conversation_id,
+            subconversation_id=subconversation_id,
+            user_id=user_id,
+        )
+    raise ValueError(f"{tool_name!r} is not a thread tool.")
+
+
+async def finish_thread_tool(
+    exec_context: ToolExecutionContext, outcome: str
+) -> ToolResult:
+    """Close the thread this turn runs in, as done or failed.
+
+    Only the close is recorded here. The echo into Home is the message the turn
+    ends with, so it is written when the turn ends (see ``threads.echo``).
+    """
+    refusal = await thread_finish_refusal(
+        exec_context.db_context,
+        app_config=_app_config(exec_context),
+        conversation_id=exec_context.conversation_id,
+        subconversation_id=exec_context.subconversation_id,
+    )
+    if refusal is not None:
+        return _error(refusal)
+    if outcome not in {"done", "failed"}:
+        return _error("The outcome must be 'done' or 'failed'.")
+    now = (exec_context.clock or SystemClock()).now()
+    await exec_context.db_context.conversation_threads.close_thread(
+        exec_context.conversation_id,
+        outcome="done" if outcome == "done" else "failed",
+        closed_by="assistant",
+        turn_id=exec_context.turn_id,
+        now=now,
+    )
+    logger.info(
+        "Thread %s finished by its assistant as %s",
+        exec_context.conversation_id,
+        outcome,
+    )
+    return ToolResult(
+        text=(
+            f"Marked the thread {outcome}. Now end your turn with a final message "
+            "stating the outcome; it is copied into the user's Home as this "
+            "thread's result."
+        ),
+        attachments=None,
+        data={"outcome": outcome},
+    )
+
+
+_STATE_DESCRIPTIONS = {
+    "working": "working",
+    "waiting": "waiting on the user",
+    "done": "done",
+    "failed": "failed",
+}
+
+
+async def list_threads_tool(exec_context: ToolExecutionContext) -> ToolResult:
+    """The facts of the Home's threads: title, profile, state and echoed outcome.
+
+    Every fact carries its taint into the turn: a title the taint of the turn
+    that wrote it, an outcome that of the thread message it echoes. The state is
+    derived by code. Transcripts and generated summaries are never read.
+    """
+    refusal = await home_read_refusal(
+        exec_context.db_context,
+        app_config=_app_config(exec_context),
+        interface_type=exec_context.interface_type,
+        conversation_id=exec_context.conversation_id,
+        subconversation_id=exec_context.subconversation_id,
+        user_id=exec_context.user_id,
+    )
+    if refusal is not None:
+        return _error(refusal)
+    db = exec_context.db_context
+    threads = await db.conversation_threads.list_for_home(exec_context.conversation_id)
+    service = exec_context.processing_service
+    live_stream = (
+        getattr(service, "home_activity_publisher", None)
+        if service is not None
+        else None
+    )
+    summaries = sorted(
+        await summarize_threads(
+            db,
+            threads,
+            # Only the live stream knows of a turn in progress there.
+            turn_running=(
+                live_stream.has_running_turn
+                if live_stream is not None
+                else lambda _conversation_id: False
+            ),
+            viewer=None,
+        ),
+        key=lambda summary: summary.updated_at,
+        reverse=True,
+    )[:LIST_THREADS_LIMIT]
+    title_taints = {thread.conversation_id: thread.title_taint for thread in threads}
+    facts: list[dict[str, object]] = []
+    lines: list[str] = []
+    for summary in summaries:
+        _merge_fact_taint(exec_context, title_taints[summary.conversation_id])
+        outcome = await _echoed_outcome(exec_context, summary.echo_message_id)
+        fact: dict[str, object] = {
+            "conversation_id": summary.conversation_id,
+            "title": summary.title,
+            "profile_id": summary.profile_id,
+            "state": summary.state,
+            "closed_by": summary.closed_by,
+            "last_activity": summary.updated_at.isoformat(),
+        }
+        line = (
+            f'- "{summary.title}" ({summary.profile_id}): '
+            f"{_STATE_DESCRIPTIONS[summary.state]}"
+        )
+        if summary.closed_by == "user":
+            line += ", closed by the user"
+        if outcome is not None:
+            fact["outcome"] = outcome
+            line += f". Outcome it reported: {outcome}"
+        facts.append(fact)
+        lines.append(line)
+    text = (
+        "Threads of this Home, most recently active first:\n" + "\n".join(lines)
+        if lines
+        else "This Home has no threads."
+    )
+    return ToolResult(text=text, attachments=None, data={"threads": facts})
+
+
+def _merge_fact_taint(
+    exec_context: ToolExecutionContext, metadata: TaintMetadata | None
+) -> None:
+    """Raise this turn's taint by what one thread fact carries."""
+    if exec_context.taint_tracker is None or metadata is None:
+        return
+    merge_taint_state_into_tracker(
+        exec_context.taint_tracker,
+        TurnTaintState.from_metadata(
+            metadata, preserve_origin=True
+        ).with_sensitive_reads_from(metadata),
+    )
+
+
+async def _echoed_outcome(
+    exec_context: ToolExecutionContext, echo_message_id: int | None
+) -> str | None:
+    """The outcome a finished thread echoed, with its taint merged into the turn.
+
+    An echo whose taint is not recorded is left out rather than shown with no
+    taint at all.
+    """
+    if echo_message_id is None:
+        return None
+    row = await exec_context.db_context.message_history.get_row_by_internal_id(
+        echo_message_id
+    )
+    if row is None or not isinstance(row["content"], str):
+        return None
+    taint = row["taint_metadata"]
+    if taint is None:
+        return None
+    _merge_fact_taint(exec_context, taint)
+    return row["content"]
 
 
 async def start_thread_tool(

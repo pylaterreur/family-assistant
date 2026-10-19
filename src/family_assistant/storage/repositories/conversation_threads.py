@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.sql import functions as func
 
 from family_assistant.storage.conversation_threads import (
     conversation_homes_table,
+    conversation_read_markers_table,
     conversation_threads_table,
 )
+from family_assistant.storage.message_history import message_history_table
 from family_assistant.storage.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
@@ -20,6 +23,24 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from family_assistant.security.taint import TaintMetadata
+
+CloseOutcome = Literal["done", "failed"]
+ClosedBy = Literal["assistant", "user"]
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadClose:
+    """The latest explicit close of a thread.
+
+    ``turn_id`` is the turn the thread's assistant closed it in; None when the
+    user closed it.
+    """
+
+    outcome: CloseOutcome
+    closed_by: ClosedBy
+    closed_at: datetime
+    turn_id: str | None
+    echo_message_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +58,21 @@ class ConversationThread:
     seed_message_id: int | None
     source_tool_call_id: str | None
     delegation_id: str | None
+    close: ThreadClose | None
     created_at: datetime
     updated_at: datetime
+
+
+def _close_from_row(row: Mapping[str, Any]) -> ThreadClose | None:
+    if row["closed_outcome"] is None:
+        return None
+    return ThreadClose(
+        outcome=cast("CloseOutcome", row["closed_outcome"]),
+        closed_by=cast("ClosedBy", row["closed_by"]),
+        closed_at=row["closed_at"],
+        turn_id=row["closed_turn_id"],
+        echo_message_id=row["echo_message_id"],
+    )
 
 
 def _thread_from_row(row: Mapping[str, Any]) -> ConversationThread:
@@ -54,6 +88,7 @@ def _thread_from_row(row: Mapping[str, Any]) -> ConversationThread:
         seed_message_id=row["seed_message_id"],
         source_tool_call_id=row["source_tool_call_id"],
         delegation_id=row["delegation_id"],
+        close=_close_from_row(row),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -222,3 +257,139 @@ class ConversationThreadsRepository(BaseRepository):
             .order_by(conversation_threads_table.c.created_at.desc())
         )
         return [_thread_from_row(row) for row in rows]
+
+    async def close_thread(
+        self,
+        conversation_id: str,
+        *,
+        outcome: CloseOutcome,
+        closed_by: ClosedBy,
+        turn_id: str | None,
+        now: datetime,
+    ) -> None:
+        """Record an explicit close, replacing any earlier one.
+
+        The close starts with no echo: one is written when the assistant's
+        closing turn ends, and never for a close the user made.
+        """
+        await self._db.execute(
+            conversation_threads_table
+            .update()
+            .where(conversation_threads_table.c.conversation_id == conversation_id)
+            .values(
+                closed_outcome=outcome,
+                closed_by=closed_by,
+                closed_at=now,
+                closed_turn_id=turn_id,
+                echo_message_id=None,
+                updated_at=now,
+            )
+        )
+
+    async def record_echo(
+        self, conversation_id: str, *, turn_id: str, echo_message_id: int
+    ) -> bool:
+        """Record the echo of the close made in ``turn_id``, if it has none yet.
+
+        Returns whether it was recorded: false when the thread has since been
+        closed again, or this close was already echoed.
+        """
+        result = await self._db.execute(
+            conversation_threads_table
+            .update()
+            .where(
+                conversation_threads_table.c.conversation_id == conversation_id,
+                conversation_threads_table.c.closed_by == "assistant",
+                conversation_threads_table.c.closed_turn_id == turn_id,
+                conversation_threads_table.c.echo_message_id.is_(None),
+            )
+            .values(echo_message_id=echo_message_id)
+        )
+        return result.rowcount > 0
+
+    async def mark_read(
+        self,
+        conversation_id: str,
+        *,
+        viewer_user_id: str,
+        through_message_id: int,
+        now: datetime,
+    ) -> None:
+        """Move a viewer's read marker forward to ``through_message_id``.
+
+        Never backward: a client reporting an older position, or two clients
+        racing, cannot make read messages unread again.
+        """
+        insert_ctor = (
+            pg_insert if self._db.dialect_name == "postgresql" else sqlite_insert
+        )
+        statement = insert_ctor(conversation_read_markers_table).values(
+            conversation_id=conversation_id,
+            viewer_user_id=viewer_user_id,
+            last_read_message_id=through_message_id,
+            updated_at=now,
+        )
+        await self._db.execute(
+            statement.on_conflict_do_update(
+                index_elements=["conversation_id", "viewer_user_id"],
+                set_={
+                    "last_read_message_id": statement.excluded.last_read_message_id,
+                    "updated_at": statement.excluded.updated_at,
+                },
+                where=(
+                    conversation_read_markers_table.c.last_read_message_id
+                    < statement.excluded.last_read_message_id
+                ),
+            )
+        )
+
+    async def unread_counts(
+        self,
+        conversation_ids: Collection[str],
+        *,
+        viewer_user_id: str,
+        viewer_keys: Collection[str],
+    ) -> dict[str, int]:
+        """How many visible messages each conversation has that the viewer has not read.
+
+        Visible is what a reader of the conversation sees: non-internal user
+        and assistant rows with content, at its top level. A message the viewer
+        wrote themselves -- a user row under any of ``viewer_keys``, the ids
+        their logins store -- is never unread to them. Conversations with
+        nothing unread are absent.
+        """
+        if not conversation_ids:
+            return {}
+        history = message_history_table
+        markers = conversation_read_markers_table
+        rows = await self._db.fetch_all(
+            select(
+                history.c.conversation_id,
+                func.count(history.c.internal_id).label("count"),
+            )
+            .select_from(
+                history.outerjoin(
+                    markers,
+                    (markers.c.conversation_id == history.c.conversation_id)
+                    & (markers.c.viewer_user_id == viewer_user_id),
+                )
+            )
+            .where(
+                history.c.conversation_id.in_(list(conversation_ids)),
+                history.c.is_internal.is_(False),
+                history.c.role.in_(["user", "assistant"]),
+                history.c.content.isnot(None),
+                history.c.subconversation_id.is_(None),
+                or_(
+                    markers.c.last_read_message_id.is_(None),
+                    history.c.internal_id > markers.c.last_read_message_id,
+                ),
+                or_(
+                    history.c.role != "user",
+                    history.c.user_id.is_(None),
+                    history.c.user_id.not_in(list(viewer_keys)),
+                ),
+            )
+            .group_by(history.c.conversation_id)
+        )
+        return {row["conversation_id"]: row["count"] for row in rows}

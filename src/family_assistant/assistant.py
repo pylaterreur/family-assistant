@@ -195,7 +195,7 @@ from family_assistant.tools import (
 from family_assistant.tools.calendar import GOOGLE_CALENDAR_TOOL_REQUIRED_SCOPES
 from family_assistant.tools.google_data import GOOGLE_TOOL_REQUIRED_SCOPES
 from family_assistant.tools.memory import MEMORY_WRITE_TOOL_NAMES
-from family_assistant.tools.threads import TOOL_NAME as START_THREAD_TOOL_NAME
+from family_assistant.tools.threads import THREAD_TOOL_NAMES
 from family_assistant.utils.logging_handler import setup_error_logging
 from family_assistant.utils.scraping import PlaywrightScraper
 from family_assistant.weather import WeatherService
@@ -304,8 +304,8 @@ def _build_profile_policy_engine(
     Fail-closed, so a caller that does not say leaves them out.
 
     ``withheld_tools`` are tools the profile cannot use here -- ones its
-    plugin instances cannot serve (see ``withheld_profile_tools``), and
-    ``start_thread`` while threads are disabled -- withheld the same way.
+    plugin instances cannot serve (see ``withheld_profile_tools``), and the
+    thread tools while threads are disabled -- withheld the same way.
     """
     if profile_tools_policy is None:
         msg = (
@@ -1649,6 +1649,11 @@ class Assistant:
             model_router=model_router,
             turn_relevance=turn_relevance,
             jev_client=self._jev_client,
+            home_activity_publisher=(
+                getattr(self.fastapi_app.state, "conversation_stream_hub", None)
+                if self.fastapi_app is not None
+                else None
+            ),
         )
 
         # Render once now so a template referencing a placeholder that no
@@ -1737,7 +1742,7 @@ class Assistant:
             | (
                 set()
                 if self.config.conversation_threads.enabled
-                else {START_THREAD_TOOL_NAME}
+                else set(THREAD_TOOL_NAMES)
             ),
         )
         confirmation_timeout = profile_tools_conf.confirmation_timeout_seconds

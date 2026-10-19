@@ -890,6 +890,17 @@ global_tools_policy:
       decision: "allow"
       priority: 50
       description: "read_text_attachment and jq_query are available in every profile so the assistant can always read back tool results that exceeded the large-result threshold and were auto-converted to attachments."
+    # A thread can run on any profile, so whichever runs it can close the job.
+    # Offered only in a thread's own turns, and withheld while
+    # conversation_threads is off. A profile that withholds every global grant
+    # (excluded_global_tools) withholds this one too; its threads are closed by
+    # the user.
+    - match:
+        names:
+          - "finish_thread"
+      decision: "allow"
+      priority: 50
+      description: "finish_thread is available in every profile so whichever profile runs a thread can close its job."
 
 default_profile_settings:
   # Specific models a delegating model may pin any tiered profile to by name
@@ -1017,6 +1028,9 @@ default_profile_settings:
             # Refused outside a user's Home, and while conversation_threads is
             # off; admitted per target by the delegation rules below.
             - "start_thread"
+            # Home's read of its threads' titles and states; offered only in
+            # Home, and withheld while conversation_threads is off.
+            - "list_threads"
             - "query_recent_events"
             - "get_home_status"
             - "render_home_assistant_template"
@@ -1461,6 +1475,7 @@ service_profiles:
       - "read_text_attachment"
       - "jq_query"
       - "report_technical_problem"
+      - "finish_thread"
     slash_commands:
       - "/browse_authenticated"
   - id: "credential_browser_visual_profile"
@@ -1520,6 +1535,7 @@ service_profiles:
       - "read_text_attachment"
       - "jq_query"
       - "report_technical_problem"
+      - "finish_thread"
     slash_commands: []
   # --- Authenticated-site variants ---------------------------------------
   # The two profiles an authenticated-site run executes under. They are not the
@@ -1608,6 +1624,7 @@ service_profiles:
       - "read_text_attachment"
       - "jq_query"
       - "report_technical_problem"
+      - "finish_thread"
     slash_commands: []
   - id: "authenticated_browser_visual_profile"
     description: "Visual half of an authenticated-site run, driven by Gemini's native computer-use capability against the same confined browser session. Invoked only by delegation from authenticated_browser_profile."
@@ -1664,6 +1681,7 @@ service_profiles:
       - "read_text_attachment"
       - "jq_query"
       - "report_technical_problem"
+      - "finish_thread"
     slash_commands: []
   - id: "research"
     user_selectable: true
@@ -1742,7 +1760,7 @@ service_profiles:
     # taint_policy.mode to match, since under observe nothing here gates.
     tools_policy:
       default_decision: "deny"
-    # This profile's own deny cannot refuse the three tools global_tools_policy
+    # This profile's own deny cannot refuse the tools global_tools_policy
     # grants everywhere: global rules land in the `profile` policy layer, which
     # outranks the `defaults` layer this policy occupies. Without the exclusion
     # the profile is advertised over /api/profiles as holding tools its own
@@ -1754,6 +1772,7 @@ service_profiles:
       - "read_text_attachment"
       - "jq_query"
       - "report_technical_problem"
+      - "finish_thread"
     slash_commands:
       - "/coder"
   - id: "data_visualization"
@@ -1879,17 +1898,18 @@ service_profiles:
     # the Rule of Two exists to prevent.
     #
     # On [C]: an empty tool policy is not literally no tools either.
-    # global_tools_policy grants three tools to every profile, and a profile's
+    # global_tools_policy grants four tools to every profile, and a profile's
     # own tools_policy cannot refuse them -- global rules are injected at the
     # `profile` policy layer, which outranks the `defaults` layer a profile's own
     # policy occupies, so layer beats priority. excluded_global_tools is how a
     # profile withholds them; it denies in the same layer at a higher priority.
     #
-    # All three have to go. read_text_attachment and jq_query are not confined to
+    # All four have to go. read_text_attachment and jq_query are not confined to
     # this turn: both resolve any attachment id the acting user owns, so injected
     # media naming an id could read private content [B]. report_technical_problem
-    # is tagged STATE_CHANGING and writes model-supplied text to error_logs [C].
-    # Left in place, a profile advertised as [A]-only would hold all three.
+    # is tagged STATE_CHANGING and writes model-supplied text to error_logs [C],
+    # and finish_thread closes a thread and echoes its reply into Home [C].
+    # Left in place, a profile advertised as [A]-only would hold all four.
     processing_config:
       provider: "google"
       llm_model: "gemini-3.8-flash"
@@ -1918,6 +1938,7 @@ service_profiles:
       - "read_text_attachment"
       - "jq_query"
       - "report_technical_problem"
+      - "finish_thread"
     slash_commands: []
   - id: "memory_curator"
     description: "Internal background profile that reviews a settled conversation and proposes edits to the household memory notes. Not a delegation target: it is run by the memory review task with a rendered transcript as its request."
@@ -2049,14 +2070,16 @@ service_profiles:
           priority: 10
     # global_tools_policy is injected at the `profile` layer, which outranks the
     # `defaults` layer this profile's own tools_policy occupies, so the deny
-    # above cannot refuse the three globally granted tools at any priority.
+    # above cannot refuse the globally granted tools at any priority.
     # read_text_attachment and jq_query resolve any attachment the acting user
-    # owns rather than this turn's, and report_technical_problem persists
-    # model-supplied text; none belongs in a silent background turn.
+    # owns rather than this turn's, report_technical_problem persists
+    # model-supplied text, and finish_thread closes the thread a turn runs in;
+    # none belongs in a silent background turn.
     excluded_global_tools:
       - "read_text_attachment"
       - "jq_query"
       - "report_technical_problem"
+      - "finish_thread"
     slash_commands: []
   - id: "artist"
     user_selectable: true
@@ -2449,6 +2472,7 @@ service_profiles:
       - "read_text_attachment"
       - "jq_query"
       - "report_technical_problem"
+      - "finish_thread"
     # Reached only by delegation: a delegated run is what holds the council's
     # turn open until a whole phase of members has finished.
     slash_commands: []
@@ -2514,6 +2538,7 @@ service_profiles:
       - "read_text_attachment"
       - "jq_query"
       - "report_technical_problem"
+      - "finish_thread"
     slash_commands: []
   - id: "engineer"
     user_selectable: true

@@ -418,6 +418,12 @@ class ConversationStreamHub:
             return []
         return list(state.turns.values())
 
+    def has_running_turn(self, conversation_id: str) -> bool:
+        """Whether a turn is in progress in a conversation."""
+        return any(
+            turn.status == "running" for turn in self.active_turns(conversation_id)
+        )
+
     def latest_seq(self, conversation_id: str) -> int:
         """Return the seq of the most recently published event, or -1 if the
         conversation has published none.

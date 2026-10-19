@@ -167,6 +167,7 @@ def _history_row(
         taint_metadata_version=None,
         taint_metadata=cast("TaintMetadata", _TRUSTED),
         is_internal=False,
+        echoed_from_conversation_id=None,
     )
 
 

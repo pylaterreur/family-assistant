@@ -55,6 +55,29 @@ conversation_threads_table = Table(
     Column("source_tool_call_id", String(255), nullable=True),
     # The run that executes the thread's first turn.
     Column("delegation_id", String(100), nullable=True),
+    # The latest explicit close: "done" or "failed", by "assistant" or "user".
+    # A close stays recorded when the thread reopens; whether it is still in
+    # effect is derived from what has happened in the thread since.
+    Column("closed_outcome", String(20), nullable=True),
+    Column("closed_by", String(20), nullable=True),
+    Column("closed_at", DateTime(timezone=True), nullable=True),
+    # The turn the thread's assistant closed it in, whose own later rows -- the
+    # final message written after the call -- do not reopen it.
+    Column("closed_turn_id", String(36), nullable=True),
+    # The Home row this close was echoed into, once the closing turn ended.
+    Column("echo_message_id", Integer, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+conversation_read_markers_table = Table(
+    "conversation_read_markers",
+    metadata,
+    Column("conversation_id", String(255), nullable=False),
+    # Canonical, so every login of one person shares a marker.
+    Column("viewer_user_id", String(255), nullable=False),
+    # The newest message the viewer has read; everything after it is unread.
+    Column("last_read_message_id", Integer, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("conversation_id", "viewer_user_id"),
 )

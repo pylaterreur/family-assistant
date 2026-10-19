@@ -111,6 +111,9 @@ message_history_table = Table(
     Column(
         "is_internal", Boolean, nullable=False, default=False, server_default="false"
     ),
+    # On a Home row that echoes a finished thread's final message: the thread
+    # it was copied from, so clients render it attributed to that thread.
+    Column("echoed_from_conversation_id", String(255), nullable=True),
     # Backs the sole-owner predicate behind the conversation list, which asks
     # "does this conversation carry a user message owned by anyone other than
     # the caller?" as a correlated NOT EXISTS. Without it PostgreSQL answers

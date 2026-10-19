@@ -258,6 +258,8 @@ class MessageHistoryRow(TypedDict):
     taint_metadata_version: str | None
     taint_metadata: "TaintMetadata | None"
     is_internal: bool
+    # The thread a Home row echoes, when it is a finished thread's echo.
+    echoed_from_conversation_id: str | None
 
 
 class ConversationSummaryRow(TypedDict):
