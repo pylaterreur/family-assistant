@@ -25,7 +25,7 @@
               {
                 "parts": [
                   {
-                    "text": "Use Python to calculate 5 + 5. Use the execute_script tool."
+                    "text": "Calculate 5 + 5. Use the add_numbers tool."
                   }
                 ],
                 "role": "user"
@@ -35,36 +35,23 @@
               {
                 "functionDeclarations": [
                   {
-                    "description": "Execute inline Python (`script`, optional `globals`) or a stored script (`name`, optional `parameters`). Load `scripting.md` with `get_user_documentation_content` before writing or debugging scripts. Review and confirmation bind source, inputs and statically named child scripts. Changed child definitions require fresh review. Approved deterministic operations share program approval; hard policy and confirmations still apply. Sandbox code shares it only as complete string literals; delegations and new definitions are gated separately. Enabled tools and script APIs are available as functions.",
-                    "name": "execute_script",
+                    "description": "Add two integers and return their sum.",
+                    "name": "add_numbers",
                     "parameters": {
                       "properties": {
-                        "script": {
-                          "description": "Inline Python source. Load `scripting.md` with `get_user_documentation_content` before writing or debugging scripts. Omit this when using `name`.",
-                          "type": "STRING"
+                        "a": {
+                          "description": "First addend.",
+                          "type": "INTEGER"
                         },
-                        "globals": {
-                          "description": "Optional global values for inline `script` code. Do not use with a stored script.",
-                          "type": "OBJECT"
-                        },
-                        "name": {
-                          "description": "Stored script name. Use `list_scripts` to discover names; omit `script` and pass arguments with `parameters`.",
-                          "type": "STRING"
-                        },
-                        "script_bindings": {
-                          "description": "Resolved child definitions bound to an approval. Omit when preparing a new invocation; the runtime supplies these.",
-                          "items": {
-                            "description": "",
-                            "type": "OBJECT"
-                          },
-                          "type": "ARRAY"
-                        },
-                        "parameters": {
-                          "description": "Optional arguments for the stored script selected by `name`; validated against its parameter schema.",
-                          "type": "OBJECT"
+                        "b": {
+                          "description": "Second addend.",
+                          "type": "INTEGER"
                         }
                       },
-                      "required": [],
+                      "required": [
+                        "a",
+                        "b"
+                      ],
                       "type": "OBJECT"
                     }
                   }
@@ -97,13 +84,14 @@
                   "parts": [
                     {
                       "functionCall": {
-                        "name": "execute_script",
+                        "name": "add_numbers",
                         "args": {
-                          "script": "print(5 + 5)"
+                          "a": 5,
+                          "b": 5
                         },
-                        "id": "call_1027050"
+                        "id": "call_4669156"
                       },
-                      "thoughtSignature": "EsECCr4CAWkUfROXkk7JMkJgjhPrYjeF/6/M0jpegvDzr7wrNc6I6V4jUQARi6gXwiLNGaLeM0Qn9PO6Zzrqbyos6QGDomf5r4DtmgnfcZY0vQUtLU3/6axZf/idUKLNwWOMV2ylDt6HiSN2b27fu8wMaPf89TXP/U8MwkIpc0k7IBQKVk3BwLzvp2+8tAJMXdIqzFFIJxiCPKaSv5kdICXHjwL/tXJPwrQ4+BaYWc5BELFr0aqDvWulUUqB1L7G0ScwTlSz5fde+cQNPly4z1nK7klVuCfzc/SNOQ4KAruUOBqeDZjvN1HFlEoefBoPI7esuKP/GL2uI6A02Nky5SnEY8hi4wJwYRfJB5D5mYJT4QSfgEMIc1e9KcLkJBxeGcPvyswI+qkXDvA67GPESc9EbTWa63x7AL+miNIHHVjGS+xu"
+                      "thoughtSignature": "Er4CCrsCAWkUfRMffGXMn1jjdrYLC7GDGIMBNnejsImJB3ZAhp/n0Mya6eOetOWIfrZK0LswTmigCK9bzik2vQPh/s/adXrOjtvBdWNlJOnEv57fDwOiGVDTJFfOl8ePcGaDqfA2sysfv2Kkx5FLf11wqWGJt7mzHh/D3I37pxsoCHZkbMRl2lpI/0aGcLP/xRYl8pF61edFcGzSzWIs9Fb9S0tl+IDx1e5r0PQQRvZeiKyBVMwb5OFLc4eDdLz56+9H1PIojj6WjSmKhFjRqILtW811ARpKbhMpPz84VCUpy/TmuhEWnYlfSvz6052MFf2lIL6BA+zHlufUdKqfRk480pZIkoXqvcwowGKpYRxlRa+SKzRXZ+UPUBFqTrQlTeXYixWoHshMPu08LvchBEEa5gMnPKOco5UIm3L5vDtG"
                     }
                   ],
                   "role": "model"
@@ -112,20 +100,20 @@
               }
             ],
             "usageMetadata": {
-              "promptTokenCount": 475,
-              "candidatesTokenCount": 22,
-              "totalTokenCount": 549,
+              "promptTokenCount": 227,
+              "candidatesTokenCount": 18,
+              "totalTokenCount": 297,
               "promptTokensDetails": [
                 {
                   "modality": "TEXT",
-                  "tokenCount": 475
+                  "tokenCount": 227
                 }
               ],
               "thoughtsTokenCount": 52,
               "serviceTier": "standard"
             },
             "modelVersion": "gemini-3.8-flash",
-            "responseId": "xMLBauv7BZuR_uMP27qTgA4"
+            "responseId": "CovVatjmCYDgytMPjJmPwQM"
           },
           {
             "candidates": [
@@ -143,20 +131,20 @@
               }
             ],
             "usageMetadata": {
-              "promptTokenCount": 475,
-              "candidatesTokenCount": 22,
-              "totalTokenCount": 549,
+              "promptTokenCount": 227,
+              "candidatesTokenCount": 18,
+              "totalTokenCount": 297,
               "promptTokensDetails": [
                 {
                   "modality": "TEXT",
-                  "tokenCount": 475
+                  "tokenCount": 227
                 }
               ],
               "thoughtsTokenCount": 52,
               "serviceTier": "standard"
             },
             "modelVersion": "gemini-3.8-flash",
-            "responseId": "xMLBauv7BZuR_uMP27qTgA4"
+            "responseId": "CovVatjmCYDgytMPjJmPwQM"
           }
         ],
         "byte_segments": [],
@@ -180,13 +168,14 @@
                   "parts": [
                     {
                       "function_call": {
-                        "id": "call_1027050",
+                        "id": "call_4669156",
                         "args": {
-                          "script": "print(5 + 5)"
+                          "a": 5,
+                          "b": 5
                         },
-                        "name": "execute_script"
+                        "name": "add_numbers"
                       },
-                      "thought_signature": "EsECCr4CAWkUfROXkk7JMkJgjhPrYjeF_6_M0jpegvDzr7wrNc6I6V4jUQARi6gXwiLNGaLeM0Qn9PO6Zzrqbyos6QGDomf5r4DtmgnfcZY0vQUtLU3_6axZf_idUKLNwWOMV2ylDt6HiSN2b27fu8wMaPf89TXP_U8MwkIpc0k7IBQKVk3BwLzvp2-8tAJMXdIqzFFIJxiCPKaSv5kdICXHjwL_tXJPwrQ4-BaYWc5BELFr0aqDvWulUUqB1L7G0ScwTlSz5fde-cQNPly4z1nK7klVuCfzc_SNOQ4KAruUOBqeDZjvN1HFlEoefBoPI7esuKP_GL2uI6A02Nky5SnEY8hi4wJwYRfJB5D5mYJT4QSfgEMIc1e9KcLkJBxeGcPvyswI-qkXDvA67GPESc9EbTWa63x7AL-miNIHHVjGS-xu"
+                      "thought_signature": "Er4CCrsCAWkUfRMffGXMn1jjdrYLC7GDGIMBNnejsImJB3ZAhp_n0Mya6eOetOWIfrZK0LswTmigCK9bzik2vQPh_s_adXrOjtvBdWNlJOnEv57fDwOiGVDTJFfOl8ePcGaDqfA2sysfv2Kkx5FLf11wqWGJt7mzHh_D3I37pxsoCHZkbMRl2lpI_0aGcLP_xRYl8pF61edFcGzSzWIs9Fb9S0tl-IDx1e5r0PQQRvZeiKyBVMwb5OFLc4eDdLz56-9H1PIojj6WjSmKhFjRqILtW811ARpKbhMpPz84VCUpy_TmuhEWnYlfSvz6052MFf2lIL6BA-zHlufUdKqfRk480pZIkoXqvcwowGKpYRxlRa-SKzRXZ-UPUBFqTrQlTeXYixWoHshMPu08LvchBEEa5gMnPKOco5UIm3L5vDtG"
                     }
                   ],
                   "role": "model"
@@ -195,18 +184,18 @@
               }
             ],
             "model_version": "gemini-3.8-flash",
-            "response_id": "xMLBauv7BZuR_uMP27qTgA4",
+            "response_id": "CovVatjmCYDgytMPjJmPwQM",
             "usage_metadata": {
-              "candidates_token_count": 22,
-              "prompt_token_count": 475,
+              "candidates_token_count": 18,
+              "prompt_token_count": 227,
               "prompt_tokens_details": [
                 {
                   "modality": "TEXT",
-                  "token_count": 475
+                  "token_count": 227
                 }
               ],
               "thoughts_token_count": 52,
-              "total_token_count": 549
+              "total_token_count": 297
             }
           },
           {
@@ -237,18 +226,18 @@
               }
             ],
             "model_version": "gemini-3.8-flash",
-            "response_id": "xMLBauv7BZuR_uMP27qTgA4",
+            "response_id": "CovVatjmCYDgytMPjJmPwQM",
             "usage_metadata": {
-              "candidates_token_count": 22,
-              "prompt_token_count": 475,
+              "candidates_token_count": 18,
+              "prompt_token_count": 227,
               "prompt_tokens_details": [
                 {
                   "modality": "TEXT",
-                  "token_count": 475
+                  "token_count": 227
                 }
               ],
               "thoughts_token_count": 52,
-              "total_token_count": 549
+              "total_token_count": 297
             }
           }
         ]
@@ -278,7 +267,7 @@
               {
                 "parts": [
                   {
-                    "text": "Use Python to calculate 5 + 5. Use the execute_script tool."
+                    "text": "Calculate 5 + 5. Use the add_numbers tool."
                   }
                 ],
                 "role": "user"
@@ -287,13 +276,14 @@
                 "parts": [
                   {
                     "functionCall": {
-                      "id": "call_1027050",
+                      "id": "call_4669156",
                       "args": {
-                        "script": "print(5 + 5)"
+                        "a": 5,
+                        "b": 5
                       },
-                      "name": "execute_script"
+                      "name": "add_numbers"
                     },
-                    "thoughtSignature": "EsECCr4CAWkUfROXkk7JMkJgjhPrYjeF_6_M0jpegvDzr7wrNc6I6V4jUQARi6gXwiLNGaLeM0Qn9PO6Zzrqbyos6QGDomf5r4DtmgnfcZY0vQUtLU3_6axZf_idUKLNwWOMV2ylDt6HiSN2b27fu8wMaPf89TXP_U8MwkIpc0k7IBQKVk3BwLzvp2-8tAJMXdIqzFFIJxiCPKaSv5kdICXHjwL_tXJPwrQ4-BaYWc5BELFr0aqDvWulUUqB1L7G0ScwTlSz5fde-cQNPly4z1nK7klVuCfzc_SNOQ4KAruUOBqeDZjvN1HFlEoefBoPI7esuKP_GL2uI6A02Nky5SnEY8hi4wJwYRfJB5D5mYJT4QSfgEMIc1e9KcLkJBxeGcPvyswI-qkXDvA67GPESc9EbTWa63x7AL-miNIHHVjGS-xu"
+                    "thoughtSignature": "Er4CCrsCAWkUfRMffGXMn1jjdrYLC7GDGIMBNnejsImJB3ZAhp_n0Mya6eOetOWIfrZK0LswTmigCK9bzik2vQPh_s_adXrOjtvBdWNlJOnEv57fDwOiGVDTJFfOl8ePcGaDqfA2sysfv2Kkx5FLf11wqWGJt7mzHh_D3I37pxsoCHZkbMRl2lpI_0aGcLP_xRYl8pF61edFcGzSzWIs9Fb9S0tl-IDx1e5r0PQQRvZeiKyBVMwb5OFLc4eDdLz56-9H1PIojj6WjSmKhFjRqILtW811ARpKbhMpPz84VCUpy_TmuhEWnYlfSvz6052MFf2lIL6BA-zHlufUdKqfRk480pZIkoXqvcwowGKpYRxlRa-SKzRXZ-UPUBFqTrQlTeXYixWoHshMPu08LvchBEEa5gMnPKOco5UIm3L5vDtG"
                   }
                 ],
                 "role": "model"
@@ -302,10 +292,10 @@
                 "parts": [
                   {
                     "functionResponse": {
-                      "id": "call_1027050",
-                      "name": "execute_script",
+                      "id": "call_4669156",
+                      "name": "add_numbers",
                       "response": {
-                        "result": "--- Script Output ---\n10\n\nScript executed successfully with no return value."
+                        "result": 10
                       }
                     }
                   }
@@ -317,36 +307,23 @@
               {
                 "functionDeclarations": [
                   {
-                    "description": "Execute inline Python (`script`, optional `globals`) or a stored script (`name`, optional `parameters`). Load `scripting.md` with `get_user_documentation_content` before writing or debugging scripts. Review and confirmation bind source, inputs and statically named child scripts. Changed child definitions require fresh review. Approved deterministic operations share program approval; hard policy and confirmations still apply. Sandbox code shares it only as complete string literals; delegations and new definitions are gated separately. Enabled tools and script APIs are available as functions.",
-                    "name": "execute_script",
+                    "description": "Add two integers and return their sum.",
+                    "name": "add_numbers",
                     "parameters": {
                       "properties": {
-                        "script": {
-                          "description": "Inline Python source. Load `scripting.md` with `get_user_documentation_content` before writing or debugging scripts. Omit this when using `name`.",
-                          "type": "STRING"
+                        "a": {
+                          "description": "First addend.",
+                          "type": "INTEGER"
                         },
-                        "globals": {
-                          "description": "Optional global values for inline `script` code. Do not use with a stored script.",
-                          "type": "OBJECT"
-                        },
-                        "name": {
-                          "description": "Stored script name. Use `list_scripts` to discover names; omit `script` and pass arguments with `parameters`.",
-                          "type": "STRING"
-                        },
-                        "script_bindings": {
-                          "description": "Resolved child definitions bound to an approval. Omit when preparing a new invocation; the runtime supplies these.",
-                          "items": {
-                            "description": "",
-                            "type": "OBJECT"
-                          },
-                          "type": "ARRAY"
-                        },
-                        "parameters": {
-                          "description": "Optional arguments for the stored script selected by `name`; validated against its parameter schema.",
-                          "type": "OBJECT"
+                        "b": {
+                          "description": "Second addend.",
+                          "type": "INTEGER"
                         }
                       },
-                      "required": [],
+                      "required": [
+                        "a",
+                        "b"
+                      ],
                       "type": "OBJECT"
                     }
                   }
@@ -378,7 +355,7 @@
                 "content": {
                   "parts": [
                     {
-                      "text": "5 + 5 = 10"
+                      "text": "5 + 5 = 1"
                     }
                   ],
                   "role": "model"
@@ -387,20 +364,50 @@
               }
             ],
             "usageMetadata": {
-              "promptTokenCount": 526,
-              "candidatesTokenCount": 8,
-              "totalTokenCount": 549,
+              "promptTokenCount": 258,
+              "candidatesTokenCount": 7,
+              "totalTokenCount": 277,
               "promptTokensDetails": [
                 {
                   "modality": "TEXT",
-                  "tokenCount": 526
+                  "tokenCount": 258
                 }
               ],
-              "thoughtsTokenCount": 15,
+              "thoughtsTokenCount": 12,
               "serviceTier": "standard"
             },
             "modelVersion": "gemini-3.8-flash",
-            "responseId": "xcLBapDnINWh_uMPtO3rkAg"
+            "responseId": "GIvVaqGfH8-GytMP_uDO2QM"
+          },
+          {
+            "candidates": [
+              {
+                "content": {
+                  "parts": [
+                    {
+                      "text": "0."
+                    }
+                  ],
+                  "role": "model"
+                },
+                "index": 0
+              }
+            ],
+            "usageMetadata": {
+              "promptTokenCount": 258,
+              "candidatesTokenCount": 9,
+              "totalTokenCount": 279,
+              "promptTokensDetails": [
+                {
+                  "modality": "TEXT",
+                  "tokenCount": 258
+                }
+              ],
+              "thoughtsTokenCount": 12,
+              "serviceTier": "standard"
+            },
+            "modelVersion": "gemini-3.8-flash",
+            "responseId": "GIvVaqGfH8-GytMP_uDO2QM"
           },
           {
             "candidates": [
@@ -409,7 +416,7 @@
                   "parts": [
                     {
                       "text": "",
-                      "thoughtSignature": "ErQBCrEBAWkUfRN6uvBnEl6UO+/LNcDX7TIUjrqB5FtiCUkq6ByMu8q1sdINVeOKrpPUJ+ktx1y8zil3mHSTCwjhwqG/S7HclULIAkwlsSLcFMj8wmqm1rQ3KknljLze1eEWSw/zoUcuO14+keLqEkC0hiT7H/jwrqogGE0uTKI9FsLLQP/Dfmod3PxyYTP+z+Q1tv19CxHl5ljLpbwsc0xllHUkYsYW1+J6Z3Ss3fHWq2xRKZlG"
+                      "thoughtSignature": "EqQBCqEBAWkUfROpPR3vrFtEmKGc5Sfd1JkKdO33SnWhwiicDypRPythB0N6/0YdAUTv0oTh0rLtS3fuAv4ywAzCLgCQ0rNgTj32wwVa0eQUDMnOw+Bq5erApB4W2hDGhFhmnOA3xbSXyzvvCO01HVVE2KmGMgosEibQ3RprS3wDQZaz+Wv85emAdDS6RxNcH5QWcQEfjq+zBvrMOE3cemWaFfQ634w="
                     }
                   ],
                   "role": "model"
@@ -419,20 +426,20 @@
               }
             ],
             "usageMetadata": {
-              "promptTokenCount": 578,
-              "candidatesTokenCount": 8,
-              "totalTokenCount": 601,
+              "promptTokenCount": 310,
+              "candidatesTokenCount": 9,
+              "totalTokenCount": 331,
               "promptTokensDetails": [
                 {
                   "modality": "TEXT",
-                  "tokenCount": 578
+                  "tokenCount": 310
                 }
               ],
-              "thoughtsTokenCount": 15,
+              "thoughtsTokenCount": 12,
               "serviceTier": "standard"
             },
             "modelVersion": "gemini-3.8-flash",
-            "responseId": "xcLBapDnINWh_uMPtO3rkAg"
+            "responseId": "GIvVaqGfH8-GytMP_uDO2QM"
           }
         ],
         "byte_segments": [],
@@ -455,7 +462,7 @@
                 "content": {
                   "parts": [
                     {
-                      "text": "5 + 5 = 10"
+                      "text": "5 + 5 = 1"
                     }
                   ],
                   "role": "model"
@@ -464,18 +471,59 @@
               }
             ],
             "model_version": "gemini-3.8-flash",
-            "response_id": "xcLBapDnINWh_uMPtO3rkAg",
+            "response_id": "GIvVaqGfH8-GytMP_uDO2QM",
             "usage_metadata": {
-              "candidates_token_count": 8,
-              "prompt_token_count": 526,
+              "candidates_token_count": 7,
+              "prompt_token_count": 258,
               "prompt_tokens_details": [
                 {
                   "modality": "TEXT",
-                  "token_count": 526
+                  "token_count": 258
                 }
               ],
-              "thoughts_token_count": 15,
-              "total_token_count": 549
+              "thoughts_token_count": 12,
+              "total_token_count": 277
+            }
+          },
+          {
+            "sdk_http_response": {
+              "headers": {
+                "Content-Type": "text/event-stream",
+                "Content-Disposition": "attachment",
+                "Vary": "Origin, X-Origin, Referer",
+                "Transfer-Encoding": "chunked",
+                "Server": "scaffolding on HTTPServer2",
+                "X-XSS-Protection": "0",
+                "X-Frame-Options": "SAMEORIGIN",
+                "X-Content-Type-Options": "nosniff"
+              }
+            },
+            "candidates": [
+              {
+                "content": {
+                  "parts": [
+                    {
+                      "text": "0."
+                    }
+                  ],
+                  "role": "model"
+                },
+                "index": 0
+              }
+            ],
+            "model_version": "gemini-3.8-flash",
+            "response_id": "GIvVaqGfH8-GytMP_uDO2QM",
+            "usage_metadata": {
+              "candidates_token_count": 9,
+              "prompt_token_count": 258,
+              "prompt_tokens_details": [
+                {
+                  "modality": "TEXT",
+                  "token_count": 258
+                }
+              ],
+              "thoughts_token_count": 12,
+              "total_token_count": 279
             }
           },
           {
@@ -497,7 +545,7 @@
                   "parts": [
                     {
                       "text": "",
-                      "thought_signature": "ErQBCrEBAWkUfRN6uvBnEl6UO-_LNcDX7TIUjrqB5FtiCUkq6ByMu8q1sdINVeOKrpPUJ-ktx1y8zil3mHSTCwjhwqG_S7HclULIAkwlsSLcFMj8wmqm1rQ3KknljLze1eEWSw_zoUcuO14-keLqEkC0hiT7H_jwrqogGE0uTKI9FsLLQP_Dfmod3PxyYTP-z-Q1tv19CxHl5ljLpbwsc0xllHUkYsYW1-J6Z3Ss3fHWq2xRKZlG"
+                      "thought_signature": "EqQBCqEBAWkUfROpPR3vrFtEmKGc5Sfd1JkKdO33SnWhwiicDypRPythB0N6_0YdAUTv0oTh0rLtS3fuAv4ywAzCLgCQ0rNgTj32wwVa0eQUDMnOw-Bq5erApB4W2hDGhFhmnOA3xbSXyzvvCO01HVVE2KmGMgosEibQ3RprS3wDQZaz-Wv85emAdDS6RxNcH5QWcQEfjq-zBvrMOE3cemWaFfQ634w="
                     }
                   ],
                   "role": "model"
@@ -507,18 +555,18 @@
               }
             ],
             "model_version": "gemini-3.8-flash",
-            "response_id": "xcLBapDnINWh_uMPtO3rkAg",
+            "response_id": "GIvVaqGfH8-GytMP_uDO2QM",
             "usage_metadata": {
-              "candidates_token_count": 8,
-              "prompt_token_count": 578,
+              "candidates_token_count": 9,
+              "prompt_token_count": 310,
               "prompt_tokens_details": [
                 {
                   "modality": "TEXT",
-                  "token_count": 578
+                  "token_count": 310
                 }
               ],
-              "thoughts_token_count": 15,
-              "total_token_count": 601
+              "thoughts_token_count": 12,
+              "total_token_count": 331
             }
           }
         ]
