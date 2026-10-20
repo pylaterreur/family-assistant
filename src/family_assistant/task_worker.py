@@ -184,7 +184,11 @@ from family_assistant.storage.tasks import (
     tasks_table,
     unregister_worker_wake_event,
 )
-from family_assistant.threads.wakes import ensure_wake_thread, wake_thread_title
+from family_assistant.threads.wakes import (
+    discard_wake_thread,
+    ensure_wake_thread,
+    wake_thread_title,
+)
 from family_assistant.tools import (
     TaintTrackingToolsProvider,
     ToolExecutionContext,
@@ -1694,6 +1698,20 @@ async def handle_llm_callback(
         # stamp the next task from exec_context.user_id), so thread it through as
         # the turn's user_id too — not just into the confirmation callback.
         callback_owner_user_id = payload.get("created_by_user_id")
+        starts_wake_thread = bool(
+            payload.get("new_conversation") and threads_enabled(processing_service)
+        )
+
+        async def discard_quiet_wake_thread() -> None:
+            if not starts_wake_thread:
+                return
+            assert callback_owner_user_id is not None
+            await discard_wake_thread(
+                db_context,
+                conversation_id=conversation_id,
+                owner_user_id=callback_owner_user_id,
+                publisher=processing_service.home_activity_publisher,
+            )
 
         # --- Delivery checkpoint ---
         # Under commit-as-you-go the turn's messages and its tools' writes are
@@ -1709,6 +1727,7 @@ async def handle_llm_callback(
                 f"Callback turn {callback_turn_id} already ended quietly on an "
                 "earlier attempt; nothing to deliver."
             )
+            await discard_quiet_wake_thread()
             return
         if undelivered is not None:
             logger.info(
@@ -1746,7 +1765,7 @@ async def handle_llm_callback(
                 callback_trigger_taint_state
             ),
         )
-        if payload.get("new_conversation") and threads_enabled(processing_service):
+        if starts_wake_thread:
             assert callback_owner_user_id is not None
             await ensure_wake_thread(
                 db_context,
@@ -1847,6 +1866,7 @@ async def handle_llm_callback(
                 f"Callback turn {callback_turn_id} in {interface_type}:{conversation_id} "
                 "ended quietly; no message sent."
             )
+            await discard_quiet_wake_thread()
             # A quiet end on a reminder follow-up is the model judging the
             # reminder no longer needs the user, so the chain stops here too.
             return

@@ -24,7 +24,9 @@ from family_assistant.config_models import (
 )
 from family_assistant.delegation_security import DelegationSecurityLevel
 from family_assistant.interfaces import ChatInterface
+from family_assistant.llm import ToolCallFunction, ToolCallItem
 from family_assistant.processing import ProcessingService, ProcessingServiceConfig
+from family_assistant.processing.quiet_turn import END_TURN_QUIETLY_TOOL_NAME
 from family_assistant.security.taint import SourceTrustTier, TurnTaintState
 from family_assistant.storage.database import Database
 from family_assistant.storage.message_history import message_history_table
@@ -59,15 +61,18 @@ REPLY = "Here is your briefing."
 
 
 def _processing_service(
-    *, threads: bool = True, profile_id: str = "default_assistant"
+    *,
+    threads: bool = True,
+    profile_id: str = "default_assistant",
+    web_history_budget_chars: int | None = None,
+    llm_client: RuleBasedMockLLMClient | None = None,
 ) -> ProcessingService:
     tools_provider = CompositeToolsProvider(
         providers=[LocalToolsProvider(definitions=[], implementations={})]
     )
     return ProcessingService(
-        llm_client=RuleBasedMockLLMClient(
-            rules=[], default_response=LLMOutput(content=REPLY)
-        ),
+        llm_client=llm_client
+        or RuleBasedMockLLMClient(rules=[], default_response=LLMOutput(content=REPLY)),
         tools_provider=tools_provider,
         service_config=ProcessingServiceConfig(
             id=profile_id,
@@ -76,6 +81,7 @@ def _processing_service(
             history_budget_chars=0,
             history_min_turns=0,
             history_max_age_hours=1,
+            web_history_budget_chars=web_history_budget_chars,
             tools_config=ToolsConfig(),
             delegation_security_level=DelegationSecurityLevel.BLOCKED,
         ),
@@ -418,6 +424,125 @@ async def test_an_event_wake_thread_is_pinned_to_the_profile_it_ran_on(
         != SourceTrustTier.TRUSTED_USER
     )
     assert await _profiles_of_turn_rows(db, thread_id) == {"event_handler"}
+
+
+def _llm_input_text(llm_client: RuleBasedMockLLMClient) -> str:
+    """Everything the model was given on its latest call, as text."""
+    messages = llm_client.get_calls()[-1]["kwargs"]["messages"]
+    return "\n".join(str(getattr(message, "content", message)) for message in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "web_history_budget_chars",
+    [
+        # As shipped: event_handler keeps no history, except what the web
+        # settings it inherits allow.
+        pytest.param(120_000, id="shipped"),
+        pytest.param(None, id="no-history-anywhere"),
+    ],
+)
+async def test_a_reply_in_an_event_thread_sees_the_event(
+    db_engine: AsyncEngine,
+    task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    web_history_budget_chars: int | None,
+) -> None:
+    db = Database(engine=db_engine)
+    service = _processing_service(web_history_budget_chars=120_000)
+    event_llm = RuleBasedMockLLMClient(
+        rules=[], default_response=LLMOutput(content="The garage is open.")
+    )
+    event_service = _processing_service(
+        profile_id="event_handler",
+        web_history_budget_chars=web_history_budget_chars,
+        llm_client=event_llm,
+    )
+    registry = {"default_assistant": service, "event_handler": event_service}
+    service.processing_services_registry = registry
+    event_service.processing_services_registry = registry
+    chat_interface, new_task_event = await _start_worker(task_worker_manager, service)
+    await execute_action(
+        db_ctx=db,
+        action_type=ActionType.WAKE_LLM,
+        action_config={"context": "The garage door opened", "conversation": "new"},
+        conversation_id=SOURCE_CONVERSATION_ID,
+        interface_type="web",
+        context={"trigger": "Event listener 'Garage door' matched"},
+        processing_profile_id="event_handler",
+        created_by_user_id=OWNER,
+        tool_call_review_trigger_type="event_listener",
+        tool_call_review_trigger_definition="The garage door opened",
+        tool_call_review_trigger_payload_present=True,
+    )
+    new_task_event.set()
+    await wait_for_tasks_to_complete(db_engine, task_types={"llm_callback"})
+    [thread_id] = _sent_conversation_ids(chat_interface)
+
+    # The user answers in the thread, which runs on the profile it is pinned to.
+    await event_service.handle_chat_interaction(
+        db_context=db,
+        interface_type="web",
+        conversation_id=thread_id,
+        trigger_content_parts=[{"type": "text", "text": "Is it still open?"}],
+        trigger_interface_message_id=None,
+        user_name="Alice",
+        user_id=OWNER,
+        chat_interface=chat_interface,
+    )
+
+    # The recorded message list grows with the turn's own reply afterwards, so
+    # the earlier reply is the one before the user's question.
+    seen = _llm_input_text(event_llm)
+    question = seen.index("Is it still open?")
+    assert "The garage door opened" in seen[:question]
+    assert "The garage is open." in seen[:question]
+
+
+@pytest.mark.asyncio
+async def test_a_wake_that_ends_quietly_leaves_no_thread(
+    db_engine: AsyncEngine,
+    task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+) -> None:
+    db = Database(engine=db_engine)
+    service = _processing_service(
+        llm_client=RuleBasedMockLLMClient(
+            rules=[],
+            default_response=LLMOutput(
+                content="",
+                tool_calls=[
+                    ToolCallItem(
+                        id="call_quiet",
+                        type="function",
+                        function=ToolCallFunction(
+                            name=END_TURN_QUIETLY_TOOL_NAME,
+                            arguments='{"reason": "Nothing new today"}',
+                        ),
+                    )
+                ],
+            ),
+        )
+    )
+    chat_interface, new_task_event = await _start_worker(task_worker_manager, service)
+
+    await _wake_in_new_conversation(db)
+    new_task_event.set()
+    await wait_for_tasks_to_complete(db_engine, task_types={"llm_callback"})
+
+    assert _sent_conversation_ids(chat_interface) == []
+    home = await _home(db, service)
+    assert await db.conversation_threads.list_for_home(home) == []
+    assert (
+        await list_home_threads(
+            db, home, turn_running=lambda _conversation_id: False, viewer=None
+        )
+        == []
+    )
+    leftover = await db.fetch_all(
+        select(message_history_table.c.internal_id).where(
+            message_history_table.c.conversation_id != home
+        )
+    )
+    assert leftover == []
 
 
 class _RecordingNotifier:

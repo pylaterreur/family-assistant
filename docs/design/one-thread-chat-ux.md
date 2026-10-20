@@ -292,6 +292,11 @@ and each path is governed:
   - **Its profile** is the one the wake runs on, and later turns stay on it, because the thread's
     history is stamped with that profile. An event wake's thread stays on `event_handler`, whose
     confinement suits a thread holding untrusted event content.
+  - **A profile that keeps no history keeps Home's in a thread.** `event_handler` keeps none so that
+    unrelated events in a shared conversation do not mix; a thread holds one, so a reply there sees
+    the event it answers.
+  - **A wake that ends quietly leaves no thread.** It said nothing, so its thread and the wake's own
+    rows are discarded rather than left as an empty card.
   - **Retries and push.** The thread's id is derived from the task, so a retry finds the thread its
     first attempt made. Push goes to the thread, as it would to any conversation the reply lands in.
   - **While the wake's turn runs, the card reads "waiting".** That turn runs in the task worker,
