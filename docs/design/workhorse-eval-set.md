@@ -6,11 +6,17 @@ Proposed. This is a plan for approval; nothing here is implemented.
 
 ## Goal
 
-Build a **private, household-derived evaluation set** of the everyday tasks the assistant actually
-does — the "workhorse" workload that runs on `default_assistant` at the `standard` tier — and a
-harness that runs the **real agent loop** against those tasks in a sandbox with representative state
-and tools, so that a model, tier, prompt or tool change can be scored on the work it will really be
-asked to do.
+Build a **private, household-derived evaluation set** of the tasks the assistant actually does — the
+"workhorse" workload on `default_assistant` at the `standard` tier, and the harder tail that reached
+`complex_tasks` or the `deep` tier — and a harness that runs the **real agent loop** against those
+tasks in a sandbox with representative state and tools, so that a model, tier, prompt or tool change
+can be scored on the work it will really be asked to do.
+
+This is an **integration-test-style eval**. The system under test is the whole application as
+deployed — prompts, context providers, tool descriptions and policy, the tool-call reviewer, model
+routing, the tool implementations — with the model as one parameter. A failure is as likely to be
+the harness's as the model's, and the harness is built so the two are told apart (see
+"Integration-test framing" below).
 
 Questions the set should answer:
 
@@ -18,10 +24,26 @@ Questions the set should answer:
 - Which task categories does `standard` fail on, and does `deep` fix them (the evidence Auto
   routing's shadow mode was designed to need — see
   [model-tiers.md](model-tiers.md#observability-and-evaluation))?
-- Did a prompt, tool-description or tool-policy change regress ordinary tasks?
+- Did a prompt, tool-description, tool-policy or tool-implementation change regress ordinary tasks?
+- Where does the application itself get in the model's way: a tool whose description misleads, a
+  reviewer that blocks ordinary work, an iteration ceiling hit on a routine task?
 
 The guiding metric, inherited from the tiers design, is *successful useful work per dollar at
 acceptable latency*.
+
+### Models of interest
+
+The first comparison matrix, each expressed as an eval-only tier (see "Boot"):
+
+| Candidate        | Identifier          | Status in config                                      |
+| ---------------- | ------------------- | ----------------------------------------------------- |
+| current standard | `gemini-3.8-flash`  | the `standard` tier's primary                         |
+| current deep     | `claude-opus-5-5`   | the `deep` tier's primary                             |
+| Claude Sonnet    | `claude-sonnet-5-5` | known to the Anthropic adapter, no tier names it      |
+| Gemini Argon     | `gemini-4-argon`    | the `gemini_4_argon` tier                             |
+| GPT Luna         | to confirm          | not configured anywhere yet; needs a tier and adapter |
+
+More will follow; adding one is adding a tier to the eval's own config, nothing else.
 
 ## What exists and is reused
 
@@ -78,8 +100,11 @@ memory notes, tasks, users and contacts, automations, and the documents index me
 ### Export: turn records
 
 A new script, a sibling of `extract_review_history.py`, walks `message_history` by `turn_id` for
-`default_assistant` (and, optionally, `complex_tasks`, since deep-tier tasks tell us what standard
-could not do) and emits one **turn record** per turn into the private tree:
+`default_assistant` and `complex_tasks` — including turns `default_assistant` delegated to
+`complex_tasks`, and turns a user escalated with `/deep` — and emits one **turn record** per turn
+into the private tree. The hard tail is in scope on purpose: those turns are where a standard-tier
+candidate is most likely to differ, and where a harness bug (an iteration ceiling, a tool that
+returns too much) is most likely to show. Each record holds:
 
 - the trigger: user message text, attachments metadata, interface, user id, timestamp;
 - the run envelope from `reasoning_info`: resolved tier, requested tier and source, routing outcome
@@ -140,6 +165,37 @@ sandbox database, storage paths, no Telegram, deterministic embedder, and **no
 being evaluated. The model router, summariser and tool-call reviewer run their configured models
 too: they are part of the system under test, and a reviewer that asks for confirmation is a cost the
 eval should see. Provider keys come from the environment as for the LLM integration tests.
+
+The candidate model is expressed as an **eval-only tier**: the harness's config overlay adds one
+tier per candidate (`eval_claude_sonnet`, say) to `model_tiers` and widens the profile's
+`allowed_model_tiers` to include it, then names that tier on the request. `defaults.yaml` is not
+edited, the profile's own default tier is untouched, and a candidate without a configured adapter
+fails at boot rather than silently running something else — the same rule the tiers design applies
+to presets.
+
+### Integration-test framing
+
+The harness is a **pytest suite**, not a standalone script: one parametrised test per case and
+candidate tier, living beside the LLM integration tests and carrying a marker that `pytest.ini`
+excludes by default, so it runs only when asked and never in ordinary CI. Three things follow.
+
+- **It reuses the test fixtures.** The database engine fixtures, the Radicale server, the server
+  socket and wait helpers, the Gemini and VCR replay plumbing, and xdist parallelism are all already
+  there, and every eval run exercises them the way the functional tests do.
+- **A failure says whose it is.** Every trial ends in one of a closed set of outcomes before any
+  grading happens: `completed`, `tool_error` (a tool raised), `unbacked_tool` (the sandbox had no
+  backing for a tool the model called), `reviewer_blocked`, `confirmation_declined`,
+  `iteration_limit`, `timeout`, `provider_error`. Only `completed` trials are graded for quality.
+  The rest are reported as harness or application findings, broken out per tool and per candidate,
+  so a tool that errors under every model is filed as a bug in the tool, and one that errors under
+  one model as a finding about how that model calls it. A run whose non-`completed` rate exceeds a
+  small threshold is a harness failure first and a model result second.
+- **The harness has its own regression tests.** A **self-test slice** runs the whole pipeline —
+  boot, fixture materialisation, re-dating, tool backing, turn driving, deterministic grading — with
+  the rule-based mock LLM scripted to call tools, on a small committed synthetic household rather
+  than the private fixture. It runs in ordinary CI, so the harness cannot rot between eval runs, and
+  a change to a tool, the chat API or the reviewer that breaks the harness fails a test rather than
+  a paid run.
 
 Each case gets a **fresh sandbox**: the database is cloned from a prepared fixture template (the
 SQLite schema-template trick, applied to a seeded database), so cases are independent and can run in
@@ -231,23 +287,27 @@ Each milestone is independently useful and verifiable.
    database, checking the private-path refusal, and eyeballing record counts per stratum. Outcome: a
    ranked candidate list to curate from.
 2. **Case schema and first curated set.** The case model (pydantic, `extra="forbid"`, slug ids,
-   private-tree loader) and about 60 hand-curated cases with expectations. Verified by loading all
-   cases and round-tripping them; a case with text in an id or an unknown field fails to load.
-3. **Sandbox boot and fixture materialisation.** Shipped-config boot with real clients, fixture
-   template with re-dating, Radicale seeding, per-case clone. Verified by a smoke run of one case
-   with the mock LLM scripted to call a calendar tool and the end state showing the event.
+   private-tree loader) and about 60 hand-curated cases with expectations, roughly a quarter from
+   `complex_tasks` and `/deep` turns. Verified by loading all cases and round-tripping them; a case
+   with text in an id or an unknown field fails to load.
+3. **Sandbox boot and fixture materialisation.** Shipped-config boot with real clients and the
+   eval-only tier overlay, fixture template with re-dating, Radicale seeding, per-case clone, as a
+   pytest suite behind an opt-in marker. Verified by the first self-test: one synthetic case with
+   the mock LLM scripted to call a calendar tool and the end state showing the event, running in CI.
 4. **Tool backing.** Replay/capture mechanism for external reads and writes, the fake MCP server,
    and the config seams for weather, Home Assistant and messaging. Verified by a conformance check
    that every tool in the registry snapshot is either in-app, replay-backed, or capture-backed for
-   every case, failing the run otherwise.
-5. **Runner and deterministic grading.** Drive turns, collect traces, apply the checks, write run
-   records. Verified by running the dev slice on the current `standard` tier and inspecting a
-   handful of traces by hand.
+   every case, failing the run otherwise, and by self-test cases for each backing class.
+5. **Runner, outcome classification and deterministic grading.** Drive turns, collect traces,
+   classify each trial's outcome, apply the checks, write run records. Verified by running the dev
+   slice on the current `standard` tier, inspecting a handful of traces by hand, and fixing every
+   harness-attributed outcome before any model is judged on the set.
 6. **Judge, seeds and report.** Rubric and pairwise judging, seed flips, per-stratum report,
    sanitised publish. Verified by a judge-vs-human agreement check on the spot-check sample.
-7. **First real comparison.** Run `standard` vs `deep` and one alternative standard model on the
-   gate slice; publish a sanitised result. Outcome: the first evidence for the tiers design's open
-   question of whether `deep` improves the categories Auto would route there.
+7. **First real comparison.** Run the current `standard` and `deep` tiers, Claude Sonnet, Gemini
+   Argon and GPT Luna on the gate slice; publish a sanitised result. Outcome: the first evidence for
+   the tiers design's open question of whether `deep` improves the categories Auto would route
+   there, and the first ranking of candidates on the real workload.
 
 ## Deliberate simplifications
 
@@ -266,11 +326,21 @@ Each milestone is independently useful and verifiable.
   a model that may itself have been wrong; the deterministic checks and the spot-check are what
   anchor it.
 
+## Decisions taken
+
+- **`complex_tasks` is in scope** from the first set, as the hard tail.
+- **The harness is as much under test as the model.** Hence the pytest form, the closed outcome
+  taxonomy that separates harness and application failures from model failures, and the self-test
+  slice in CI.
+- **The tool-call reviewer runs its configured model** during eval runs; confirmations are counted
+  as friction rather than pinned away.
+- **First candidates:** Claude Sonnet, Gemini Argon, GPT Luna, against the current `standard` and
+  `deep` tiers.
+
 ## Open questions
 
-- Scope of profiles in the first set: `default_assistant` only, or include `complex_tasks` turns as
-  the hard tail?
-- Whether the tool-call reviewer should run on its configured model during eval runs (realistic
-  friction, extra cost and variance) or be pinned to a fixed verdict (cheaper, less realistic).
-  Proposed: configured model, counted as friction.
-- Which alternative standard-tier models to compare first.
+- The wire identifier and adapter for GPT Luna.
+- Whether a `complex_tasks` case runs on that profile (its prompt and iteration ceiling) with the
+  candidate as its tier, or on `default_assistant` to ask whether the delegation was needed at all.
+  Proposed: both, as two cases sharing one journey, since the second is the question Auto routing
+  exists to answer.
