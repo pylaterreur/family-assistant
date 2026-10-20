@@ -1,0 +1,276 @@
+# Workhorse Eval Set: Private Evaluation of Everyday Assistant Tasks
+
+## Status
+
+Proposed. This is a plan for approval; nothing here is implemented.
+
+## Goal
+
+Build a **private, household-derived evaluation set** of the everyday tasks the assistant actually
+does — the "workhorse" workload that runs on `default_assistant` at the `standard` tier — and a
+harness that runs the **real agent loop** against those tasks in a sandbox with representative state
+and tools, so that a model, tier, prompt or tool change can be scored on the work it will really be
+asked to do.
+
+Questions the set should answer:
+
+- Does a cheaper or newer model handle the standard-tier workload as well as the current one?
+- Which task categories does `standard` fail on, and does `deep` fix them (the evidence Auto
+  routing's shadow mode was designed to need — see
+  [model-tiers.md](model-tiers.md#observability-and-evaluation))?
+- Did a prompt, tool-description or tool-policy change regress ordinary tasks?
+
+The guiding metric, inherited from the tiers design, is *successful useful work per dollar at
+acceptable latency*.
+
+## What exists and is reused
+
+The tool-call review eval ([tool-call-review-eval.md](tool-call-review-eval.md)) already solved the
+privacy and process problems; this design borrows its conventions wholesale rather than inventing
+parallel ones.
+
+| Piece                                                | Reused for                                                             |
+| ---------------------------------------------------- | ---------------------------------------------------------------------- |
+| `.review-eval-local/` + `eval/private_paths.py`      | The one gitignored tree all household-derived material is confined to  |
+| `scripts/extract_review_history.py`                  | The read-only history access pattern (`mode=ro`, no `init_db`, no WAL) |
+| `scripts/dump_tool_registry.py`                      | Snapshot of the deployment's tool surface including MCP tools          |
+| `eval/tool_call_review/scrub.py`                     | Deterministic pseudonymisation when a case has to be quoted            |
+| Held-out discipline, per-slice reporting, run stamps | Same rules, same report shape                                          |
+| `docs/development/eval-results/`                     | Sanitised aggregate results are published there, nothing else          |
+| `tests/functional/tools/taint_enforce_harness.py`    | Booting the whole app on the shipped `defaults.yaml` with overrides    |
+| `tests/integration/llm/test_shipped_coder_profile…`  | Booting with **real** LLM clients built from the shipped tiers         |
+| `POST /api/v1/chat/turns` with `model_tier`          | Driving a turn exactly as a client would, on a chosen tier             |
+| `message_history.reasoning_info` tier/routing stamps | Reading back resolved tier, `would_choose`, usage and cost per reply   |
+| Radicale fixture, `FakeCameraBackend`, `MockScraper` | Sandbox-side real-ish services                                         |
+
+What does **not** exist: any harness that runs `ProcessingService` with a real model against seeded
+state and scores the outcome; a household fixture (notes, contacts, calendar, tasks); fakes for Home
+Assistant, weather and MCP servers that the `Assistant` can be configured to use; a clock seam on
+`Assistant`.
+
+## Core concepts
+
+- **Task** — one historical turn (or short run of turns) that a household member asked
+  `default_assistant` to do: the trigger message, the profile and tier it ran on, the tools it
+  called and what they returned, the reply, and the outcome signals around it.
+- **Case** — a *journey*, not a recording (the review eval's rule): a user prompt, the household
+  state it was asked against, the moment it was asked, and what a good outcome looks like. A case is
+  evaluated against the system as it stands today.
+- **Household fixture** — a snapshot of the state the assistant reads, materialised into a fresh
+  sandbox per case.
+- **Sandbox** — a full `Assistant` on the shipped config with real inference for the profile under
+  test, in-app state that is real and inspectable, and external integrations replaced by recorded or
+  fake backends that **capture** writes instead of performing them.
+- **Grade** — deterministic checks on the sandbox's end state plus an LLM judge with the historical
+  production reply as a reference, with seeds to measure variance.
+
+## Part 1 — Exporting chat history and extracting tasks
+
+### Access
+
+Production runs PostgreSQL. Take a **one-off, table-restricted dump** into a local database kept
+under `.review-eval-local/workhorse/snapshot/` rather than running extraction against production
+repeatedly: the household fixture (Part 3) needs several tables beyond `message_history`, and a
+local copy makes every later step reproducible and safe to iterate on. The dump is read with the
+same read-only rules the extraction script already enforces. Tables: `message_history`, notes,
+memory notes, tasks, users and contacts, automations, and the documents index metadata (not blobs).
+
+### Export: turn records
+
+A new script, a sibling of `extract_review_history.py`, walks `message_history` by `turn_id` for
+`default_assistant` (and, optionally, `complex_tasks`, since deep-tier tasks tell us what standard
+could not do) and emits one **turn record** per turn into the private tree:
+
+- the trigger: user message text, attachments metadata, interface, user id, timestamp;
+- the run envelope from `reasoning_info`: resolved tier, requested tier and source, routing outcome
+  and `would_choose`, serving model, token usage, iteration count, wall-clock;
+- the trace: each tool call (name, arguments) and its result row, confirmation requests, error rows;
+- the reply text;
+- **outcome signals** computed from the surrounding rows: whether the user replied within a short
+  window and whether that reply reads as a correction or retry ("no, I meant…", the same request
+  reissued, a `/deep` escalation), whether the turn ended in an error row, whether a tool call was
+  denied or needed confirmation.
+
+Unlike the review-eval templates, these records hold raw household text. That is deliberate and
+matches the review eval's decision for its run records: evaluation needs byte fidelity, the private
+tree exists to hold exactly this, and nothing in it is ever committed. The script refuses any output
+path outside the tree.
+
+### Stratify and sample
+
+A turn record is tagged along a few axes, then the set is sampled across strata so that it
+represents the workload rather than its most common shape:
+
+- **tool signature** — the set of tool families called (none; notes; calendar read; calendar write;
+  tasks; search/retrieval; smart home; messaging; web; MCP-backed);
+- **intent category** — a closed vocabulary (lookup, create, update, schedule, summarise, remind,
+  multi-step) filled by the same cheap-classifier pattern the review-eval history pipeline uses; the
+  classifier sees the record but its output is only ever a label;
+- **difficulty proxies** — iteration count, tool-call count, `would_choose`, and the outcome
+  signals; failures and escalations are over-sampled on purpose, because a set made only of turns
+  that went fine cannot discriminate between models.
+
+The output is a ranked candidate list with frequency per stratum, for the maintainer to skim. Target
+for the first version: about 60–100 cases, with every stratum that has non-trivial frequency
+represented and roughly a third drawn from turns with a negative outcome signal.
+
+### Curate into cases
+
+A case file (YAML, private tree) holds:
+
+- the prompt and any prelude turns needed for context (a follow-up like "move it to Thursday" is
+  meaningless without the turn before it);
+- the asked-at timestamp and the user;
+- a reference to the household fixture revision and the **recorded tool results** for the turn;
+- expectations: deterministic assertions on end state (a calendar event exists whose summary
+  matches; a note was updated; **no** message was sent) and a short rubric for the judge, plus the
+  historical reply as a reference answer;
+- lineage: source turn id, strata labels, dev/gate split.
+
+Curation is manual on top of the sampled list. Most of the work is writing expectations; the
+extraction gives the maintainer the trace and reply so they can be derived in a minute each.
+
+## Part 2 — The sandbox
+
+### Boot
+
+Boot a real `Assistant` on `defaults.yaml` with the `taint_enforce_harness` override pattern:
+sandbox database, storage paths, no Telegram, deterministic embedder, and **no
+`llm_client_overrides` for the profile under test**, so it runs the real client built from the tier
+being evaluated. The model router, summariser and tool-call reviewer run their configured models
+too: they are part of the system under test, and a reviewer that asks for confirmation is a cost the
+eval should see. Provider keys come from the environment as for the LLM integration tests.
+
+Each case gets a **fresh sandbox**: the database is cloned from a prepared fixture template (the
+SQLite schema-template trick, applied to a seeded database), so cases are independent and can run in
+parallel.
+
+### Household fixture
+
+The fixture is produced once from the snapshot and revisioned: notes, memory notes, contacts and
+known users, tasks, automations, and a calendar. It is the household's real data, kept private,
+because representative results need representative context — the assistant's behaviour on "add it to
+the shopping list" depends on there being a shopping list note in the house style.
+
+- **In-app state** (notes, tasks, memory, documents metadata) is loaded into the sandbox database.
+- **Calendar** is served by the Radicale fixture already used in tests, seeded from the exported
+  events.
+- **Time.** Rather than running turns "as of" a past date — `Assistant` has no clock seam and
+  roughly two hundred direct wall-clock reads sit beneath it — the fixture is **re-dated**: every
+  timestamp is shifted by a whole number of weeks so that the case's asked-at moment lands on the
+  current date and weekdays are preserved. The case stores the original timestamp; the materialiser
+  computes the shift at run time. This gives correct relative-time behaviour ("what's on tomorrow",
+  "remind me Friday") without time travel. Adding a clock seam to `Assistant` is a worthwhile
+  follow-up for precision, not a prerequisite.
+
+### Tool surface
+
+The registry snapshot from `dump_tool_registry.py` is the contract: the sandbox must present the
+same tool names and schemas the deployment did, or the case is not measuring the same task. Three
+classes of tool, by what backs them:
+
+1. **In-app tools** (notes, tasks, memory, calendar via Radicale, scheduling, search over the seeded
+   index) run for real against the sandbox. Their effects are the end state the grader inspects.
+2. **External reads** (weather, Home Assistant state, web fetch, MCP-backed lookups such as the task
+   tracker) are served by a **replay backend**: the case's recorded tool results, matched on tool
+   name and a loose argument match, with a declared "plausible empty" fallback per tool when the
+   model asks something the recording cannot answer. The fallback is logged on the trial so a grader
+   can discount it.
+3. **External writes** (send message, email, Home Assistant service calls, anything that leaves the
+   sandbox) go to **capture backends** that record the call and return a success-shaped result.
+   Captured calls are part of the end state and are what "no message was sent" assertions check.
+
+This is the one place the sandbox needs new seams. Concretely: a generic fake MCP server process
+that serves a registry snapshot with replay/capture semantics covers every MCP-backed tool in one
+mechanism; the `Assistant` needs config-selectable fake backends for the weather service and Home
+Assistant (there is no constructor seam today) and the outbound messaging paths. Prefer one
+replay/capture mechanism keyed by tool name over per-integration fakes, so a tool added later either
+has a recording or fails loudly as "unbacked", never silently succeeds.
+
+### Driving a turn
+
+The runner POSTs to `/api/v1/chat/turns` with the case's prompt, `profile_id`, the configured
+`model_tier`, and `interface_type: "api"` as the acting user, follows the stream to completion,
+answers confirmation prompts with a per-case policy (default: approve, and count it), and then
+collects: reply text, the tool-call sequence, confirmations, errors, iteration count, the
+`reasoning_info` envelope (tier, serving model, usage), latency, and the sandbox state diff.
+
+## Part 3 — Grading and reporting
+
+Three layers, cheapest first:
+
+1. **Deterministic checks** from the case's expectations against the end state: required effects
+   happened, forbidden effects did not, the turn completed without error. These decide pass/fail for
+   the side-effect half of the task.
+2. **LLM judge** for the reply: a rubric score (did it do the thing, is the information correct
+   against the fixture, is it concise) and a **pairwise preference** against the historical
+   production reply, with position swapped. The judge runs on a strong model from a different
+   provider than the one under test. Judge prompts are versioned and their hash is stamped on the
+   run.
+3. **Human spot-check** of a fixed sample per run, recorded as agreement with the judge, so judge
+   drift is visible.
+
+Every case runs with several seeds (three to start); seed disagreement is reported per case the way
+the review eval reports verdict flips.
+
+A run report, written to the private tree, breaks out per tier/model and per stratum: task success,
+side-effect correctness, confirmation friction, unbacked-tool fallbacks hit, judge preference vs
+history, tokens, cost and latency. A **sanitised summary** (counts, rates, strata labels, no text)
+is what gets published under `docs/development/eval-results/`, in the existing shape.
+
+Held-out discipline follows the review eval: the case set is split into dev and gate slices by
+stratum at curation time; prompt and routing tuning uses dev; a model-switch decision reads gate,
+and reading it spends it.
+
+## Work plan
+
+Each milestone is independently useful and verifiable.
+
+1. **Snapshot and export.** The table-restricted dump procedure and the turn-record export script,
+   with outcome-signal computation. Verified by running it on the snapshot and on a dev SQLite
+   database, checking the private-path refusal, and eyeballing record counts per stratum. Outcome: a
+   ranked candidate list to curate from.
+2. **Case schema and first curated set.** The case model (pydantic, `extra="forbid"`, slug ids,
+   private-tree loader) and about 60 hand-curated cases with expectations. Verified by loading all
+   cases and round-tripping them; a case with text in an id or an unknown field fails to load.
+3. **Sandbox boot and fixture materialisation.** Shipped-config boot with real clients, fixture
+   template with re-dating, Radicale seeding, per-case clone. Verified by a smoke run of one case
+   with the mock LLM scripted to call a calendar tool and the end state showing the event.
+4. **Tool backing.** Replay/capture mechanism for external reads and writes, the fake MCP server,
+   and the config seams for weather, Home Assistant and messaging. Verified by a conformance check
+   that every tool in the registry snapshot is either in-app, replay-backed, or capture-backed for
+   every case, failing the run otherwise.
+5. **Runner and deterministic grading.** Drive turns, collect traces, apply the checks, write run
+   records. Verified by running the dev slice on the current `standard` tier and inspecting a
+   handful of traces by hand.
+6. **Judge, seeds and report.** Rubric and pairwise judging, seed flips, per-stratum report,
+   sanitised publish. Verified by a judge-vs-human agreement check on the spot-check sample.
+7. **First real comparison.** Run `standard` vs `deep` and one alternative standard model on the
+   gate slice; publish a sanitised result. Outcome: the first evidence for the tiers design's open
+   question of whether `deep` improves the categories Auto would route there.
+
+## Deliberate simplifications
+
+- **No time travel.** Re-dating the fixture by whole weeks gives correct relative dates for the
+  overwhelming majority of tasks; a task that depends on an absolute historical date is mis-measured
+  and should be excluded at curation, not special-cased.
+- **Replay is loose, and fallbacks are declared.** A model that phrases a lookup differently from
+  the recording gets the plausible-empty result and the trial is flagged. This measures the agent
+  against slightly less helpful external services than production, which biases *against* the system
+  under test uniformly across models and is acceptable for comparisons.
+- **Single-turn by default.** Multi-turn journeys are supported through preludes, but the first set
+  is dominated by single turns because that is what the workload is and what can be graded cleanly.
+- **Raw text lives in the private tree.** No pseudonymisation on the hot path; the existing scrubber
+  is used only when quoting a case outside it.
+- **Judge preference against history is a signal, not ground truth.** The historical reply came from
+  a model that may itself have been wrong; the deterministic checks and the spot-check are what
+  anchor it.
+
+## Open questions
+
+- Scope of profiles in the first set: `default_assistant` only, or include `complex_tasks` turns as
+  the hard tail?
+- Whether the tool-call reviewer should run on its configured model during eval runs (realistic
+  friction, extra cost and variance) or be pinned to a fixed verdict (cheaper, less realistic).
+  Proposed: configured model, counted as friction.
+- Which alternative standard-tier models to compare first.
