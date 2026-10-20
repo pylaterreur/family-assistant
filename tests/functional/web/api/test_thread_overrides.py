@@ -17,7 +17,12 @@ from sqlalchemy import select
 
 from family_assistant.config_models import AppConfig, ConversationThreadsConfig
 from family_assistant.llm import ToolCallFunction, ToolCallItem
-from family_assistant.llm.messages import AssistantMessage, ToolMessage, UserMessage
+from family_assistant.llm.messages import (
+    AssistantMessage,
+    ErrorMessage,
+    ToolMessage,
+    UserMessage,
+)
 from family_assistant.processing import ProcessingService
 from family_assistant.security.taint import TurnTaintState
 from family_assistant.services.user_identity import UserIdentityResolver
@@ -780,6 +785,43 @@ async def test_a_turn_awaiting_recovery_is_neither_moved_nor_continued(
 
     assert (move.status_code, resume.status_code) == (409, 409)
     assert await db.message_history.get_row_by_internal_id(interrupted) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
+async def test_a_failed_turn_can_be_moved(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    """A turn that failed has ended: its error row is its outcome."""
+    db = Database(engine=db_engine)
+    home = await _home(api_test_client)
+    thread = await _thread_on(api_test_client, CONTEXT_PROFILE)
+    turn_id = str(uuid.uuid4())
+    failed = await db.message_history.add_message(
+        UserMessage.from_trusted_user(content="this broke"),
+        interface_type="web",
+        conversation_id=home,
+        turn_id=turn_id,
+        processing_profile_id="chat_api_test_profile",
+        timestamp=NOW,
+        user_id=CALLER,
+    )
+    await db.message_history.add_message(
+        ErrorMessage(content="Something went wrong.", error_traceback="boom"),
+        interface_type="web",
+        conversation_id=home,
+        turn_id=turn_id,
+        processing_profile_id="chat_api_test_profile",
+        timestamp=NOW + timedelta(seconds=1),
+    )
+
+    response = await api_test_client.post(
+        f"/api/v1/chat/home/threads/{thread}/moved-turns",
+        json={"message_id": failed},
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(response.json()["moved_message_ids"]) == 2
 
 
 @pytest.mark.asyncio

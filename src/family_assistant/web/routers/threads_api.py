@@ -434,10 +434,15 @@ async def _home_turn_row(
         )
     turn = hub.get_turn(home, row["turn_id"])
     # A turn interrupted by a restart is in no hub while it waits to be
-    # resumed, so a turn is carried only once its reply is stored.
-    if (
-        turn is not None and turn.status == "running"
-    ) or not await db.message_history.has_terminal_reply_for_turn(row["turn_id"]):
+    # resumed, so a turn is carried only once it has ended: with a reply, or
+    # with the error row a failed turn leaves.
+    if (turn is not None and turn.status == "running") or not (
+        await db.message_history.has_terminal_reply_for_turn(row["turn_id"])
+        or any(
+            turn_row["role"] == "error"
+            for turn_row in await db.message_history.get_rows_by_turn_id(row["turn_id"])
+        )
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="That reply is still in progress.",
