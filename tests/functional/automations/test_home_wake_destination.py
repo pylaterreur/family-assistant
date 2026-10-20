@@ -59,6 +59,7 @@ if TYPE_CHECKING:
 
     from family_assistant.services.notifier import NotificationMetadata
     from family_assistant.storage.types import ActionConfig
+    from family_assistant.utils.clock import MockClock
 
 SOURCE_CONVERSATION_ID = "web_conv_source"
 TELEGRAM_CHAT_ID = "123456"
@@ -151,13 +152,21 @@ def _sent_conversation_ids(chat_interface: ChatInterface) -> list[str]:
 
 
 async def _fire_pending(
-    db_engine: AsyncEngine, new_task_event: asyncio.Event, task_type: str
-) -> None:
+    db_engine: AsyncEngine,
+    clock: MockClock,
+    new_task_event: asyncio.Event,
+    task_type: str,
+    *,
+    allow_failures: bool = False,
+) -> set[str]:
     """Make every pending task of ``task_type`` due now, then wait for them.
+
+    "Now" is the worker's clock, which is frozen: a wall-clock time would be
+    due only while the test is younger than whatever margin it subtracted.
 
     Waits on the tasks by id: a schedule's next occurrence is enqueued as its
     own future task, which a wait over the whole task type would never see
-    finish.
+    finish. Returns their ids.
     """
     db = Database(engine=db_engine)
     rows = await db.fetch_all(
@@ -171,10 +180,13 @@ async def _fire_pending(
     await db.execute(
         update(tasks_table)
         .where(tasks_table.c.task_id.in_(task_ids))
-        .values(scheduled_at=datetime.now(UTC) - timedelta(seconds=1))
+        .values(scheduled_at=clock.now())
     )
     new_task_event.set()
-    await wait_for_tasks_to_complete(db_engine, task_ids=task_ids)
+    await wait_for_tasks_to_complete(
+        db_engine, task_ids=task_ids, allow_failures=allow_failures
+    )
+    return task_ids
 
 
 async def _create_daily_wake(
@@ -202,6 +214,7 @@ async def _home(db: Database, service: ProcessingService) -> str | None:
 async def test_a_new_web_automation_fires_in_a_home_designated_for_it(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     db = Database(engine=db_engine)
     service = _processing_service(threads=True)
@@ -211,7 +224,7 @@ async def test_a_new_web_automation_fires_in_a_home_designated_for_it(
     await _create_daily_wake(db, service, {"context": "Send the morning briefing"})
     [automation] = await db.schedule_automations.list_all(SOURCE_CONVERSATION_ID)
     assert automation["action_config"].get("conversation") == "home"
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     home = await _home(db, service)
     assert home is not None
@@ -222,6 +235,7 @@ async def test_a_new_web_automation_fires_in_a_home_designated_for_it(
 async def test_a_new_web_automation_fires_in_the_existing_home(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     db = Database(engine=db_engine)
     service = _processing_service(threads=True)
@@ -231,7 +245,7 @@ async def test_a_new_web_automation_fires_in_the_existing_home(
     )
 
     await _create_daily_wake(db, service, {"context": "Send the morning briefing"})
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     assert _sent_conversation_ids(chat_interface) == [home]
     source_rows = await db.fetch_all(
@@ -246,6 +260,7 @@ async def test_a_new_web_automation_fires_in_the_existing_home(
 async def test_an_explicit_source_automation_fires_where_it_was_created(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     db = Database(engine=db_engine)
     service = _processing_service(threads=True)
@@ -256,7 +271,7 @@ async def test_an_explicit_source_automation_fires_where_it_was_created(
         service,
         {"context": "Send the morning briefing", "conversation": "source"},
     )
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     assert _sent_conversation_ids(chat_interface) == [SOURCE_CONVERSATION_ID]
     assert await _home(db, service) is None
@@ -266,6 +281,7 @@ async def test_an_explicit_source_automation_fires_where_it_was_created(
 async def test_an_automation_stored_without_a_destination_fires_in_its_source(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     """A row from before Home existed names no destination and stays put."""
     db = Database(engine=db_engine)
@@ -284,7 +300,7 @@ async def test_an_automation_stored_without_a_destination_fires_in_its_source(
         processing_profile_id="default_assistant",
         created_by_user_id=OWNER,
     )
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     assert _sent_conversation_ids(chat_interface) == [SOURCE_CONVERSATION_ID]
 
@@ -319,6 +335,7 @@ async def test_editing_an_automation_keeps_its_destination(
 async def test_a_telegram_automation_fires_in_its_chat(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     db = Database(engine=db_engine)
     service = _processing_service(threads=True)
@@ -333,7 +350,7 @@ async def test_a_telegram_automation_fires_in_its_chat(
     )
     [automation] = await db.schedule_automations.list_all(TELEGRAM_CHAT_ID)
     assert "conversation" not in automation["action_config"]
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     assert _sent_conversation_ids(chat_interface) == [TELEGRAM_CHAT_ID]
 
@@ -364,6 +381,7 @@ async def test_a_telegram_automation_cannot_ask_for_home(
 async def test_without_threads_a_web_automation_fires_where_it_was_created(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     db = Database(engine=db_engine)
     service = _processing_service(threads=False)
@@ -372,7 +390,7 @@ async def test_without_threads_a_web_automation_fires_where_it_was_created(
     await _create_daily_wake(db, service, {"context": "Send the morning briefing"})
     [automation] = await db.schedule_automations.list_all(SOURCE_CONVERSATION_ID)
     assert automation["action_config"] == {"context": "Send the morning briefing"}
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     assert _sent_conversation_ids(chat_interface) == [SOURCE_CONVERSATION_ID]
     assert await _home(db, service) is None
@@ -401,6 +419,7 @@ async def test_without_threads_home_is_refused_at_creation(
 async def test_a_home_wake_fires_in_its_source_once_threads_are_off(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     """Created while threads were on, fired after an operator turned them off."""
     db = Database(engine=db_engine)
@@ -411,7 +430,7 @@ async def test_a_home_wake_fires_in_its_source_once_threads_are_off(
     await _create_daily_wake(
         db, _processing_service(threads=True), {"context": "Brief me"}
     )
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     assert _sent_conversation_ids(chat_interface) == [SOURCE_CONVERSATION_ID]
 
@@ -421,6 +440,7 @@ async def test_a_home_wake_fires_in_its_source_once_threads_are_off(
 async def test_a_reminder_lands_in_home(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
     conversation: str | None,
 ) -> None:
     db = Database(engine=db_engine)
@@ -434,7 +454,7 @@ async def test_a_reminder_lands_in_home(
         conversation=conversation,
     )
     assert result is not None and result.startswith("OK."), result
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     assert _sent_conversation_ids(chat_interface) == [await _home(db, service)]
 
@@ -443,6 +463,7 @@ async def test_a_reminder_lands_in_home(
 async def test_a_reminder_follow_up_stays_in_home(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     db = Database(engine=db_engine)
     service = _processing_service(threads=True)
@@ -454,7 +475,7 @@ async def test_a_reminder_follow_up_stays_in_home(
         message="Take the bins out",
         follow_up=True,
     )
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     follow_ups = await db.fetch_all(
         select(tasks_table.c.payload).where(
@@ -471,6 +492,7 @@ async def test_a_reminder_follow_up_stays_in_home(
 async def test_a_reminder_can_stay_in_its_conversation(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     db = Database(engine=db_engine)
     service = _processing_service(threads=True)
@@ -482,7 +504,7 @@ async def test_a_reminder_can_stay_in_its_conversation(
         message="Take the bins out",
         conversation="source",
     )
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     assert _sent_conversation_ids(chat_interface) == [SOURCE_CONVERSATION_ID]
 
@@ -494,6 +516,7 @@ async def test_a_reminder_can_stay_in_its_conversation(
 async def test_a_future_callback_follows_the_same_rule(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
     conversation: str | None,
     lands_in_home: bool,
 ) -> None:
@@ -508,7 +531,7 @@ async def test_a_future_callback_follows_the_same_rule(
         conversation=conversation,
     )
     assert result is not None and result.startswith("OK."), result
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     expected = await _home(db, service) if lands_in_home else SOURCE_CONVERSATION_ID
     assert _sent_conversation_ids(chat_interface) == [expected]
@@ -518,6 +541,7 @@ async def test_a_future_callback_follows_the_same_rule(
 async def test_wakes_created_in_a_thread_stay_in_the_thread(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     """A thread's reminder belongs to its work; arriving there reopens it."""
     db = Database(engine=db_engine)
@@ -549,7 +573,7 @@ async def test_wakes_created_in_a_thread_stay_in_the_thread(
     )
     [automation] = await db.schedule_automations.list_all(thread_id)
     assert "conversation" not in automation["action_config"]
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     assert _sent_conversation_ids(chat_interface) == [thread_id, thread_id]
 
@@ -558,6 +582,7 @@ async def test_wakes_created_in_a_thread_stay_in_the_thread(
 async def test_a_telegram_reminder_stays_in_its_chat(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     db = Database(engine=db_engine)
     service = _processing_service(threads=True)
@@ -570,7 +595,7 @@ async def test_a_telegram_reminder_stays_in_its_chat(
         reminder_time=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         message="Take the bins out",
     )
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     assert _sent_conversation_ids(chat_interface) == [TELEGRAM_CHAT_ID]
 
@@ -579,6 +604,7 @@ async def test_a_telegram_reminder_stays_in_its_chat(
 async def test_a_script_automation_wakes_in_home(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     db = Database(engine=db_engine)
     service = _processing_service(threads=True)
@@ -593,7 +619,7 @@ async def test_a_script_automation_wakes_in_home(
         action_config={"script_code": 'wake_llm("time for the briefing")\n'},
     )
     assert "Created schedule automation" in result.get_text(), result.get_text()
-    await _fire_pending(db_engine, new_task_event, "script_execution")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "script_execution")
     await wait_for_tasks_to_complete(db_engine, task_types={"llm_callback"})
 
     assert _sent_conversation_ids(chat_interface) == [await _home(db, service)]
@@ -628,11 +654,15 @@ async def test_a_script_stored_without_a_destination_wakes_its_source(
 async def test_a_failed_home_script_reports_in_home(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     db = Database(engine=db_engine)
     service = _processing_service(threads=True)
     chat_interface, new_task_event = await _start_worker(task_worker_manager, service)
 
+    # Enqueued for later, so the running worker cannot claim it before its
+    # retries are switched off: a retry is scheduled on the worker's frozen
+    # clock and would never come due.
     await execute_action(
         db_ctx=db,
         action_type=ActionType.SCRIPT,
@@ -643,16 +673,17 @@ async def test_a_failed_home_script_reports_in_home(
         conversation_id=SOURCE_CONVERSATION_ID,
         interface_type="web",
         created_by_user_id=OWNER,
+        scheduled_at=mock_clock.now() + timedelta(days=1),
     )
     await db.execute(
         update(tasks_table)
         .where(tasks_table.c.task_type == "script_execution")
         .values(max_retries=0)
     )
-    new_task_event.set()
-    await wait_for_tasks_to_complete(
-        db_engine, task_types={"script_execution", "llm_callback"}, allow_failures=True
+    await _fire_pending(
+        db_engine, mock_clock, new_task_event, "script_execution", allow_failures=True
     )
+    await wait_for_tasks_to_complete(db_engine, task_types={"llm_callback"})
 
     assert _sent_conversation_ids(chat_interface) == [await _home(db, service)]
 
@@ -681,6 +712,7 @@ class _RecordingNotifier:
 async def test_push_for_a_home_wake_targets_the_new_home(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+    mock_clock: MockClock,
 ) -> None:
     """The owner is found even in a Home this wake designated, with no turns yet."""
     db = Database(engine=db_engine)
@@ -693,7 +725,7 @@ async def test_push_for_a_home_wake_targets_the_new_home(
     )
 
     await _create_daily_wake(db, service, {"context": "Send the morning briefing"})
-    await _fire_pending(db_engine, new_task_event, "llm_callback")
+    await _fire_pending(db_engine, mock_clock, new_task_event, "llm_callback")
 
     home = await _home(db, service)
     assert home is not None
