@@ -583,6 +583,35 @@ describe('Starting and moving threads from Home', () => {
     );
   });
 
+  it('gives up on a failed send-as-thread when the message is sent to Home instead', async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const home = serveHome();
+    // The start's answer is lost, so it may have reached the server.
+    home.refuseNextStart = () => HttpResponse.error();
+    await renderChatApp({ waitForReady: true });
+    const homePane = await findPane(HOME);
+    const sendAsThread = async () => {
+      await user.click(within(homePane).getByTestId('send-as-thread-button'));
+      await user.click(await screen.findByTestId('send-as-thread-default_assistant'));
+    };
+
+    await user.type(within(homePane).getByTestId('chat-input'), 'Book the plumber');
+    await sendAsThread();
+    await within(homePane).findByTestId('send-as-thread-error');
+    await waitFor(() =>
+      expect(within(homePane).getByTestId('chat-input')).toHaveValue('Book the plumber')
+    );
+    await user.click(within(homePane).getByTestId('send-button'));
+    expect(await within(homePane).findByText(`Reply in ${HOME}`)).toBeInTheDocument();
+
+    expect(within(homePane).queryByTestId('send-as-thread-error')).not.toBeInTheDocument();
+    await user.type(within(homePane).getByTestId('chat-input'), 'Book the plumber');
+    await sendAsThread();
+    await findPane(NEW_THREAD);
+    expect(home.starts).toHaveLength(2);
+    expect(home.starts[1].turn_id).not.toBe(home.starts[0].turn_id);
+  });
+
   it('continues a Home reply in a thread with its context, quoting where it started', async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     const home = serveHome();

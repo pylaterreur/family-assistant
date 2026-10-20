@@ -684,6 +684,7 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
   const sendAsThreadRef = useRef<
     (profileId: string, text: string, attachments: ThreadAttachment[]) => Promise<void>
   >(async () => {});
+  const abandonSendAsThreadRef = useRef<() => void>(() => {});
   const toolCallMessageIdRef = useRef<string | null>(null);
   const lastStreamingErrorRef = useRef<string | null>(null);
   // Whether that error was written for the user (shown verbatim) rather than
@@ -2370,6 +2371,9 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
         );
         return;
       }
+      // Sending to Home instead gives up on a failed send-as-thread: its error
+      // no longer applies, and a later start of the same text is a new one.
+      abandonSendAsThreadRef.current();
 
       // Tag the optimistic bubbles with this turn's id so an interrupted-stream
       // give-up can identify THIS turn's stranded loading bubble (e.g. to replace
@@ -2561,9 +2565,12 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
     // A tier chosen in Home is for one send, which this was.
     setModelTierState(null);
   };
-  useEffect(() => {
+  abandonSendAsThreadRef.current = () => {
     setSendAsThreadError(null);
     pendingThreadStartRef.current = null;
+  };
+  useEffect(() => {
+    abandonSendAsThreadRef.current();
   }, [conversationId]);
 
   const sendAsThreadProfiles = useMemo(
