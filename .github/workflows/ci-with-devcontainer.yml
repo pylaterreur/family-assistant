@@ -367,7 +367,7 @@ jobs:
         with:
           name: frontend-test-results-${{ github.run_id }}
           path: test-results/frontend-report.json
-          retention-days: 7
+          retention-days: ${{ job.status == 'success' && 1 || 7 }}
           if-no-files-found: ignore
   test-backend-sqlite:
     needs: [prepare, build-ci-container, detect-changes]
@@ -473,7 +473,7 @@ jobs:
         with:
           name: backend-test-artifacts-sqlite-${{ github.run_id }}
           path: test-results/backend-sqlite-report.json
-          retention-days: 7
+          retention-days: ${{ job.status == 'success' && 1 || 7 }}
           if-no-files-found: ignore
   test-backend-postgres:
     needs: [prepare, build-ci-container, detect-changes]
@@ -592,7 +592,7 @@ jobs:
         with:
           name: backend-test-artifacts-postgres-${{ github.run_id }}
           path: test-results/backend-postgres-report.json
-          retention-days: 7
+          retention-days: ${{ job.status == 'success' && 1 || 7 }}
           if-no-files-found: ignore
 
   test-playwright-sqlite:
@@ -654,7 +654,7 @@ jobs:
           path: |
             test-results/
             /tmp/history_page_*.png
-          retention-days: 7
+          retention-days: ${{ job.status == 'success' && 1 || 7 }}
           if-no-files-found: ignore
       - name: Output artifact info
         if: always()
@@ -739,7 +739,7 @@ jobs:
           path: |
             test-results/
             /tmp/history_page_*.png
-          retention-days: 7
+          retention-days: ${{ job.status == 'success' && 1 || 7 }}
           if-no-files-found: ignore
       - name: Output artifact info
         if: always()
@@ -795,7 +795,7 @@ jobs:
         with:
           name: gemini-live-test-results-${{ github.run_id }}
           path: test-results/gemini-live-report.json
-          retention-days: 7
+          retention-days: ${{ job.status == 'success' && 1 || 7 }}
           if-no-files-found: ignore
 
   test-llm-integration:
@@ -843,7 +843,7 @@ jobs:
         with:
           name: llm-integration-test-results-${{ github.run_id }}
           path: test-results/llm-integration-report.json
-          retention-days: 7
+          retention-days: ${{ job.status == 'success' && 1 || 7 }}
           if-no-files-found: ignore
 
   smoke-test-main-image:
