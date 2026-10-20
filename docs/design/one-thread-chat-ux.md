@@ -4,9 +4,9 @@
 
 Approved. Milestones 1 (threads exist) and 2 (Home on web, including the right-hand panel),
 milestone 3 (state and echo) on the backend, the web and iOS, milestone 4 (Home on iOS), and the
-backend of milestone 5 (user overrides) implemented. Mockups:
-[one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered: [iOS](one-thread-ux/ios.png),
-[web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
+backend of milestone 5 (user overrides, and automations' "new conversation per run" as a thread)
+implemented. Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered:
+[iOS](one-thread-ux/ios.png), [web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
 
 ## Problem
 
@@ -47,11 +47,11 @@ proactive messages and the morning brief all live there, inline, like a Telegram
 delivers to its owner's Home, whichever conversation created it, except one created in a thread,
 which belongs to that thread's work. The destination is written down when it is created and resolved
 to a conversation when it fires, so it reaches the Home the owner has then. "Here" remains an
-explicit choice. Telegram is unchanged, because a Telegram chat is already its own Home. The
-existing "new conversation per run" option stays a separate conversation for now; it is planned to
-become a thread off Home, reusing user-started threads (milestone 5). Results of work started in a
-conversation, such as worker completions and delegation results, return to that conversation; only
-proactive messages default to Home.
+explicit choice. Telegram is unchanged, because a Telegram chat is already its own Home. The "new
+conversation per run" option starts a thread off Home at each firing, through the same creation path
+as every other thread, and the run's turn happens there; with threads off it is still a separate
+conversation. Results of work started in a conversation, such as worker completions and delegation
+results, return to that conversation; only proactive messages default to Home.
 
 **A thread is for work that outlives the turn.** That means work that runs in the background, waits
 on someone, takes several steps the user will want to follow, or is a project the user will come
@@ -282,6 +282,20 @@ and each path is governed:
 - **A Home-bound wake falls back to where it was created when Home no longer applies.** If threads
   are switched off after it was created, it fires in its source conversation, which is where it
   would have gone before Home existed.
+
+- **An automation's "new" thread is an ordinary thread with nothing seeded.**
+
+  - **Its title** is the automation's name, or the first line of its message when it has none (a
+    one-off callback, a script's hand-off), plus the date. The title carries the wake's taint.
+  - **Its first row** is the wake prompt, stored as every wake prompt is: a machine-authored
+    internal row, never the user's words. The card therefore has no "Assistant asked" quote.
+  - **Its profile** is the one the wake runs on, and later turns stay on it, because the thread's
+    history is stamped with that profile. An event wake's thread stays on `event_handler`, whose
+    confinement suits a thread holding untrusted event content.
+  - **Retries and push.** The thread's id is derived from the task, so a retry finds the thread its
+    first attempt made. Push goes to the thread, as it would to any conversation the reply lands in.
+  - **While the wake's turn runs, the card reads "waiting".** That turn runs in the task worker,
+    outside the live stream that marks a thread working, and it is short.
 
 - **Only the streaming turn endpoint absorbs a queued run.** A non-streaming message sent into a
   thread whose first turn hasn't started holds the conversation until it is answered; the first turn

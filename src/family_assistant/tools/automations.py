@@ -137,7 +137,7 @@ For schedule automations:
                         "description": """Configuration for the action.
 For wake_llm:
   - context: string with optional context for the LLM
-  - conversation: where each firing wakes you. Omit it for the default: the user's Home in the web and iOS apps when they have one, otherwise this conversation (always this chat in Telegram). 'source' wakes this conversation instead -- choose it when the automation only makes sense next to this conversation's history. 'home' asks for Home explicitly. 'new' starts a fresh conversation each time it fires; it only works in the web app, and the new conversation has no history, so the context must say everything the woken turn needs.
+  - conversation: where each firing wakes you. Omit it for the default: the user's Home in the web and iOS apps when they have one, otherwise this conversation (always this chat in Telegram). 'source' wakes this conversation instead -- choose it when the automation only makes sense next to this conversation's history. 'home' asks for Home explicitly. 'new' starts afresh each time it fires: a new thread of the user's Home when they use threads, so each run gets its own card there, otherwise a new conversation. It only works in the web app, and the new thread or conversation has no history, so the context must say everything the woken turn needs.
 
 For script:
   - script_code: Python code to execute (inline), OR
