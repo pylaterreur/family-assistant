@@ -15,7 +15,11 @@ from sqlalchemy import insert, select
 
 from family_assistant.config_models import ToolsConfig
 from family_assistant.delegation_security import DelegationSecurityLevel
-from family_assistant.llm.messages import AssistantMessage, UserMessage
+from family_assistant.llm.messages import (
+    AssistantMessage,
+    ProviderMetadataDict,
+    UserMessage,
+)
 from family_assistant.memory.due import select_due_conversations
 from family_assistant.memory.review_settings import MemoryReviewSettings
 from family_assistant.processing.types import ProcessingServiceConfig
@@ -320,6 +324,46 @@ async def test_two_moves_of_one_turn_copy_it_once(db_engine: AsyncEngine) -> Non
         "MovedTurnRows",
     ]
     assert len(await _thread_rows(db)) == 2
+
+
+@pytest.mark.asyncio
+async def test_copies_drop_thinking_bound_to_their_old_history(
+    db_engine: AsyncEngine,
+) -> None:
+    """Anthropic thinking binds to the prefix; other providers' metadata does not."""
+    db = Database(engine=db_engine)
+    for provider in ("anthropic", "openai"):
+        await db.message_history.add_message(
+            AssistantMessage(
+                content=f"thought with {provider}",
+                taint_metadata=UNTRUSTED,
+                provider_metadata=ProviderMetadataDict(provider=provider),
+            ),
+            interface_type="web",
+            conversation_id=HOME,
+            timestamp=NOW,
+            turn_id=f"turn-{provider}",
+            processing_profile_id="default_assistant",
+        )
+
+    await copy_across_boundary(
+        db,
+        destination=_destination(_profile("complex_tasks", household=True)),
+        payload=CopiedTurns(
+            source_interface_type="web",
+            source_conversation_id=HOME,
+            turn_ids=("turn-anthropic", "turn-openai"),
+        ),
+        turn_id="unused",
+        now=NOW,
+    )
+
+    assert {
+        row["content"]: row["provider_metadata"] for row in await _thread_rows(db)
+    } == {
+        "thought with anthropic": None,
+        "thought with openai": {"provider": "openai"},
+    }
 
 
 @pytest.mark.asyncio

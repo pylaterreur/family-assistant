@@ -2354,6 +2354,11 @@ class MessageHistoryRepository(BaseRepository):
             interface_message_id=None,
             thread_root_id=None,
         )
+        metadata = row["provider_metadata"]
+        if isinstance(metadata, dict) and metadata.get("provider") == "anthropic":
+            # Anthropic thinking blocks are bound to the history before them,
+            # which a copy does not share (see ``without_bound_thinking``).
+            values["provider_metadata"] = None
         result = await txn.execute(
             insert(message_history_table)
             .values(**values)
