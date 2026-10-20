@@ -55,21 +55,18 @@ from family_assistant.processing import (
     RemoteObservation,
     RemoteSubmission,
 )
-from family_assistant.scripting import (
-    MontyEngine,
-    ScriptError,
-    ScriptTimeoutError,
-)
 from family_assistant.scripting.apis.keychute import (
     add_keychute_http_api,
     keychute_external_function_names,
 )
 from family_assistant.scripting.config import ScriptConfig
+from family_assistant.scripting.errors import ScriptError, ScriptTimeoutError
 from family_assistant.scripting.invocation import (
     PreparedScriptInvocation,
     ScriptExecutionScope,
     ScriptReviewContext,
 )
+from family_assistant.scripting.monty_engine import MontyEngine
 from family_assistant.security.definition_records import (
     UNRESOLVED_DEFINITION,
     DefinitionResolution,
@@ -143,8 +140,8 @@ if TYPE_CHECKING:
     )
     from family_assistant.telegram.protocols import ConfirmationUIManager
     from family_assistant.threads.turns import ThreadTurnRunner
-    from family_assistant.tools import ToolsProvider
     from family_assistant.tools.authenticated_sites import AuthenticatedRunSettlement
+    from family_assistant.tools.infrastructure import ToolsProvider
     from family_assistant.web.conversation_stream_hub import ConversationStreamHub
 
     # A handler may return a note recorded on the task when it finishes, for a
@@ -189,20 +186,21 @@ from family_assistant.threads.wakes import (
     ensure_wake_thread,
     wake_thread_title,
 )
-from family_assistant.tools import (
-    TaintTrackingToolsProvider,
-    ToolExecutionContext,
-    find_provider_by_type,
-)
 from family_assistant.tools.authenticated_site_results import authenticated_site_result
+from family_assistant.tools.authenticated_sites import prepare_authenticated_run
 from family_assistant.tools.computer_use_names import COMPUTER_USE_FUNCTION_NAMES
 from family_assistant.tools.confirmation import render_tool_confirmation
+from family_assistant.tools.infrastructure import (
+    TaintTrackingToolsProvider,
+    find_provider_by_type,
+)
 from family_assistant.tools.stored_scripts import AUTOMATION_RUNTIME_GLOBALS
 from family_assistant.tools.types import (
     ConfirmationOutcome,
     RequestConfirmationCallback,
     ToolCallReviewAuthorization,
     ToolConfirmationAuthorization,
+    ToolExecutionContext,
     ToolResult,
 )
 from family_assistant.utils.clock import Clock, SystemClock
@@ -2666,11 +2664,6 @@ class TaskWorker:
         failed: bool,
         result_text: str | None = None,
     ) -> AuthenticatedRunSettlement | None:
-        # Local import: family_assistant.tools imports this module.
-        from family_assistant.tools.authenticated_sites import (  # noqa: PLC0415
-            prepare_authenticated_run,
-        )
-
         return await prepare_authenticated_run(
             exec_context, delegation_id, failed=failed, result_text=result_text
         )

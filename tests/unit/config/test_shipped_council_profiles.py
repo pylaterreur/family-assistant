@@ -22,7 +22,7 @@ from family_assistant.paths import PACKAGE_ROOT
 from family_assistant.skills.loader import load_skills_from_directory
 from family_assistant.skills.registry import NoteRegistry
 from family_assistant.storage.repositories.notes import NoteReadPolicy
-from family_assistant.tools import LOCAL_TOOL_DESCRIPTORS
+from family_assistant.tools.catalog import LOCAL_TOOL_DESCRIPTORS
 from family_assistant.tools.policy import ToolPolicyDecision
 from tests.unit.conftest import shipped_profile
 

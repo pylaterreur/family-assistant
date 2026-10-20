@@ -58,8 +58,8 @@ from family_assistant.services.oauth_integration_state import (
 )
 from family_assistant.storage import init_db
 from family_assistant.storage.database import Database
-from family_assistant.tools import LOCAL_TOOL_REGISTRATIONS
 from family_assistant.tools.calendar import GOOGLE_CALENDAR_TOOL_REQUIRED_SCOPES
+from family_assistant.tools.catalog import LOCAL_TOOL_REGISTRATIONS
 from family_assistant.tools.google_data import (
     GOOGLE_TOOL_REQUIRED_SCOPES,
     gmail_get_attachment_tool,

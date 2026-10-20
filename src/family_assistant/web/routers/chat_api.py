@@ -72,9 +72,12 @@ from family_assistant.storage.repositories.conversation_threads import (
 from family_assistant.storage.types import MessageHistoryRow
 from family_assistant.threads.home import viewer_for
 from family_assistant.threads.listing import ThreadSummary, summarize_threads
-from family_assistant.tools import MCPToolsProvider, find_provider_by_type
 from family_assistant.tools.confirmation import render_tool_confirmation
-from family_assistant.tools.infrastructure import ToolDescriptorProvider
+from family_assistant.tools.infrastructure import (
+    ToolDescriptorProvider,
+    find_provider_by_type,
+)
+from family_assistant.tools.mcp import MCPToolsProvider
 from family_assistant.tools.outcomes import (
     NOT_RUN_YET_NOTE,
     ToolOutcome,

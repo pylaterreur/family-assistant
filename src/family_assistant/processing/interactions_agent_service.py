@@ -52,12 +52,12 @@ from family_assistant.security.taint import (
     TaintSourceType,
     TurnTaintState,
 )
-from family_assistant.tools import (
+from family_assistant.tools.infrastructure import (
     TaintTrackingToolsProvider,
-    ToolExecutionContext,
     ToolPolicyDeniedError,
     find_provider_by_type,
 )
+from family_assistant.tools.types import ToolExecutionContext
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

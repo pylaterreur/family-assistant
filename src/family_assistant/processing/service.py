@@ -65,6 +65,7 @@ from family_assistant.storage.delegation_runs import (
 )
 from family_assistant.storage.history_compaction import HistoryScope
 from family_assistant.threads.echo import announce_home_change, echo_finished_turn
+from family_assistant.tools.live_meta import LiveMetaToolsProvider
 from family_assistant.utils.clock import Clock, SystemClock
 from family_assistant.utils.text_normalization import normalize_latex_to_unicode
 
@@ -125,7 +126,8 @@ if TYPE_CHECKING:
     from family_assistant.storage.database import Database
     from family_assistant.telegram.protocols import ConfirmationUIManager
     from family_assistant.threads.echo import HomeActivityPublisher
-    from family_assistant.tools import OnDemandToolsView, ToolsProvider
+    from family_assistant.tools.infrastructure import ToolsProvider
+    from family_assistant.tools.on_demand import OnDemandToolsView
     from family_assistant.tools.types import EventSourcesById
 
 logger = logging.getLogger(__name__)
@@ -1479,10 +1481,6 @@ class ProcessingService:
         if self.on_demand_view is None:
             return self.tools_provider
         if self._live_tools_provider is None:
-            from family_assistant.tools.live_meta import (  # noqa: PLC0415 - avoids a cycle through tools/__init__
-                LiveMetaToolsProvider,
-            )
-
             self._live_tools_provider = LiveMetaToolsProvider(self.on_demand_view)
         return self._live_tools_provider
 
