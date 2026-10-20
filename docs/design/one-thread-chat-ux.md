@@ -4,10 +4,9 @@
 
 Approved. Milestones 1 (threads exist) and 2 (Home on web, including the right-hand panel),
 milestone 3 (state and echo) on the backend, the web and iOS, milestone 4 (Home on iOS), and
-milestone 5 (user overrides, and automations' "new conversation per run" as a thread) on the
-backend and iOS implemented. Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html)
-(rendered: [iOS](one-thread-ux/ios.png), [web](one-thread-ux/web.png),
-[notes](one-thread-ux/notes.png)).
+milestone 5 (user overrides, and automations' "new conversation per run" as a thread) on the backend
+and iOS implemented. Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered:
+[iOS](one-thread-ux/ios.png), [web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
 
 ## Problem
 
