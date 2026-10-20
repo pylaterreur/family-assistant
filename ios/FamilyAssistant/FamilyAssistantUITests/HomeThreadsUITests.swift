@@ -180,6 +180,97 @@ final class HomeThreadsUITests: XCTestCase {
         XCTAssertTrue(row.label.contains("Booked Sam's Gutters"), "An assistant-closed thread shows its outcome.")
     }
 
+    func testNewThreadFromTheSwitcherOpensTheThreadWithItsReply() {
+        let threadsButton = app.buttons["threads-button"]
+        XCTAssertTrue(threadsButton.waitForExistence(timeout: Self.readyTimeout))
+        threadsButton.tap()
+        let newThread = app.buttons["thread-switcher-new-thread"]
+        XCTAssertTrue(newThread.waitForExistence(timeout: 10))
+        newThread.tap()
+
+        let prompt = element("start-thread-prompt")
+        XCTAssertTrue(prompt.waitForExistence(timeout: 10))
+        prompt.tap()
+        prompt.typeText("Plan the school holidays")
+        attachScreenshot(named: "new-thread-sheet")
+        let start = app.buttons["start-thread-confirm"]
+        XCTAssertTrue(waitForEnabled(start))
+        start.tap()
+
+        XCTAssertTrue(element("thread-title").waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Native reply to Plan the school holidays"].waitForExistence(timeout: 20))
+        attachScreenshot(named: "new-thread-opened")
+
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(element("home-title").waitForExistence(timeout: 10))
+        threadsButton.tap()
+        XCTAssertTrue(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Plan the school holidays"))
+                .firstMatch.waitForExistence(timeout: 10),
+            "The switcher lists the new thread."
+        )
+    }
+
+    func testContinueInAThreadShowsWhereItStartedFrom() {
+        let answer = app.staticTexts["Yes, bins go out Tuesday night."]
+        XCTAssertTrue(answer.waitForExistence(timeout: Self.readyTimeout))
+        answer.press(forDuration: 1.2)
+        let continueAction = app.buttons["Continue in Thread…"]
+        XCTAssertTrue(continueAction.waitForExistence(timeout: 10))
+        continueAction.tap()
+
+        XCTAssertTrue(element("start-thread-quote").waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            element("start-thread-include-context").exists,
+            "The default profile takes Home conversations, so context is offered."
+        )
+        let prompt = element("start-thread-prompt")
+        prompt.tap()
+        prompt.typeText("Remind me on Monday")
+        attachScreenshot(named: "continue-in-thread-sheet")
+        app.buttons["start-thread-confirm"].tap()
+
+        let banner = element("thread-origin-banner")
+        XCTAssertTrue(banner.waitForExistence(timeout: 20))
+        XCTAssertTrue(
+            waitForLabel(of: banner, containing: "Yes, bins go out Tuesday night."),
+            "The thread quotes the message it started from: \(banner.label)"
+        )
+        XCTAssertTrue(app.staticTexts["Native reply to Remind me on Monday"].waitForExistence(timeout: 20))
+        attachScreenshot(named: "continued-thread")
+    }
+
+    func testMoveLeavesAMarkerInHomeThatOpensTheThread() {
+        let question = app.staticTexts["Is bin night Tuesday this week?"]
+        XCTAssertTrue(question.waitForExistence(timeout: Self.readyTimeout))
+        // The cards' titles come from the thread list, which the destinations need too.
+        XCTAssertTrue(waitForLabel(of: quotesCard, containing: "Waiting on you"))
+        question.press(forDuration: 1.2)
+        let moveAction = app.buttons["Move to Thread…"]
+        XCTAssertTrue(moveAction.waitForExistence(timeout: 10))
+        moveAction.tap()
+
+        let quotes = element("move-destination-web_conv_thread_quotes")
+        XCTAssertTrue(quotes.waitForExistence(timeout: 10))
+        let gutters = element("move-destination-web_conv_thread_gutters")
+        XCTAssertTrue(gutters.exists)
+        XCTAssertFalse(gutters.isEnabled, "A thread whose profile doesn't take Home conversations is not offered.")
+        XCTAssertTrue(gutters.label.contains("doesn’t take Home conversations"), gutters.label)
+        XCTAssertFalse(element("move-destination-web_conv_thread_flights").isEnabled, "A working thread is not at rest.")
+        attachScreenshot(named: "move-to-thread-sheet")
+        quotes.tap()
+
+        let marker = app.buttons["Moved to Hot water system quotes"]
+        XCTAssertTrue(marker.waitForExistence(timeout: 20))
+        XCTAssertFalse(question.exists, "The moved exchange leaves Home.")
+        attachScreenshot(named: "home-moved-marker")
+        marker.tap()
+
+        XCTAssertTrue(element("thread-title").waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Is bin night Tuesday this week?"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Yes, bins go out Tuesday night."].exists)
+    }
+
     /// Back from a thread opened via the switcher lands on Home.
     private func threadsButtonFromThread() {
         app.navigationBars.buttons.element(boundBy: 0).tap()

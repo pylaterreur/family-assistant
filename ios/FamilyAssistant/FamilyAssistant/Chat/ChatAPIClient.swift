@@ -53,6 +53,39 @@ struct ChatAPIClient {
         return try JSONDecoder.chatDecoder.decode(ChatThreadSummary.self, from: data)
     }
 
+    /// Start a thread of the caller's Home: "New thread", send-as-thread, or
+    /// "Continue in a thread" when `start` names an anchor. With an opening
+    /// message its first turn runs at once; the thread's stream shows it.
+    /// Idempotent on `start.turnID`, so a retry returns the thread already
+    /// started. A refusal (409 for the context gate, 422 for a missing opening
+    /// message, 400 for a bad profile or tier) carries the server's reason.
+    func startHomeThread(_ start: HomeThreadStart) async throws -> ChatStartThreadResult {
+        var request = try await authManager.authorizedRequest(
+            url: apiURL("/api/v1/chat/home/threads"),
+            method: "POST"
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder.chatEncoder.encode(ChatStartThreadRequest(start: start))
+        let (data, response) = try await urlSession.dataExpectingJSON(for: request, authWallError: ChatAPIError.authWall)
+        try validate(response: response, data: data)
+        return try JSONDecoder.chatDecoder.decode(ChatStartThreadResult.self, from: data)
+    }
+
+    /// Move the whole Home turn `messageID` belongs to into one of the caller's
+    /// threads. Home keeps a marker in its place.
+    func moveTurnToThread(conversationID: String, messageID: Int) async throws -> ChatMoveTurnResult {
+        let encodedID = Self.encodedPathComponent(conversationID)
+        var request = try await authManager.authorizedRequest(
+            url: apiURL("/api/v1/chat/home/threads/\(encodedID)/moved-turns"),
+            method: "POST"
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder.chatEncoder.encode(ChatMoveTurnRequest(messageID: messageID))
+        let (data, response) = try await urlSession.dataExpectingJSON(for: request, authWallError: ChatAPIError.authWall)
+        try validate(response: response, data: data)
+        return try JSONDecoder.chatDecoder.decode(ChatMoveTurnResult.self, from: data)
+    }
+
     /// Move the caller's read marker in Home or a thread forward to
     /// `throughMessageID`. The server never moves it back.
     func markConversationRead(conversationID: String, throughMessageID: Int) async throws -> ChatMarkReadResponse {
@@ -1214,6 +1247,73 @@ private struct ChatStreamRequest: Encodable {
         case interfaceType = "interface_type"
         case attachments
         case modelTier = "model_tier"
+    }
+}
+
+/// `POST /api/v1/chat/home/threads`. Nil optionals are left out of the body.
+private struct ChatStartThreadRequest: Encodable {
+    let profileID: String
+    let prompt: String?
+    let turnID: String
+    let anchorMessageID: Int?
+    let includeContext: Bool
+    let modelTier: String?
+    let attachments: [ChatStreamAttachment]?
+
+    init(start: HomeThreadStart) {
+        profileID = start.profileID
+        prompt = start.prompt
+        turnID = start.turnID
+        anchorMessageID = start.anchorMessageID
+        includeContext = start.includeContext
+        modelTier = start.modelTier
+        attachments = start.attachments.isEmpty ? nil : start.attachments.map(ChatStreamAttachment.init(attachment:))
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case profileID = "profile_id"
+        case prompt
+        case turnID = "turn_id"
+        case anchorMessageID = "anchor_message_id"
+        case includeContext = "include_context"
+        case modelTier = "model_tier"
+        case attachments
+    }
+}
+
+/// The thread a start made, and its first turn when it was given an opening
+/// message.
+struct ChatStartThreadResult: Decodable, Equatable {
+    struct Turn: Decodable, Equatable {
+        let turnID: String
+        let firstSeq: Int
+
+        enum CodingKeys: String, CodingKey {
+            case turnID = "turn_id"
+            case firstSeq = "first_seq"
+        }
+    }
+
+    let thread: ChatThreadSummary
+    let turn: Turn?
+}
+
+private struct ChatMoveTurnRequest: Encodable {
+    let messageID: Int
+
+    enum CodingKeys: String, CodingKey {
+        case messageID = "message_id"
+    }
+}
+
+/// Where a moved turn went, and the marker Home keeps in its place.
+struct ChatMoveTurnResult: Decodable, Equatable {
+    let thread: ChatThreadSummary
+    let markerMessageID: Int
+
+    enum CodingKeys: String, CodingKey {
+        case thread
+        case markerMessageID = "marker_message_id"
     }
 }
 

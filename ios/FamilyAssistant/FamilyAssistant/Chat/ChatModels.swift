@@ -149,6 +149,10 @@ struct ChatProfile: Codable, Equatable, Identifiable {
     /// The tier the profile runs at when a request names none. Nil for a pinned
     /// profile.
     let defaultModelTier: String?
+    /// Whether Home's turns may enter this profile: a thread on it can be
+    /// continued from Home with context, or have a Home turn moved into it.
+    /// Elsewhere the server refuses both, so the client does not offer them.
+    var receivesHouseholdContext = false
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -160,6 +164,7 @@ struct ChatProfile: Codable, Equatable, Identifiable {
         case userSelectable = "user_selectable"
         case modelTiers = "model_tiers"
         case defaultModelTier = "default_model_tier"
+        case receivesHouseholdContext = "receives_household_context"
     }
 
     init(
@@ -171,7 +176,8 @@ struct ChatProfile: Codable, Equatable, Identifiable {
         delegationOnly: Bool,
         userSelectable: Bool? = nil,
         modelTiers: [ChatModelTier] = [],
-        defaultModelTier: String? = nil
+        defaultModelTier: String? = nil,
+        receivesHouseholdContext: Bool = false
     ) {
         self.id = id
         self.description = description
@@ -182,6 +188,7 @@ struct ChatProfile: Codable, Equatable, Identifiable {
         self.userSelectable = userSelectable ?? !delegationOnly
         self.modelTiers = modelTiers
         self.defaultModelTier = defaultModelTier
+        self.receivesHouseholdContext = receivesHouseholdContext
     }
 
     init(from decoder: Decoder) throws {
@@ -200,6 +207,12 @@ struct ChatProfile: Codable, Equatable, Identifiable {
         // control, which is the same thing a pinned profile reports.
         modelTiers = try container.decodeIfPresent([ChatModelTier].self, forKey: .modelTiers) ?? []
         defaultModelTier = try container.decodeIfPresent(String.self, forKey: .defaultModelTier)
+        // Absent against a server that predates the context gate: offering
+        // nothing is what the server would then refuse anyway.
+        receivesHouseholdContext = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .receivesHouseholdContext
+        ) ?? false
     }
 
     /// Whether this profile gives the user something to decide. One tier is not a
@@ -400,6 +413,9 @@ struct ChatMessage: Identifiable, Equatable {
     /// On a Home message echoing a finished thread's outcome: the thread's
     /// conversation id, so the message is shown as coming from it.
     var echoedFromThread: String? = nil
+    /// On a Home message marking a turn the user moved into a thread: that
+    /// thread's conversation id. Shown as "Moved to …" in place of its text.
+    var movedToThread: String? = nil
 }
 
 /// The intelligence level a persisted reply ran at, as reported on the message's
@@ -986,6 +1002,8 @@ struct ChatBackendMessage: Decodable, Equatable {
     let metadata: [String: JSONValue]?
     /// On a Home row echoing a finished thread's outcome: that thread.
     let echoedFromThread: String?
+    /// On a Home row marking a turn moved into a thread: that thread.
+    let movedToThread: String?
 
     enum CodingKeys: String, CodingKey {
         case internalID = "internal_id"
@@ -1002,6 +1020,7 @@ struct ChatBackendMessage: Decodable, Equatable {
         case reasoningInfo = "reasoning_info"
         case metadata
         case echoedFromThread = "echoed_from_thread"
+        case movedToThread = "moved_to_thread"
     }
 
     init(from decoder: Decoder) throws {
@@ -1025,6 +1044,7 @@ struct ChatBackendMessage: Decodable, Equatable {
         reasoningInfo = try container.decodeIfPresent(ChatMessageReasoningInfo.self, forKey: .reasoningInfo)
         metadata = try container.decodeIfPresent([String: JSONValue].self, forKey: .metadata)
         echoedFromThread = try container.decodeIfPresent(String.self, forKey: .echoedFromThread)
+        movedToThread = try container.decodeIfPresent(String.self, forKey: .movedToThread)
 
         if let content = try? container.decode(String.self, forKey: .content) {
             text = content

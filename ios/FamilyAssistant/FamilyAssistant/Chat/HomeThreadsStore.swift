@@ -20,6 +20,11 @@ final class HomeThreadsStore {
     @ObservationIgnored var openConversation: ((String) -> Void)?
     /// The conversation model pushed over Home, so a push hint reaches it.
     @ObservationIgnored weak var pushedModel: ChatViewModel?
+    /// Home's own model: a turn moved out of it reloads it, and a thread
+    /// continued from it quotes the message it started from.
+    @ObservationIgnored weak var homeModel: ChatViewModel?
+    /// The thread sheet Home shows, when a message or the composer asked for one.
+    var presentedSheet: HomeThreadSheet?
 
     @ObservationIgnored private let apiClient: ChatAPIClient
     @ObservationIgnored private let errorReporter: ErrorReporter
@@ -72,8 +77,9 @@ final class HomeThreadsStore {
 
     /// Threads a "Mark done" request is out for, so it is not sent twice.
     private(set) var markingDone: Set<String> = []
-    /// A user action on a thread that failed, for the alert that reports it.
-    var actionErrorMessage: String?
+    /// A user action on a thread that failed, for Home's alert. Actions taken
+    /// in a sheet show their failure in the sheet instead.
+    var actionFailure: ThreadActionFailure?
 
     /// Close a thread as done, as the user. The card and row show the closed
     /// thread straight from the server's answer, and the list is refreshed for
@@ -91,11 +97,86 @@ final class HomeThreadsStore {
             guard !Self.isCancellation(error) else {
                 return
             }
-            actionErrorMessage = "Couldn’t mark this thread done. \(error.localizedDescription)"
+            actionFailure = ThreadActionFailure(
+                title: "Couldn’t Update Thread",
+                message: "Couldn’t mark this thread done. \(error.localizedDescription)"
+            )
             errorReporter.report(error, component: "Chat.markThreadDone")
             return
         }
         await refreshThreads()
+    }
+
+    /// Start a thread of Home. The thread is listed at once from the server's
+    /// answer, and the list refreshed for anything else that changed. A
+    /// refusal is reported and returned with the server's reason, never
+    /// dropped; nil means the attempt was cancelled.
+    func startThread(_ start: HomeThreadStart) async -> Result<ChatThreadSummary, ThreadActionFailure>? {
+        let started: ChatStartThreadResult
+        do {
+            started = try await apiClient.startHomeThread(start)
+        } catch {
+            guard !Self.isCancellation(error) else {
+                return nil
+            }
+            errorReporter.report(error, component: "Chat.startThread")
+            return .failure(ThreadActionFailure(title: "Couldn’t Start Thread", message: error.localizedDescription))
+        }
+        insertOrReplace(started.thread)
+        await refreshThreads()
+        return .success(started.thread)
+    }
+
+    /// Send-as-thread's start: on success the new thread is opened, and a
+    /// failure goes to Home's alert, since no sheet is showing by then.
+    func startThreadAndOpen(_ start: HomeThreadStart) async -> Bool {
+        switch await startThread(start) {
+        case let .success(thread):
+            open(thread.conversationID)
+            return true
+        case let .failure(failure):
+            actionFailure = failure
+            return false
+        case nil:
+            return false
+        }
+    }
+
+    /// Move the Home turn `messageID` belongs to into `conversationID`. Home
+    /// is reloaded so its marker replaces the turn, and the thread's row is
+    /// updated from the server's answer.
+    func moveTurn(messageID: Int, to conversationID: String) async -> Result<ChatMoveTurnResult, ThreadActionFailure>? {
+        let moved: ChatMoveTurnResult
+        do {
+            moved = try await apiClient.moveTurnToThread(conversationID: conversationID, messageID: messageID)
+        } catch {
+            guard !Self.isCancellation(error) else {
+                return nil
+            }
+            errorReporter.report(error, component: "Chat.moveTurnToThread")
+            return .failure(ThreadActionFailure(title: "Couldn’t Move to Thread", message: error.localizedDescription))
+        }
+        insertOrReplace(moved.thread)
+        await homeModel?.reloadMessages()
+        await refreshThreads()
+        return .success(moved)
+    }
+
+    /// The text of the Home message a thread was continued from, while Home
+    /// still holds it.
+    func anchorQuote(for thread: ChatThreadSummary) -> String? {
+        guard thread.homeConversationID == homeConversationID, let anchor = thread.anchorMessageID else {
+            return nil
+        }
+        return homeModel?.shownText(ofPersistedMessage: anchor)
+    }
+
+    private func insertOrReplace(_ thread: ChatThreadSummary) {
+        if let index = threads.firstIndex(where: { $0.conversationID == thread.conversationID }) {
+            threads[index] = thread
+        } else {
+            threads.insert(thread, at: 0)
+        }
     }
 
     /// Show the caller's unread count for a thread they have just read.
@@ -152,6 +233,32 @@ final class HomeThreadsStore {
 
     private static func isCancellation(_ error: Error) -> Bool {
         error is CancellationError || (error as? URLError)?.code == .cancelled
+    }
+}
+
+/// A user action on threads that failed: what the alert reporting it says.
+struct ThreadActionFailure: Error, Equatable, Identifiable {
+    let title: String
+    let message: String
+
+    var id: String { title + message }
+}
+
+/// A sheet Home shows for starting a thread or moving a turn into one.
+enum HomeThreadSheet: Identifiable, Equatable {
+    /// Send-as-thread: pick the profile the composer's message opens a thread on.
+    case sendAsThread
+    /// Continue in a thread from the Home message `anchorMessageID`.
+    case continueFrom(anchorMessageID: Int, quote: String)
+    /// Move the Home turn holding `messageID` into a thread.
+    case move(messageID: Int, quote: String)
+
+    var id: String {
+        switch self {
+        case .sendAsThread: "send-as-thread"
+        case let .continueFrom(anchor, _): "continue-\(anchor)"
+        case let .move(messageID, _): "move-\(messageID)"
+        }
     }
 }
 

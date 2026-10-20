@@ -278,20 +278,22 @@ struct HomeRootView: View {
                 }
         }
         .alert(
-            "Couldn’t Update Thread",
+            store.actionFailure?.title ?? "",
             isPresented: Binding(
-                get: { store.actionErrorMessage != nil },
-                set: { if !$0 { store.actionErrorMessage = nil } }
-            )
-        ) {
+                get: { store.actionFailure != nil },
+                set: { if !$0 { store.actionFailure = nil } }
+            ),
+            presenting: store.actionFailure
+        ) { _ in
             Button("OK", role: .cancel) {}
-        } message: {
-            Text(store.actionErrorMessage ?? "")
+        } message: { failure in
+            Text(verbatim: failure.message)
         }
         .environment(\.homeThreads, store)
         .sheet(isPresented: $showsSwitcher) {
             ThreadSwitcherView(
                 store: store,
+                homeModel: viewModel,
                 homePreview: homePreview,
                 onSelect: { conversationID in
                     showsSwitcher = false
@@ -303,12 +305,19 @@ struct HomeRootView: View {
                 }
             )
         }
+        .sheet(item: Binding(
+            get: { store.presentedSheet },
+            set: { store.presentedSheet = $0 }
+        )) { sheet in
+            threadSheet(sheet)
+        }
         .task {
             // Only the path binding and Home's id are captured: the store holds
             // this callback, so capturing the view would keep the store and
             // Home's model alive after Home is removed.
             let path = $path
             let homeConversationID = store.homeConversationID
+            store.homeModel = viewModel
             store.openConversation = { conversationID in
                 Self.open(conversationID, homeConversationID: homeConversationID, path: path)
             }
@@ -327,8 +336,8 @@ struct HomeRootView: View {
         .onChange(of: route) { _, newRoute in
             apply(newRoute)
         }
-        .onChange(of: showsSwitcher) { _, shown in
-            viewModel.setCoveredBySheet(shown)
+        .onChange(of: showsSwitcher || store.presentedSheet != nil) { _, covered in
+            viewModel.setCoveredBySheet(covered)
         }
         .onChange(of: notificationManager.pendingPushHint) { _, _ in
             consumePendingPushHint()
@@ -378,6 +387,25 @@ struct HomeRootView: View {
             ThreadsButton(waitingCount: store.waitingCount) {
                 showsSwitcher = true
             }
+        }
+    }
+
+    @ViewBuilder
+    private func threadSheet(_ sheet: HomeThreadSheet) -> some View {
+        switch sheet {
+        case .sendAsThread:
+            StartThreadSheet(mode: .sendAsThread, homeModel: viewModel, store: store)
+        case let .continueFrom(anchorMessageID, quote):
+            StartThreadSheet(
+                mode: .continueFrom(anchorMessageID: anchorMessageID, quote: quote),
+                homeModel: viewModel,
+                store: store
+            ) { thread in
+                store.presentedSheet = nil
+                open(thread.conversationID)
+            }
+        case let .move(messageID, quote):
+            MoveToThreadSheet(messageID: messageID, quote: quote, homeModel: viewModel, store: store)
         }
     }
 
@@ -605,6 +633,7 @@ private struct ThreadNavigationTitle: View {
 /// Atop a thread: where it came from and what the assistant asked of it. Drawn
 /// from the thread's record, never part of the thread's own history.
 struct ThreadOriginBanner: View {
+    @Environment(\.homeThreads) private var homeThreads
     var viewModel: ChatViewModel
 
     private static let seedPreviewLimit = 400
@@ -615,6 +644,14 @@ struct ThreadOriginBanner: View {
                 Label("Started from Home", systemImage: "arrow.turn.down.right")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
+                // A continued thread quotes the message it grew from while Home
+                // still holds it. Moved away since, it simply has no quote.
+                if let quote = homeThreads?.anchorQuote(for: thread) {
+                    Text(verbatim: "“\(String(quote.prefix(Self.seedPreviewLimit)))”")
+                        .font(.footnote)
+                        .italic()
+                        .lineLimit(4)
+                }
                 if let seed = thread.seedRequest, !seed.isEmpty {
                     Text("Assistant asked: \(String(seed.prefix(Self.seedPreviewLimit)))")
                         .font(.footnote)
@@ -827,11 +864,13 @@ struct ThreadCardView: View {
 /// they need, then everything else under "Earlier".
 struct ThreadSwitcherView: View {
     var store: HomeThreadsStore
+    var homeModel: ChatViewModel
     let homePreview: String?
     let onSelect: (String) -> Void
     let onNewChat: () -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @State private var startsThread = false
     @State private var searchText = ""
     @State private var searchResults: (query: String, conversations: [ChatConversationSummary])?
     @State private var searchFailed = false
@@ -866,11 +905,23 @@ struct ThreadSwitcherView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    Button {
+                        startsThread = true
+                    } label: {
+                        Label("New Thread", systemImage: "text.bubble")
+                    }
+                    .accessibilityIdentifier("thread-switcher-new-thread")
                     Button(action: onNewChat) {
                         Label("New Chat", systemImage: "square.and.pencil")
                     }
                     .accessibilityIdentifier("thread-switcher-new-chat")
+                }
+            }
+            .sheet(isPresented: $startsThread) {
+                StartThreadSheet(mode: .newThread, homeModel: homeModel, store: store) { thread in
+                    startsThread = false
+                    onSelect(thread.conversationID)
                 }
             }
         }
