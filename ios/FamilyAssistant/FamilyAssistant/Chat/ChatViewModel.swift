@@ -59,8 +59,16 @@ final class ChatViewModel {
     var messages: [ChatMessage] = [] {
         // Cheap unless a read could be recorded: the check that reads the
         // messages runs once the position has settled, not per streamed token.
-        didSet { readPositionMayHaveChanged() }
+        didSet {
+            readPositionMayHaveChanged()
+            if role == .home {
+                userStartedTurnIDs = HomeTurnThreadActions.userStartedTurnIDs(in: messages)
+            }
+        }
     }
+    /// Home's turns that hold a message the user wrote, kept with `messages`
+    /// so a bubble's context menu need not scan the transcript.
+    @ObservationIgnored private var userStartedTurnIDs: Set<String> = []
     // Fixed upper bound on how many grouped bubbles are realized into the chat
     // view at once. The full thread is still loaded into `messages`; only a
     // recent window is shown, and `showEarlierMessages()` /
@@ -80,6 +88,9 @@ final class ChatViewModel {
     /// it. Derived from `profiles` at the one place they are assigned, so the
     /// thread reads a dictionary rather than rebuilding one per bubble.
     private(set) var modelTierLabels: [String: String] = [:]
+    /// The profiles Home's turns may enter, from the full profile list. Nil
+    /// until that list has loaded once, so nothing is offered on a guess.
+    private(set) var householdContextProfileIDs: Set<String>?
     var defaultProfileID = "default_assistant"
     // The profile the active conversation runs under: it drives the picker label
     // and is sent on every turn. The backend partitions a conversation's history
@@ -1927,7 +1938,10 @@ final class ChatViewModel {
             // dropping them would strand a running turn and dangle its mapping. A
             // retired follow bubble is already unmapped (see
             // finalizeLiveFollowBubble), so it is dropped here.
-            var merged = messages.filter { !$0.id.hasPrefix("local_") }
+            var merged = Self.removingMovedTurns(
+                messages.filter { !$0.id.hasPrefix("local_") },
+                markedIn: rendered
+            )
             let existingIDs = Set(merged.map(\.id))
             merged.append(contentsOf: rendered.filter { !existingIDs.contains($0.id) })
             replaceMessagesPreservingPagedBackWindow(withLiveFollowBubbles(merged))
@@ -2003,6 +2017,11 @@ final class ChatViewModel {
             let response = try await apiClient.listProfiles()
             defaultProfileID = response.defaultProfileID
             profiles = response.profiles.filter { $0.userSelectable }
+            // From every profile, not only the selectable ones: a thread the
+            // assistant started may run on a profile no picker offers.
+            householdContextProfileIDs = Set(
+                response.profiles.filter(\.receivesHouseholdContext).map(\.id)
+            )
             // Deliberately do NOT reset the selection when it's absent from the
             // fetched list. The list is empty during a backend cold start
             // (`/v1/profiles` returns `{"profiles":[]}` before the registry is
@@ -2032,6 +2051,119 @@ final class ChatViewModel {
             return
         }
         _ = await sendDraft(fallbackFromSteer: false)
+    }
+
+    // MARK: - Home's thread actions
+
+    /// Whether no reply is in progress here, by this device or another, and
+    /// the conversation is loaded: what moving a turn out of it needs.
+    var isAtRest: Bool {
+        !isLoadingMessages && !awaitsConversationMetadata && !isStreaming && !isSubmittingDraft
+            && activeTurnIdentity == nil && knownRunningTurnIDs.isEmpty
+    }
+
+    /// What a message's context menu offers for threads. Only Home offers
+    /// anything: a thread's own messages are already in a thread.
+    func threadActions(for message: ChatMessage) -> HomeTurnThreadActions? {
+        guard role == .home else {
+            return nil
+        }
+        return HomeTurnThreadActions.resolve(
+            for: message,
+            userStartedTurnIDs: userStartedTurnIDs,
+            homeIsAtRest: isAtRest,
+            runningTurnIDs: knownRunningTurnIDs.union(activeTurnIdentity.map { [$0.turnID] } ?? [])
+        )
+    }
+
+    /// The text a bubble showed for a saved message, for a thread's "Started
+    /// from" quote. Nil once the message is no longer held here.
+    func shownText(ofPersistedMessage messageID: Int) -> String? {
+        let id = "msg_\(messageID)"
+        guard let message = groupedMessages.first(where: { $0.id == id }) else {
+            return nil
+        }
+        let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
+    }
+
+    /// Whether the composer's contents can go out as a new thread's opening
+    /// turn: everything a send needs, and some text, since the server takes
+    /// attachments only with an opening message.
+    var canSendDraftAsThread: Bool {
+        role == .home && !isStreaming && canSendDraft
+            && !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The start a send-as-thread of the composer's contents is retried under,
+    /// so a retry of the same draft to the same profile reuses its turn id.
+    @ObservationIgnored private var pendingThreadSend: (draft: ChatDraft, start: HomeThreadStart)?
+
+    /// Send the composer's message, with its attachments and the intelligence
+    /// chosen for it, as the opening turn of a new thread on `profileID`.
+    /// The send button shows it in progress, as for an ordinary send. On
+    /// success the composer is cleared, unless it was edited meanwhile; on
+    /// failure it is kept, and `startThread` reports why.
+    func sendDraftAsThread(
+        profileID: String,
+        using startThread: @MainActor (HomeThreadStart) async -> Bool
+    ) async {
+        guard canSendDraftAsThread, let id = conversationID else {
+            return
+        }
+        let draft = currentDraft
+        let submittedTierChoice = modelTierChoice
+        let start = threadStart(for: draft, profileID: profileID)
+        pendingThreadSend = (draft, start)
+        submittingDraftConversationID = id
+        defer {
+            if submittingDraftConversationID == id {
+                submittingDraftConversationID = nil
+            }
+        }
+        guard await startThread(start) else {
+            return
+        }
+        pendingThreadSend = nil
+        // Home's choice was for the message just sent. One made since is for
+        // the next message, and stays.
+        if modelTierChoice == submittedTierChoice {
+            modelTierChoice = nil
+        }
+        guard currentDraft == draft else {
+            return
+        }
+        draftText = ""
+        cleanupTemporaryImports(for: draftAttachments)
+        draftAttachments = []
+    }
+
+    private func threadStart(for draft: ChatDraft, profileID: String) -> HomeThreadStart {
+        // Home's choice is for the profile Home runs on; it carries over only
+        // where the thread's profile offers the same tier.
+        let targetTiers = profiles.first { $0.id == profileID }?.modelTiers ?? []
+        let tier = modelTierChoice.flatMap { choice in
+            targetTiers.contains { $0.id == choice } ? choice : nil
+        }
+        // A retry is the same start only while the draft, profile and tier
+        // are what was sent; anything changed is a new start.
+        if let pending = pendingThreadSend, pending.draft == draft,
+           pending.start.profileID == profileID, pending.start.modelTier == tier {
+            return pending.start
+        }
+        return HomeThreadStart(
+            turnID: UUID().uuidString,
+            profileID: profileID,
+            prompt: draft.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            modelTier: tier,
+            attachments: draft.attachments.filter { $0.uploadState == .uploaded }
+        )
+    }
+
+    /// Reload the transcript in full, as after a turn was moved out of it:
+    /// the moved rows are gone and a delta would only add the marker.
+    func reloadMessages() async {
+        await loadMessages(userInitiated: false)
     }
 
     /// `routedPrompt` sends that text on its own instead of the composer's
@@ -5716,10 +5848,28 @@ final class ChatViewModel {
                 turnID: backend.turnID,
                 modelTier: backend.reasoningInfo?.modelTier,
                 modelTierSource: backend.reasoningInfo?.modelTierSource,
-                echoedFromThread: backend.echoedFromThread
+                echoedFromThread: backend.echoedFromThread,
+                movedToThread: backend.movedToThread
             )
         }
         return rendered
+    }
+
+    /// `held` with the rows of every turn `incoming` marks as moved taken out.
+    /// A moved turn's rows are deleted from Home and a marker carrying the
+    /// turn's id takes their place, but a delta fetch only brings what is new,
+    /// so the marker's arrival is what retires the copies still held here.
+    nonisolated static func removingMovedTurns(
+        _ held: [ChatMessage],
+        markedIn incoming: [ChatMessage]
+    ) -> [ChatMessage] {
+        let movedTurnIDs = Set(incoming.filter { $0.movedToThread != nil }.compactMap(\.turnID))
+        guard !movedTurnIDs.isEmpty else {
+            return held
+        }
+        return held.filter { message in
+            message.movedToThread != nil || !(message.turnID.map(movedTurnIDs.contains) ?? false)
+        }
     }
 
     /// The held thread with each agentic turn's tool calls collapsed into a

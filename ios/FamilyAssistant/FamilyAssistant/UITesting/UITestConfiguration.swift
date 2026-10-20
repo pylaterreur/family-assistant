@@ -178,6 +178,8 @@ private final class UITestBackendURLProtocol: URLProtocol {
     // Threads the user marked done, and threads they have read, this launch.
     private static var markedDoneThreadIDs: Set<String> = []
     private static var readThreadIDs: Set<String> = []
+    // Threads the user started this launch, newest first.
+    private static var startedThreads: [UITestThreadSummary] = []
 
     private let stopLock = NSLock()
     private var stopped = false
@@ -253,6 +255,7 @@ private final class UITestBackendURLProtocol: URLProtocol {
             pendingChatTurnIDs = [:]
             markedDoneThreadIDs = []
             readThreadIDs = []
+            startedThreads = []
             if threadsEnabled {
                 chatMessages.merge(UITestThreadsFixture.conversations) { current, _ in current }
             }
@@ -268,8 +271,8 @@ private final class UITestBackendURLProtocol: URLProtocol {
     /// The fixture's threads as this launch has left them: marked done by the
     /// user, or read.
     private static func currentThreads() -> [UITestThreadSummary] {
-        let (done, read) = lock.withLock { (markedDoneThreadIDs, readThreadIDs) }
-        return UITestThreadsFixture.threads.map { thread in
+        let (done, read, started) = lock.withLock { (markedDoneThreadIDs, readThreadIDs, startedThreads) }
+        return (started + UITestThreadsFixture.threads).map { thread in
             var thread = thread
             if done.contains(thread.conversationID) {
                 thread.state = "done"
@@ -291,6 +294,12 @@ private final class UITestBackendURLProtocol: URLProtocol {
             return nil
         }
         let components = path.split(separator: "/").map(String.init)
+        if path == "/api/v1/chat/home/threads" {
+            return startThread(from: request)
+        }
+        if components.count == 7, path.hasPrefix("/api/v1/chat/home/threads/"), components[6] == "moved-turns" {
+            return moveTurn(from: request, into: components[5])
+        }
         if components.count == 7, path.hasPrefix("/api/v1/chat/home/threads/"), components[6] == "done" {
             let conversationID = components[5]
             _ = lock.withLock { markedDoneThreadIDs.insert(conversationID) }
@@ -306,6 +315,144 @@ private final class UITestBackendURLProtocol: URLProtocol {
         }
         return nil
     }
+
+    /// The profiles Home's turns may enter, as the profile list reports them.
+    private static let householdContextProfileIDs: Set<String> = ["default_assistant", "research"]
+
+    /// `POST /api/v1/chat/home/threads`: the thread is named after the
+    /// request's turn id, so a retry returns the thread it already started.
+    /// The opening turn is answered at once.
+    private static func startThread(from request: URLRequest) -> UITestResponse {
+        guard let body = try? JSONDecoder().decode(UITestStartThreadRequest.self, from: request.bodyData) else {
+            return .json(#"{"detail":"Invalid thread payload."}"#, statusCode: 400)
+        }
+        let conversationID = "web_conv_thread_\(body.turnID.prefix(8).lowercased())"
+        if let existing = currentThreads().first(where: { $0.conversationID == conversationID }) {
+            return encode(UITestStartThreadResponse(thread: existing, turn: nil))
+        }
+        let trimmed = body.prompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let prompt: String? = trimmed.isEmpty ? nil : trimmed
+        let carriesContext = body.anchorMessageID != nil && body.includeContext
+        guard prompt != nil || carriesContext else {
+            return .json(#"{"detail":"A thread needs an opening message."}"#, statusCode: 422)
+        }
+        if carriesContext, !householdContextProfileIDs.contains(body.profileID) {
+            return .json(
+                #"{"detail":"Profile '\#(body.profileID)' does not receive household context, so Home conversation can't be carried into it. Continue without context, or choose another profile."}"#,
+                statusCode: 409
+            )
+        }
+        let reply = prompt.map { "Native reply to \($0)" }
+        let thread = UITestThreadSummary(
+            conversationID: conversationID,
+            homeConversationID: UITestThreadsFixture.homeID,
+            title: prompt.map { String($0.prefix(60)) } ?? "Continued from Home",
+            profileID: body.profileID,
+            state: "waiting",
+            sourceToolCallID: nil,
+            seedRequest: nil,
+            preview: reply,
+            createdAt: "2026-06-08T10:00:00Z",
+            updatedAt: "2026-06-08T10:00:01Z",
+            anchorMessageID: body.anchorMessageID
+        )
+        lock.withLock {
+            var messages: [UITestChatMessage] = []
+            let home = chatMessages[UITestThreadsFixture.homeID] ?? []
+            if carriesContext, let anchor = body.anchorMessageID,
+               let turnID = home.first(where: { $0.internalID == anchor })?.turnID {
+                messages = home
+                    .filter { $0.turnID == turnID }
+                    .enumerated()
+                    .map { index, row in row.copied(internalID: index + 1, timestamp: "2026-06-08T10:00:00Z") }
+            }
+            if let prompt, let reply {
+                let nextID = messages.count + 1
+                messages.append(UITestChatMessage(
+                    internalID: nextID,
+                    role: "user",
+                    content: prompt,
+                    timestamp: "2026-06-08T10:00:00Z",
+                    toolCalls: nil,
+                    toolCallID: nil,
+                    attachments: nil,
+                    turnID: body.turnID
+                ))
+                messages.append(UITestChatMessage(
+                    internalID: nextID + 1,
+                    role: "assistant",
+                    content: reply,
+                    timestamp: "2026-06-08T10:00:01Z",
+                    toolCalls: nil,
+                    toolCallID: nil,
+                    attachments: nil,
+                    turnID: body.turnID
+                ))
+            }
+            chatMessages[conversationID] = messages
+            startedThreads.insert(thread, at: 0)
+        }
+        return encode(UITestStartThreadResponse(
+            thread: thread,
+            turn: prompt == nil
+                ? nil
+                : UITestChatTurnResponse(turnID: body.turnID, conversationID: conversationID, firstSeq: 0)
+        ))
+    }
+
+    /// `POST /api/v1/chat/home/threads/{id}/moved-turns`: the Home turn's
+    /// rows move to the thread, and Home keeps a marker under the turn's id.
+    private static func moveTurn(from request: URLRequest, into conversationID: String) -> UITestResponse {
+        guard let body = try? JSONDecoder().decode(UITestMoveTurnRequest.self, from: request.bodyData) else {
+            return .json(#"{"detail":"Invalid move payload."}"#, statusCode: 400)
+        }
+        guard let thread = currentThreads().first(where: { $0.conversationID == conversationID }) else {
+            return .json(#"{"detail":"Not Found"}"#, statusCode: 404)
+        }
+        guard householdContextProfileIDs.contains(thread.profileID) else {
+            return .json(
+                #"{"detail":"This thread runs on '\#(thread.profileID)', which does not receive household context, so a Home turn can't be moved into it."}"#,
+                statusCode: 409
+            )
+        }
+        let moved = lock.withLock { () -> (marker: Int, ids: [Int])? in
+            let home = chatMessages[UITestThreadsFixture.homeID] ?? []
+            guard let turnID = home.first(where: { $0.internalID == body.messageID })?.turnID else {
+                return nil
+            }
+            var destination = chatMessages[conversationID] ?? []
+            let firstID = (destination.map(\.internalID).max() ?? 0) + 1
+            let copies = home.filter { $0.turnID == turnID }.enumerated().map { index, row in
+                row.copied(internalID: firstID + index, timestamp: "2026-06-08T10:30:0\(min(index, 9))Z")
+            }
+            destination.append(contentsOf: copies)
+            chatMessages[conversationID] = destination
+            let markerID = (home.map(\.internalID).max() ?? 0) + 1
+            var remaining = home.filter { $0.turnID != turnID }
+            remaining.append(UITestChatMessage(
+                internalID: markerID,
+                role: "assistant",
+                content: "(The user moved an exchange from here into one of their threads.)",
+                timestamp: "2026-06-08T10:30:00Z",
+                toolCalls: nil,
+                toolCallID: nil,
+                attachments: nil,
+                turnID: turnID,
+                movedToThread: conversationID
+            ))
+            chatMessages[UITestThreadsFixture.homeID] = remaining
+            return (markerID, copies.map(\.internalID))
+        }
+        guard let moved else {
+            return .json(#"{"detail":"This message is not part of a turn that can be carried."}"#, statusCode: 409)
+        }
+        return encode(UITestMoveTurnResponse(
+            thread: thread,
+            markerMessageID: moved.marker,
+            movedMessageIDs: moved.ids
+        ))
+    }
+
 
     override class func canInit(with request: URLRequest) -> Bool {
         request.url?.host == "assistant.example.test"
@@ -377,7 +524,8 @@ private final class UITestBackendURLProtocol: URLProtocol {
                       "llm_model": "ui-test-model",
                       "available_tools": ["notes", "calendar"],
                       "enabled_mcp_servers": [],
-                      "delegation_only": false
+                      "delegation_only": false,
+                      "receives_household_context": true
                     },
                     {
                       "id": "research",
@@ -385,7 +533,18 @@ private final class UITestBackendURLProtocol: URLProtocol {
                       "llm_model": "ui-test-research",
                       "available_tools": ["search"],
                       "enabled_mcp_servers": [],
-                      "delegation_only": false
+                      "delegation_only": false,
+                      "receives_household_context": true
+                    },
+                    {
+                      "id": "browser_profile",
+                      "description": "Browser profile",
+                      "llm_model": "ui-test-browser",
+                      "available_tools": [],
+                      "enabled_mcp_servers": [],
+                      "delegation_only": false,
+                      "user_selectable": false,
+                      "receives_household_context": false
                     }
                   ],
                   "default_profile_id": "default_assistant"
@@ -1030,6 +1189,7 @@ private struct UITestThreadSummary: Codable {
     var closedAt: String? = nil
     var echoMessageID: Int? = nil
     var unreadCount = 0
+    var anchorMessageID: Int? = nil
 
     enum CodingKeys: String, CodingKey {
         case conversationID = "conversation_id"
@@ -1046,6 +1206,48 @@ private struct UITestThreadSummary: Codable {
         case closedAt = "closed_at"
         case echoMessageID = "echo_message_id"
         case unreadCount = "unread_count"
+        case anchorMessageID = "anchor_message_id"
+    }
+}
+
+private struct UITestStartThreadRequest: Decodable {
+    let profileID: String
+    let prompt: String?
+    let turnID: String
+    let anchorMessageID: Int?
+    let includeContext: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case profileID = "profile_id"
+        case prompt
+        case turnID = "turn_id"
+        case anchorMessageID = "anchor_message_id"
+        case includeContext = "include_context"
+    }
+}
+
+private struct UITestStartThreadResponse: Encodable {
+    let thread: UITestThreadSummary
+    let turn: UITestChatTurnResponse?
+}
+
+private struct UITestMoveTurnRequest: Decodable {
+    let messageID: Int
+
+    enum CodingKeys: String, CodingKey {
+        case messageID = "message_id"
+    }
+}
+
+private struct UITestMoveTurnResponse: Encodable {
+    let thread: UITestThreadSummary
+    let markerMessageID: Int
+    let movedMessageIDs: [Int]
+
+    enum CodingKeys: String, CodingKey {
+        case thread
+        case markerMessageID = "marker_message_id"
+        case movedMessageIDs = "moved_message_ids"
     }
 }
 
@@ -1079,6 +1281,8 @@ private enum UITestThreadsFixture {
     static let guttersThreadID = "web_conv_thread_gutters"
     static let startQuotesCallID = "call-start-quotes"
     static let guttersOutcome = "Booked Sam's Gutters for Saturday at 9am."
+    static let binsQuestion = "Is bin night Tuesday this week?"
+    static let binsAnswer = "Yes, bins go out Tuesday night."
 
     static var nonOrdinaryIDs: Set<String> {
         [homeID, quotesThreadID, flightsThreadID, guttersThreadID]
@@ -1114,7 +1318,7 @@ private enum UITestThreadsFixture {
             conversationID: guttersThreadID,
             homeConversationID: homeID,
             title: "Gutter cleaning",
-            profileID: "research",
+            profileID: "browser_profile",
             state: "done",
             sourceToolCallID: nil,
             seedRequest: "Book someone to clean the gutters.",
@@ -1137,7 +1341,8 @@ private enum UITestThreadsFixture {
                     timestamp: "2026-06-08T09:13:00Z",
                     toolCalls: nil,
                     toolCallID: nil,
-                    attachments: nil
+                    attachments: nil,
+                    turnID: "turn-hot-water"
                 ),
                 UITestChatMessage(
                     internalID: 2,
@@ -1155,7 +1360,8 @@ private enum UITestThreadsFixture {
                         ),
                     ],
                     toolCallID: nil,
-                    attachments: nil
+                    attachments: nil,
+                    turnID: "turn-hot-water"
                 ),
                 UITestChatMessage(
                     internalID: 3,
@@ -1164,7 +1370,8 @@ private enum UITestThreadsFixture {
                     timestamp: "2026-06-08T09:14:01Z",
                     toolCalls: nil,
                     toolCallID: startQuotesCallID,
-                    attachments: nil
+                    attachments: nil,
+                    turnID: "turn-hot-water"
                 ),
                 UITestChatMessage(
                     internalID: 4,
@@ -1173,7 +1380,8 @@ private enum UITestThreadsFixture {
                     timestamp: "2026-06-08T09:14:02Z",
                     toolCalls: nil,
                     toolCallID: nil,
-                    attachments: nil
+                    attachments: nil,
+                    turnID: "turn-hot-water"
                 ),
                 UITestChatMessage(
                     internalID: 5,
@@ -1184,6 +1392,26 @@ private enum UITestThreadsFixture {
                     toolCallID: nil,
                     attachments: nil,
                     echoedFromThread: guttersThreadID
+                ),
+                UITestChatMessage(
+                    internalID: 6,
+                    role: "user",
+                    content: binsQuestion,
+                    timestamp: "2026-06-08T09:16:00Z",
+                    toolCalls: nil,
+                    toolCallID: nil,
+                    attachments: nil,
+                    turnID: "turn-bins"
+                ),
+                UITestChatMessage(
+                    internalID: 7,
+                    role: "assistant",
+                    content: binsAnswer,
+                    timestamp: "2026-06-08T09:16:01Z",
+                    toolCalls: nil,
+                    toolCallID: nil,
+                    attachments: nil,
+                    turnID: "turn-bins"
                 ),
             ],
             quotesThreadID: [
@@ -1232,6 +1460,8 @@ private struct UITestChatMessage: Codable {
     let toolCallID: String?
     let attachments: [UITestAttachment]?
     var echoedFromThread: String? = nil
+    var turnID: String? = nil
+    var movedToThread: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case internalID = "internal_id"
@@ -1242,6 +1472,22 @@ private struct UITestChatMessage: Codable {
         case toolCallID = "tool_call_id"
         case attachments
         case echoedFromThread = "echoed_from_thread"
+        case turnID = "turn_id"
+        case movedToThread = "moved_to_thread"
+    }
+
+    /// This row as copied into another conversation.
+    func copied(internalID: Int, timestamp: String) -> UITestChatMessage {
+        UITestChatMessage(
+            internalID: internalID,
+            role: role,
+            content: content,
+            timestamp: timestamp,
+            toolCalls: toolCalls,
+            toolCallID: toolCallID,
+            attachments: attachments,
+            turnID: turnID
+        )
     }
 }
 

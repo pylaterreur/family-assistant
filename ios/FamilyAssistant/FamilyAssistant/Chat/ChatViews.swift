@@ -644,6 +644,44 @@ struct MessageBubble: View {
     }
 
     var body: some View {
+        if let threadID = message.movedToThread {
+            // The turn itself is in the thread now; Home shows where it went.
+            MovedTurnMarker(threadID: threadID, store: homeThreads)
+        } else {
+            bubble
+        }
+    }
+
+    /// What the context menu quotes for a thread action on this bubble.
+    private var threadActionQuote: String {
+        let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? "This exchange" : String(text.prefix(300))
+    }
+
+    @ViewBuilder
+    private var threadActionMenuItems: some View {
+        if let homeThreads, let actions = retryViewModel?.threadActions(for: message) {
+            if actions.canContinue {
+                Button {
+                    homeThreads.presentedSheet = .continueFrom(
+                        anchorMessageID: actions.messageID,
+                        quote: threadActionQuote
+                    )
+                } label: {
+                    Label("Continue in Thread…", systemImage: "arrow.turn.down.right")
+                }
+            }
+            if actions.canMove {
+                Button {
+                    homeThreads.presentedSheet = .move(messageID: actions.messageID, quote: threadActionQuote)
+                } label: {
+                    Label("Move to Thread…", systemImage: "arrow.right.square")
+                }
+            }
+        }
+    }
+
+    private var bubble: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let threadID = message.echoedFromThread {
                 EchoedThreadHeader(threadID: threadID, store: homeThreads)
@@ -751,6 +789,7 @@ struct MessageBubble: View {
                     Label("Copy", systemImage: "doc.on.doc")
                 }
             }
+            threadActionMenuItems
         }
         .padding(12)
         .background(isUser ? Color.accentColor.opacity(0.16) : Color(.secondarySystemBackground))
@@ -962,6 +1001,7 @@ struct StickyBottomScroll<Content: View>: View {
 }
 
 private struct ChatComposerView: View {
+    @Environment(\.homeThreads) private var homeThreads
     var viewModel: ChatViewModel
     @State private var selectedPhotoItem: PhotosPickerItem?
     @State private var capturesPhoto = false
@@ -1126,6 +1166,17 @@ private struct ChatComposerView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(viewModel.isSubmittingDraft || (!viewModel.isStreaming && !viewModel.canSendDraft))
+                // In Home, a long press sends the message as a new thread's
+                // opening turn instead, on a profile picked next.
+                .contextMenu {
+                    if let homeThreads, viewModel.canSendDraftAsThread {
+                        Button {
+                            homeThreads.presentedSheet = .sendAsThread
+                        } label: {
+                            Label("Send as Thread…", systemImage: "text.bubble")
+                        }
+                    }
+                }
                 .accessibilityLabel(actionButtonLabel)
                 .accessibilityIdentifier(actionButtonIdentifier)
             }

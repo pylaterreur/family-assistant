@@ -98,6 +98,9 @@ struct ChatThreadSummary: Equatable, Identifiable {
     var echoMessageID: Int? = nil
     /// The caller's own unread count: someone else reading it does not clear it.
     var unreadCount = 0
+    /// The Home message the user continued the thread from, for its "Started
+    /// from" quote. Display only: the message may since have left Home.
+    var anchorMessageID: Int? = nil
 
     var id: String { conversationID }
 
@@ -165,6 +168,7 @@ extension ChatThreadSummary: Decodable {
         case closedAt = "closed_at"
         case echoMessageID = "echo_message_id"
         case unreadCount = "unread_count"
+        case anchorMessageID = "anchor_message_id"
     }
 
     // In an extension so the memberwise initializer stays available.
@@ -184,6 +188,7 @@ extension ChatThreadSummary: Decodable {
         closedAt = try container.decodeIfPresent(Date.self, forKey: .closedAt)
         echoMessageID = try container.decodeIfPresent(Int.self, forKey: .echoMessageID)
         unreadCount = try container.decodeIfPresent(Int.self, forKey: .unreadCount) ?? 0
+        anchorMessageID = try container.decodeIfPresent(Int.self, forKey: .anchorMessageID)
     }
 }
 
@@ -393,5 +398,166 @@ struct ThreadSwitcherSections: Equatable {
     /// Threads waiting on the user, which the threads button badges.
     static func waitingCount(in threads: [ChatThreadSummary]) -> Int {
         threads.filter { $0.presentationState == .waiting }.count
+    }
+}
+
+/// A thread "Move to thread…" lists, with why it cannot take the turn now, if
+/// it can't. Unavailable threads are listed disabled rather than hidden, so the
+/// user sees why the thread they had in mind is not offered.
+struct ThreadMoveDestination: Identifiable, Equatable {
+    let thread: ChatThreadSummary
+    let unavailableReason: String?
+
+    var id: String { thread.conversationID }
+    var isAvailable: Bool { unavailableReason == nil }
+
+    /// Every thread of Home, those that can take a Home turn first, each group
+    /// in the server's order (newest first). A thread takes one only when its
+    /// profile receives household context (the context gate: anything else
+    /// the server refuses) and it is at rest, since a turn lands as the
+    /// thread's newest and must not interleave with a reply in progress.
+    /// `householdContextProfileIDs` is nil while the profile list is unknown,
+    /// which leaves nothing to offer rather than guessing.
+    static func list(
+        threads: [ChatThreadSummary],
+        householdContextProfileIDs: Set<String>?
+    ) -> [ThreadMoveDestination] {
+        let destinations = threads.map { thread in
+            ThreadMoveDestination(
+                thread: thread,
+                unavailableReason: unavailableReason(
+                    for: thread,
+                    householdContextProfileIDs: householdContextProfileIDs
+                )
+            )
+        }
+        return destinations.filter(\.isAvailable) + destinations.filter { !$0.isAvailable }
+    }
+
+    private static func unavailableReason(
+        for thread: ChatThreadSummary,
+        householdContextProfileIDs: Set<String>?
+    ) -> String? {
+        guard let householdContextProfileIDs else {
+            return "Couldn’t check which profiles take Home conversations."
+        }
+        guard householdContextProfileIDs.contains(thread.profileID) else {
+            return "Runs on \(thread.profileID), which doesn’t take Home conversations."
+        }
+        if thread.presentationState == .working {
+            return "Working. Try again once it has finished."
+        }
+        return nil
+    }
+}
+
+/// What a Home message's context menu offers for threads. Only a saved
+/// message of a turn is a candidate: it names the turn to the server, and a
+/// "Moved to …" marker is a pointer, not a turn.
+struct HomeTurnThreadActions: Equatable {
+    /// The id the server knows the message by.
+    let messageID: Int
+    /// "Continue in a thread": once the message's turn has finished.
+    let canContinue: Bool
+    /// "Move to thread…": only while Home is at rest (no reply in progress,
+    /// here or elsewhere), and only for an exchange the user started. A
+    /// thread's echoed outcome and a proactive message stay in Home.
+    let canMove: Bool
+
+    /// The turns among `messages` that the user started.
+    static func userStartedTurnIDs(in messages: [ChatMessage]) -> Set<String> {
+        Set(messages.lazy.filter { $0.role == .user && $0.movedToThread == nil }.compactMap(\.turnID))
+    }
+
+    static func resolve(
+        for message: ChatMessage,
+        userStartedTurnIDs: Set<String>,
+        homeIsAtRest: Bool,
+        runningTurnIDs: Set<String>
+    ) -> HomeTurnThreadActions? {
+        guard message.movedToThread == nil,
+              let turnID = message.turnID,
+              let messageID = ReadMarkerGate.persistedID(of: message.id)
+        else {
+            return nil
+        }
+        let turnHasEnded = !runningTurnIDs.contains(turnID)
+            && message.status != .running && !message.isLoading
+        let userStarted = message.echoedFromThread == nil && userStartedTurnIDs.contains(turnID)
+        let actions = HomeTurnThreadActions(
+            messageID: messageID,
+            canContinue: turnHasEnded,
+            canMove: turnHasEnded && homeIsAtRest && userStarted
+        )
+        return actions.canContinue || actions.canMove ? actions : nil
+    }
+}
+
+/// The choices "New thread" and "Continue in a thread" offer, given the
+/// profile picked. Context (the anchor's exchange and the Home turns before
+/// it) is offered only into a profile that takes Home conversations; anywhere
+/// else the thread starts from the opening message alone, which is then
+/// required.
+struct ThreadStartOptions: Equatable {
+    let anchorMessageID: Int?
+    let profileID: String
+    /// Nil while the profile list is unknown, which offers no context.
+    let householdContextProfileIDs: Set<String>?
+
+    var offersContext: Bool {
+        anchorMessageID != nil && (householdContextProfileIDs?.contains(profileID) ?? false)
+    }
+
+    func carriesContext(includeContext: Bool) -> Bool {
+        offersContext && includeContext
+    }
+
+    func canStart(prompt: String, includeContext: Bool) -> Bool {
+        carriesContext(includeContext: includeContext)
+            || !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func start(turnID: String, prompt: String, includeContext: Bool) -> HomeThreadStart {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return HomeThreadStart(
+            turnID: turnID,
+            profileID: profileID,
+            prompt: trimmed.isEmpty ? nil : trimmed,
+            anchorMessageID: anchorMessageID,
+            includeContext: anchorMessageID == nil || carriesContext(includeContext: includeContext)
+        )
+    }
+}
+
+/// What a thread is started with. Whoever offers the start keeps one for the
+/// attempt, so a retry sends the same `turnID`: the server then returns the
+/// thread a timed-out attempt already started instead of starting a second.
+struct HomeThreadStart: Equatable {
+    let turnID: String
+    var profileID: String
+    var prompt: String?
+    var anchorMessageID: Int? = nil
+    var includeContext = true
+    var modelTier: String? = nil
+    var attachments: [ChatAttachment] = []
+
+    /// This start as a retry of `previous`: under its turn id when nothing
+    /// else changed, so the server treats it as the same start. A start whose
+    /// choices changed is a new start, or the server would answer it with
+    /// the thread the earlier attempt may already have made.
+    func retrying(_ previous: HomeThreadStart?) -> HomeThreadStart {
+        guard let previous else {
+            return self
+        }
+        let same = HomeThreadStart(
+            turnID: previous.turnID,
+            profileID: profileID,
+            prompt: prompt,
+            anchorMessageID: anchorMessageID,
+            includeContext: includeContext,
+            modelTier: modelTier,
+            attachments: attachments
+        )
+        return same == previous ? same : self
     }
 }

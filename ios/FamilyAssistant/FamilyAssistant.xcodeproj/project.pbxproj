@@ -10,6 +10,7 @@
 		A3T0001 /* HomeThreadsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3T0001 /* HomeThreadsUITests.swift */; };
 		A2T0001 /* HomeThreadsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2T0001 /* HomeThreadsTests.swift */; };
 		A1T0004 /* HomeViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1T0003 /* HomeViews.swift */; };
+		A1T0005 /* HomeThreadSheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1T0004 /* HomeThreadSheets.swift */; };
 		A1T0003 /* HomeThreadsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1T0002 /* HomeThreadsStore.swift */; };
 		A1T0001 /* ThreadModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1T0001 /* ThreadModels.swift */; };
 		A1T0002 /* ThreadModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1T0001 /* ThreadModels.swift */; };
@@ -223,6 +224,7 @@
 		B3T0001 /* HomeThreadsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeThreadsUITests.swift; sourceTree = "<group>"; };
 		B2T0001 /* HomeThreadsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeThreadsTests.swift; sourceTree = "<group>"; };
 		B1T0003 /* HomeViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViews.swift; sourceTree = "<group>"; };
+		B1T0004 /* HomeThreadSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeThreadSheets.swift; sourceTree = "<group>"; };
 		B1T0002 /* HomeThreadsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeThreadsStore.swift; sourceTree = "<group>"; };
 		B1T0001 /* ThreadModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadModels.swift; sourceTree = "<group>"; };
 		AA000003 /* WatchAuthentication.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchAuthentication.swift; sourceTree = "<group>"; };
@@ -590,6 +592,7 @@
 			children = (
 				B10022 /* ChatModels.swift */,
 				B1T0003 /* HomeViews.swift */,
+				B1T0004 /* HomeThreadSheets.swift */,
 				B1T0002 /* HomeThreadsStore.swift */,
 				B1T0001 /* ThreadModels.swift */,
 				B10023 /* ChatAPIClient.swift */,
@@ -933,6 +936,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1T0004 /* HomeViews.swift in Sources */,
+				A1T0005 /* HomeThreadSheets.swift in Sources */,
 				A1T0003 /* HomeThreadsStore.swift in Sources */,
 				A1T0001 /* ThreadModels.swift in Sources */,
 				CE000023 /* AssistantCallHandle.swift in Sources */,
