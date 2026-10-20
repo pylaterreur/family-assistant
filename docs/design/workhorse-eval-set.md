@@ -110,12 +110,42 @@ Assistant, weather and MCP servers that the `Assistant` can be configured to use
 
 ### Access
 
-Production runs PostgreSQL. Take a **one-off, table-restricted dump** into a local database kept
-under `.review-eval-local/workhorse/snapshot/` rather than running extraction against production
-repeatedly: the household fixture (Part 3) needs several tables beyond `message_history`, and a
-local copy makes every later step reproducible and safe to iterate on. The dump is read with the
-same read-only rules the extraction script already enforces. Tables: `message_history`, notes,
-memory notes, tasks, users and contacts, automations, and the documents index metadata (not blobs).
+Production runs PostgreSQL. Take a **one-off dump** into a local database kept under
+`.review-eval-local/workhorse/` rather than running extraction against production repeatedly: the
+household fixture (Part 2) needs several tables beyond `message_history`, and a local copy makes
+every later step reproducible and safe to iterate on. The dump is read with the same read-only rules
+the extraction script already enforces. Exclude credential tables outright; keep everything else,
+**including the document embeddings**, because retrieval in the sandbox has to run against the
+production index (see "Tool surface"). The snapshot therefore needs a Postgres with pgvector.
+
+Two inputs the database does not hold come with it: the **calendar**, which lives on the CalDAV
+server and is exported as iCalendar; and the **attachment payloads** the turns reference, copied
+from the deployment's attachment storage into the private tree so an image or PDF turn replays with
+its bytes. An attachment that can no longer be retrieved excludes its turn from sampling, and the
+report states how many were excluded.
+
+### Workload profile
+
+The first snapshot (2026-10-20, profiled in aggregate under `.review-eval-local/workhorse/`)
+reshaped the plan, so the shape is recorded here. Of roughly 3,900 user-authored assistant turns in
+the last six months, about three quarters are **three templated automation prompts** (an e-ink
+display brief and two smaller ones) running a couple of times a day, each at around 150k prompt
+tokens per turn. The **human-authored** workload is about a thousand assistant turns and five
+hundred complex-tasks turns in six months, split evenly between Telegram and web; a quarter of
+assistant turns and two fifths of complex-tasks turns delegate to another profile, most often the
+browser profile; a tenth use no tool at all, two fifths use one to three; the long tail of sixteen
+or more tool calls is a tenth of assistant turns and a fifth of complex ones. Attachments appear on
+one turn in twenty. Shadow routing would send about one assistant turn in eight to `deep`, and those
+turns are measurably longer. Correction-shaped follow-ups are rare (under one percent), so the
+outcome signal is a weak sampling aid, not a label.
+
+Consequences: the templated automations are **their own slice** — a handful of cases, each run many
+times, where a cheaper configuration is worth the most money; the human set is sampled from a
+smaller population than first assumed, so sixty cases is a meaningful fraction of it; delegation is
+part of the ordinary workload and the sandbox has to run it (see "Tool surface"); and the
+in-app/external split of tool calls is roughly ninety to ten, so the backing work concentrates on a
+short list: web search, Home Assistant, the task tracker, Google mail and drive, transport, and
+shopping lookups.
 
 ### Export: turn records
 
@@ -175,9 +205,15 @@ Engineering investigation (`engineer` profile) needs a different sandbox — a s
 diagnostics endpoints, logs — and is a later set built on the same harness.
 
 The output is a ranked candidate list with frequency per stratum, for the maintainer to skim. Target
-for the first version: about 60 cases, with every stratum that has non-trivial frequency
-represented, roughly a third drawn from turns with a negative outcome signal, and several short
-multi-turn sequences.
+for the first version: about 60 human-authored cases, with every stratum that has non-trivial
+frequency represented, roughly a third drawn from turns with a negative outcome signal, several
+short multi-turn sequences, and a separate small slice of the templated automation turns.
+
+Because the sample is deliberately unrepresentative — failures over-sampled, strata balanced — the
+extraction **persists each stratum's population frequency** with the case set. Aggregate success,
+cost and latency are reported **weighted back to the workload** so they estimate the everyday
+workload the goal names, while per-stratum results stay unweighted for diagnosis. A gate decision
+reads the weighted figure.
 
 ### Curate into cases
 
@@ -244,44 +280,69 @@ parallel.
 ### Household fixture
 
 The fixture is produced once from the snapshot and revisioned: notes, memory notes, contacts and
-known users, tasks, automations, and a calendar. It is the household's real data, kept private,
-because representative results need representative context — the assistant's behaviour on "add it to
-the shopping list" depends on there being a shopping list note in the house style.
+known users, automations, the document index with its embeddings, emails, and the calendar. It is
+the household's real data, kept private, because representative results need representative context
+— the assistant's behaviour on "add it to the shopping list" depends on there being a shopping list
+note in the house style.
 
-- **In-app state** (notes, tasks, memory, documents metadata) is loaded into the sandbox database.
+- **In-app state** is loaded into the sandbox database (Postgres with pgvector, so the production
+  index is queryable as-is).
 - **Calendar** is served by the Radicale fixture already used in tests, seeded from the exported
-  events.
-- **Time.** Rather than running turns "as of" a past date — `Assistant` has no clock seam and
-  roughly two hundred direct wall-clock reads sit beneath it — the fixture is **re-dated**: every
-  timestamp is shifted by a whole number of weeks so that the case's asked-at moment lands on the
-  current date and weekdays are preserved. The case stores the original timestamp; the materialiser
-  computes the shift at run time. This gives correct relative-time behaviour ("what's on tomorrow",
-  "remind me Friday") without time travel. Adding a clock seam to `Assistant` is a worthwhile
-  follow-up for precision, not a prerequisite.
+  iCalendar.
+- **Time.** Each trial runs with the **process clock frozen at the case's asked-at moment** using
+  `time-machine`, which patches the interpreter's clock sources so the roughly two hundred direct
+  wall-clock reads under `Assistant` all agree, without a clock seam. The fixture is not re-dated:
+  state and clock are both historical, so "tomorrow" and "Friday" resolve against the same day the
+  prompt was written on, and past calendar events are found where they were. Database-side `now()`
+  defaults are the one clock this does not reach; they stamp bookkeeping columns, not anything a
+  case asserts on.
+- **State is the fixture's, not history's.** The snapshot holds the household as it is now, not as
+  it was when each turn was asked, and notes, automations and calendar entries change. A case's
+  expectations are therefore **authored against the fixture revision it names**, which is the only
+  ground truth the sandbox has; the historical reply is a reference for the judge, flagged where
+  curation found the state has since moved. A case whose required state no longer exists in any
+  fixture is excluded rather than reconstructed, and the export reports how many that was. Where a
+  case needs state the fixture lacks, curation adds it as a declared per-case delta applied on
+  materialisation, so the fixture stays one revision and the delta is visible in the case.
 
 ### Tool surface
 
 The registry snapshot from `dump_tool_registry.py` is the contract: the sandbox must present the
-same tool names and schemas the deployment did, or the case is not measuring the same task. Three
-classes of tool, by what backs them:
+same tool names and schemas the deployment did, or the case is not measuring the same task. The rule
+for backing a tool is that **every call either gets a real or deterministic answer, or the trial is
+unscorable** — never a plausible stand-in, because a stand-in handed to one candidate and not
+another is exactly the non-uniform bias a comparison cannot carry. Four classes, by what backs them:
 
-1. **In-app tools** (notes, tasks, memory, calendar via Radicale, scheduling, search over the seeded
-   index) run for real against the sandbox. Their effects are the end state the grader inspects.
-2. **External reads** (weather, Home Assistant state, web fetch, MCP-backed lookups such as the task
-   tracker) are served by a **replay backend**: the case's recorded tool results, matched on tool
-   name and a loose argument match, with a declared "plausible empty" fallback per tool when the
-   model asks something the recording cannot answer. The fallback is logged on the trial so a grader
-   can discount it.
-3. **External writes** (send message, email, Home Assistant service calls, anything that leaves the
-   sandbox) go to **capture backends** that record the call and return a success-shaped result.
+1. **In-app tools** — notes, memory, calendar via Radicale, scheduling, scripts, delegation, and
+   **search over the production index with the production embedding provider**, so query vectors
+   match the stored rows — run for real against the sandbox. Their effects are the end state the
+   grader inspects. The deterministic test embedder is not used here: it cannot query the imported
+   index, and re-embedding with it would change what retrieval returns.
+2. **Live read-only services** — web search, weather, maps, transport, shopping lookups — call the
+   real service. Their answers drift over time, which is accepted for reads that nothing in the
+   household owns: the drift is the same for every candidate in a run, and a replay would reject
+   most of the varied queries a search tool receives.
+3. **Household-owned external state** — Home Assistant, the task tracker, Google mail and drive — is
+   served by **deterministic fakes seeded from the snapshot**, so that two candidates phrasing a
+   lookup differently both get a correct answer. Where no seeded fake exists yet, a replay of the
+   case's recorded results is the interim backing, and a call the replay cannot answer ends the
+   trial as `unbacked_call`, which is excluded from quality metrics and reported as a harness gap.
+4. **External writes** — messaging, email, Home Assistant service calls, anything that leaves the
+   sandbox — go to **capture backends** that record the call and return a success-shaped result.
    Captured calls are part of the end state and are what "no message was sent" assertions check.
 
+Delegation is part of the ordinary workload, so a **delegated profile runs for real inside the
+sandbox** on its configured tier, under the same backing rules; the browser profile reads the live
+web as a live read-only service. Targets that reach outside the sandbox by design — the Kubernetes
+agent, the managed coder, remote agents — are capture-backed with the recorded result returned, and
+a case that depends on their output says so.
+
 This is the one place the sandbox needs new seams. Concretely: a generic fake MCP server process
-that serves a registry snapshot with replay/capture semantics covers every MCP-backed tool in one
-mechanism; the `Assistant` needs config-selectable fake backends for the weather service and Home
-Assistant (there is no constructor seam today) and the outbound messaging paths. Prefer one
-replay/capture mechanism keyed by tool name over per-integration fakes, so a tool added later either
-has a recording or fails loudly as "unbacked", never silently succeeds.
+that serves a registry snapshot with seeded-fake, replay or capture semantics per tool covers every
+MCP-backed tool in one mechanism; the `Assistant` needs config-selectable backends for the weather
+service and Home Assistant (there is no constructor seam today) and the outbound messaging paths.
+Prefer one mechanism keyed by tool name over per-integration fakes, so a tool added later either has
+a backing or fails loudly as unbacked, never silently succeeds.
 
 ### Driving a turn
 
@@ -357,13 +418,17 @@ Each milestone is independently useful and verifiable.
    `complex_tasks` and `/deep` turns. Verified by loading all cases and round-tripping them; a case
    with text in an id or an unknown field fails to load.
 3. **Sandbox boot and fixture materialisation.** Shipped-config boot with real clients and the
-   eval-only tier overlay, fixture template with re-dating, Radicale seeding, per-case clone, as a
-   pytest suite behind an opt-in marker. Verified by the first self-test: one synthetic case with
-   the mock LLM scripted to call a calendar tool and the end state showing the event, running in CI.
-4. **Tool backing.** Replay/capture mechanism for external reads and writes, the fake MCP server,
-   and the config seams for weather, Home Assistant and messaging. Verified by a conformance check
-   that every tool in the registry snapshot is either in-app, replay-backed, or capture-backed for
-   every case, failing the run otherwise, and by self-test cases for each backing class.
+   eval-only tier overlay, a pgvector-backed fixture template carrying the production index, the
+   frozen process clock, Radicale seeding from the calendar export, per-case clone, as a pytest
+   suite behind an opt-in marker. Verified by the first self-test: one synthetic case with the mock
+   LLM scripted to call a calendar tool "tomorrow" relative to a frozen date, and the end state
+   showing the event on the right day, running in CI.
+4. **Tool backing.** The fake MCP server with seeded-fake, replay and capture semantics, seeded
+   fakes for Home Assistant and the task tracker, live read-only wiring for search and weather, and
+   the config seams for weather, Home Assistant and messaging. Verified by a conformance check that
+   every tool in the registry snapshot has a backing class for every case, failing the run
+   otherwise, and by self-test cases for each class including an unbacked call ending a trial as
+   unscorable.
 5. **Runner, outcome classification and deterministic grading.** Drive turns, collect traces,
    classify each trial's outcome, apply the checks, write run records. Verified by running the dev
    slice on the current `standard` tier, inspecting a handful of traces by hand, and fixing every
@@ -377,13 +442,15 @@ Each milestone is independently useful and verifiable.
 
 ## Deliberate simplifications
 
-- **No time travel.** Re-dating the fixture by whole weeks gives correct relative dates for the
-  overwhelming majority of tasks; a task that depends on an absolute historical date is mis-measured
-  and should be excluded at curation, not special-cased.
-- **Replay is loose, and fallbacks are declared.** A model that phrases a lookup differently from
-  the recording gets the plausible-empty result and the trial is flagged. This measures the agent
-  against slightly less helpful external services than production, which biases *against* the system
-  under test uniformly across models and is acceptable for comparisons.
+- **The process clock is the only clock frozen.** Database-side defaults and external services see
+  real time. That reaches bookkeeping columns and the live read-only services, not the state a case
+  asserts on; a case that would depend on it is excluded at curation.
+- **Live reads drift.** Web search, weather and transport answers change between runs; a comparison
+  within one run sees the same drift for every candidate, and runs are not compared on those tools'
+  content across time.
+- **Fixture state is current, not historical.** Expectations are authored against the fixture, the
+  historical reply is only a reference, and cases whose state is gone are excluded and counted
+  rather than reconstructed.
 - **Single-turn by default.** Multi-turn journeys are supported through preludes, but the first set
   is dominated by single turns because that is what the workload is and what can be graded cleanly.
 - **Raw text lives in the private tree.** No pseudonymisation on the hot path; the existing scrubber
