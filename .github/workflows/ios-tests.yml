@@ -128,5 +128,5 @@ jobs:
           path: |
             ios/FamilyAssistant/TestResults-unit.xcresult
             ios/FamilyAssistant/TestResults-ui.xcresult
-          retention-days: 7
+          retention-days: ${{ job.status == 'success' && 1 || 7 }}
           if-no-files-found: ignore
