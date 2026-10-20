@@ -215,11 +215,7 @@ final class HomeThreadsUITests: XCTestCase {
         let answer = app.staticTexts["Yes, bins go out Tuesday night."]
         XCTAssertTrue(answer.waitForExistence(timeout: Self.readyTimeout))
         answer.press(forDuration: 1.2)
-        let continueAction = app.buttons["Continue in Thread…"]
-        XCTAssertTrue(continueAction.waitForExistence(timeout: 10))
-        continueAction.tap()
-
-        XCTAssertTrue(element("start-thread-quote").waitForExistence(timeout: 10))
+        tapMenuItem(app.buttons["Continue in Thread…"], until: element("start-thread-quote"))
         XCTAssertTrue(
             element("start-thread-include-context").exists,
             "The default profile takes Home conversations, so context is offered."
@@ -246,12 +242,8 @@ final class HomeThreadsUITests: XCTestCase {
         // The cards' titles come from the thread list, which the destinations need too.
         XCTAssertTrue(waitForLabel(of: quotesCard, containing: "Waiting on you"))
         question.press(forDuration: 1.2)
-        let moveAction = app.buttons["Move to Thread…"]
-        XCTAssertTrue(moveAction.waitForExistence(timeout: 10))
-        moveAction.tap()
-
         let quotes = element("move-destination-web_conv_thread_quotes")
-        XCTAssertTrue(quotes.waitForExistence(timeout: 10))
+        tapMenuItem(app.buttons["Move to Thread…"], until: quotes)
         let gutters = element("move-destination-web_conv_thread_gutters")
         XCTAssertTrue(gutters.exists)
         XCTAssertFalse(gutters.isEnabled, "A thread whose profile doesn't take Home conversations is not offered.")
@@ -269,6 +261,24 @@ final class HomeThreadsUITests: XCTestCase {
         XCTAssertTrue(element("thread-title").waitForExistence(timeout: 20))
         XCTAssertTrue(app.staticTexts["Is bin night Tuesday this week?"].waitForExistence(timeout: 20))
         XCTAssertTrue(app.staticTexts["Yes, bins go out Tuesday night."].exists)
+    }
+
+    /// Tap a context-menu item once it can take the tap. A tap while the menu
+    /// is still animating in is dropped, so tap again while the item is
+    /// still showing and what it opens has not appeared.
+    private func tapMenuItem(_ item: XCUIElement, until opened: XCUIElement) {
+        XCTAssertTrue(item.waitForExistence(timeout: 10))
+        for _ in 0 ..< 3 {
+            let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: item)
+            _ = XCTWaiter.wait(for: [hittable], timeout: 5)
+            if item.exists, item.isHittable {
+                item.tap()
+            }
+            if opened.waitForExistence(timeout: 5) {
+                return
+            }
+        }
+        XCTFail("\(item) did not open \(opened)")
     }
 
     /// Back from a thread opened via the switcher lands on Home.

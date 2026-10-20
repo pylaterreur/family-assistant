@@ -23,9 +23,9 @@ struct StartThreadSheet: View {
     @State private var profileID: String
     @State private var prompt = ""
     @State private var includeContext = true
-    /// One per sheet, so retrying after a failure is the same start to the
-    /// server and cannot leave two threads behind.
-    @State private var turnID = UUID().uuidString
+    /// The last start sent, so retrying it unchanged after a failure is the
+    /// same start to the server and cannot leave two threads behind.
+    @State private var lastAttempt: HomeThreadStart?
     @State private var isStarting = false
     @State private var failure: ThreadActionFailure?
 
@@ -209,7 +209,10 @@ struct StartThreadSheet: View {
         }
         isStarting = true
         defer { isStarting = false }
-        switch await store.startThread(options.start(turnID: turnID, prompt: prompt, includeContext: includeContext)) {
+        let start = options.start(turnID: UUID().uuidString, prompt: prompt, includeContext: includeContext)
+            .retrying(lastAttempt)
+        lastAttempt = start
+        switch await store.startThread(start) {
         case let .success(thread):
             onStarted(thread)
         case let .failure(failure):

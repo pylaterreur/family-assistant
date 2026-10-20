@@ -979,7 +979,10 @@ final class HomeThreadsTests: XCTestCase {
         model.draftText = "Other"
 
         XCTAssertFalse(model.isSubmittingDraft, "The send in progress belongs to the conversation left behind.")
-        XCTAssertTrue(model.canSendDraft)
+        // A background catch-up of the newly opened conversation may briefly
+        // hold the composer while it loads; only the other send must not.
+        try await waitUntil { model.canSendDraft }
+        XCTAssertTrue(preflights.values.count == 1 && !model.isSubmittingDraft)
         preflight.finish()
         await send.value
         XCTAssertFalse(model.isSubmittingDraft)
@@ -1627,6 +1630,19 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertTrue(research.start(turnID: "t", prompt: "", includeContext: true).includeContext)
         XCTAssertNil(research.start(turnID: "t", prompt: "", includeContext: true).prompt)
         XCTAssertTrue(newThread.start(turnID: "t", prompt: "Hi", includeContext: false).includeContext)
+    }
+
+    func testARetriedStartKeepsItsTurnIDOnlyWhileNothingChanged() {
+        let first = HomeThreadStart(turnID: "first", profileID: "research", prompt: "Plan it", anchorMessageID: 4)
+        let unchanged = HomeThreadStart(turnID: "second", profileID: "research", prompt: "Plan it", anchorMessageID: 4)
+        let edited = HomeThreadStart(turnID: "third", profileID: "research", prompt: "Plan it all", anchorMessageID: 4)
+        var otherProfile = unchanged
+        otherProfile.profileID = "default_assistant"
+
+        XCTAssertEqual(unchanged.retrying(first).turnID, "first", "A retry is the same start to the server.")
+        XCTAssertEqual(edited.retrying(first).turnID, "third", "An edited start is a new one.")
+        XCTAssertEqual(otherProfile.retrying(first).turnID, "second")
+        XCTAssertEqual(unchanged.retrying(nil).turnID, "second")
     }
 
     // MARK: - User overrides: send-as-thread

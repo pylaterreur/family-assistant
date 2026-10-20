@@ -540,4 +540,24 @@ struct HomeThreadStart: Equatable {
     var includeContext = true
     var modelTier: String? = nil
     var attachments: [ChatAttachment] = []
+
+    /// This start as a retry of `previous`: under its turn id when nothing
+    /// else changed, so the server treats it as the same start. A start whose
+    /// choices changed is a new start, or the server would answer it with
+    /// the thread the earlier attempt may already have made.
+    func retrying(_ previous: HomeThreadStart?) -> HomeThreadStart {
+        guard let previous else {
+            return self
+        }
+        let same = HomeThreadStart(
+            turnID: previous.turnID,
+            profileID: profileID,
+            prompt: prompt,
+            anchorMessageID: anchorMessageID,
+            includeContext: includeContext,
+            modelTier: modelTier,
+            attachments: attachments
+        )
+        return same == previous ? same : self
+    }
 }
