@@ -789,23 +789,44 @@ async def test_a_turn_awaiting_recovery_is_neither_moved_nor_continued(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("profiles")
+@pytest.mark.parametrize("stopped_after", ["user", "tool_call"])
 async def test_moving_into_a_thread_awaiting_its_reply_is_refused(
-    api_test_client: AsyncClient, db_engine: AsyncEngine
+    api_test_client: AsyncClient, db_engine: AsyncEngine, stopped_after: str
 ) -> None:
     """The thread's own turn was interrupted by a restart and waits to resume."""
     db = Database(engine=db_engine)
     home = await _home(api_test_client)
     thread = await _thread_on(api_test_client, CONTEXT_PROFILE)
     moved = await _home_turn(db, home, words="finished", at=NOW)
+    interrupted_turn = str(uuid.uuid4())
     await db.message_history.add_message(
         UserMessage.from_trusted_user(content="and then?"),
         interface_type="web",
         conversation_id=thread,
-        turn_id=str(uuid.uuid4()),
+        turn_id=interrupted_turn,
         processing_profile_id=CONTEXT_PROFILE,
         timestamp=datetime.now(UTC),
         user_id=CALLER,
     )
+    if stopped_after == "tool_call":
+        await db.message_history.add_message(
+            AssistantMessage(
+                content="Let me check.",
+                taint_metadata=TurnTaintState.empty().to_metadata(),
+                tool_calls=[
+                    ToolCallItem(
+                        id="call_interrupted",
+                        type="function",
+                        function=ToolCallFunction(name="look_up", arguments="{}"),
+                    )
+                ],
+            ),
+            interface_type="web",
+            conversation_id=thread,
+            turn_id=interrupted_turn,
+            processing_profile_id=CONTEXT_PROFILE,
+            timestamp=datetime.now(UTC),
+        )
 
     response = await api_test_client.post(
         f"/api/v1/chat/home/threads/{thread}/moved-turns",

@@ -357,7 +357,11 @@ and each path is governed:
   time of the move so the turn is the thread's newest, and deleted from Home in the same
   transaction. Home keeps one marker row naming the thread, which clients render as "Moved to …" and
   which Home's assistant reads only as "an exchange was moved". A turn is moved only while neither
-  conversation has a reply in progress, so its rows never land inside another turn.
+  conversation has a reply in progress, so its rows never land inside another turn. "In progress" is
+  read from what is stored, not only from the live stream: a turn that has not ended with a reply or
+  an error, including one waiting to resume after a restart, and a thread whose starting run has not
+  finished, all count. Only an exchange the user started moves; a thread's echoed outcome stays in
+  Home.
 
 - **iOS lists every done thread under "Done".** The switcher has no "Done today" cut-off. A done
   thread stays there until something reopens it, and older conversations stay under Earlier, so the

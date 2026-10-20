@@ -457,13 +457,16 @@ async def _turn_has_ended(db: Database, turn_id: str) -> bool:
 
 
 async def _awaits_its_reply(db: Database, conversation_id: str) -> bool:
-    """Whether a conversation's newest message is the user's, still unanswered."""
+    """Whether a conversation's newest message belongs to a turn that has not ended.
+
+    The user's unanswered message, or an assistant step that called a tool and
+    has nothing after it yet.
+    """
     latest = (await db.message_history.latest_visible_messages([conversation_id])).get(
         conversation_id
     )
     return (
         latest is not None
-        and latest.role == "user"
         and latest.turn_id is not None
         and not await _turn_has_ended(db, latest.turn_id)
     )
