@@ -2112,6 +2112,7 @@ final class ChatViewModel {
             return
         }
         let draft = currentDraft
+        let submittedTierChoice = modelTierChoice
         let start = threadStart(for: draft, profileID: profileID)
         pendingThreadSend = (draft, start)
         submittingDraftConversationID = id
@@ -2124,7 +2125,11 @@ final class ChatViewModel {
             return
         }
         pendingThreadSend = nil
-        modelTierChoice = nil
+        // Home's choice was for the message just sent. One made since is for
+        // the next message, and stays.
+        if modelTierChoice == submittedTierChoice {
+            modelTierChoice = nil
+        }
         guard currentDraft == draft else {
             return
         }
@@ -2134,14 +2139,17 @@ final class ChatViewModel {
     }
 
     private func threadStart(for draft: ChatDraft, profileID: String) -> HomeThreadStart {
-        if let pending = pendingThreadSend, pending.draft == draft, pending.start.profileID == profileID {
-            return pending.start
-        }
         // Home's choice is for the profile Home runs on; it carries over only
         // where the thread's profile offers the same tier.
         let targetTiers = profiles.first { $0.id == profileID }?.modelTiers ?? []
         let tier = modelTierChoice.flatMap { choice in
             targetTiers.contains { $0.id == choice } ? choice : nil
+        }
+        // A retry is the same start only while the draft, profile and tier
+        // are what was sent; anything changed is a new start.
+        if let pending = pendingThreadSend, pending.draft == draft,
+           pending.start.profileID == profileID, pending.start.modelTier == tier {
+            return pending.start
         }
         return HomeThreadStart(
             turnID: UUID().uuidString,

@@ -1690,6 +1690,37 @@ final class HomeThreadsTests: XCTestCase {
         XCTAssertNotEqual(starts[1].turnID, starts[2].turnID, "A new send after success is a new thread.")
     }
 
+    func testSendAsThreadKeepsATierChosenMeanwhileForTheNextMessage() async throws {
+        let model = try await makeHomeModelWithProfiles()
+        model.draftText = "Research heat pumps"
+
+        await model.sendDraftAsThread(profileID: "research") { _ in
+            model.selectModelTier("deep")
+            return true
+        }
+
+        XCTAssertEqual(model.modelTierChoice, "deep", "A choice made during the send is for the next message.")
+
+        model.draftText = "Another"
+        await model.sendDraftAsThread(profileID: "research") { _ in true }
+        XCTAssertNil(model.modelTierChoice, "The choice sent with a message is used up by it.")
+    }
+
+    func testSendAsThreadRetryWithAChangedTierIsANewStart() async throws {
+        let model = try await makeHomeModelWithProfiles()
+        model.draftText = "Research heat pumps"
+        var starts: [HomeThreadStart] = []
+
+        await model.sendDraftAsThread(profileID: "research") { starts.append($0); return false }
+        model.selectModelTier("deep")
+        await model.sendDraftAsThread(profileID: "research") { starts.append($0); return false }
+
+        XCTAssertEqual(starts.count, 2)
+        XCTAssertNil(starts[0].modelTier)
+        XCTAssertEqual(starts[1].modelTier, "deep", "The retry sends the tier now chosen.")
+        XCTAssertNotEqual(starts[0].turnID, starts[1].turnID, "A changed tier is a new start.")
+    }
+
     func testSendAsThreadDropsATierTheThreadsProfileDoesNotOffer() async throws {
         let model = try await makeHomeModelWithProfiles()
         model.draftText = "Quick one"
