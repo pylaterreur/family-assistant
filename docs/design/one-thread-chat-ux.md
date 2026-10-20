@@ -296,7 +296,8 @@ and each path is governed:
     unrelated events in a shared conversation do not mix; a thread holds one, so a reply there sees
     the event it answers.
   - **A wake that ends quietly leaves no thread.** It said nothing, so its thread and the wake's own
-    rows are discarded rather than left as an empty card.
+    rows are discarded rather than left as an empty card, unless the user has replied in the thread
+    meanwhile, which makes it theirs and keeps it.
   - **Retries and push.** The thread's id is derived from the task, so a retry finds the thread its
     first attempt made. Push goes to the thread, as it would to any conversation the reply lands in.
   - **While the wake's turn runs, the card reads "waiting".** That turn runs in the task worker,

@@ -1709,6 +1709,7 @@ async def handle_llm_callback(
             await discard_wake_thread(
                 db_context,
                 conversation_id=conversation_id,
+                turn_id=callback_turn_id,
                 owner_user_id=callback_owner_user_id,
                 publisher=processing_service.home_activity_publisher,
             )

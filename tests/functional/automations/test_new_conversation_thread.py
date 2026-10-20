@@ -8,6 +8,7 @@ which the thread is pinned to.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -25,9 +26,14 @@ from family_assistant.config_models import (
 from family_assistant.delegation_security import DelegationSecurityLevel
 from family_assistant.interfaces import ChatInterface
 from family_assistant.llm import ToolCallFunction, ToolCallItem
+from family_assistant.llm.messages import UserMessage
 from family_assistant.processing import ProcessingService, ProcessingServiceConfig
 from family_assistant.processing.quiet_turn import END_TURN_QUIETLY_TOOL_NAME
-from family_assistant.security.taint import SourceTrustTier, TurnTaintState
+from family_assistant.security.taint import (
+    SourceTrustTier,
+    TurnTaintState,
+    machine_authored_taint_metadata,
+)
 from family_assistant.storage.database import Database
 from family_assistant.storage.message_history import message_history_table
 from family_assistant.storage.tasks import tasks_table
@@ -38,7 +44,7 @@ from family_assistant.task_worker import (
 )
 from family_assistant.threads.home import find_home
 from family_assistant.threads.listing import list_home_threads
-from family_assistant.threads.wakes import ensure_wake_thread
+from family_assistant.threads.wakes import discard_wake_thread, ensure_wake_thread
 from family_assistant.tools import CompositeToolsProvider, LocalToolsProvider
 from family_assistant.tools.automations import create_automation_tool
 from family_assistant.tools.types import ToolExecutionContext
@@ -47,7 +53,6 @@ from tests.helpers import wait_for_condition, wait_for_tasks_to_complete
 from tests.mocks.mock_llm import LLMOutput, RuleBasedMockLLMClient
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Callable
 
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -499,29 +504,139 @@ async def test_a_reply_in_an_event_thread_sees_the_event(
 
 
 @pytest.mark.asyncio
+def _quiet_llm(gate: asyncio.Event | None = None) -> RuleBasedMockLLMClient:
+    """A model that ends every turn quietly, once ``gate`` (if any) is set."""
+    return RuleBasedMockLLMClient(
+        rules=[],
+        default_response=LLMOutput(
+            content="",
+            tool_calls=[
+                ToolCallItem(
+                    id="call_quiet",
+                    type="function",
+                    function=ToolCallFunction(
+                        name=END_TURN_QUIETLY_TOOL_NAME,
+                        arguments='{"reason": "Nothing new today"}',
+                    ),
+                )
+            ],
+        ),
+        response_gate=gate,
+    )
+
+
+async def _reply_in(db: Database, conversation_id: str) -> int:
+    """A message the user sends into a thread, as the turn endpoint saves it."""
+    return await db.message_history.add_message(
+        UserMessage.from_trusted_user(content="Tell me anyway"),
+        interface_type="web",
+        conversation_id=conversation_id,
+        timestamp=datetime.now(UTC),
+        turn_id="user_turn",
+        user_id=OWNER,
+        processing_profile_id="default_assistant",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_reply_sent_during_a_quiet_wake_keeps_the_thread(
+    db_engine: AsyncEngine,
+    task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
+) -> None:
+    db = Database(engine=db_engine)
+    gate = asyncio.Event()
+    service = _processing_service(llm_client=_quiet_llm(gate))
+    _, new_task_event = await _start_worker(task_worker_manager, service)
+
+    await _wake_in_new_conversation(db)
+    new_task_event.set()
+
+    async def wake_thread() -> str | None:
+        home = await find_home(
+            db, service.app_config, user_id=OWNER, interface_type="web"
+        )
+        threads = await db.conversation_threads.list_for_home(home) if home else []
+        return threads[0].conversation_id if threads else None
+
+    # The wake's turn is held at the model while the user replies in its card.
+    thread_id = await wait_for_condition(wake_thread, description="the wake thread")
+    assert thread_id is not None
+    reply_id = await _reply_in(db, thread_id)
+    gate.set()
+    await wait_for_tasks_to_complete(db_engine, task_types={"llm_callback"})
+
+    assert await db.conversation_threads.get_thread(thread_id) is not None
+    assert await db.message_history.get_row_by_internal_id(reply_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_discarding_a_wake_thread_spares_anything_but_the_wake(
+    db_engine: AsyncEngine,
+) -> None:
+    """What a retry of an already quiet wake relies on, as the first attempt does."""
+    db = Database(engine=db_engine)
+    service = _processing_service()
+    now = datetime.now(UTC)
+    for conversation_id in ("web_conv_replied", "web_conv_quiet"):
+        await ensure_wake_thread(
+            db,
+            service.app_config,
+            conversation_id=conversation_id,
+            owner_user_id=OWNER,
+            profile=service.service_config,
+            title="Morning briefing · 20 Oct",
+            title_taint=TurnTaintState.empty().to_metadata(),
+            turn_id="wake_turn",
+            now=now,
+            publisher=None,
+        )
+        await db.message_history.add_message(
+            UserMessage(
+                content="System Callback Trigger: ...",
+                taint_metadata=machine_authored_taint_metadata(TurnTaintState.empty()),
+                authorship_taint_metadata=machine_authored_taint_metadata(
+                    TurnTaintState.empty()
+                ),
+            ),
+            interface_type="web",
+            conversation_id=conversation_id,
+            timestamp=now,
+            turn_id="wake_turn",
+            user_id=OWNER,
+            processing_profile_id="default_assistant",
+            is_internal=True,
+        )
+    reply_id = await _reply_in(db, "web_conv_replied")
+
+    for conversation_id in ("web_conv_replied", "web_conv_quiet"):
+        await discard_wake_thread(
+            db,
+            conversation_id=conversation_id,
+            turn_id="wake_turn",
+            owner_user_id=OWNER,
+            publisher=None,
+        )
+
+    assert await db.conversation_threads.get_thread("web_conv_replied") is not None
+    assert await db.message_history.get_row_by_internal_id(reply_id) is not None
+    assert await db.conversation_threads.get_thread("web_conv_quiet") is None
+    assert (
+        await db.fetch_all(
+            select(message_history_table.c.internal_id).where(
+                message_history_table.c.conversation_id == "web_conv_quiet"
+            )
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_wake_that_ends_quietly_leaves_no_thread(
     db_engine: AsyncEngine,
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
 ) -> None:
     db = Database(engine=db_engine)
-    service = _processing_service(
-        llm_client=RuleBasedMockLLMClient(
-            rules=[],
-            default_response=LLMOutput(
-                content="",
-                tool_calls=[
-                    ToolCallItem(
-                        id="call_quiet",
-                        type="function",
-                        function=ToolCallFunction(
-                            name=END_TURN_QUIETLY_TOOL_NAME,
-                            arguments='{"reason": "Nothing new today"}',
-                        ),
-                    )
-                ],
-            ),
-        )
-    )
+    service = _processing_service(llm_client=_quiet_llm())
     chat_interface, new_task_event = await _start_worker(task_worker_manager, service)
 
     await _wake_in_new_conversation(db)

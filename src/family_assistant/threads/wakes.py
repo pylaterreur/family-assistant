@@ -119,19 +119,29 @@ async def discard_wake_thread(
     db: Database,
     *,
     conversation_id: str,
+    turn_id: str,
     owner_user_id: str,
     publisher: HomeActivityPublisher | None,
 ) -> None:
     """Remove the thread a wake started, when its turn ended quietly.
 
     A quiet end says nothing to the user, so the thread would be an empty card
-    waiting on them forever. Its rows go with it: they are the wake's own
-    machine-written turn, nothing the user wrote.
+    waiting on them forever. Only a thread holding nothing but the wake's own
+    machine-written turn goes, rows and all. The wake's turn runs outside the
+    live stream, so the user can reply in the thread meanwhile; a thread with
+    such a reply is theirs, and stays, like any other.
     """
     thread = await db.conversation_threads.get_thread(conversation_id)
     if thread is None:
         return
-    await db.conversation_threads.discard_thread(conversation_id)
+    if not await db.conversation_threads.discard_thread_of_turn(
+        conversation_id, turn_id
+    ):
+        logger.info(
+            "Kept wake thread %s after its quiet end: it holds more than the wake",
+            conversation_id,
+        )
+        return
     logger.info(
         "Discarded wake thread %s of Home %s: its turn ended quietly",
         conversation_id,
