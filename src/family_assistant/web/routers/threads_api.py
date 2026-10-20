@@ -456,19 +456,24 @@ async def _turn_has_ended(db: Database, turn_id: str) -> bool:
     )
 
 
-async def _awaits_its_reply(db: Database, conversation_id: str) -> bool:
-    """Whether a conversation's newest message belongs to a turn that has not ended.
+async def _at_rest(
+    db: Database, hub: ConversationStreamHub, conversation_id: str
+) -> bool:
+    """Whether no turn is under way in a conversation, live or waiting to resume.
 
-    The user's unanswered message, or an assistant step that called a tool and
-    has nothing after it yet.
+    A turn interrupted by a restart is in no hub, so the stored record is
+    read too: the newest message must belong to a turn that has ended, not be
+    the user's unanswered message or an assistant step that called a tool.
     """
+    if hub.has_running_turn(conversation_id):
+        return False
     latest = (await db.message_history.latest_visible_messages([conversation_id])).get(
         conversation_id
     )
     return (
-        latest is not None
-        and latest.turn_id is not None
-        and not await _turn_has_ended(db, latest.turn_id)
+        latest is None
+        or latest.turn_id is None
+        or await _turn_has_ended(db, latest.turn_id)
     )
 
 
@@ -734,14 +739,12 @@ async def move_turn_to_thread(
         else None
     )
     if (
-        hub.has_running_turn(home)
-        or hub.has_running_turn(conversation_id)
+        not await _at_rest(db_context, hub, home)
+        or not await _at_rest(db_context, hub, conversation_id)
         or (
             starting_run is not None
             and starting_run["status"] not in TERMINAL_DELEGATION_STATUSES
         )
-        # A thread turn interrupted by a restart, waiting to be resumed.
-        or await _awaits_its_reply(db_context, conversation_id)
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

@@ -839,6 +839,35 @@ async def test_moving_into_a_thread_awaiting_its_reply_is_refused(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("profiles")
+async def test_moving_while_homes_newest_turn_awaits_recovery_is_refused(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    """An older, finished turn waits while a newer Home turn is still owed a reply."""
+    db = Database(engine=db_engine)
+    home = await _home(api_test_client)
+    thread = await _thread_on(api_test_client, CONTEXT_PROFILE)
+    moved = await _home_turn(db, home, words="finished", at=NOW)
+    await db.message_history.add_message(
+        UserMessage.from_trusted_user(content="interrupted"),
+        interface_type="web",
+        conversation_id=home,
+        turn_id=str(uuid.uuid4()),
+        processing_profile_id="chat_api_test_profile",
+        timestamp=NOW + timedelta(seconds=30),
+        user_id=CALLER,
+    )
+
+    response = await api_test_client.post(
+        f"/api/v1/chat/home/threads/{thread}/moved-turns",
+        json={"message_id": moved["reply"]},
+    )
+
+    assert response.status_code == 409
+    assert await db.message_history.get_row_by_internal_id(moved["reply"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
 async def test_an_echo_is_not_moved(
     api_test_client: AsyncClient, db_engine: AsyncEngine
 ) -> None:
