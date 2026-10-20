@@ -41,6 +41,19 @@ the thread.
 """
 
 
+TITLE_LENGTH = 60
+"""How long a title taken from the text a thread starts with may run."""
+
+
+def title_from_text(text: str) -> str:
+    """A thread title from the text it starts with: its first line, shortened."""
+    line = " ".join(text.strip().splitlines()[0].split()) if text.strip() else ""
+    if len(line) <= TITLE_LENGTH:
+        return line
+    cut = line[:TITLE_LENGTH].rsplit(" ", 1)[0]
+    return f"{cut}…"
+
+
 def new_thread_conversation_id(interface_type: str) -> str:
     """A fresh conversation id for a thread on ``interface_type``."""
     if interface_type == "web":

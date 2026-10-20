@@ -31,6 +31,7 @@ from family_assistant.threads.creation import (
     CONTINUE_CONTEXT_TURNS,
     NewThread,
     create_thread,
+    title_from_text,
 )
 from family_assistant.threads.echo import announce_home_change
 from family_assistant.threads.home import (
@@ -67,8 +68,6 @@ threads_api_router = APIRouter()
 
 CONTINUED_THREAD_TITLE = "Continued from Home"
 """The title of a thread continued with neither a title nor an opening message."""
-
-_DERIVED_TITLE_LENGTH = 60
 
 
 class HomeResponse(BaseModel):
@@ -404,11 +403,7 @@ def _derived_title(prompt: str | None) -> str:
     """A thread's title from the user's opening message: its first line, shortened."""
     if prompt is None:
         return CONTINUED_THREAD_TITLE
-    line = " ".join(prompt.splitlines()[0].split())
-    if len(line) <= _DERIVED_TITLE_LENGTH:
-        return line
-    cut = line[:_DERIVED_TITLE_LENGTH].rsplit(" ", 1)[0]
-    return f"{cut}…"
+    return title_from_text(prompt)
 
 
 async def _home_turn_row(

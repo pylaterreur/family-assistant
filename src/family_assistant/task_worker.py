@@ -31,6 +31,7 @@ from family_assistant.actions import (
     assert_wake_llm_allowed,
     home_owner_for,
     resolve_home_target,
+    threads_enabled,
 )
 from family_assistant.llm.messages import (
     AssistantMessage,
@@ -183,6 +184,7 @@ from family_assistant.storage.tasks import (
     tasks_table,
     unregister_worker_wake_event,
 )
+from family_assistant.threads.wakes import ensure_wake_thread, wake_thread_title
 from family_assistant.tools import (
     TaintTrackingToolsProvider,
     ToolExecutionContext,
@@ -541,6 +543,51 @@ class ScriptExecutionPayload(TypedDict, total=False):
     # durable automation or listener carries one too and resolution ignores it:
     # that record was stamped by the firing, which has no authoring turn.
     tool_call_review_definition_record: DefinitionRecordDict
+
+
+async def _wake_automation_name(
+    db: Database,
+    payload: LlmCallbackPayload,
+    # ast-grep-ignore: no-dict-any - Legacy event callbacks carry arbitrary external JSON
+    callback_context: str | dict[str, Any],
+) -> str | None:
+    """The name of the automation a wake fired from, when it names one.
+
+    An event listener's wake names its listener, as a script it runs names it
+    in the wake's metadata; a schedule automation's wake names the automation.
+    """
+    listener_id = (
+        callback_context.get("listener_id")
+        if isinstance(callback_context, dict)
+        else (payload.get("metadata") or {}).get("listener_id")
+    )
+    if isinstance(listener_id, int) or (
+        isinstance(listener_id, str) and listener_id.isdigit()
+    ):
+        listener = await db.events.get_event_listener_by_id(int(listener_id))
+        return listener["name"] if listener else None
+    automation_id = payload.get("automation_id")
+    if payload.get("automation_type") == "schedule" and automation_id is not None:
+        automation = await db.schedule_automations.get_by_id(int(automation_id))
+        return automation["name"] if automation else None
+    return None
+
+
+def _wake_message(
+    payload: LlmCallbackPayload,
+    # ast-grep-ignore: no-dict-any - Legacy event callbacks carry arbitrary external JSON
+    callback_context: str | dict[str, Any],
+) -> str | None:
+    """The message a wake carries: its action's context, or a script's first hand-off."""
+    if isinstance(callback_context, dict):
+        message = callback_context.get("message")
+        return message if isinstance(message, str) else None
+    contexts = (payload.get("metadata") or {}).get("accumulated_contexts")
+    if isinstance(contexts, list) and contexts:
+        first = contexts[0].get("context") if isinstance(contexts[0], dict) else None
+        message = first.get("message") if isinstance(first, dict) else None
+        return message if isinstance(message, str) else None
+    return callback_context
 
 
 def _llm_callback_definition_refs(
@@ -1699,6 +1746,30 @@ async def handle_llm_callback(
                 callback_trigger_taint_state
             ),
         )
+        if payload.get("new_conversation") and threads_enabled(processing_service):
+            assert callback_owner_user_id is not None
+            await ensure_wake_thread(
+                db_context,
+                processing_service.app_config,
+                conversation_id=conversation_id,
+                owner_user_id=callback_owner_user_id,
+                profile=processing_service.service_config,
+                title=wake_thread_title(
+                    automation_name=await _wake_automation_name(
+                        db_context, payload, callback_context
+                    ),
+                    message=_wake_message(payload, callback_context),
+                    when=clock.now().astimezone(exec_context.timezone),
+                ),
+                # The title is drawn from what this wake carries, so it
+                # carries the wake's taint, as its prompt does.
+                title_taint=machine_authored_taint_metadata(
+                    callback_trigger_taint_state
+                ),
+                turn_id=callback_turn_id,
+                now=callback_trigger_timestamp,
+                publisher=processing_service.home_activity_publisher,
+            )
         if existing_callback_trigger is None:
             await db_context.message_history.add_message(
                 callback_trigger_message,
