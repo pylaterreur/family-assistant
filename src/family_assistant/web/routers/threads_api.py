@@ -434,21 +434,39 @@ async def _home_turn_row(
             detail="This message is not part of a turn that can be carried.",
         )
     turn = hub.get_turn(home, row["turn_id"])
-    # A turn interrupted by a restart is in no hub while it waits to be
-    # resumed, so a turn is carried only once it has ended: with a reply, or
-    # with the error row a failed turn leaves.
-    if (turn is not None and turn.status == "running") or not (
-        await db.message_history.has_terminal_reply_for_turn(row["turn_id"])
-        or any(
-            turn_row["role"] == "error"
-            for turn_row in await db.message_history.get_rows_by_turn_id(row["turn_id"])
-        )
+    if (turn is not None and turn.status == "running") or not await _turn_has_ended(
+        db, row["turn_id"]
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="That reply is still in progress.",
         )
     return row
+
+
+async def _turn_has_ended(db: Database, turn_id: str) -> bool:
+    """Whether a turn has finished: with a reply, or the error row a failed turn leaves.
+
+    A turn interrupted by a restart is in no hub while it waits to be resumed,
+    so the stored outcome is what says it is over.
+    """
+    return await db.message_history.has_terminal_reply_for_turn(turn_id) or any(
+        turn_row["role"] == "error"
+        for turn_row in await db.message_history.get_rows_by_turn_id(turn_id)
+    )
+
+
+async def _awaits_its_reply(db: Database, conversation_id: str) -> bool:
+    """Whether a conversation's newest message is the user's, still unanswered."""
+    latest = (await db.message_history.latest_visible_messages([conversation_id])).get(
+        conversation_id
+    )
+    return (
+        latest is not None
+        and latest.role == "user"
+        and latest.turn_id is not None
+        and not await _turn_has_ended(db, latest.turn_id)
+    )
 
 
 async def _thread_summary(
@@ -704,6 +722,8 @@ async def move_turn_to_thread(
             starting_run is not None
             and starting_run["status"] not in TERMINAL_DELEGATION_STATUSES
         )
+        # A thread turn interrupted by a restart, waiting to be resumed.
+        or await _awaits_its_reply(db_context, conversation_id)
     ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
