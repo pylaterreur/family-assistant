@@ -15,6 +15,7 @@ from family_assistant.config_models import AppConfig
 from family_assistant.processing import ProcessingService
 from family_assistant.security.taint import TurnTaintState
 from family_assistant.storage.database import Database, DatabaseTransaction
+from family_assistant.storage.delegation_runs import TERMINAL_DELEGATION_STATUSES
 from family_assistant.storage.repositories.conversation_threads import (
     ConversationThread,
 )
@@ -688,8 +689,9 @@ async def move_turn_to_thread(
     assert row["turn_id"] is not None
     # A row landing in either conversation mid-turn would sort into the middle
     # of that turn's own rows.
-    # A thread whose starting run is still queued has a turn under way that
-    # the hub does not know of yet.
+    # A thread whose starting run has not finished -- queued, or waiting on its
+    # own delegations to requeue it -- has a turn under way the hub may not
+    # know of.
     starting_run = (
         await db_context.delegation_runs.get_by_delegation_id(thread.delegation_id)
         if thread.delegation_id is not None
@@ -699,7 +701,8 @@ async def move_turn_to_thread(
         hub.has_running_turn(home)
         or hub.has_running_turn(conversation_id)
         or (
-            starting_run is not None and starting_run["status"] in {"queued", "running"}
+            starting_run is not None
+            and starting_run["status"] not in TERMINAL_DELEGATION_STATUSES
         )
     ):
         raise HTTPException(

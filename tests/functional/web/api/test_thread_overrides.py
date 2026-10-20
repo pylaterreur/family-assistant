@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from family_assistant.config_models import AppConfig, ConversationThreadsConfig
 from family_assistant.llm import ToolCallFunction, ToolCallItem
@@ -26,7 +26,7 @@ from family_assistant.llm.messages import (
 from family_assistant.processing import ProcessingService
 from family_assistant.security.taint import TurnTaintState
 from family_assistant.services.user_identity import UserIdentityResolver
-from family_assistant.storage import message_history_table
+from family_assistant.storage import delegation_runs_table, message_history_table
 from family_assistant.storage.database import Database
 from family_assistant.web.dependencies import get_current_user
 from tests.mocks.mock_llm import LLMOutput, MatcherArgs, RuleBasedMockLLMClient
@@ -850,10 +850,11 @@ async def test_overlapping_retries_of_a_start_share_one_thread(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("profiles")
-async def test_moving_into_a_thread_whose_first_run_is_queued_is_refused(
-    api_test_client: AsyncClient, db_engine: AsyncEngine
+@pytest.mark.parametrize("status", ["queued", "awaiting_children"])
+async def test_moving_into_a_thread_whose_first_run_is_unfinished_is_refused(
+    api_test_client: AsyncClient, db_engine: AsyncEngine, status: str
 ) -> None:
-    """The worker has not registered that turn anywhere the hub can see yet."""
+    """The run's turn is in no hub: not yet started, or waiting to be requeued."""
     db = Database(engine=db_engine)
     home = await _home(api_test_client)
     moved = await _home_turn(db, home, words="hold on", at=NOW)
@@ -891,6 +892,11 @@ async def test_moving_into_a_thread_whose_first_run_is_queued_is_refused(
         "request_text": "Plan the trip.",
         "content_parts_json": [{"type": "text", "text": "Plan the trip."}],
     })
+    await db.execute(
+        update(delegation_runs_table)
+        .where(delegation_runs_table.c.delegation_id == "delegation_queued")
+        .values(status=status)
+    )
 
     response = await api_test_client.post(
         f"/api/v1/chat/home/threads/{thread}/moved-turns",
