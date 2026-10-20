@@ -28,6 +28,7 @@ from family_assistant.security.taint import TurnTaintState
 from family_assistant.services.user_identity import UserIdentityResolver
 from family_assistant.storage import delegation_runs_table, message_history_table
 from family_assistant.storage.database import Database
+from family_assistant.web.conversation_stream_hub import ConversationStreamHub
 from family_assistant.web.dependencies import get_current_user
 from tests.mocks.mock_llm import LLMOutput, MatcherArgs, RuleBasedMockLLMClient
 
@@ -38,7 +39,6 @@ if TYPE_CHECKING:
 
     from family_assistant.llm.messages import LLMMessage
     from family_assistant.security.taint import TaintMetadata
-    from family_assistant.web.conversation_stream_hub import ConversationStreamHub
 
 # Anchored to the real clock: history windows are read against it.
 NOW = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
@@ -864,6 +864,61 @@ async def test_moving_while_homes_newest_turn_awaits_recovery_is_refused(
 
     assert response.status_code == 409
     assert await db.message_history.get_row_by_internal_id(moved["reply"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["turns", "send_message"])
+async def test_retrying_a_moved_turn_does_not_run_it_again(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+    profiles: Profiles,
+    endpoint: str,
+) -> None:
+    """Its rows are gone from Home, but the turn was handled: a retry reloads."""
+    home = await _home(api_test_client)
+    thread = await _thread_on(api_test_client, CONTEXT_PROFILE)
+    turn_id = str(uuid.uuid4())
+    request = {
+        "turn_id": turn_id,
+        "conversation_id": home,
+        "prompt": "Book the plumber",
+        "interface_type": "web",
+    }
+    if endpoint == "turns":
+        await api_test_client.post("/api/v1/chat/turns", json=request)
+        await api_test_client.get(
+            f"/api/v1/chat/conversations/{home}/stream", params={"from_seq": 0}
+        )
+    else:
+        await api_test_client.post("/api/v1/chat/send_message", json=request)
+    home_messages = (
+        await api_test_client.get(f"/api/v1/chat/conversations/{home}/messages")
+    ).json()["messages"]
+    [user_message] = [
+        m for m in home_messages if m["turn_id"] == turn_id and m["role"] == "user"
+    ]
+    moved = await api_test_client.post(
+        f"/api/v1/chat/home/threads/{thread}/moved-turns",
+        json={"message_id": user_message["internal_id"]},
+    )
+    assert moved.status_code == 200, moved.text
+    # As after a restart, or once the finished turn was pruned from the hub.
+    app_fixture.state.conversation_stream_hub = ConversationStreamHub()
+    calls_before = len(profiles.seen["chat_api_test_profile"])
+
+    retry = await api_test_client.post(
+        "/api/v1/chat/turns" if endpoint == "turns" else "/api/v1/chat/send_message",
+        json=request,
+    )
+
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["already_complete"] is True
+    assert retry.json().get("incomplete", False) is False
+    assert len(profiles.seen["chat_api_test_profile"]) == calls_before
+    rows = (
+        await api_test_client.get(f"/api/v1/chat/conversations/{home}/messages")
+    ).json()["messages"]
+    assert [m["moved_to_thread"] for m in rows if m["turn_id"] == turn_id] == [thread]
 
 
 @pytest.mark.asyncio

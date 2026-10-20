@@ -2186,8 +2186,8 @@ class MessageHistoryRepository(BaseRepository):
         destination has already passed. The originals are then deleted, with
         the attachments recorded against them following their copies and the
         turn's search index record going with them -- the copy is indexed
-        afresh under its own turn id -- and a marker row records in the source
-        where the turn went. Atomic.
+        afresh under its own turn id -- and a marker row, under the moved
+        turn's id, records in the source where the turn went. Atomic.
 
         Callers go through ``family_assistant.threads.boundary``.
 
@@ -2240,13 +2240,15 @@ class MessageHistoryRepository(BaseRepository):
             await delete_documents_by_source(
                 txn, MESSAGE_HISTORY_SOURCE_TYPE, f"message_turn:{turn_id}"
             )
-            marker_turn_id = str(uuid.uuid4())
             result = await txn.execute(
                 insert(message_history_table)
                 .values(
                     interface_type=source_interface_type,
                     conversation_id=source_conversation_id,
-                    turn_id=marker_turn_id,
+                    # The moved turn's own id, so a retry of the request that
+                    # started it finds the turn handled rather than running it
+                    # again (see :meth:`moved_turn_conversation`).
+                    turn_id=turn_id,
                     timestamp=now,
                     role="assistant",
                     content=marker_content,
@@ -2267,6 +2269,21 @@ class MessageHistoryRepository(BaseRepository):
             )
 
         return await self._db.atomic(_move)
+
+    async def moved_turn_conversation(self, turn_id: str) -> str | None:
+        """The conversation a turn was moved out of, if ``turn_id`` names a moved turn.
+
+        A moved turn's rows are gone from its conversation; the marker left
+        there keeps its id, so a retried request for the turn is recognised as
+        already handled.
+        """
+        row = await self._db.fetch_one(
+            select(message_history_table.c.conversation_id).where(
+                message_history_table.c.turn_id == turn_id,
+                message_history_table.c.moved_to_conversation_id.isnot(None),
+            )
+        )
+        return row["conversation_id"] if row is not None else None
 
     async def turn_ids_leading_to(
         self,
@@ -2312,6 +2329,11 @@ class MessageHistoryRepository(BaseRepository):
         conversation_id: str,
         turn_ids: Sequence[str],
     ) -> list[Mapping[str, Any]]:
+        """The rows of whole top-level turns that can be carried elsewhere.
+
+        A moved turn's marker shares the moved turn's id, but records where it
+        went rather than being part of it, so it is never carried.
+        """
         return list(
             await db.fetch_all(
                 select(message_history_table)
@@ -2320,6 +2342,7 @@ class MessageHistoryRepository(BaseRepository):
                     message_history_table.c.conversation_id == conversation_id,
                     message_history_table.c.subconversation_id.is_(None),
                     message_history_table.c.turn_id.in_(list(turn_ids)),
+                    message_history_table.c.moved_to_conversation_id.is_(None),
                 )
                 .order_by(message_history_table.c.internal_id.asc())
             )

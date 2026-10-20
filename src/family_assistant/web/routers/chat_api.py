@@ -1148,6 +1148,25 @@ def _should_emit(event_type: str, allowed_event_types: frozenset[str] | None) ->
     )
 
 
+async def turn_was_moved_out(
+    db_context: Database, conversation_id: str, turn_id: str
+) -> bool:
+    """Whether ``turn_id`` names a turn the user moved out of this conversation.
+
+    Part of the durable turn-id idempotency both turn endpoints apply: a moved
+    turn's own rows are gone, so without this a retry of the request that
+    started it would run it a second time. A turn moved out of some other
+    conversation is not the caller's to name here: 404, as for a turn whose
+    user row lives elsewhere.
+    """
+    moved_from = await db_context.message_history.moved_turn_conversation(turn_id)
+    if moved_from is None:
+        return False
+    if moved_from != conversation_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return True
+
+
 async def _existing_send_message_response(
     db_context: Database,
     conversation_id: str,
@@ -1541,6 +1560,13 @@ async def start_chat_turn(
             first_seq=0,
             already_complete=True,
             incomplete=not turn_has_terminal_reply,
+        )
+    if await turn_was_moved_out(idem_db, conversation_id, payload.turn_id):
+        return ChatTurnResponse(
+            turn_id=payload.turn_id,
+            conversation_id=conversation_id,
+            first_seq=0,
+            already_complete=True,
         )
 
     # One turn at a time per conversation. A second turn started while the first
@@ -2747,6 +2773,9 @@ async def run_non_streaming_turn(
             or existing_user_row.get("user_id") != user_id
         ):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        # A moved turn's reply is in a thread now; the marker left here, under
+        # the turn's id, is what a retry is answered with.
+        await turn_was_moved_out(db_context, conversation_id, payload.turn_id)
         existing_response = await _existing_send_message_response(
             db_context, conversation_id, payload.turn_id
         )
