@@ -353,6 +353,10 @@ and each path is governed:
   from the user's opening message and keeps the anchor for its "Started from" quote, like an
   assistant-started seed.
 
+- **A "Started from" quote can outlive its message.** The anchor is display-only. If the user later
+  moves the exchange a thread was continued from, the thread keeps working and simply shows no
+  quote; nothing retargets or snapshots it.
+
 - **A moved turn is a copy, then a removal.** Its rows are copied into the thread, stamped with the
   time of the move so the turn is the thread's newest, and deleted from Home in the same
   transaction. Home keeps one marker row naming the thread, which clients render as "Moved to …" and
