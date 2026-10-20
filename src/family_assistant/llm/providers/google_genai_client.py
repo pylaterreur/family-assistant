@@ -393,6 +393,24 @@ def _generation_config_fields(
     return fields
 
 
+_API_VERSION_SUFFIX = re.compile(r"/(v\d+(?:alpha|beta)?)/?$")
+
+
+def _http_options_for_base_url(base_url: str) -> types.HttpOptions:
+    """SDK HTTP options for a configured endpoint.
+
+    The SDK appends its own API version to ``base_url``, so a URL that already
+    ends in one (``.../v1beta``, the form LiteLLM-era configs used) is split
+    into the two rather than requesting ``/v1beta/v1beta/models/...``.
+    """
+    match = _API_VERSION_SUFFIX.search(base_url)
+    if match is None:
+        return types.HttpOptions(base_url=base_url)
+    return types.HttpOptions(
+        base_url=base_url[: match.start()] + "/", api_version=match.group(1)
+    )
+
+
 class GoogleGenAIClient(BaseLLMClient):
     """Direct Google Generative AI implementation."""
 
@@ -436,7 +454,7 @@ class GoogleGenAIClient(BaseLLMClient):
             debug_config: SDK DebugConfig dict for record/replay in tests (client_mode, replay_id, replays_directory)
             **kwargs: Default parameters for generation, as for ``model_parameters``
         """
-        http_options = types.HttpOptions(base_url=base_url) if base_url else None
+        http_options = _http_options_for_base_url(base_url) if base_url else None
         # Create client with optional debug_config for record/replay in tests
         if debug_config:
             self.client = genai.Client(

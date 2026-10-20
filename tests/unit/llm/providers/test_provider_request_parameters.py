@@ -163,6 +163,32 @@ def test_gemini_base_url_reaches_the_sdk_client() -> None:
     )
 
 
+async def test_gemini_versioned_base_url_is_not_versioned_twice() -> None:
+    """A legacy ``.../v1beta`` endpoint keeps the SDK from appending another."""
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, json=_GEMINI_REPLY)
+
+    client = GoogleGenAIClient(
+        api_key="test-key",
+        model="gemini-3.8-flash",
+        base_url="https://gemini.example.test/v1beta",
+    )
+    http_options = client.client._api_client._http_options
+    http_options.httpx_async_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler)
+    )
+    client.client = genai.Client(api_key="test-key", http_options=http_options)
+
+    await client.generate_response([UserMessage(content="hi")])
+
+    assert urls[0].startswith(
+        "https://gemini.example.test/v1beta/models/gemini-3.8-flash:"
+    )
+
+
 def _openai_chat_client(
     model: str,
     model_parameters: dict[str, dict[str, object]],
