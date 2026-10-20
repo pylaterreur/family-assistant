@@ -1,7 +1,8 @@
 """The one place rows cross from one conversation into another.
 
 Every path that carries content between a Home and its threads goes through
-:func:`copy_across_boundary`, so a path added later cannot skip a rule. It
+this module -- :func:`copy_across_boundary`, or :func:`move_turn_across_boundary`
+for a turn the user moves -- so a path added later cannot skip a rule. It
 applies three:
 
 1. **Taint and profile.** Copied rows keep their taint exactly and are
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from family_assistant.processing.types import ProcessingServiceConfig
     from family_assistant.security.taint import TaintMetadata
     from family_assistant.storage.database import DatabaseExecutor
+    from family_assistant.storage.repositories.message_history import MovedTurnRows
 
 
 class CrossBoundaryCopyRefusedError(Exception):
@@ -126,18 +128,71 @@ async def copy_across_boundary(
                 )
             ]
         case CopiedTurns():
-            if not destination.profile.receives_household_context:
-                raise CrossBoundaryCopyRefusedError(
-                    f"Profile {destination.profile.id!r} does not receive household "
-                    "context, so conversation turns cannot be copied into it."
-                )
+            _require_household_context(destination)
             return await db.message_history.copy_turns(
                 source_interface_type=payload.source_interface_type,
                 source_conversation_id=payload.source_conversation_id,
                 turn_ids=payload.turn_ids,
                 destination_conversation_id=destination.conversation_id,
                 destination_profile_id=destination.profile.id,
+                timestamp=now,
             )
+
+
+@dataclass(frozen=True, slots=True)
+class MovedTurn:
+    """One whole top-level turn of a source conversation, to be moved out of it."""
+
+    source_interface_type: str
+    source_conversation_id: str
+    turn_id: str
+
+
+MOVED_TURN_MARKER = "(The user moved an exchange from here into one of their threads.)"
+"""What a moved turn leaves behind in its source.
+
+Fixed text written by code, so it carries no taint; clients render the marker
+from the thread it names rather than from this text.
+"""
+
+
+async def move_turn_across_boundary(
+    db: DatabaseExecutor,
+    *,
+    destination: BoundaryDestination,
+    turn: MovedTurn,
+    now: datetime,
+) -> MovedTurnRows:
+    """Move ``turn`` into ``destination`` under the three rules.
+
+    The turn's rows keep their taint and are re-stamped to the destination's
+    profile; the source keeps only a marker of where they went, so neither its
+    readers nor its model see the moved content any more.
+
+    Raises:
+        CrossBoundaryCopyRefusedError: the destination's profile does not
+            receive household context.
+        LookupError: the source has no top-level rows of the turn.
+    """
+    _require_household_context(destination)
+    return await db.message_history.move_turn(
+        source_interface_type=turn.source_interface_type,
+        source_conversation_id=turn.source_conversation_id,
+        turn_id=turn.turn_id,
+        destination_conversation_id=destination.conversation_id,
+        destination_profile_id=destination.profile.id,
+        marker_content=MOVED_TURN_MARKER,
+        now=now,
+    )
+
+
+def _require_household_context(destination: BoundaryDestination) -> None:
+    """The context gate: conversation turns enter only a profile that takes them."""
+    if not destination.profile.receives_household_context:
+        raise CrossBoundaryCopyRefusedError(
+            f"Profile {destination.profile.id!r} does not receive household "
+            "context, so conversation turns cannot be copied into it."
+        )
 
 
 async def _write_assistant_request(

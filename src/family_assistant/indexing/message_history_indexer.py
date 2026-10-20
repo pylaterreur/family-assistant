@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypedDict
 
 from family_assistant.observability.metrics import record_indexing_documents
+from family_assistant.storage.message_history import MESSAGE_HISTORY_SOURCE_TYPE
 from family_assistant.storage.tasks import TaskPriority
 from family_assistant.storage.vector import (
     add_document,
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-MESSAGE_HISTORY_SOURCE_TYPE = "message_history"
 MESSAGE_TURN_EMBEDDING_TYPE = "message_turn"
 DEFAULT_MESSAGE_HISTORY_INDEX_BATCH_SIZE = 50
 MAX_INDEXED_FIELD_LENGTH = 4000

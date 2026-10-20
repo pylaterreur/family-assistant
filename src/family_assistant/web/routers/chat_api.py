@@ -555,6 +555,15 @@ class ConversationMessage(BaseModel):
             "thread's conversation id, so the message is shown attributed to it"
         ),
     )
+    moved_to_thread: str | None = Field(
+        None,
+        description=(
+            "On a Home message marking a turn the user moved into a thread: "
+            "that thread's conversation id. Render it as 'Moved to <thread "
+            "title>' rather than showing its content; the turn itself is now "
+            "in the thread"
+        ),
+    )
     metadata: dict | None = Field(None, description="Additional message metadata")
 
 
@@ -604,6 +613,14 @@ class ThreadSummaryResponse(BaseModel):
     source_tool_call_id: str | None = Field(
         default=None, description="The Home tool call that started the thread, if any"
     )
+    anchor_message_id: int | None = Field(
+        default=None,
+        description=(
+            "The Home message the user continued the thread from, for its "
+            "'Started from' quote. Display only: the message may since have "
+            "been moved out of Home"
+        ),
+    )
     seed_request: str | None = Field(
         default=None, description="The request the thread was started with"
     )
@@ -629,6 +646,7 @@ def thread_summary_response(
         echo_message_id=summary.echo_message_id,
         unread_count=summary.unread_count or 0,
         source_tool_call_id=summary.source_tool_call_id,
+        anchor_message_id=summary.anchor_message_id,
         seed_request=summary.seed_request,
         preview=summary.preview,
         created_at=summary.created_at,
@@ -928,7 +946,7 @@ def get_stream_hub(request: Request) -> ConversationStreamHub:
     return hub
 
 
-def _resolve_requested_model_tier(
+def resolve_requested_model_tier(
     service: ProcessingService,
     model_tier: str | None,
 ) -> ResolvedModelSelection:
@@ -1128,6 +1146,25 @@ def _should_emit(event_type: str, allowed_event_types: frozenset[str] | None) ->
     return (
         event_type in allowed_event_types or event_type in _ALWAYS_EMITTED_EVENT_TYPES
     )
+
+
+async def turn_was_moved_out(
+    db_context: Database, conversation_id: str, turn_id: str
+) -> bool:
+    """Whether ``turn_id`` names a turn the user moved out of this conversation.
+
+    Part of the durable turn-id idempotency both turn endpoints apply: a moved
+    turn's own rows are gone, so without this a retry of the request that
+    started it would run it a second time. A turn moved out of some other
+    conversation is not the caller's to name here: 404, as for a turn whose
+    user row lives elsewhere.
+    """
+    moved_from = await db_context.message_history.moved_turn_conversation(turn_id)
+    if moved_from is None:
+        return False
+    if moved_from != conversation_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    return True
 
 
 async def _existing_send_message_response(
@@ -1433,6 +1470,29 @@ async def api_chat_create_turn(
     exists for this conversation, the existing identity is returned and no
     new producer is started.
     """
+    return await start_chat_turn(
+        payload,
+        request,
+        current_user,
+        default_processing_service=default_processing_service,
+        web_chat_interface=web_chat_interface,
+    )
+
+
+async def start_chat_turn(
+    payload: ChatTurnRequest,
+    request: Request,
+    current_user: Mapping[str, object],
+    *,
+    default_processing_service: ProcessingService,
+    web_chat_interface: "WebChatInterface",
+) -> ChatTurnResponse:
+    """Start a streaming turn, as ``POST /v1/chat/turns`` does.
+
+    For other routers whose action begins with a user turn -- a thread the user
+    starts runs its first turn through here -- so it streams, steers and
+    resumes exactly like any turn the user sends.
+    """
     conversation_id = payload.conversation_id or str(uuid.uuid4())
     pinned_thread = await _thread_for(request, conversation_id)
     interface_type = (
@@ -1501,6 +1561,13 @@ async def api_chat_create_turn(
             already_complete=True,
             incomplete=not turn_has_terminal_reply,
         )
+    if await turn_was_moved_out(idem_db, conversation_id, payload.turn_id):
+        return ChatTurnResponse(
+            turn_id=payload.turn_id,
+            conversation_id=conversation_id,
+            first_seq=0,
+            already_complete=True,
+        )
 
     # One turn at a time per conversation. A second turn started while the first
     # is mid-tool overlaps two LLM loops on one history: they interleave their
@@ -1557,7 +1624,7 @@ async def api_chat_create_turn(
     # Resolved here rather than inside the producer: the producer's refusals
     # can only reach the client as a stream error, and a tier the profile does
     # not accept is an answer about the request itself.
-    resolved_model_selection = _resolve_requested_model_tier(
+    resolved_model_selection = resolve_requested_model_tier(
         selected_processing_service, payload.model_tier
     )
 
@@ -2488,6 +2555,15 @@ class ServiceProfile(BaseModel):
             "one recorded on a past message. The default profile is always true."
         ),
     )
+    receives_household_context: bool = Field(
+        default=False,
+        description=(
+            "Whether Home conversation turns may enter this profile. A client "
+            "offers 'Continue in a thread' with context, and 'Move to thread...' "
+            "into a thread, only on a profile where this is true; elsewhere the "
+            "server refuses them with 409"
+        ),
+    )
 
 
 class ProfilesResponse(BaseModel):
@@ -2697,13 +2773,16 @@ async def run_non_streaming_turn(
             or existing_user_row.get("user_id") != user_id
         ):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        # A moved turn's reply is in a thread now; the marker left here, under
+        # the turn's id, is what a retry is answered with.
+        await turn_was_moved_out(db_context, conversation_id, payload.turn_id)
         existing_response = await _existing_send_message_response(
             db_context, conversation_id, payload.turn_id
         )
         if existing_response is not None:
             return existing_response
 
-    resolved_model_selection = _resolve_requested_model_tier(
+    resolved_model_selection = resolve_requested_model_tier(
         processing_service, payload.model_tier
     )
 
@@ -3124,6 +3203,7 @@ def _serialize_conversation_messages(
                 processing_profile_id=msg.get("processing_profile_id"),
                 reasoning_info=msg.get("reasoning_info"),
                 echoed_from_thread=msg.get("echoed_from_conversation_id"),
+                moved_to_thread=msg.get("moved_to_conversation_id"),
                 metadata=None,
             )
         )
@@ -3981,6 +4061,7 @@ async def get_available_profiles(
                     service_config.user_selectable
                     or profile_id == default_processing_service.service_config.id
                 ),
+                receives_household_context=service_config.receives_household_context,
                 llm_model=getattr(service_config, "llm_model", None),
                 available_tools=sorted(available_tools),
                 enabled_mcp_servers=sorted(enabled_mcp_servers),

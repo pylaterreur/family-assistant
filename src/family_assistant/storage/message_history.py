@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 # instead, so the index is PostgreSQL-only.
 MESSAGE_CONTENT_SEARCH_CONFIG = literal_column("'simple'::regconfig")
 
+MESSAGE_HISTORY_SOURCE_TYPE = "message_history"
+"""The ``documents.source_type`` of a message-history turn's search index record."""
+
 # Define the message history table
 message_history_table = Table(
     "message_history",
@@ -114,6 +117,9 @@ message_history_table = Table(
     # On a Home row that echoes a finished thread's final message: the thread
     # it was copied from, so clients render it attributed to that thread.
     Column("echoed_from_conversation_id", String(255), nullable=True),
+    # On a Home row marking where a turn the user moved went: the thread it
+    # was moved into. The turn itself is no longer in Home.
+    Column("moved_to_conversation_id", String(255), nullable=True),
     # Backs the sole-owner predicate behind the conversation list, which asks
     # "does this conversation carry a user message owned by anyone other than
     # the caller?" as a correlated NOT EXISTS. Without it PostgreSQL answers

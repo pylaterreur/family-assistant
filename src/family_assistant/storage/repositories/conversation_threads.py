@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from family_assistant.security.taint import TaintMetadata
+    from family_assistant.storage.database import DatabaseTransaction
 
 CloseOutcome = Literal["done", "failed"]
 ClosedBy = Literal["assistant", "user"]
@@ -226,6 +227,27 @@ class ConversationThreadsRepository(BaseRepository):
                 updated_at=now,
             )
         )
+
+    async def discard_thread(self, conversation_id: str) -> None:
+        """Remove a thread that never started: its record and whatever was copied in.
+
+        For a thread whose creation is abandoned before its first turn, so
+        nothing the user wrote is lost.
+        """
+
+        async def _discard(txn: DatabaseTransaction) -> None:
+            await txn.execute(
+                message_history_table.delete().where(
+                    message_history_table.c.conversation_id == conversation_id
+                )
+            )
+            await txn.execute(
+                conversation_threads_table.delete().where(
+                    conversation_threads_table.c.conversation_id == conversation_id
+                )
+            )
+
+        await self._db.atomic(_discard)
 
     async def set_seed_message(
         self, conversation_id: str, seed_message_id: int, now: datetime
