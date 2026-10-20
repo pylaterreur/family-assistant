@@ -818,6 +818,38 @@ async def test_moving_into_a_thread_awaiting_its_reply_is_refused(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("profiles")
+async def test_an_echo_is_not_moved(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    """An echo is the thread's outcome record, not an exchange the user started."""
+    db = Database(engine=db_engine)
+    home = await _home(api_test_client)
+    thread = await _thread_on(api_test_client, CONTEXT_PROFILE)
+    [reply] = [
+        cast("int", row["internal_id"])
+        for row in await _rows(db, thread)
+        if row["role"] == "assistant"
+    ]
+    echo = await db.message_history.copy_message_as_echo(
+        source_internal_id=reply,
+        destination_conversation_id=home,
+        destination_profile_id="chat_api_test_profile",
+        echoed_from_conversation_id=thread,
+        turn_id=str(uuid.uuid4()),
+        timestamp=NOW,
+    )
+
+    response = await api_test_client.post(
+        f"/api/v1/chat/home/threads/{thread}/moved-turns",
+        json={"message_id": echo},
+    )
+
+    assert response.status_code == 409
+    assert await db.message_history.get_row_by_internal_id(echo) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("profiles")
 async def test_a_failed_turn_can_be_moved(
     api_test_client: AsyncClient, db_engine: AsyncEngine
 ) -> None:

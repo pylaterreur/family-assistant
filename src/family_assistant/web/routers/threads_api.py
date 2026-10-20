@@ -705,6 +705,21 @@ async def move_turn_to_thread(
     hub = get_stream_hub(request)
     row = await _home_turn_row(db_context, home, payload.message_id, hub)
     assert row["turn_id"] is not None
+    # What moves is an exchange the user started. A turn with no message of
+    # theirs -- a thread's echoed outcome, a proactive message -- is a record
+    # other things point at, and stays in Home.
+    if not any(
+        turn_row["role"] == "user"
+        and not turn_row["is_internal"]
+        and turn_row["conversation_id"] == home
+        for turn_row in await db_context.message_history.get_rows_by_turn_id(
+            row["turn_id"]
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only an exchange you started can be moved.",
+        )
     # A row landing in either conversation mid-turn would sort into the middle
     # of that turn's own rows.
     # A thread whose starting run has not finished -- queued, or waiting on its
