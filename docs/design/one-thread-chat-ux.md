@@ -3,10 +3,11 @@
 ## Status
 
 Approved. Milestones 1 (threads exist) and 2 (Home on web, including the right-hand panel),
-milestone 3 (state and echo) on the backend, the web and iOS, milestone 4 (Home on iOS), and the
-backend of milestone 5 (user overrides, and automations' "new conversation per run" as a thread)
-implemented. Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html) (rendered:
-[iOS](one-thread-ux/ios.png), [web](one-thread-ux/web.png), [notes](one-thread-ux/notes.png)).
+milestone 3 (state and echo) on the backend, the web and iOS, milestone 4 (Home on iOS), and
+milestone 5 (user overrides, and automations' "new conversation per run" as a thread) on the
+backend and iOS implemented. Mockups: [one-thread-ux/mockups.html](one-thread-ux/mockups.html)
+(rendered: [iOS](one-thread-ux/ios.png), [web](one-thread-ux/web.png),
+[notes](one-thread-ux/notes.png)).
 
 ## Problem
 
@@ -397,6 +398,13 @@ and each path is governed:
   is retried only when a newer message arrives, never in a loop. "At the bottom" comes from the
   scroll view's own visibility report, which iOS 17 lacks. There it falls back to the bottom of the
   transcript having appeared, which can stay true after scrolling up within the loaded page.
+
+- **iOS: overrides offer what the client can see, and the server decides.** "Move to thread…" is
+  offered while Home looks at rest and lists threads as available from the state the client last
+  loaded; a reply that started elsewhere a moment ago is refused by the server, and the refusal is
+  shown. A "Started from" quote is drawn from Home's loaded messages, so a thread continued from a
+  message Home no longer holds shows no quote. A move made on another device takes the moved rows
+  out of Home when its marker arrives.
 
 ## Decisions
 

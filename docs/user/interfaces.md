@@ -337,6 +337,26 @@ including those from before threads, under **Earlier**. The list also has search
 Something you share into the app lands in Home's composer. An intelligence level picked in Home
 applies to that one message. See [Home and threads](#home-and-threads) for how threads work.
 
+You can start and fill threads yourself:
+
+- **New Thread**, at the top of the chat list: pick an assistant, write the opening message, and the
+  thread opens with its first reply on the way.
+- **Send as Thread**: long-press the send button in Home to send what you've written, with its
+  attachments, as a new thread's first message instead. Pick the assistant next. The intelligence
+  level you picked goes with it if that assistant offers the same level.
+- **Continue in Thread**: long-press a message in Home. With **Bring this conversation** on, the
+  thread starts with that exchange and up to four before it, and an opening message is optional.
+  Some assistants (such as the browser) never see Home conversations; for those the thread starts
+  from your opening message alone, and the sheet says so. The thread shows the message it started
+  from at the top.
+- **Move to Thread**: long-press a message in Home to move that whole exchange (your message and the
+  reply) into an existing thread. Home keeps a **Moved to …** link in its place; tap it to open the
+  thread. It's offered once no reply is in progress. Threads that can't take it are listed greyed
+  out with the reason: one whose assistant doesn't see Home conversations, or one that is still
+  working.
+
+If the server refuses one of these, an alert says why, and nothing changes.
+
 **Getting content in:** share a supported file from the iOS share sheet or Files "Open In" and it
 opens a new Chat draft with the file attached. A copied image can be pasted with the paste button
 beside the composer. The Photos share sheet does not list Family Assistant — copy the photo and
