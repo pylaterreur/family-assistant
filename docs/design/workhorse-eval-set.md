@@ -31,19 +31,39 @@ Questions the set should answer:
 The guiding metric, inherited from the tiers design, is *successful useful work per dollar at
 acceptable latency*.
 
-### Models of interest
+### Configurations under test
 
-The first comparison matrix, each expressed as an eval-only tier (see "Boot"):
+A candidate is a **model at an effort level**, not just a model: effort is the cheaper dial to turn
+before switching models, and the eval should say when it is enough. Each configuration is an
+eval-only tier (see "Boot") with a **single-entry chain and no fallback**, so a trial's result is
+that configuration's or a visible failure, never a stand-in's answer under its name. The production
+recipes, with their routing and fallbacks, are assessed separately afterwards with the winners in
+place.
 
-| Candidate        | Identifier          | Status in config                                      |
-| ---------------- | ------------------- | ----------------------------------------------------- |
-| current standard | `gemini-3.8-flash`  | the `standard` tier's primary                         |
-| current deep     | `claude-opus-5-5`   | the `deep` tier's primary                             |
-| Claude Sonnet    | `claude-sonnet-5-5` | known to the Anthropic adapter, no tier names it      |
-| Gemini Argon     | `gemini-4-argon`    | the `gemini_4_argon` tier                             |
-| GPT Luna         | to confirm          | not configured anywhere yet; needs a tier and adapter |
+First round, six models in eight configurations:
 
-More will follow; adding one is adding a tier to the eval's own config, nothing else.
+| Configuration     | Identifier          | Effort | What it answers                                                |
+| ----------------- | ------------------- | ------ | -------------------------------------------------------------- |
+| Flash, as shipped | `gemini-3.8-flash`  | medium | the Standard baseline                                          |
+| Flash, low        | `gemini-3.8-flash`  | low    | whether routine requests finish faster with less thinking      |
+| Opus, as shipped  | `claude-opus-5-5`   | high   | the Deep baseline                                              |
+| Opus, medium      | `claude-opus-5-5`   | medium | whether lowering effort beats switching models on cost/latency |
+| Gemini Argon      | `gemini-4-argon`    | medium | the strongest challenger for long tool sequences               |
+| GPT-6.1 Sol       | `gpt-6.1-sol`       | medium | whether the browser tier's model earns a broader role          |
+| Claude Sonnet     | `claude-sonnet-5-5` | medium | whether a cheaper Claude keeps enough of Opus's judgement      |
+| GPT Luna          | `gpt-6-luna`        | medium | the cheap OpenAI model already on the reminder path            |
+
+Second round, on the cases the first round failed or disagreed on: Argon at high and the Max tier's
+Fable at xhigh, to test whether more spend actually rescues failures.
+
+Effort is per chain entry (`llm_parameters`) for the Anthropic and OpenAI adapters today; the Google
+adapter sends no thinking level yet, so **Flash low depends on adding that** (in progress
+separately). Whatever was sent, the harness records the **effective request parameters** beside
+every trial — a configuration that silently ran at the default effort would otherwise look like a
+result.
+
+The managed Antigravity coding agent (`coder`) is a different system — server-side execution, its
+own effort controls — and is not in this set.
 
 ## What exists and is reused
 
@@ -135,9 +155,29 @@ represents the workload rather than its most common shape:
   signals; failures and escalations are over-sampled on purpose, because a set made only of turns
   that went fine cannot discriminate between models.
 
+Curation then checks the sample against a short list of **coverage areas**, each needing both
+ordinary successes and known failures, and each asking one thing of the system:
+
+| Area                          | Cases to include                                                                           | Question                                                              |
+| ----------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| Retrieval and grounding       | facts spread across notes, calendar, email, documents; stale records; near-duplicate names | finds the complete, current answer and cites the real source          |
+| Cross-tool completion         | dependent actions, pagination, related-record updates, partial failures                    | reaches the intended end state with no omissions or unrelated changes |
+| Analysis and judgement        | conflicting evidence, competing constraints, comparisons needing a recommendation          | resolves what matters and separates fact from assumption              |
+| Memory and continuity         | follow-ups, corrected facts, changed preferences, resumed work, compacted history          | applies corrections without resurrecting stale state                  |
+| Delegation and tier selection | simple requests that should stay local; hard ones that need another profile                | picks a useful profile or tier and carries the task through           |
+| Easy with room to overwork    | one-record lookups, a simple reminder, a question with one authoritative answer            | stops when the task is done instead of buying quality with checking   |
+| Multimodal                    | a handful of photo, screenshot and PDF turns, if the traffic warrants it                   | the whole path extracts the right information                         |
+
+Two areas are deliberately thin here. Authority and trust — instructions in retrieved content,
+ambiguous authorisation — is the tool-call review eval's job; this set keeps only a few **benign
+requests that resemble risky ones**, to measure the friction the reviewer adds to legitimate work.
+Engineering investigation (`engineer` profile) needs a different sandbox — a source tree,
+diagnostics endpoints, logs — and is a later set built on the same harness.
+
 The output is a ranked candidate list with frequency per stratum, for the maintainer to skim. Target
-for the first version: about 60–100 cases, with every stratum that has non-trivial frequency
-represented and roughly a third drawn from turns with a negative outcome signal.
+for the first version: about 60 cases, with every stratum that has non-trivial frequency
+represented, roughly a third drawn from turns with a negative outcome signal, and several short
+multi-turn sequences.
 
 ### Curate into cases
 
@@ -267,12 +307,38 @@ Three layers, cheapest first:
    drift is visible.
 
 Every case runs with several seeds (three to start); seed disagreement is reported per case the way
-the review eval reports verdict flips.
+the review eval reports verdict flips. The judge is blinded to which configuration produced a reply,
+and presentation quality is scored as its own line so polished writing cannot hide a wrong result.
 
-A run report, written to the private tree, breaks out per tier/model and per stratum: task success,
-side-effect correctness, confirmation friction, unbacked-tool fallbacks hit, judge preference vs
-history, tokens, cost and latency. A **sanitised summary** (counts, rates, strata labels, no text)
-is what gets published under `docs/development/eval-results/`, in the existing shape.
+### Scorecard
+
+Per configuration and per stratum, in this order of importance:
+
+1. **Correct completion** — the primary metric. Required outcomes achieved with the right people,
+   records, dates and quantities; no unintended changes; the reply's claims agree with what actually
+   happened. Authority violations and wrong side effects are explicit failures, never averaged in.
+2. **Spend per successful task** — cost per attempt and cost per success (all spend across every
+   attempt, divided by successes), counting the parent turn, every delegation subconversation,
+   retries and failed attempts. The application records token usage, not money, so the harness keeps
+   the **raw usage per call** and prices it at report time from a versioned price table; results can
+   be repriced later without rerunning (Argon's introductory pricing is the near example).
+3. **Experienced latency** — time to first useful token or action, time to completion, median and
+   tail with sample counts, and model wait versus tool wait, so a fast acknowledgement cannot make a
+   slow task look responsive. Also the fraction of tasks completed within a chosen time budget.
+4. **Supervision required** — clarifying questions that were unnecessary, confirmations asked,
+   corrections the user would have had to make, manual recovery.
+5. **Efficiency and stopping** — model rounds, tool calls, repeated searches, retries, delegations;
+   whether extra verification changed correctness and whether the model stopped once the task was
+   adequately done. This is the layer that explains *why* a configuration costs more.
+6. **Answer usefulness** — the judge's rubric: correctness, completeness, evidence, clarity,
+   appropriate uncertainty, with presentation separate.
+
+A run report, written to the private tree, carries all of this plus the harness findings (outcome
+taxonomy, unbacked-tool fallbacks hit). A **sanitised summary** (counts, rates, strata labels, no
+text) is what gets published under `docs/development/eval-results/`, in the existing shape. The
+report the maintainer actually wants is the success–cost–latency table per profile and the routing
+decisions it supports: which requests Flash handles adequately, where lower effort pays off, where
+Argon earns its cost, where Opus still materially improves the outcome.
 
 Held-out discipline follows the review eval: the case set is split into dev and gate slices by
 stratum at curation time; prompt and routing tuning uses dev; a model-switch decision reads gate,
@@ -304,10 +370,10 @@ Each milestone is independently useful and verifiable.
    harness-attributed outcome before any model is judged on the set.
 6. **Judge, seeds and report.** Rubric and pairwise judging, seed flips, per-stratum report,
    sanitised publish. Verified by a judge-vs-human agreement check on the spot-check sample.
-7. **First real comparison.** Run the current `standard` and `deep` tiers, Claude Sonnet, Gemini
-   Argon and GPT Luna on the gate slice; publish a sanitised result. Outcome: the first evidence for
-   the tiers design's open question of whether `deep` improves the categories Auto would route
-   there, and the first ranking of candidates on the real workload.
+7. **First real comparison.** Run the first-round configurations on the gate slice; publish a
+   sanitised result. Outcome: the first evidence for the tiers design's open question of whether
+   `deep` improves the categories Auto would route there, the first ranking of candidates on the
+   real workload, and the list of cases the second round (Argon high, Fable xhigh) should target.
 
 ## Deliberate simplifications
 
@@ -334,12 +400,16 @@ Each milestone is independently useful and verifiable.
   slice in CI.
 - **The tool-call reviewer runs its configured model** during eval runs; confirmations are counted
   as friction rather than pinned away.
-- **First candidates:** Claude Sonnet, Gemini Argon, GPT Luna, against the current `standard` and
-  `deep` tiers.
+- **Candidates are model-at-effort configurations with no fallback**, assessed on the real prompts,
+  tools and adapters; the production recipes with routing and fallback are assessed after, with the
+  winners in place.
+- **First round:** Flash medium and low, Opus high and medium, Argon, GPT-6.1 Sol, Sonnet and Luna;
+  second round adds Argon high and Fable xhigh on the failures.
+- **Engineer and coder are out of this set.** Engineer gets a later set on the same harness;
+  Antigravity coding is a different system.
 
 ## Open questions
 
-- The wire identifier and adapter for GPT Luna.
 - Whether a `complex_tasks` case runs on that profile (its prompt and iteration ceiling) with the
   candidate as its tier, or on `default_assistant` to ask whether the delegation was needed at all.
   Proposed: both, as two cases sharing one journey, since the second is the question Auto routing
