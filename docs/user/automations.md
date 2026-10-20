@@ -84,10 +84,13 @@ To keep one in the conversation where you created it, say so: "remind me here to
 replying where they always have.
 
 In the web app you can also ask for each run to start a **new conversation**: "every morning at 7am,
-start a new conversation with my daily briefing." Each run then appears as its own conversation in
-the sidebar. On the Automations page this is the "Start a new conversation each time" checkbox. A
-new conversation has no earlier history, so the automation's prompt has to say everything the
-assistant needs. This option isn't available in Telegram, where a chat is a single conversation.
+start a new conversation with my daily briefing." Each run then becomes a thread of its own off your
+Home, named after the automation and the day it ran, so it appears as a card in Home and in the
+thread list; you can reply in it, and it can be finished like any other thread. Where threads aren't
+in use, each run appears as its own conversation in the sidebar instead. On the Automations page
+this is the "Start a new conversation each time" checkbox. A run started this way has no earlier
+history, so the automation's prompt has to say everything the assistant needs. This option isn't
+available in Telegram, where a chat is a single conversation.
 
 ## Managing automations
 
@@ -137,8 +140,9 @@ If a script calls an action that would normally need your approval — deleting 
 
 A script can also call `wake_llm()` to hand off to the assistant conditionally, with context you
 choose. That's a good middle ground: cheap filtering in the script, judgement only when it's
-actually needed. Pass `new_conversation=True` to have that hand-off start a new web conversation
-rather than continue the current one.
+actually needed. Pass `new_conversation=True` to have that hand-off start afresh — a new thread of
+your Home, or a new web conversation where threads aren't in use — rather than continue the current
+one.
 
 ## Events from outside your household
 

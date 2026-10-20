@@ -249,6 +249,52 @@ class ConversationThreadsRepository(BaseRepository):
 
         await self._db.atomic(_discard)
 
+    async def discard_thread_of_turn(self, conversation_id: str, turn_id: str) -> bool:
+        """Remove a thread that holds nothing but ``turn_id``'s rows. Returns whether it did.
+
+        Anything else in it -- a reply the user sent while that turn ran -- keeps
+        the thread and every row. Only ``turn_id``'s rows are ever deleted, and
+        the record only while no row is left, so a reply landing mid-discard is
+        never lost: at worst it stays in a conversation that is no longer a
+        thread.
+        """
+
+        async def _discard(txn: DatabaseTransaction) -> bool:
+            other = await txn.fetch_one(
+                select(message_history_table.c.internal_id)
+                .where(
+                    message_history_table.c.conversation_id == conversation_id,
+                    or_(
+                        message_history_table.c.turn_id.is_(None),
+                        message_history_table.c.turn_id != turn_id,
+                    ),
+                )
+                .limit(1)
+            )
+            if other is not None:
+                return False
+            await txn.execute(
+                message_history_table.delete().where(
+                    message_history_table.c.conversation_id == conversation_id,
+                    message_history_table.c.turn_id == turn_id,
+                )
+            )
+            removed = await txn.execute(
+                conversation_threads_table.delete().where(
+                    conversation_threads_table.c.conversation_id == conversation_id,
+                    ~(
+                        select(message_history_table.c.internal_id)
+                        .where(
+                            message_history_table.c.conversation_id == conversation_id
+                        )
+                        .exists()
+                    ),
+                )
+            )
+            return removed.rowcount != 0
+
+        return await self._db.atomic(_discard)
+
     async def set_seed_message(
         self, conversation_id: str, seed_message_id: int, now: datetime
     ) -> None:

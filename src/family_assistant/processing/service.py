@@ -45,6 +45,7 @@ from family_assistant.processing.history_compaction import (
     without_bound_thinking,
 )
 from family_assistant.processing.history_window import (
+    HistoryLimits,
     HistoryWindow,
     HistoryWindowLoader,
     messages_size,
@@ -1125,7 +1126,12 @@ class ProcessingService:
                 processing_profile_id=self.service_config.id,
                 subconversation_id=subconversation_id,
             ),
-            limits=self.context_preparer.get_history_limits(interface_type),
+            limits=await self._history_limits(
+                db_context,
+                interface_type=interface_type,
+                conversation_id=conversation_id,
+                subconversation_id=subconversation_id,
+            ),
             now=self.clock.now(),
             active_turn_id=active_turn_id,
             thread_root_id=thread_root_id,
@@ -1134,6 +1140,45 @@ class ProcessingService:
             record=record,
             request_text=request_text,
         )
+
+    async def _history_limits(
+        self,
+        db_context: Database,
+        *,
+        interface_type: str,
+        conversation_id: str,
+        subconversation_id: str | None,
+    ) -> HistoryLimits:
+        """This profile's history limits here, or Home's in a thread it keeps none in.
+
+        A profile that keeps no history (``event_handler``) does so because a
+        shared conversation would mix unrelated events into each turn. A thread
+        holds one piece of work, so its own history is safe to show, and
+        without it a reply in the thread could not see what it answers.
+        """
+        limits = self.context_preparer.get_history_limits(interface_type)
+        if (
+            limits.budget_chars > 0
+            or limits.min_turns > 0
+            or subconversation_id is not None
+            or not self.app_config.conversation_threads.enabled
+            or await db_context.conversation_threads.get_thread(conversation_id) is None
+        ):
+            return limits
+        home_service = (
+            self
+            if self.service_config.id == self.app_config.default_service_profile_id
+            else (self.processing_services_registry or {}).get(
+                self.app_config.default_service_profile_id
+            )
+        )
+        if not isinstance(home_service, ProcessingService):
+            raise RuntimeError(
+                f"Home's profile {self.app_config.default_service_profile_id!r} is "
+                "not a local profile, so a thread on a profile that keeps no "
+                "history has no history limits to use."
+            )
+        return home_service.context_preparer.get_history_limits(interface_type)
 
     async def _compaction_capabilities(self) -> CompactionCapabilities:
         """Which references this profile can follow, for compacted turns."""

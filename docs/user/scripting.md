@@ -1141,12 +1141,13 @@ wake_llm(context, include_event=True)
   - **Dictionary**: For structured data with multiple fields
 - `include_event` (bool, optional): Whether to include the original event data in the wake context
   (default: True)
-- `new_conversation` (bool, optional): Start a new web conversation for the woken assistant instead
-  of waking where the script's automation replies — your Home, or the conversation it was created in
-  (see [automations.md](automations.md#where-the-assistant-replies)) (default: False). Only works
-  for scripts that belong to a web conversation. The new conversation has no history, so put
-  everything the assistant needs in `context`. Within one run, the calls that set it share one new
-  conversation and the rest wake the usual one.
+- `new_conversation` (bool, optional): Start afresh for the woken assistant instead of waking where
+  the script's automation replies — your Home, or the conversation it was created in (see
+  [automations.md](automations.md#where-the-assistant-replies)) (default: False). It starts a new
+  thread of your Home, or a new web conversation where threads aren't in use. Only works for scripts
+  that belong to a web conversation. The new thread or conversation has no history, so put
+  everything the assistant needs in `context`; its first line also names the thread. Within one run,
+  the calls that set it share one new thread or conversation and the rest wake the usual one.
 
 **Usage in Event Scripts:**
 
