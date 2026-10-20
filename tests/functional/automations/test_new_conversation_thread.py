@@ -618,6 +618,13 @@ async def test_discarding_a_wake_thread_spares_anything_but_the_wake(
         )
 
     assert await db.conversation_threads.get_thread("web_conv_replied") is not None
+    # The reply keeps the whole thread, the wake prompt it answers included.
+    kept = await db.fetch_all(
+        select(message_history_table.c.internal_id).where(
+            message_history_table.c.conversation_id == "web_conv_replied"
+        )
+    )
+    assert len(kept) == 2
     assert await db.message_history.get_row_by_internal_id(reply_id) is not None
     assert await db.conversation_threads.get_thread("web_conv_quiet") is None
     assert (
