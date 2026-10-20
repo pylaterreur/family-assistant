@@ -469,7 +469,9 @@ jobs:
           PY
       - name: Upload backend test results (SQLite)
         uses: actions/upload-artifact@v7
-        if: always()
+        # Successful runs keep the summary above; retain full diagnostics for
+        # failures and cancellations (including timeouts) for seven days.
+        if: failure() || cancelled()
         with:
           name: backend-test-artifacts-sqlite-${{ github.run_id }}
           path: test-results/backend-sqlite-report.json
@@ -588,7 +590,9 @@ jobs:
           PY
       - name: Upload backend test results (PostgreSQL)
         uses: actions/upload-artifact@v7
-        if: always()
+        # Successful runs keep the summary above; retain full diagnostics for
+        # failures and cancellations (including timeouts) for seven days.
+        if: failure() || cancelled()
         with:
           name: backend-test-artifacts-postgres-${{ github.run_id }}
           path: test-results/backend-postgres-report.json
