@@ -250,7 +250,10 @@ async def test_dict_fails_script_not_evaluated(
     """When dict conditions fail, script is not evaluated (short-circuit)."""
     evaluator = event_processor.condition_evaluator
     with patch.object(
-        evaluator, "evaluate_condition", wraps=evaluator.evaluate_condition
+        evaluator,
+        "evaluate_condition",
+        autospec=True,
+        side_effect=evaluator.evaluate_condition,
     ) as evaluate_condition:
         result = await event_processor._check_match_conditions(
             EVENT_DATA,

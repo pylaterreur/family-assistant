@@ -2,9 +2,10 @@
 
 import asyncio
 import os
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 from assertpy import assert_that, soft_assertions  # type: ignore[import-untyped]
@@ -14,14 +15,10 @@ from family_assistant.indexing.processors.network_processors import (
     WebFetcherProcessor,
     WebFetcherProcessorConfig,
 )
+from family_assistant.storage.base import create_engine_with_sqlite_optimizations
+from family_assistant.storage.database import Database
+from family_assistant.tools.types import ToolExecutionContext
 from family_assistant.utils.scraping import MockScraper, ScrapeResult
-
-if TYPE_CHECKING:
-    from family_assistant.tools.types import ToolExecutionContext
-
-
-from datetime import UTC, datetime  # Added for MockDocumentImpl
-from typing import Any  # Added for MockDocumentImpl
 
 # --- Mocks and Fixtures ---
 
@@ -102,12 +99,25 @@ def mock_document() -> MockDocumentImpl:  # Changed return type
 
 
 @pytest.fixture
-def mock_tool_execution_context() -> MagicMock:
-    """Provides a mock ToolExecutionContext object."""
-    # Add attributes if the processor uses them (e.g., db_context, enqueue_task)
-    # For WebFetcherProcessor, it's currently just passed through.
-    return MagicMock(
-        spec=["db_context", "enqueue_task", "llm_interface", "embedding_generator"]
+def mock_tool_execution_context() -> ToolExecutionContext:
+    """A real ToolExecutionContext; WebFetcherProcessor only passes it through."""
+    return ToolExecutionContext(
+        interface_type="test",
+        conversation_id="network-processor-test",
+        user_name="Tester",
+        turn_id=None,
+        # The processor reads nothing from the database; this engine never connects.
+        db_context=Database(
+            create_engine_with_sqlite_optimizations("sqlite+aiosqlite:///:memory:")
+        ),
+        processing_service=None,
+        clock=None,
+        plugins=None,
+        event_sources=None,
+        attachment_registry=None,
+        credential_resolvers=None,
+        api_backend=None,
+        timezone=ZoneInfo("UTC"),
     )
 
 
@@ -126,7 +136,7 @@ def default_config() -> WebFetcherProcessorConfig:
 async def test_fetch_markdown_content_success(
     default_config: WebFetcherProcessorConfig,
     mock_document: MockDocumentImpl,  # Changed type hint
-    mock_tool_execution_context: "ToolExecutionContext",
+    mock_tool_execution_context: ToolExecutionContext,
 ) -> None:
     """Test successful fetching and processing of Markdown content."""
     url = "http://example.com/markdown"
@@ -171,7 +181,7 @@ async def test_fetch_markdown_content_success(
 async def test_fetch_text_content_success(
     default_config: WebFetcherProcessorConfig,
     mock_document: MockDocumentImpl,  # Changed type hint
-    mock_tool_execution_context: "ToolExecutionContext",
+    mock_tool_execution_context: ToolExecutionContext,
 ) -> None:
     """Test successful fetching and processing of plain text content."""
     url = "http://example.com/text"
@@ -208,7 +218,7 @@ async def test_fetch_text_content_success(
 async def test_fetch_image_content_success(
     default_config: WebFetcherProcessorConfig,
     mock_document: MockDocumentImpl,  # Changed type hint
-    mock_tool_execution_context: "ToolExecutionContext",
+    mock_tool_execution_context: ToolExecutionContext,
 ) -> None:
     """Test successful fetching and storing of image content."""
     url = "http://example.com/image.png"
@@ -260,7 +270,7 @@ async def test_fetch_image_content_success(
 async def test_scraper_error_passes_through_item(
     default_config: WebFetcherProcessorConfig,
     mock_document: MockDocumentImpl,  # Changed type hint
-    mock_tool_execution_context: "ToolExecutionContext",
+    mock_tool_execution_context: ToolExecutionContext,
 ) -> None:
     """Test that if scraper returns an error, the original item is passed through."""
     url = "http://example.com/will_error"
@@ -292,7 +302,7 @@ async def test_scraper_error_passes_through_item(
 async def test_non_target_embedding_type_passes_through(
     default_config: WebFetcherProcessorConfig,
     mock_document: MockDocumentImpl,  # Changed type hint
-    mock_tool_execution_context: "ToolExecutionContext",
+    mock_tool_execution_context: ToolExecutionContext,
 ) -> None:
     """Test that items with non-target embedding_types are passed through."""
     url = "http://example.com/ignored_type"
@@ -317,7 +327,7 @@ async def test_non_target_embedding_type_passes_through(
 async def test_non_url_content_passes_through(
     default_config: WebFetcherProcessorConfig,
     mock_document: MockDocumentImpl,  # Changed type hint
-    mock_tool_execution_context: "ToolExecutionContext",
+    mock_tool_execution_context: ToolExecutionContext,
 ) -> None:
     """Test that items with non-URL content are passed through."""
     mock_scraper = MockScraper(url_map={})  # Should not be called
@@ -342,14 +352,17 @@ async def test_non_url_content_passes_through(
 async def test_empty_input_list(
     default_config: WebFetcherProcessorConfig,
     mock_document: MockDocumentImpl,  # Changed type hint
-    mock_tool_execution_context: "ToolExecutionContext",
+    mock_tool_execution_context: ToolExecutionContext,
 ) -> None:
     """Test that an empty list of input items results in an empty list."""
     mock_scraper = MockScraper(url_map={})
     processor = WebFetcherProcessor(scraper=mock_scraper, config=default_config)
 
     results = await processor.process(
-        [], mock_document, MagicMock(spec=IndexableContent), mock_tool_execution_context
+        [],
+        mock_document,
+        IndexableContent(embedding_type="raw_url", source_processor="test"),
+        mock_tool_execution_context,
     )
     assert_that(results).is_empty()
     assert_that(processor._temp_files).is_empty()
@@ -361,7 +374,7 @@ async def test_empty_input_list(
 async def test_multiple_items_processing(
     default_config: WebFetcherProcessorConfig,
     mock_document: MockDocumentImpl,  # Changed type hint
-    mock_tool_execution_context: "ToolExecutionContext",
+    mock_tool_execution_context: ToolExecutionContext,
 ) -> None:
     """Test processing a mix of items: successful fetch, error, and pass-through."""
     url_md = "http://example.com/markdown"
@@ -468,7 +481,7 @@ async def test_multiple_items_processing(
 async def test_cleanup_temp_files_file_externally_deleted(
     default_config: WebFetcherProcessorConfig,
     mock_document: MockDocumentImpl,  # Changed type hint
-    mock_tool_execution_context: "ToolExecutionContext",
+    mock_tool_execution_context: ToolExecutionContext,
 ) -> None:
     """Test cleanup_temp_files when a tracked file was deleted externally."""
     missing_url = "http://example.com/missing.gif"
@@ -520,7 +533,7 @@ async def test_cleanup_temp_files_file_externally_deleted(
 async def test_del_cleanup_fallback(
     default_config: WebFetcherProcessorConfig,
     mock_document: MockDocumentImpl,
-    mock_tool_execution_context: "ToolExecutionContext",
+    mock_tool_execution_context: ToolExecutionContext,
 ) -> None:
     """Test that deleting a processor removes binary content left for cleanup."""
     url = "http://example.com/image.gif"

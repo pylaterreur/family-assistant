@@ -8,7 +8,7 @@ in unchanged, in the right position, and must not leak into other providers.
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Self
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from pydantic import BaseModel
@@ -354,18 +354,32 @@ class _FakeAnthropicStream:
         )
 
 
+class _RecordingCreate:
+    """Stands in for ``messages.create``, returning one response and recording requests."""
+
+    def __init__(self, response: object) -> None:
+        self.response = response
+        self.requests: list[dict[str, object]] = []
+
+    async def __call__(self, **kwargs: object) -> object:
+        self.requests.append(kwargs)
+        return self.response
+
+
+async def _no_vcr_replay(_params: dict[str, object]) -> None:
+    return None
+
+
 async def test_production_stream_loop_emits_thinking_delta() -> None:
     """The production messages.stream branch keeps thinking separate from text."""
     client = AnthropicClient(api_key="test-key", model="claude-sonnet-4-6")
     fake_stream = _FakeAnthropicStream()
 
     with (
+        patch.object(client, "_maybe_parse_vcr_stream", new=_no_vcr_replay),
         patch.object(
-            client,
-            "_maybe_parse_vcr_stream",
-            new=AsyncMock(return_value=None),
+            client.client.messages, "stream", new=lambda **_kwargs: fake_stream
         ),
-        patch.object(client.client.messages, "stream", return_value=fake_stream),
     ):
         events = [
             event
@@ -494,17 +508,21 @@ async def test_structured_output_keeps_thinking_and_the_configured_effort() -> N
         usage=SimpleNamespace(input_tokens=1, output_tokens=1),
         stop_reason="end_turn",
     )
-    create = AsyncMock(return_value=response)
+    create = _RecordingCreate(response)
 
     with patch.object(client.client.messages, "create", new=create):
         result = await client.generate_structured([UserMessage(content="hi")], _Model)
 
     assert result == _Model(answer="42")
-    assert create.await_args is not None
-    sent = create.await_args.kwargs
-    assert sent["output_config"]["effort"] == "high"
-    assert sent["output_config"]["format"]["type"] == "json_schema"
-    assert sent["thinking"]["type"] == "adaptive"
+    assert len(create.requests) == 1
+    sent = create.requests[0]
+    output_config = sent["output_config"]
+    thinking = sent["thinking"]
+    assert isinstance(output_config, dict)
+    assert isinstance(thinking, dict)
+    assert output_config["effort"] == "high"
+    assert output_config["format"]["type"] == "json_schema"
+    assert thinking["type"] == "adaptive"
     assert "tools" not in sent
 
 
@@ -528,7 +546,7 @@ async def test_reply_ignoring_the_required_tool_is_a_provider_error(
     reply without the tool call it required.
     """
     client = _shipped_client()
-    create = AsyncMock(return_value=_text_only_response())
+    create = _RecordingCreate(_text_only_response())
 
     with (
         patch.object(client.client.messages, "create", new=create),
@@ -541,7 +559,7 @@ async def test_reply_ignoring_the_required_tool_is_a_provider_error(
 
 async def test_auto_reply_without_a_tool_call_is_fine() -> None:
     client = _shipped_client()
-    create = AsyncMock(return_value=_text_only_response())
+    create = _RecordingCreate(_text_only_response())
 
     with patch.object(client.client.messages, "create", new=create):
         output = await client.generate_response(

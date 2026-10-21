@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from unittest.mock import create_autospec
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -13,6 +14,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
+from telegram import Bot, Chat, Message, Update, User
+from telegram.ext import Application, CallbackContext
 
 import family_assistant.processing.context as proc_context_module
 import family_assistant.processing.service as proc_service_module
@@ -21,25 +24,36 @@ import family_assistant.task_worker as tw_module
 import family_assistant.telegram.handler as tg_module
 from family_assistant.config_models import AppConfig, ToolsConfig
 from family_assistant.delegation_security import DelegationSecurityLevel
-from family_assistant.llm import LLMStreamEvent
+from family_assistant.llm import LLMOutput
+from family_assistant.llm.messages import UserMessage
 from family_assistant.llm.tool_call import ToolCallFunction, ToolCallItem
 from family_assistant.processing import ProcessingService, ProcessingServiceConfig
-from family_assistant.processing.types import ChatInteractionResult
-from family_assistant.services.user_identity import UserIdentityResolver
+from family_assistant.services.attachment_registry import AttachmentRegistry
 from family_assistant.storage.database import Database
 from family_assistant.storage.tasks import TaskPriority
 from family_assistant.task_worker import TaskWorker
+from family_assistant.telegram.service import TelegramService
 from family_assistant.tools.infrastructure import ToolNotFoundError
 from tests.helpers import wait_for_condition, wait_for_tasks_to_complete
+from tests.mocks.idle_processing_service import make_idle_processing_service
+from tests.mocks.mock_llm import RuleBasedMockLLMClient, extract_text_from_content
+from tests.mocks.recording_chat_interface import ScriptedChatInterface
+from tests.mocks.telegram_bot_autospec import sent_message
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import Iterator
+    from pathlib import Path
+    from unittest.mock import NonCallableMagicMock
 
     from sqlalchemy.ext.asyncio import AsyncEngine
-    from telegram import Update
 
     from family_assistant.context_providers import ContextProvider
     from family_assistant.telegram.types import AttachmentData
+    from family_assistant.tools.types import (
+        ToolDefinition,
+        ToolExecutionContext,
+        ToolResult,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -122,13 +136,40 @@ class MockContextProvider:
         return self._fragments
 
 
+ToolOutcome = str | Exception
+
+
+class ScriptedToolsProvider:
+    """Answers every tool call with one scripted outcome: a result or an exception."""
+
+    def __init__(self, outcome: ToolOutcome = "") -> None:
+        self._outcome = outcome
+
+    async def get_tool_definitions(self) -> list[ToolDefinition]:
+        return []
+
+    async def execute_tool(
+        self,
+        name: str,
+        # ast-grep-ignore: no-dict-any - tool args are dynamic
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+        call_id: str | None = None,
+    ) -> str | ToolResult:
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        return self._outcome
+
+    async def close(self) -> None:
+        pass
+
+
 def _make_processing_service(
     context_providers: list[MockContextProvider] | None = None,
-    llm_client: object | None = None,
+    llm_reply: str = "hello",
+    tools_provider: ScriptedToolsProvider | None = None,
 ) -> ProcessingService:
-    """Build a minimal ProcessingService with mocked dependencies."""
-    mock_llm = llm_client if llm_client is not None else MagicMock()
-    mock_tools = MagicMock()
+    """Build a minimal real ProcessingService with a scripted LLM and tools."""
     service_config = ProcessingServiceConfig(
         prompts={"system": "test"},
         timezone=ZoneInfo("UTC"),
@@ -138,18 +179,18 @@ def _make_processing_service(
         delegation_security_level=DelegationSecurityLevel.BLOCKED,
         id="test-profile",
     )
-    mock_app_config = MagicMock()
-    mock_app_config.attachment_config.large_tool_result_threshold_kb = 100
     providers: list[ContextProvider] = (
         list(context_providers) if context_providers else []
     )
     return ProcessingService(
-        llm_client=mock_llm,
-        tools_provider=mock_tools,
+        llm_client=RuleBasedMockLLMClient(
+            rules=[], default_response=LLMOutput(content=llm_reply)
+        ),
+        tools_provider=tools_provider or ScriptedToolsProvider(),
         service_config=service_config,
         context_providers=providers,
         server_url="http://localhost:8000",
-        app_config=mock_app_config,
+        app_config=AppConfig(),
     )
 
 
@@ -240,12 +281,10 @@ class TestContextAggregateSpan:
 class TestToolExecuteSpan:
     @pytest.mark.asyncio
     async def test_tool_execute_creates_span_on_success(
-        self, processing_span_exporter: InMemorySpanExporter
+        self, processing_span_exporter: InMemorySpanExporter, db_engine: AsyncEngine
     ) -> None:
-        service = _make_processing_service()
-        service.tool_executor.tools_provider = MagicMock()
-        service.tool_executor.tools_provider.execute_tool = AsyncMock(
-            return_value="tool result text"
+        service = _make_processing_service(
+            tools_provider=ScriptedToolsProvider("tool result text")
         )
 
         tool_call = ToolCallItem(
@@ -253,7 +292,6 @@ class TestToolExecuteSpan:
             type="function",
             function=ToolCallFunction(name="get_weather", arguments='{"city": "NYC"}'),
         )
-        db_context = AsyncMock()
 
         result = await service.tool_executor.execute(
             tool_call,
@@ -261,7 +299,7 @@ class TestToolExecuteSpan:
             conversation_id="conv1",
             user_name="user1",
             turn_id="turn1",
-            db_context=db_context,
+            db_context=Database(db_engine),
             chat_interface=None,
         )
 
@@ -278,12 +316,10 @@ class TestToolExecuteSpan:
 
     @pytest.mark.asyncio
     async def test_tool_execute_sets_error_on_not_found(
-        self, processing_span_exporter: InMemorySpanExporter
+        self, processing_span_exporter: InMemorySpanExporter, db_engine: AsyncEngine
     ) -> None:
-        service = _make_processing_service()
-        service.tool_executor.tools_provider = MagicMock()
-        service.tool_executor.tools_provider.execute_tool = AsyncMock(
-            side_effect=ToolNotFoundError("no_such_tool")
+        service = _make_processing_service(
+            tools_provider=ScriptedToolsProvider(ToolNotFoundError("no_such_tool"))
         )
 
         tool_call = ToolCallItem(
@@ -291,7 +327,6 @@ class TestToolExecuteSpan:
             type="function",
             function=ToolCallFunction(name="no_such_tool", arguments="{}"),
         )
-        db_context = AsyncMock()
 
         result = await service.tool_executor.execute(
             tool_call,
@@ -299,7 +334,7 @@ class TestToolExecuteSpan:
             conversation_id="conv1",
             user_name="user1",
             turn_id="turn1",
-            db_context=db_context,
+            db_context=Database(db_engine),
             chat_interface=None,
         )
 
@@ -314,12 +349,10 @@ class TestToolExecuteSpan:
 
     @pytest.mark.asyncio
     async def test_tool_execute_sets_error_on_exception(
-        self, processing_span_exporter: InMemorySpanExporter
+        self, processing_span_exporter: InMemorySpanExporter, db_engine: AsyncEngine
     ) -> None:
-        service = _make_processing_service()
-        service.tool_executor.tools_provider = MagicMock()
-        service.tool_executor.tools_provider.execute_tool = AsyncMock(
-            side_effect=RuntimeError("boom")
+        service = _make_processing_service(
+            tools_provider=ScriptedToolsProvider(RuntimeError("boom"))
         )
 
         tool_call = ToolCallItem(
@@ -327,7 +360,6 @@ class TestToolExecuteSpan:
             type="function",
             function=ToolCallFunction(name="exploding_tool", arguments="{}"),
         )
-        db_context = AsyncMock()
 
         result = await service.tool_executor.execute(
             tool_call,
@@ -335,7 +367,7 @@ class TestToolExecuteSpan:
             conversation_id="conv1",
             user_name="user1",
             turn_id="turn1",
-            db_context=db_context,
+            db_context=Database(db_engine),
             chat_interface=None,
         )
 
@@ -352,12 +384,10 @@ class TestToolExecuteSpan:
 
     @pytest.mark.asyncio
     async def test_tool_execute_records_result_size(
-        self, processing_span_exporter: InMemorySpanExporter
+        self, processing_span_exporter: InMemorySpanExporter, db_engine: AsyncEngine
     ) -> None:
-        service = _make_processing_service()
-        service.tool_executor.tools_provider = MagicMock()
-        service.tool_executor.tools_provider.execute_tool = AsyncMock(
-            return_value="short answer"
+        service = _make_processing_service(
+            tools_provider=ScriptedToolsProvider("short answer")
         )
 
         tool_call = ToolCallItem(
@@ -365,7 +395,6 @@ class TestToolExecuteSpan:
             type="function",
             function=ToolCallFunction(name="simple_tool", arguments="{}"),
         )
-        db_context = AsyncMock()
 
         await service.tool_executor.execute(
             tool_call,
@@ -373,7 +402,7 @@ class TestToolExecuteSpan:
             conversation_id="conv1",
             user_name="user1",
             turn_id="turn1",
-            db_context=db_context,
+            db_context=Database(db_engine),
             chat_interface=None,
         )
 
@@ -390,40 +419,22 @@ class TestToolExecuteSpan:
 # ---------------------------------------------------------------------------
 
 
-async def _fake_llm_stream(
-    *_args: object, **_kwargs: object
-) -> AsyncIterator[LLMStreamEvent]:
-    yield LLMStreamEvent(type="content", content="hello")
-
-
 class TestConversationProcessSpan:
     @pytest.mark.asyncio
     async def test_conversation_process_creates_span(
-        self, processing_span_exporter: InMemorySpanExporter
+        self, processing_span_exporter: InMemorySpanExporter, db_engine: AsyncEngine
     ) -> None:
-        mock_llm = AsyncMock()
-        mock_llm.generate_response_stream = _fake_llm_stream
-        service = _make_processing_service(llm_client=mock_llm)
-        service.context_providers = []
+        service = _make_processing_service()
 
-        mock_db_context = AsyncMock()
-        mock_db_context.engine = MagicMock()
-        mock_db_context.engine.dialect = MagicMock()
-        mock_db_context.engine.dialect.name = "sqlite"
-        mock_db_context.message_history = AsyncMock()
-        mock_db_context.message_history.get_recent = AsyncMock(return_value=[])
-        mock_db_context.message_history.add_message = AsyncMock(return_value=1)
-
-        events = []
-        async for event in service.handle_chat_interaction_stream(
-            db_context=mock_db_context,
+        async for _event in service.handle_chat_interaction_stream(
+            db_context=Database(db_engine),
             trigger_content_parts=[{"type": "text", "text": "hello"}],
             trigger_interface_message_id=None,
             interface_type="test",
             conversation_id="conv123",
             user_name="TestUser",
         ):
-            events.append(event)
+            pass
 
         spans = processing_span_exporter.get_finished_spans()
         conv_spans = [s for s in spans if s.name == "conversation.process"]
@@ -436,23 +447,12 @@ class TestConversationProcessSpan:
 
     @pytest.mark.asyncio
     async def test_conversation_process_sets_subconversation_id(
-        self, processing_span_exporter: InMemorySpanExporter
+        self, processing_span_exporter: InMemorySpanExporter, db_engine: AsyncEngine
     ) -> None:
-        mock_llm = AsyncMock()
-        mock_llm.generate_response_stream = _fake_llm_stream
-        service = _make_processing_service(llm_client=mock_llm)
-        service.context_providers = []
-
-        mock_db_context = AsyncMock()
-        mock_db_context.engine = MagicMock()
-        mock_db_context.engine.dialect = MagicMock()
-        mock_db_context.engine.dialect.name = "sqlite"
-        mock_db_context.message_history = AsyncMock()
-        mock_db_context.message_history.get_recent = AsyncMock(return_value=[])
-        mock_db_context.message_history.add_message = AsyncMock(return_value=1)
+        service = _make_processing_service()
 
         async for _event in service.handle_chat_interaction_stream(
-            db_context=mock_db_context,
+            db_context=Database(db_engine),
             trigger_content_parts=[{"type": "text", "text": "hi"}],
             trigger_interface_message_id=None,
             interface_type="test",
@@ -475,64 +475,89 @@ class TestConversationProcessSpan:
 # ---------------------------------------------------------------------------
 
 
+class TelegramHarness(NamedTuple):
+    handler: tg_module.TelegramUpdateHandler
+    llm: RuleBasedMockLLMClient
+    # The Telegram Bot API is external: an autospecced Bot stands in for it.
+    bot: NonCallableMagicMock
+    context: CallbackContext[Any, Any, Any, Any]
+
+
+def _make_telegram_harness(db_engine: AsyncEngine, tmp_path: Path) -> TelegramHarness:
+    """A real TelegramService and handler whose outbound Bot is autospecced."""
+    database = Database(db_engine)
+    processing_service = _make_processing_service(llm_reply="Hi Alice")
+    llm = cast("RuleBasedMockLLMClient", processing_service.llm_client)
+    telegram_service = TelegramService(
+        telegram_token="123456:TEST-TOKEN",
+        processing_service=processing_service,
+        processing_services_registry={
+            processing_service.service_config.id: processing_service
+        },
+        app_config=AppConfig.model_validate({
+            "users": [{"id": "alice", "telegram": {"user_ids": [123]}}]
+        }),
+        attachment_registry=AttachmentRegistry(
+            storage_path=str(tmp_path), db_engine=db_engine, config=None
+        ),
+        database=database,
+    )
+
+    bot = create_autospec(Bot, instance=True, spec_set=True)
+    bot._send_message.return_value = sent_message(43)
+    application = create_autospec(Application, instance=True, spec_set=True)
+    application.bot = bot
+    context: CallbackContext[Any, Any, Any, Any] = CallbackContext(application)
+    return TelegramHarness(
+        handler=telegram_service.update_handler, llm=llm, bot=bot, context=context
+    )
+
+
+def _text_update(
+    text: str, *, message_id: int, user_id: int, first_name: str
+) -> Update:
+    return Update(
+        update_id=message_id,
+        message=Message(
+            message_id=message_id,
+            date=datetime.now(UTC),
+            chat=Chat(id=user_id, type=Chat.PRIVATE),
+            from_user=User(id=user_id, first_name=first_name, is_bot=False),
+            text=text,
+        ),
+    )
+
+
 class TestTelegramProcessBatchSpan:
     @pytest.mark.asyncio
     async def test_telegram_process_batch_creates_span(
-        self, telegram_span_exporter: InMemorySpanExporter
+        self,
+        telegram_span_exporter: InMemorySpanExporter,
+        db_engine: AsyncEngine,
+        tmp_path: Path,
     ) -> None:
-        mock_user = MagicMock()
-        mock_user.id = 123
-        mock_user.first_name = "Alice"
+        harness = _make_telegram_harness(db_engine, tmp_path)
+        update = _text_update("hello", message_id=42, user_id=123, first_name="Alice")
+        batch: list[tuple[Update, list[AttachmentData] | None]] = [(update, None)]
 
-        mock_message = MagicMock()
-        mock_message.message_id = 42
-        mock_message.caption = None
-        mock_message.text = "hello"
-        mock_message.reply_to_message = None
-        mock_message.forward_origin = None
-
-        mock_update = MagicMock()
-        mock_update.effective_user = mock_user
-        mock_update.message = mock_message
-
-        processing_service = MagicMock()
-        processing_service.service_config.id = "test-profile"
-        processing_service.handle_chat_interaction = AsyncMock(
-            return_value=ChatInteractionResult.success(text_reply="Hi Alice")
-        )
-        telegram_service = MagicMock()
-        telegram_service.fastapi_app = None
-        handler = tg_module.TelegramUpdateHandler(
-            telegram_service=telegram_service,
-            user_identity_resolver=UserIdentityResolver(
-                AppConfig.model_validate({
-                    "users": [
-                        {
-                            "id": "alice",
-                            "telegram": {"user_ids": [123]},
-                        }
-                    ]
-                })
-            ),
-            processing_service=processing_service,
-            database=MagicMock(),
-            message_batcher=None,
-            confirmation_manager=MagicMock(),
+        await harness.handler.process_batch(
+            chat_id=123, batch=batch, context=harness.context
         )
 
-        batch: list[tuple[Update, list[AttachmentData] | None]] = [(mock_update, None)]
-
-        context = MagicMock()
-        context.bot.send_chat_action = AsyncMock()
-        context.bot.send_message = AsyncMock(return_value=MagicMock(message_id=43))
-        context.bot.send_rich_message = AsyncMock(return_value=MagicMock(message_id=43))
-        await handler.process_batch(chat_id=123, batch=batch, context=context)
-
-        processing_service.handle_chat_interaction.assert_awaited_once()
-        assert processing_service.handle_chat_interaction.await_args.kwargs[
-            "trigger_content_parts"
-        ] == [{"type": "text", "text": "hello"}]
-        context.bot.send_rich_message.assert_awaited_once()
+        llm_calls = harness.llm.get_calls()
+        assert len(llm_calls) == 1
+        user_texts = [
+            extract_text_from_content(message.content)
+            for message in llm_calls[0]["kwargs"]["messages"]
+            if isinstance(message, UserMessage)
+        ]
+        assert user_texts[-1].endswith("\nhello")
+        harness.bot._send_message.assert_awaited_once()
+        send_args = harness.bot._send_message.await_args
+        assert send_args is not None
+        assert send_args.args[0] == "sendRichMessage"
+        assert send_args.kwargs["data"]["chat_id"] == 123
+        assert "Hi Alice" in str(send_args.kwargs["data"]["rich_message"])
 
         spans = telegram_span_exporter.get_finished_spans()
         tg_spans = [s for s in spans if s.name == "telegram.process_batch"]
@@ -546,54 +571,39 @@ class TestTelegramProcessBatchSpan:
 
     @pytest.mark.asyncio
     async def test_telegram_process_batch_empty_batch_no_span(
-        self, telegram_span_exporter: InMemorySpanExporter
+        self,
+        telegram_span_exporter: InMemorySpanExporter,
+        db_engine: AsyncEngine,
+        tmp_path: Path,
     ) -> None:
-        handler = MagicMock(spec=tg_module.TelegramUpdateHandler)
+        harness = _make_telegram_harness(db_engine, tmp_path)
 
-        await tg_module.TelegramUpdateHandler.process_batch(
-            handler, chat_id=123, batch=[], context=MagicMock()
+        await harness.handler.process_batch(
+            chat_id=123, batch=[], context=harness.context
         )
 
+        assert not harness.llm.get_calls()
         spans = telegram_span_exporter.get_finished_spans()
         tg_spans = [s for s in spans if s.name == "telegram.process_batch"]
         assert len(tg_spans) == 0
 
     @pytest.mark.asyncio
     async def test_telegram_process_batch_sets_error_on_exception(
-        self, telegram_span_exporter: InMemorySpanExporter
+        self,
+        telegram_span_exporter: InMemorySpanExporter,
+        db_engine: AsyncEngine,
+        tmp_path: Path,
     ) -> None:
-        mock_user = MagicMock()
-        mock_user.first_name = "Bob"
-        mock_user.id = 123
-
-        # Make message.reply_to_message raise to trigger error inside span
-        mock_message = MagicMock()
-        mock_message.message_id = 99
-        mock_message.caption = None
-        mock_message.text = "test"
-        mock_message.forward_origin = None
-        # Accessing reply_to_message will raise
-        type(mock_message).reply_to_message = property(
-            lambda self: (_ for _ in ()).throw(RuntimeError("intentional"))
-        )
-
-        mock_update = MagicMock()
-        mock_update.effective_user = mock_user
-        mock_update.message = mock_message
-
-        handler = MagicMock(spec=tg_module.TelegramUpdateHandler)
-        handler.debug_mode = False
-        handler.processing_service = AsyncMock()
-        handler.telegram_service = MagicMock()
-        handler.Database = MagicMock()
-        handler.developer_chat_id = None
-        handler.confirmation_manager = MagicMock()
-
-        batch: list[tuple[Update, list[AttachmentData] | None]] = [(mock_update, None)]
+        harness = _make_telegram_harness(db_engine, tmp_path)
+        # A transient send failure is not a rich-message compatibility error,
+        # so it is not swallowed by the plain-text fallback and escapes the batch.
+        harness.bot._send_message.side_effect = RuntimeError("intentional")
+        update = _text_update("test", message_id=99, user_id=123, first_name="Bob")
+        batch: list[tuple[Update, list[AttachmentData] | None]] = [(update, None)]
 
         with pytest.raises(RuntimeError, match="intentional"):
-            await tg_module.TelegramUpdateHandler.process_batch(
-                handler, chat_id=456, batch=batch, context=MagicMock()
+            await harness.handler.process_batch(
+                chat_id=456, batch=batch, context=harness.context
             )
 
         spans = telegram_span_exporter.get_finished_spans()
@@ -623,7 +633,8 @@ class TestTaskProcessSpan:
     ) -> None:
         db = Database(db_engine)
         worker, new_task_event, _ = task_worker_manager(
-            processing_service=MagicMock(), chat_interface=MagicMock()
+            processing_service=make_idle_processing_service(),
+            chat_interface=ScriptedChatInterface(),
         )
         handled = asyncio.Event()
 
@@ -666,7 +677,8 @@ class TestTaskProcessSpan:
     ) -> None:
         db = Database(db_engine)
         worker, wake_up_event, _ = task_worker_manager(
-            processing_service=MagicMock(), chat_interface=MagicMock()
+            processing_service=make_idle_processing_service(),
+            chat_interface=ScriptedChatInterface(),
         )
         await db.tasks.enqueue(
             task_id="task_002",
@@ -691,7 +703,8 @@ class TestTaskProcessSpan:
     ) -> None:
         db = Database(db_engine)
         worker, new_task_event, _ = task_worker_manager(
-            processing_service=MagicMock(), chat_interface=MagicMock()
+            processing_service=make_idle_processing_service(),
+            chat_interface=ScriptedChatInterface(),
         )
 
         async def failing_handler(exec_context: object, payload: object) -> None:

@@ -1,30 +1,34 @@
 """Unit tests for the Home Assistant client wrapper."""
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import patch
 
 import homeassistant_api
 import pytest
+import pytest_asyncio
 from homeassistant_api.models.domains import Domain
 
 from family_assistant.plugins.home_assistant.client import HomeAssistantClientWrapper
 
 
-def _make_wrapper(
-    client_mock: MagicMock,
-) -> HomeAssistantClientWrapper:
-    return HomeAssistantClientWrapper(
-        api_url="http://home-assistant.test:8123",
+@pytest_asyncio.fixture
+async def client() -> AsyncIterator[homeassistant_api.Client]:
+    """A real async SDK client; it is never contacted, and its session is closed."""
+    real_client = homeassistant_api.Client(
+        api_url="http://home-assistant.test:8123/api",
         token="test-token",
-        client=cast("homeassistant_api.Client", client_mock),
+        use_async=True,
     )
+    yield real_client
+    await real_client.async_cache_session.close()
 
 
 @pytest.mark.asyncio
-async def test_action_catalog_supports_media_selector_multiple() -> None:
+async def test_action_catalog_supports_media_selector_multiple(
+    client: homeassistant_api.Client,
+) -> None:
     """The upstream service model accepts HA's media selector multiple field."""
-    client_mock = MagicMock(spec=homeassistant_api.Client)
     domain = Domain.from_json(
         {
             "domain": "media_player",
@@ -36,11 +40,19 @@ async def test_action_catalog_supports_media_selector_multiple() -> None:
                 }
             },
         },
-        client=cast("homeassistant_api.Client", client_mock),
+        client=client,
     )
-    client_mock.async_get_domains = AsyncMock(return_value={"media_player": domain})
+    wrapper = HomeAssistantClientWrapper(
+        api_url="http://home-assistant.test:8123", token="test-token", client=client
+    )
 
-    catalog = await _make_wrapper(client_mock).async_get_action_catalog()
+    with patch.object(
+        client,
+        "async_get_domains",
+        autospec=True,
+        return_value={"media_player": domain},
+    ):
+        catalog = await wrapper.async_get_action_catalog()
 
     assert catalog[0]["fields"]["media_content_id"]["selector"]["media"] == {
         "multiple": False
@@ -48,31 +60,30 @@ async def test_action_catalog_supports_media_selector_multiple() -> None:
 
 
 @pytest.mark.asyncio
-async def test_entity_histories_filters_by_entity_id() -> None:
+async def test_entity_histories_filters_by_entity_id(
+    client: homeassistant_api.Client,
+) -> None:
     """History is requested for exactly the given entity ids over the window."""
-    client = homeassistant_api.Client(
-        api_url="http://home-assistant.test:8123/api",
-        token="test-token",
-        use_async=True,
-    )
-    request = AsyncMock(
-        return_value=[
-            [
-                {"entity_id": "person.test", "state": "home"},
-                {"entity_id": "person.test", "state": "away"},
-            ]
-        ]
-    )
-    client.async_request = request  # type: ignore[method-assign]
     wrapper = HomeAssistantClientWrapper(
         api_url="http://home-assistant.test:8123", token="test-token", client=client
     )
     start = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
     end = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
 
-    histories = await wrapper.async_get_entity_histories(
-        ["person.test"], start_timestamp=start, end_timestamp=end
-    )
+    with patch.object(
+        client,
+        "async_request",
+        autospec=True,
+        return_value=[
+            [
+                {"entity_id": "person.test", "state": "home"},
+                {"entity_id": "person.test", "state": "away"},
+            ]
+        ],
+    ) as request:
+        histories = await wrapper.async_get_entity_histories(
+            ["person.test"], start_timestamp=start, end_timestamp=end
+        )
 
     assert [h.entity_id for h in histories] == ["person.test"]
     assert [s.state for s in histories[0].states] == ["home", "away"]

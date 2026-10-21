@@ -231,26 +231,6 @@ exemptions:
   # new code uses a real object, a fake, or create_autospec(..., spec_set=True).
   - rule: no-unspecced-mock
     files:
-      - tests/llm/test_google_deep_research.py
-      - tests/unit/calendar_config/test_calendar_config_from_context.py
-      - tests/unit/events/test_event_match_conditions.py
-      - tests/unit/events/test_event_source_deduplication.py
-      - tests/unit/events/test_home_assistant_validation.py
-      - tests/unit/indexing/processors/test_network_processors.py
-      - tests/unit/llm/providers/test_anthropic_client.py
-      - tests/unit/llm/providers/test_anthropic_max_tokens.py
-      - tests/unit/llm/providers/test_anthropic_thinking.py
-      - tests/unit/llm/providers/test_google_genai_tool_choice.py
-      - tests/unit/llm/providers/test_native_output_modes.py
-      - tests/unit/llm/providers/test_resolved_model_telemetry.py
-      - tests/unit/llm/test_google_computer_use_client.py
-      - tests/unit/llm/test_google_genai_message_conversion.py
-      - tests/unit/llm/test_google_genai_tool_call_events.py
-      - tests/unit/llm/test_llm_multimodal_processing.py
-      - tests/unit/llm/test_model_tiers.py
-      - tests/unit/llm/test_one_shot.py
-      - tests/unit/llm/test_retrying_client.py
-      - tests/unit/llm/test_retrying_client_streaming.py
       - tests/unit/plugins/ai_workers/backends/test_docker_backend.py
       - tests/unit/plugins/ai_workers/backends/test_kubernetes_backend.py
       - tests/unit/plugins/ai_workers/test_worker_confirmation_renderer.py
@@ -272,12 +252,6 @@ exemptions:
       - tests/unit/telegram/test_markdown_utils.py
       - tests/unit/telegram/test_mid_turn_controller.py
       - tests/unit/telegram/test_rich_messages.py
-      - tests/unit/test_google_embedding_generator.py
-      - tests/unit/test_home_assistant_wrapper.py
-      - tests/unit/test_openai_embedding_generator.py
-      - tests/unit/test_otel_processing_spans.py
-      - tests/unit/test_remote_a2a_setup.py
-      - tests/unit/test_weather.py
       - tests/unit/tools/test_authenticated_run_settlement.py
       - tests/unit/tools/test_authenticated_site_tools.py
       - tests/unit/tools/test_browser_ordering.py

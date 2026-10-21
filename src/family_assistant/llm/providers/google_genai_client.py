@@ -2785,16 +2785,14 @@ class GoogleGenAIClient(BaseLLMClient):
                             resolved_model=resolved_model, response_id=response_id
                         )
 
-                    # Extract text content from chunk
-                    if hasattr(chunk, "text") and chunk.text:
-                        chunk_event = LLMStreamEvent(type="content", content=chunk.text)
-                        telemetry.observe_event(chunk_event)
-                        yield chunk_event  # noqa: ASYNC119
-                        content_yielded = True
-
-                    # Handle candidates structure for more complex responses
-                    elif hasattr(chunk, "candidates") and chunk.candidates:
-                        for candidate in chunk.candidates:
+                    # Walk the parts rather than reading ``chunk.text``: that
+                    # joins the text parts of a chunk that also carries a
+                    # function call, and the call would be lost with it. Only
+                    # the first candidate is the answer, as ``chunk.text`` and
+                    # the non-streaming path read it; any others are
+                    # alternatives to it.
+                    if chunk.candidates:
+                        for candidate in chunk.candidates[:1]:
                             if (
                                 hasattr(candidate, "content")
                                 and candidate.content

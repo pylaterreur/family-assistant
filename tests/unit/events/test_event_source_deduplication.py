@@ -1,11 +1,15 @@
 """Test that event sources are properly deduplicated."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from family_assistant.assistant import Assistant
 from family_assistant.config_models import AppConfig
+from family_assistant.plugins.home_assistant.client import (
+    HomeAssistantClientWrapper,
+    create_home_assistant_client,
+)
 from tests.mocks.mock_llm import (  # pylint: disable=no-name-in-module
     LLMOutput,
     RuleBasedMockLLMClient,
@@ -51,14 +55,22 @@ class TestEventSourceDeduplication:
             ],
         }
 
-        # Only mock the external Home Assistant client creation
-        with patch(
-            "family_assistant.plugins.home_assistant.plugin.create_home_assistant_client"
-        ) as mock_create_ha_client:
-            # Mock the HA client creation
-            mock_ha_client = MagicMock()
-            mock_create_ha_client.return_value = mock_ha_client
+        built_clients: list[HomeAssistantClientWrapper] = []
 
+        def build_client(
+            api_url: str, token: str, verify_ssl: bool = True
+        ) -> HomeAssistantClientWrapper:
+            client = create_home_assistant_client(api_url, token, verify_ssl)
+            built_clients.append(client)
+            return client
+
+        # The real factory runs (building a client does not connect); the
+        # spec'd wrapper around it counts how many clients were built.
+        with patch(
+            "family_assistant.plugins.home_assistant.plugin.create_home_assistant_client",
+            autospec=True,
+            side_effect=build_client,
+        ) as mock_create_ha_client:
             # Create assistant with mock LLM to avoid needing real provider
             mock_llm = RuleBasedMockLLMClient(
                 rules=[],
@@ -86,3 +98,5 @@ class TestEventSourceDeduplication:
             finally:
                 # Clean up using the Assistant's built-in stop_services method
                 await assistant.stop_services()
+                for client in built_clients:
+                    await client._client.async_cache_session.close()

@@ -1,13 +1,24 @@
 """Unit tests for Gemini native computer use client configuration."""
 
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from google.genai import types
 
 from family_assistant.llm.messages import UserMessage
 from family_assistant.llm.providers.google_genai_client import GoogleGenAIClient
+from tests.mocks.recording_async_call import RecordingAsyncCall
+
+
+def text_response(text: str) -> types.GenerateContentResponse:
+    return types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(role="model", parts=[types.Part(text=text)])
+            )
+        ]
+    )
 
 
 class TestComputerUseClientConfiguration:
@@ -22,28 +33,13 @@ class TestComputerUseClientConfiguration:
             enable_computer_use=True,
         )
 
-        with patch.object(
-            client.client.aio.models, "generate_content"
-        ) as mock_generate:
-            # Mock response
-            part_mock = MagicMock(text="Response")
-            part_mock.thought_signature = None
-            part_mock.function_call = None
-
-            mock_response = MagicMock()
-            mock_response.candidates = [MagicMock(content=MagicMock(parts=[part_mock]))]
-            mock_generate.return_value = mock_response
-
+        generate = RecordingAsyncCall(text_response("Response"))
+        with patch.object(client.client.aio.models, "generate_content", new=generate):
             messages = [UserMessage(content="Test message")]
             await client.generate_response(messages)
 
             # Verify the call included the ComputerUse tool
-            call_args = mock_generate.call_args
-            assert call_args is not None
-            _, kwargs = call_args
-
-            config = kwargs.get("config")
-            assert config is not None
+            config = generate.last_call.kwargs["config"]
             assert isinstance(config, types.GenerateContentConfig)
 
             tools_passed = config.tools
@@ -76,27 +72,13 @@ class TestComputerUseClientConfiguration:
             computer_use_excluded_functions=excluded,
         )
 
-        with patch.object(
-            client.client.aio.models, "generate_content"
-        ) as mock_generate:
-            # Mock response
-            part_mock = MagicMock(text="Response")
-            part_mock.thought_signature = None
-            part_mock.function_call = None
-
-            mock_response = MagicMock()
-            mock_response.candidates = [MagicMock(content=MagicMock(parts=[part_mock]))]
-            mock_generate.return_value = mock_response
-
+        generate = RecordingAsyncCall(text_response("Response"))
+        with patch.object(client.client.aio.models, "generate_content", new=generate):
             messages = [UserMessage(content="Test message")]
             await client.generate_response(messages)
 
             # Verify excluded functions are passed
-            call_args = mock_generate.call_args
-            assert call_args is not None
-            _, kwargs = call_args
-
-            config = kwargs.get("config")
+            config = generate.last_call.kwargs["config"]
             assert isinstance(config, types.GenerateContentConfig)
             tools_passed = config.tools
             assert tools_passed is not None
@@ -120,18 +102,8 @@ class TestComputerUseClientConfiguration:
             enable_computer_use=True,
         )
 
-        with patch.object(
-            client.client.aio.models, "generate_content"
-        ) as mock_generate:
-            # Mock response
-            part_mock = MagicMock(text="Response")
-            part_mock.thought_signature = None
-            part_mock.function_call = None
-
-            mock_response = MagicMock()
-            mock_response.candidates = [MagicMock(content=MagicMock(parts=[part_mock]))]
-            mock_generate.return_value = mock_response
-
+        generate = RecordingAsyncCall(text_response("Response"))
+        with patch.object(client.client.aio.models, "generate_content", new=generate):
             computer_use_names = (
                 "click",
                 "double_click",
@@ -170,11 +142,8 @@ class TestComputerUseClientConfiguration:
             await client.generate_response(messages, tools=cast("Any", test_tools))
 
             # Verify filtering
-            call_args = mock_generate.call_args
-            assert call_args is not None
-            _, kwargs = call_args
-
-            config = kwargs.get("config")
+            config = generate.last_call.kwargs["config"]
+            assert isinstance(config, types.GenerateContentConfig)
             tools_passed = config.tools
             assert tools_passed is not None
 
@@ -197,27 +166,14 @@ class TestComputerUseClientConfiguration:
             enable_computer_use=False,
         )
 
-        with patch.object(
-            client.client.aio.models, "generate_content"
-        ) as mock_generate:
-            # Mock response
-            part_mock = MagicMock(text="Response")
-            part_mock.thought_signature = None
-            part_mock.function_call = None
-
-            mock_response = MagicMock()
-            mock_response.candidates = [MagicMock(content=MagicMock(parts=[part_mock]))]
-            mock_generate.return_value = mock_response
-
+        generate = RecordingAsyncCall(text_response("Response"))
+        with patch.object(client.client.aio.models, "generate_content", new=generate):
             messages = [UserMessage(content="Test message")]
             await client.generate_response(messages)
 
             # Verify no ComputerUse tool
-            call_args = mock_generate.call_args
-            assert call_args is not None
-            _, kwargs = call_args
-
-            config = kwargs.get("config")
+            config = generate.last_call.kwargs["config"]
+            assert isinstance(config, types.GenerateContentConfig)
             tools_passed = config.tools
 
             # Should be None if no tools provided

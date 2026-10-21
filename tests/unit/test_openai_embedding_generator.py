@@ -1,7 +1,7 @@
 """Unit tests for OpenAIEmbeddingGenerator (no API calls)."""
 
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -52,8 +52,9 @@ async def test_model_sent_verbatim_to_api() -> None:
     response = FakeEmbeddingsResponse(
         data=[FakeEmbeddingDatum(embedding=[1.0, 2.0, 3.0], index=0)]
     )
-    mock_create = AsyncMock(return_value=response)
-    with patch.object(generator._client.embeddings, "create", mock_create):
+    with patch.object(
+        generator._client.embeddings, "create", autospec=True, return_value=response
+    ) as mock_create:
         await generator.generate_embeddings(["hello"])
 
     mock_create.assert_called_once()
@@ -70,8 +71,9 @@ async def test_dimensions_passed_when_set() -> None:
     response = FakeEmbeddingsResponse(
         data=[FakeEmbeddingDatum(embedding=[0.1] * 256, index=0)]
     )
-    mock_create = AsyncMock(return_value=response)
-    with patch.object(generator._client.embeddings, "create", mock_create):
+    with patch.object(
+        generator._client.embeddings, "create", autospec=True, return_value=response
+    ) as mock_create:
         await generator.generate_embeddings(["hello"])
 
     assert mock_create.call_args.kwargs["dimensions"] == 256
@@ -86,8 +88,9 @@ async def test_dimensions_omitted_when_none() -> None:
     response = FakeEmbeddingsResponse(
         data=[FakeEmbeddingDatum(embedding=[0.1, 0.2], index=0)]
     )
-    mock_create = AsyncMock(return_value=response)
-    with patch.object(generator._client.embeddings, "create", mock_create):
+    with patch.object(
+        generator._client.embeddings, "create", autospec=True, return_value=response
+    ) as mock_create:
         await generator.generate_embeddings(["hello"])
 
     assert "dimensions" not in mock_create.call_args.kwargs
@@ -105,8 +108,9 @@ async def test_embeddings_reordered_by_index() -> None:
             FakeEmbeddingDatum(embedding=[0.0], index=0),
         ]
     )
-    mock_create = AsyncMock(return_value=response)
-    with patch.object(generator._client.embeddings, "create", mock_create):
+    with patch.object(
+        generator._client.embeddings, "create", autospec=True, return_value=response
+    ):
         result = await generator.generate_embeddings(["first", "second"])
 
     assert result.embeddings == [[0.0], [2.0]]
@@ -118,9 +122,13 @@ async def test_missing_embeddings_raises() -> None:
     generator = OpenAIEmbeddingGenerator(
         model="text-embedding-3-small", api_key="fake-key"
     )
-    mock_create = AsyncMock(return_value=FakeEmbeddingsResponse(data=[]))
     with (
-        patch.object(generator._client.embeddings, "create", mock_create),
+        patch.object(
+            generator._client.embeddings,
+            "create",
+            autospec=True,
+            return_value=FakeEmbeddingsResponse(data=[]),
+        ),
         pytest.raises(ValueError, match="returned no embeddings"),
     ):
         await generator.generate_embeddings(["hello"])
@@ -135,9 +143,10 @@ async def test_count_mismatch_raises() -> None:
     response = FakeEmbeddingsResponse(
         data=[FakeEmbeddingDatum(embedding=[1.0, 2.0], index=0)]
     )
-    mock_create = AsyncMock(return_value=response)
     with (
-        patch.object(generator._client.embeddings, "create", mock_create),
+        patch.object(
+            generator._client.embeddings, "create", autospec=True, return_value=response
+        ),
         pytest.raises(ValueError, match="returned 1 embeddings for 2"),
     ):
         await generator.generate_embeddings(["hello", "world"])
