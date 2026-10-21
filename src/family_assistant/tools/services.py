@@ -1591,12 +1591,12 @@ SERVICE_TOOLS_DEFINITION: list[ToolDefinition] = [
             "description": (
                 "Stops an asynchronous profile delegation that is no longer wanted -- a duplicate, "
                 "or one the user has called off -- so its result is never delivered. Works on a "
-                "delegation that has not started yet, or that is running on a remote agent (such as "
-                "coder or research), whose run is also asked to stop; a remote agent may finish its "
-                "current step first. A delegation whose turn is already running inside Family "
-                "Assistant cannot be stopped and finishes on its own. Use list_delegations to find "
-                "the reference. This is distinct from "
-                "cancel_worker_task, which stops spawn_worker jobs."
+                "delegation that is queued, running a turn here, or running on a remote agent (such "
+                "as coder or research), which is asked to stop. A running turn stops at once and a "
+                "remote agent may finish its current step first; anything already done stays "
+                "done. A delegation waiting on delegations of its own cannot be cancelled "
+                "until they finish. Use list_delegations to find the reference. This is distinct "
+                "from cancel_worker_task, which stops spawn_worker jobs."
             ),
             "parameters": {
                 "type": "object",
@@ -1950,13 +1950,15 @@ async def cancel_delegation_tool(
     exec_context: ToolExecutionContext,
     delegation_id: str,
 ) -> ToolResult:
-    """Stop a queued or remote delegation and drop its result.
+    """Stop a delegation and drop its result.
 
     The run is failed first, as a compare-and-set on a cancellable status, so a
-    poll that finishes it at the same moment wins or loses cleanly rather than
-    both landing. Only then is the provider asked to stop, and only that it was
-    asked is recorded. The run is marked delivered on the spot: the caller
-    learns the outcome from this result, so no failure notification follows.
+    poll or turn that finishes it at the same moment wins or loses cleanly
+    rather than both landing. A turn running here is then cancelled, and a
+    worker about to start one finds the run no longer ``running``; a provider
+    is asked to stop, and only that it was asked is recorded. The run is marked
+    delivered on the spot: the caller learns the outcome from this result, so
+    no failure notification follows.
     """
     if not delegation_tools_config(exec_context).async_delegation_enabled:
         return ToolResult(
@@ -1993,12 +1995,20 @@ async def cancel_delegation_tool(
             ),
             attachments=None,
         )
+    if run["run_kind"] == "thread":
+        return ToolResult(
+            text=(
+                f"Error: Delegation '{delegation_id}' runs as a conversation thread; "
+                "the user can stop it from the thread itself."
+            ),
+            attachments=None,
+        )
     if run["status"] not in CANCELLABLE_DELEGATION_STATUSES:
         return ToolResult(
             text=(
-                f"Error: Delegation '{delegation_id}' is running a turn inside Family "
-                "Assistant, which cannot be stopped partway. It will finish on its own "
-                "and report back as usual."
+                f"Error: Delegation '{delegation_id}' is waiting on delegations of its "
+                "own and cannot be cancelled until they finish. Cancel those first, "
+                "or check back with get_delegation_status."
             ),
             attachments=None,
         )
@@ -2028,7 +2038,16 @@ async def cancel_delegation_tool(
     )
 
     remote_note = ""
-    if remote_task_id := cancelled["remote_task_id"]:
+    if cancelled["remote_task_id"] is None and run["status"] != "awaiting_remote":
+        processing_service = exec_context.processing_service
+        delegation_turns = (
+            processing_service.delegation_turns
+            if processing_service is not None
+            else None
+        )
+        if delegation_turns is not None and delegation_turns.stop(delegation_id):
+            remote_note = " Its turn was stopped partway; anything it had already done stays done."
+    elif remote_task_id := cancelled["remote_task_id"]:
         remote_note = await _request_remote_cancel(
             exec_context, cancelled, remote_task_id, now
         )

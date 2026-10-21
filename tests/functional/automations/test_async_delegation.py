@@ -92,6 +92,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+    from family_assistant.processing.delegation_turns import RunningDelegationTurns
     from family_assistant.storage.repositories.delegation_runs import (
         DelegationRunCreate,
         DelegationRunDict,
@@ -192,6 +193,7 @@ class FakeDelegatableService:
     """Minimal delegatable target service for async delegation tests."""
 
     kind = "local"
+    delegation_turns: RunningDelegationTurns | None = None
 
     def __init__(
         self,
@@ -481,8 +483,10 @@ def _source_processing_service(
     target_service: FakeDelegatableService,
     *,
     async_delegation_enabled: bool = True,
+    delegation_turns: RunningDelegationTurns | None = None,
 ) -> ProcessingService:
     source_service = SimpleNamespace(
+        delegation_turns=delegation_turns,
         service_config=SimpleNamespace(
             id="source_profile",
             tools_config=ToolsConfig(

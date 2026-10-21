@@ -927,8 +927,6 @@ class DelegationRunsRepository(BaseRepository):
         if values.get("local_failure_kind") == "stranded":
             stmt = stmt.where(delegation_runs_table.c.status.in_(["queued", "running"]))
         elif values.get("local_failure_kind") == "cancelled":
-            # A turn running here cannot be stopped from outside its worker, so
-            # cancelling one would only discard a result that still arrives.
             stmt = stmt.where(
                 delegation_runs_table.c.status.in_(
                     list(CANCELLABLE_DELEGATION_STATUSES)

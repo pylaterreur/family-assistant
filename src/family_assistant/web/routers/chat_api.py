@@ -2265,12 +2265,9 @@ async def _reject_pending_confirmations_for_turn(
 ) -> None:
     """Reject the cancelled turn's still-pending durable tool confirmations.
 
-    Every confirmation raised within a turn carries that turn's user message as
-    its ``source_message_internal_id``, so we reject exactly the confirmations
-    for this turn without touching a concurrent turn's. Since Stop's safety
-    relies on this, a confirmation we cannot reject (or a failure to even list
-    them) raises 503 so the caller retries rather than treating the turn as
-    safely stopped. Already-resolved/expired confirmations are not failures.
+    Since Stop's safety relies on this, a confirmation we cannot reject (or a
+    failure to even list them) raises 503 so the caller retries rather than
+    treating the turn as safely stopped.
     """
     confirmation_service = _get_confirmation_service(request)
     try:
@@ -2278,8 +2275,11 @@ async def _reject_pending_confirmations_for_turn(
         user_row = await db.message_history.get_user_row_by_turn_id(turn_id)
         if user_row is None:
             return
-        source_internal_id = user_row["internal_id"]
-        pending = await confirmation_service.list_pending_for_user(user_id=user_id)
+        unrejected = await confirmation_service.withdraw_pending_for_messages(
+            user_id=user_id,
+            source_message_internal_ids={user_row["internal_id"]},
+            interface="web",
+        )
     except Exception as exc:
         logger.warning(
             "Failed to list pending confirmations for cancelled turn=%s",
@@ -2290,33 +2290,6 @@ async def _reject_pending_confirmations_for_turn(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not verify the stopped turn's tool confirmations; retry.",
         ) from exc
-
-    unrejected = 0
-    for confirmation in pending:
-        if confirmation["source_message_internal_id"] != source_internal_id:
-            continue
-        try:
-            await confirmation_service.reject(
-                request_id=confirmation["id"],
-                rejecting_user_id=user_id,
-                rejecting_interface="web",
-                by_system=True,
-            )
-        except (
-            ConfirmationExpiredError,
-            ConfirmationAlreadyResolvedError,
-            ConfirmationNotFoundError,
-        ):
-            # Already resolved/expired elsewhere — nothing to reject.
-            continue
-        except Exception:
-            unrejected += 1
-            logger.warning(
-                "Failed to reject confirmation %s for cancelled turn=%s",
-                confirmation["id"],
-                turn_id,
-                exc_info=True,
-            )
 
     if unrejected:
         # Some state-changing confirmation is still approvable; don't report a

@@ -111,7 +111,7 @@ from family_assistant.tools.services import (
 from family_assistant.tools.types import CalendarConfig, EventSourcesById
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping
     from zoneinfo import ZoneInfo
 
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -157,6 +157,7 @@ from family_assistant.interfaces import ChatDeliveryError, HistoryBackedChatInte
 from family_assistant.processing.quiet_turn import QUIET_END_TRIGGER_HINT
 from family_assistant.processing.types import ChatInteractionStatus
 from family_assistant.processing.utils import get_file_extension_from_mime_type
+from family_assistant.services.confirmation_service import ConfirmationService
 from family_assistant.services.deferred_tool_confirmation import (
     build_deferred_confirmation_callback,
 )
@@ -2242,15 +2243,19 @@ class TaskWorker:
             return
 
         local_target = cast("ProcessingService", target_service)
+        confirmation_sources: set[int] = set()
         try:
             if payload.get("continuation"):
-                result = await self._run_delegation_continuation(
-                    exec_context, started, local_target
+                turn = self._run_delegation_continuation(
+                    exec_context, started, local_target, confirmation_sources
                 )
             else:
-                result = await self._run_delegated_request(
-                    exec_context, run, local_target
+                turn = self._run_delegated_request(
+                    exec_context, run, local_target, confirmation_sources
                 )
+            result = await self._run_stoppable_delegated_turn(
+                exec_context, delegation_id, local_target, turn
+            )
         except Exception:
             # A timeout cancellation (CancelledError) is intentionally NOT caught
             # here: it propagates so the task is retried, and the retry's
@@ -2267,13 +2272,99 @@ class TaskWorker:
             )
             return
 
+        if result is None:
+            await self._withdraw_stopped_turn_confirmations(
+                exec_context, started, confirmation_sources
+            )
+            return
         await self._settle_delegated_turn(exec_context, started, result)
+
+    async def _run_stoppable_delegated_turn(
+        self,
+        exec_context: ToolExecutionContext,
+        delegation_id: str,
+        local_target: ProcessingService,
+        turn_coro: Coroutine[object, object, ChatInteractionResult],
+    ) -> ChatInteractionResult | None:
+        """Run a delegated turn where ``cancel_delegation`` can stop it.
+
+        Returns ``None`` when the turn was stopped. The turn is registered,
+        held at a gate, before the run is read back, so a cancellation lands
+        either way: one committed before the read stops the turn before it
+        starts, and one after it finds the registered turn to cancel.
+        """
+        admitted = asyncio.Event()
+
+        async def run_when_admitted() -> ChatInteractionResult:
+            try:
+                await admitted.wait()
+            except asyncio.CancelledError:
+                turn_coro.close()
+                raise
+            return await turn_coro
+
+        turn = asyncio.create_task(run_when_admitted())
+        registry = local_target.delegation_turns
+        with (
+            registry.running(delegation_id, turn)
+            if registry is not None
+            else contextlib.nullcontext()
+        ):
+            current = (
+                await exec_context.db_context.delegation_runs.get_by_delegation_id(
+                    delegation_id
+                )
+            )
+            if current is None or current["status"] != "running":
+                turn.cancel()
+            admitted.set()
+            try:
+                return await turn
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+                logger.info(
+                    "Delegated turn of run %s was stopped by a cancellation.",
+                    delegation_id,
+                )
+                return None
+
+    async def _withdraw_stopped_turn_confirmations(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        confirmation_sources: set[int],
+    ) -> None:
+        """Reject what a stopped turn left waiting for approval.
+
+        Approving one would run nothing -- delegated confirmations are
+        decision-only -- but the prompt would sit in the user's list asking
+        about a turn that no longer exists.
+        """
+        user_id = run["user_id"]
+        if user_id is None or not confirmation_sources:
+            return
+        unrejected = await ConfirmationService(
+            db=exec_context.db_context
+        ).withdraw_pending_for_messages(
+            user_id=user_id,
+            source_message_internal_ids=confirmation_sources,
+            interface=run["interface_type"],
+        )
+        if unrejected:
+            logger.warning(
+                "%d confirmation(s) of stopped delegation %s could not be withdrawn.",
+                unrejected,
+                run["delegation_id"],
+            )
 
     async def _run_delegated_request(
         self,
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
         local_target: ProcessingService,
+        confirmation_sources: set[int],
     ) -> ChatInteractionResult:
         """Run a delegation's first turn, on the request it was created with."""
         content_parts = cast(
@@ -2285,7 +2376,7 @@ class TaskWorker:
             run["interface_type"],
         )
         request_confirmation_callback = self._build_delegation_confirmation_callback(
-            exec_context, run
+            exec_context, run, confirmation_sources
         )
         return await local_target.handle_chat_interaction(
             db_context=exec_context.db_context,
@@ -2417,6 +2508,7 @@ class TaskWorker:
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
         local_target: ProcessingService,
+        confirmation_sources: set[int],
     ) -> ChatInteractionResult:
         """Run the turn that follows a run's own delegations finishing.
 
@@ -2496,7 +2588,7 @@ class TaskWorker:
             chat_interfaces=exec_context.chat_interfaces,
             confirmation_ui_managers=exec_context.confirmation_ui_managers,
             request_confirmation_callback=self._build_delegation_confirmation_callback(
-                exec_context, run
+                exec_context, run, confirmation_sources
             ),
             trigger_attachments=trigger_attachments or None,
             subconversation_id=run["subconversation_id"],
@@ -3693,8 +3785,13 @@ class TaskWorker:
         self,
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
+        confirmation_sources: set[int],
     ) -> RequestConfirmationCallback | None:
-        """Build a confirmation callback for a delegated profile background run."""
+        """Build a confirmation callback for a delegated profile background run.
+
+        Each confirmation's source message is added to ``confirmation_sources``,
+        which is how a stopped turn finds the requests it left pending.
+        """
         confirmation_ui_managers = (
             exec_context.confirmation_ui_managers or self.confirmation_ui_managers
         )
@@ -3736,6 +3833,7 @@ class TaskWorker:
                 )
                 if source_row is not None:
                     source_message_internal_id = source_row["internal_id"]
+                    confirmation_sources.add(source_message_internal_id)
 
             taint_state_json = (
                 context.taint_tracker.snapshot().to_metadata()

@@ -46,13 +46,15 @@ TERMINAL_DELEGATION_STATUSES: frozenset[DelegationRunStatus] = frozenset({
 
 CANCELLABLE_DELEGATION_STATUSES: frozenset[DelegationRunStatus] = frozenset({
     "queued",
+    "running",
     "awaiting_remote",
 })
-"""Where a run can be stopped: not started yet, or held by a provider.
+"""Where a run can be stopped: not started yet, mid-turn, or held by a provider.
 
-A ``running`` or ``awaiting_children`` run has a turn executing in, or owed
-to, one of this application's workers, which nothing outside that worker can
-interrupt.
+A ``running`` turn executes in this process and is stopped by cancelling its
+task (see ``RunningDelegationTurns``). An
+``awaiting_children`` run is not here: stopping it would leave its children
+running with nobody to answer to.
 """
 
 DelegationLocalFailureKind = Literal[
