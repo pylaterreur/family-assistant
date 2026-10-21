@@ -1781,3 +1781,59 @@ async def test_a_retryable_download_failure_registers_nothing(
         )
 
     assert await registry.list_attachments(db_context, acting_user_id="user-1") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent_client", "chained_onto"),
+    [
+        (lambda: _antigravity_client("gemini-3.8-flash"), "inter_failed"),
+        (_google_client, None),
+    ],
+    ids=["sandboxed agent", "deep research"],
+)
+async def test_a_resume_after_a_failed_run_chains_only_a_sandboxed_agent(
+    db_engine: AsyncEngine,
+    agent_client: Callable[[], GoogleGenAIClient],
+    chained_onto: str | None,
+) -> None:
+    """A sandboxed agent's failed run holds its work; Deep Research's does not."""
+    db_context = Database(db_engine)
+    await db_context.delegation_runs.create_run({
+        "delegation_id": "d-failed",
+        "task_id": "task-d-failed",
+        "source_profile_id": "src",
+        "target_service_id": "research",
+        "interface_type": "web",
+        "conversation_id": "conv-1",
+        "subconversation_id": "sub-1",
+        "request_text": "make the bookmarks",
+        "content_parts_json": [],
+    })
+    await db_context.delegation_runs.mark_awaiting_remote(
+        "d-failed",
+        remote_task_id="inter_failed",
+        remote_context_id=None,
+        started_at=datetime(2026, 10, 21, tzinfo=UTC),
+    )
+    await db_context.delegation_runs.mark_failed(
+        delegation_id="d-failed",
+        error="All connection attempts failed",
+        completed_at=datetime(2026, 10, 21, tzinfo=UTC),
+    )
+    client = agent_client()
+    interaction = AsyncMock()
+    interaction.id = "inter_resumed"
+    client.start_agent_interaction = AsyncMock(return_value=interaction)
+    service = _make_service(client)
+
+    await service.submit_async(
+        [{"type": "text", "text": "Carry on from where you were."}],
+        conversation_id="conv-1",
+        subconversation_id="sub-1",
+        user_name="Andrew",
+        db_context=db_context,
+    )
+
+    kwargs = client.start_agent_interaction.call_args.kwargs
+    assert kwargs["previous_interaction_id"] == chained_onto
