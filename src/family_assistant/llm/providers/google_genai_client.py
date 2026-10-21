@@ -20,6 +20,7 @@ from collections.abc import (
     Sequence,
 )
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -201,6 +202,7 @@ class SandboxFileEntry:
     path: str
     size_bytes: int | None
     mime_type: str | None
+    modified: datetime | None = None
 
 
 def _agent_interaction_response(response: object) -> Interaction:
@@ -2362,6 +2364,7 @@ class GoogleGenAIClient(BaseLLMClient):
                     path=entry.path,
                     size_bytes=entry.size_bytes,
                     mime_type=entry.mime_type,
+                    modified=entry.modified,
                 )
                 for entry in response.files or []
                 if entry.type == "FILE" and entry.path

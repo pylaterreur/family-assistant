@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
@@ -1837,3 +1838,55 @@ async def test_a_resume_after_a_failed_run_chains_only_a_sandboxed_agent(
 
     kwargs = client.start_agent_interaction.call_args.kwargs
     assert kwargs["previous_interaction_id"] == chained_onto
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_run_returns_only_what_it_wrote(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    """The predecessor's outputs share the sandbox and were already returned."""
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, download = _client_with_outputs({})
+    started = datetime(2026, 10, 21, 5, 41, 8, 600_000, tzinfo=UTC)
+    client.list_sandbox_files = AsyncMock(
+        return_value=[
+            SandboxFileEntry(
+                path=f"workspace/outputs/{name}",
+                size_bytes=1,
+                mime_type="text/plain",
+                modified=modified,
+            )
+            for name, modified in (
+                ("earlier.txt", started - timedelta(minutes=30)),
+                # Whole-second listing time, written in the run's first second.
+                ("first-second.txt", started.replace(microsecond=0)),
+                ("later.txt", started + timedelta(minutes=2)),
+                ("untimed.txt", None),
+            )
+        ]
+    )
+    download.side_effect = lambda _env, _path: b"x"
+    service = _make_service(client, attachment_registry=registry)
+    observation = replace(
+        _finished_with_environment("env_prev"), remote_created_at=started
+    )
+
+    collected = await service.collect_outputs(
+        observation,
+        owner_user_id="user-1",
+        conversation_id="conv-1",
+        taint_state=TurnTaintState.empty(),
+        db_context=Database(db_engine),
+    )
+
+    fetched = [call.args[1] for call in download.await_args_list]
+    assert fetched == [
+        "workspace/outputs/first-second.txt",
+        "workspace/outputs/later.txt",
+        "workspace/outputs/untimed.txt",
+    ]
+    assert len(collected.attachment_ids) == 3
+    assert collected.omitted == []

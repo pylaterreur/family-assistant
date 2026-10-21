@@ -231,7 +231,9 @@ that run's environment, so the agent finds its earlier work where it left it, al
 sent with the resume. Every delegated sandbox run is therefore given an environment created through
 the API, even with nothing to upload, because only such an environment accepts uploads later. For a
 sandboxed agent, a resume chains onto the latest run that reached the provider, failed or not: a run
-failed on our side after a connection blip did real work, and its sandbox still holds it.
+failed on our side after a connection blip did real work, and its sandbox still holds it. Its
+outputs are the files under `/workspace/outputs` modified since it started: the predecessor's are in
+the same directory and were returned with that run.
 
 ## Deliberate simplifications
 

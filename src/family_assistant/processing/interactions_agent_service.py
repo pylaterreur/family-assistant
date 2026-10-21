@@ -616,6 +616,20 @@ class InteractionsAgentProcessingService(ProcessingService):
             return CollectedOutputs(attachment_ids=[], omitted=[])
         client = self._google_client()
         entries = await client.list_sandbox_files(environment_id, _SANDBOX_OUTPUT_DIR)
+        # A resumed run works in its predecessor's sandbox, whose outputs were
+        # returned with that run: only what this run wrote is its output. The
+        # listing has whole-second timestamps, so the run's start is truncated
+        # to match; a file that reports no time is returned rather than lost.
+        started = observation.remote_created_at
+        if started is not None and started.tzinfo is not None:
+            started = started.replace(microsecond=0)
+            entries = [
+                entry
+                for entry in entries
+                if entry.modified is None
+                or entry.modified.tzinfo is None
+                or entry.modified >= started
+            ]
         if not entries:
             return CollectedOutputs(attachment_ids=[], omitted=[])
         registry = self.attachment_registry

@@ -761,7 +761,7 @@ async def test_every_page_of_an_output_listing_is_read(
 
     def page(path: str, token: str | None) -> SimpleNamespace:
         entry = SimpleNamespace(
-            path=path, type="FILE", size_bytes=1, mime_type="text/plain"
+            path=path, type="FILE", size_bytes=1, mime_type="text/plain", modified=None
         )
         return SimpleNamespace(files=[entry], next_page_token=token)
 
