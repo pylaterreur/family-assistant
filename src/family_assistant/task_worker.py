@@ -2686,7 +2686,7 @@ class TaskWorker:
             exec_context.db_context,
             run,
             clock.now(),
-            exec_context.inherited_task_priority(),
+            exec_context.inherited_task_priority,
         )
 
     @staticmethod

@@ -1985,7 +1985,7 @@ async def continue_waiting_parent(
     db: Database,
     run: DelegationRunDict,
     now: datetime,
-    priority: TaskPriority,
+    priority: Callable[[], TaskPriority],
 ) -> bool:
     """Queue the next turn of the run that started ``run``, if it is waiting on it.
 
@@ -1994,6 +1994,8 @@ async def continue_waiting_parent(
     conditional requeue is what makes that happen once. Returns False when
     there is no live parent -- a top-level turn started the run, or the parent
     has already finished -- and the run answers to the person instead.
+    ``priority`` is asked for the continuation's lane only when there is a
+    parent to continue.
     """
     parent_subconversation_id = run["source_subconversation_id"]
     if parent_subconversation_id is None:
@@ -2011,8 +2013,10 @@ async def continue_waiting_parent(
     # parent waiting, and it waits on a parent parking in the same instant, so
     # one of the two always sees this child finished. A parent still in its
     # turn picks the result up when the turn ends.
+    lane = priority()
+
     async def _requeue(txn: DatabaseTransaction) -> bool:
-        return await queue_continuation_if_ready(txn, parent, now, priority)
+        return await queue_continuation_if_ready(txn, parent, now, lane)
 
     await db.atomic(_requeue)
     return True
@@ -2117,8 +2121,13 @@ async def cancel_delegation_tool(
         cancelled["source_subconversation_id"] is not None
         and cancelled["source_subconversation_id"] == exec_context.subconversation_id
     )
+    # Outside a task -- a person's own turn -- the cancel is made by someone
+    # waiting on the answer.
     if cancelled_by_parent or not await continue_waiting_parent(
-        db, cancelled, now, exec_context.inherited_task_priority()
+        db,
+        cancelled,
+        now,
+        lambda: exec_context.task_priority or TaskPriority.INTERACTIVE,
     ):
         await db.delegation_runs.mark_notified(
             delegation_id=delegation_id,

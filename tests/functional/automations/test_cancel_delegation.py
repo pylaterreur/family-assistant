@@ -8,6 +8,7 @@ delegation tests use.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
@@ -495,7 +496,11 @@ async def test_a_cancelled_remote_run_is_still_counted_in_the_metrics(
 async def test_cancelling_a_waiting_parents_last_child_hands_it_to_the_parents_next_turn(
     db_engine: AsyncEngine,
 ) -> None:
-    """Otherwise the parent waits forever on a child that will never finish."""
+    """Otherwise the parent waits forever on a child that will never finish.
+
+    Cancelled from a person's own chat turn, which runs outside any task, so
+    there is no lane to inherit for the parent's continuation.
+    """
     target = FakePollableService()
     db_context = Database(engine=db_engine)
     await _create_run(db_context, delegation_id="delegation_parent")
@@ -512,9 +517,10 @@ async def test_cancelling_a_waiting_parents_last_child_hands_it_to_the_parents_n
     )
     await db_context.delegation_runs.mark_awaiting_children("delegation_parent")
 
-    await cancel_delegation_tool(
-        _tool_context(db_context, _processing_service(target)), "delegation_child"
+    chat_turn = dataclasses.replace(
+        _tool_context(db_context, _processing_service(target)), task_priority=None
     )
+    await cancel_delegation_tool(chat_turn, "delegation_child")
 
     parent = await db_context.delegation_runs.get_by_delegation_id("delegation_parent")
     assert parent is not None
