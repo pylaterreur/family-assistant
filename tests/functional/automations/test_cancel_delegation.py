@@ -168,13 +168,6 @@ class MeteredPollableService(FakePollableService):
         self.recorded.append((remote_task_id, cancelled))
 
 
-class FailingCancelService(FakePollableService):
-    """A remote target whose cancel request does not get through."""
-
-    async def cancel_async(self, remote_task_id: str) -> None:
-        raise ConnectionError(f"could not reach the provider for {remote_task_id}")
-
-
 def _poll_payload(delegation_id: str) -> DelegationPollPayload:
     return {
         "delegation_id": delegation_id,
@@ -222,6 +215,7 @@ async def test_cancelling_a_remote_run_stops_it_and_drops_its_result(
     assert result.text is not None
     assert "Cancelled delegation 'delegation_duplicate'" in result.text
     assert "asked to stop" in result.text
+    assert "may still carry on" in result.text
     assert target.cancelled == [REMOTE_TASK_ID]
     run = await db_context.delegation_runs.get_by_delegation_id("delegation_duplicate")
     assert run is not None
@@ -479,31 +473,6 @@ async def test_another_conversations_run_cannot_be_cancelled(
     run = await db_context.delegation_runs.get_by_delegation_id("delegation_elsewhere")
     assert run is not None
     assert run["status"] == "awaiting_remote"
-
-
-@pytest.mark.asyncio
-async def test_a_failed_remote_cancel_still_cancels_and_says_the_agent_may_continue(
-    db_engine: AsyncEngine,
-) -> None:
-    target = FailingCancelService()
-    processing_service = _processing_service(target)
-    db_context = Database(engine=db_engine)
-    await _remote_run(db_context, "delegation_unreachable")
-
-    result = await cancel_delegation_tool(
-        _tool_context(db_context, processing_service), "delegation_unreachable"
-    )
-
-    assert result.text is not None
-    assert "Cancelled delegation 'delegation_unreachable'" in result.text
-    assert "may run to the end" in result.text
-    run = await db_context.delegation_runs.get_by_delegation_id(
-        "delegation_unreachable"
-    )
-    assert run is not None
-    assert run["status"] == "failed"
-    assert run["local_failure_kind"] == "cancelled"
-    assert run["cancel_requested_at"] is None
 
 
 @pytest.mark.asyncio

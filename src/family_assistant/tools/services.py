@@ -2148,12 +2148,10 @@ async def _request_remote_cancel(
     remote_task_id: str,
     now: datetime,
 ) -> str:
-    """Ask the provider holding a cancelled run to stop it; say how that went.
+    """Ask the provider holding a cancelled run to stop it; say what that means.
 
-    Best-effort on every provider, and the run is already cancelled here
-    whatever it answers, so a failure is reported to the caller rather than
-    raised: the user wants to know the agent may carry on, not to see the
-    cancellation itself fail.
+    The run is already cancelled here whatever the provider does, so the
+    caller is told only that the agent was asked and may carry on.
     """
     # Local import: the processing package imports the tools package.
     from family_assistant.processing.protocol import (  # noqa: PLC0415
@@ -2172,21 +2170,12 @@ async def _request_remote_cancel(
             " The remote agent could not be reached to stop it, so it may run to "
             "the end; its result will be ignored."
         )
-    try:
-        await target.cancel_async(remote_task_id)
-    except Exception:
-        logger.warning(
-            "Remote cancel of delegation %s failed", run["delegation_id"], exc_info=True
-        )
-        note = (
-            " Asking the remote agent to stop failed, so it may run to the end; "
-            "its result will be ignored."
-        )
-    else:
-        await exec_context.db_context.delegation_runs.mark_cancel_requested(
-            run["delegation_id"], now=now
-        )
-        note = " The remote agent was asked to stop."
+    # Best-effort by contract: providers log a failed request rather than
+    # raise, so whether it reached the agent is not known here.
+    await target.cancel_async(remote_task_id)
+    await exec_context.db_context.delegation_runs.mark_cancel_requested(
+        run["delegation_id"], now=now
+    )
     # This cancellation won the terminal CAS and no poll will read the run
     # again, so it owes the run's accounting, as the worker's timeout path
     # does. Probed for the reason the worker gives in
@@ -2194,4 +2183,7 @@ async def _request_remote_cancel(
     record = getattr(target, "record_terminal_metrics", None)
     if record is not None:
         await record(remote_task_id, cancelled=True)
-    return note
+    return (
+        " The remote agent was asked to stop; it may still carry on to the end, "
+        "but its result will be ignored."
+    )
