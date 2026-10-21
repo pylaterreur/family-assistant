@@ -24,6 +24,7 @@ from sqlalchemy import func, select, update
 
 # Removed storage import - using repository pattern
 from family_assistant.actions import (
+    EVENT_HANDLER_PROFILE_ID,
     ActionType,
     WakeDestinationError,
     WakeLlmProfileError,
@@ -492,9 +493,10 @@ class LlmCallbackPayload(TypedDict, total=False):
     # for legacy tasks queued before this field existed, in which case confirm-gated
     # tools cannot be approved.
     created_by_user_id: str
-    # Profile the woken turn should run under. Event-listener wakes carry the
-    # restricted "event_handler" profile (untrusted trigger); schedule and
-    # future-callback wakes carry their originating profile. Absent for reminders
+    # Profile the woken turn should run under. Event-triggered wakes (an event
+    # listener's wake_llm, or wake_llm() from an event listener's script) carry
+    # the restricted "event_handler" profile (untrusted trigger); schedule,
+    # scheduled-script and future-callback wakes carry their originating profile. Absent for reminders
     # (which switch to the "reminder" profile) and legacy tasks (run as default).
     processing_profile_id: str
     # Reviewer-only trigger metadata. Kept separate from callback_context so an
@@ -1526,7 +1528,7 @@ async def handle_llm_callback(
     # Determine the profile the woken turn runs under.
     #  - Reminders switch to the specialized "reminder" profile (soft: falls back
     #    to default if it is not registered).
-    #  - Otherwise honor the wake's stamped execution profile: event-listener
+    #  - Otherwise honor the wake's stamped execution profile: event-triggered
     #    wakes carry the restricted "event_handler" profile (untrusted trigger),
     #    schedule/future-callback wakes carry their originating profile. This is a
     #    fail-loud resolve — a stamped non-default profile that cannot be resolved
@@ -6270,6 +6272,10 @@ async def _process_script_wake_llm(
     destination -- its owner's Home when its action config names Home, else
     the conversation it was created in.
 
+    A script fired by an event listener wakes under ``event_handler``, as the
+    listener's own wake_llm action would: the wake carries the untrusted event
+    to a turn that reads it. A scheduled script wakes under its own profile.
+
     Args:
         exec_context: The execution context with DB access
         wake_contexts: List of wake context dictionaries from script
@@ -6278,12 +6284,13 @@ async def _process_script_wake_llm(
         home_owner_user_id: Whose Home the script's own wakes land in, if any
     """
 
-    # A script's built-in wake_llm() enqueues an llm_callback stamped with the
-    # script's own profile (see the payload below). A script running under a
-    # confined profile (allow_wake_llm disabled) must not be able to wake at all:
-    # handle_llm_callback re-checks the flag and would raise at fire time. Refuse
-    # here, mirroring the create_automation/execute_action guard.
+    # A script running under a confined profile (allow_wake_llm disabled) must
+    # not be able to wake at all, whichever profile the wake would run under.
+    # Refuse here, mirroring the create_automation/execute_action guard.
     assert_wake_llm_allowed(ActionType.WAKE_LLM, exec_context.allow_wake_llm)
+    wake_profile_id = (
+        EVENT_HANDLER_PROFILE_ID if listener_id else exec_context.processing_profile_id
+    )
 
     to_source = [ctx for ctx in wake_contexts if not ctx.get("new_conversation")]
     to_new = [ctx for ctx in wake_contexts if ctx.get("new_conversation")]
@@ -6305,6 +6312,7 @@ async def _process_script_wake_llm(
             to_source,
             event_data,
             listener_id,
+            wake_profile_id=wake_profile_id,
             new_conversation=False,
             home_owner_user_id=home_owner_user_id,
         )
@@ -6314,6 +6322,7 @@ async def _process_script_wake_llm(
             to_new,
             event_data,
             listener_id,
+            wake_profile_id=wake_profile_id,
             new_conversation=True,
             home_owner_user_id=None,
         )
@@ -6326,6 +6335,7 @@ async def _enqueue_script_wake(
     event_data: dict[str, Any],
     listener_id: str | None,
     *,
+    wake_profile_id: str | None,
     new_conversation: bool,
     home_owner_user_id: str | None,
 ) -> None:
@@ -6477,9 +6487,8 @@ async def _enqueue_script_wake(
     }
     if exec_context.user_id is not None:
         payload["created_by_user_id"] = exec_context.user_id
-    # The woken turn runs under the script's own (originating) profile.
-    if exec_context.processing_profile_id is not None:
-        payload["processing_profile_id"] = exec_context.processing_profile_id
+    if wake_profile_id is not None:
+        payload["processing_profile_id"] = wake_profile_id
     if new_conversation:
         payload["new_conversation"] = True
     elif home_owner_user_id is not None:
@@ -6513,7 +6522,7 @@ def _resolve_execution_service(
     """Resolve the processing service a task should execute under.
 
     Used for both script execution (runs under the creating profile) and
-    profile-routed wake_llm turns (event listeners route to ``event_handler``;
+    profile-routed wake_llm turns (event-triggered wakes route to ``event_handler``;
     schedule/future-callback wakes carry their originating profile). Tasks with
     no recorded profile, or stamped with the default profile, fall back to the
     default processing service.

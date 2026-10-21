@@ -45,72 +45,16 @@ search the calendar and documents, query recent events, publish MQTT, and messag
 cannot browse, delegate, run scripts, or touch the calendar and automations. Scope an event
 `wake_llm` to that list.
 
-**An event script must not call `wake_llm()`.** An event *script* does run under the creating
-profile, and that is safe on its own: a script is deterministic, so an attacker who controls the
-event can influence the arguments but not which tools get called. Waking the assistant from inside
-one breaks that. The wake carries the raw triggering event into a turn running with the creating
-profile's full tools — untrusted input, private data and the ability to act, all at once, which is
-exactly the combination the `event_handler` routing exists to prevent. Do not treat it as a way to
-give an event automation more capability.
+**An event script's `wake_llm()` also wakes `event_handler`.** The script itself runs under the
+creating profile, which is safe on its own: a script is deterministic, so an attacker who controls
+the event can influence the arguments but not which tools get called. The turn it wakes reads the
+event, though, so that turn gets the same confinement as an event `wake_llm`. A script is a good way
+to filter events cheaply and wake only for the ones worth looking at, but it is not a way to give an
+event automation more capability than the list above.
 
 So when an event response needs more than `event_handler` can do, have the script do the work
 deterministically and leave the outcome in data — a note the user (or a later scheduled automation)
-picks up. If it genuinely needs judgement over the event content, that judgement belongs in
-`event_handler`, within the tools listed above.
-
-One more thing worth knowing: an automation owned by a different profile cannot be updated from
-here. `update_automation` fails with an ownership error naming the owning profile. Recreate it here
-instead.
-
-## Procedure
-
-The goal is an automation that works without manual intervention. Validate assumptions with tools
-rather than guessing; the cost of a wrong entity ID or a mistaken event shape is a silent weekly
-failure that nobody notices for a month.
-
-### 1. Understand the request, and look at what exists
-
-Parse what should happen, and when. Then call `list_automations` to see whether something similar
-already exists — an existing automation that already fires correctly is the best available template,
-and `get_automation_stats` tells you whether it actually runs. Ask the user if the request is
-ambiguous.
-
-### 2. Work out the trigger
-
-**Schedule automations** need an RRULE and a timezone. Times in an RRULE are interpreted in the
-user's configured timezone, not UTC — `BYHOUR=9` means 9am local, and DST is handled for you. The
-Scheduling skill covers RRULE patterns in detail.
-
-**Event automations** need an event source and a filter. Never guess the shape of an event: call
-`query_recent_events` and read a real one.
-
-```
-query_recent_events(source_id="home_assistant", hours=24, limit=10)
-```
-
-Simple equality conditions go in `match_conditions`, using exact field names with dot notation for
-nested fields (`new_state.state`). Anything else — a genuine state transition, a numeric threshold,
-a pattern across entities — needs a `condition_script`, a Python expression receiving `event` and
-returning a boolean.
-
-Then confirm the filter would actually have matched:
-
-```
-test_event_listener(
-    source="home_assistant",
-    match_conditions={"entity_id": "sensor.motion", "new_state.state": "on"},
-    hours=24,
-    limit=5,
-)
-```
-
-A filter that matches nothing in recent history is the single most common way an automation ends up
-silently dead. If it matches nothing, find out why before creating it.
-
-For Home Assistant entity IDs and states, load the Home Assistant skill and check the entity
-directly rather than trusting a name from the conversation.
-
-### 3. Choose the action type
+picks up.
 
 Use `action_type="script"` when the response is fixed and deterministic — logging, a notification
 with known content, data collection. Scripts run immediately, cost nothing per run, and behave
@@ -120,9 +64,10 @@ Use `action_type="wake_llm"` when the response needs judgement — when what to 
 the situation. For an event automation, check the wake against what `event_handler` can reach (see
 above) before choosing it.
 
-In a **schedule** automation a script can also call `wake_llm()` conditionally, which is often the
-best of both: cheap deterministic filtering, waking only when something is actually worth the user's
-attention. Do not do this in an event automation — see above.
+A script can also call `wake_llm()` conditionally, which is often the best of both: cheap
+deterministic filtering, waking only when something is actually worth the user's attention. In a
+schedule automation the wake runs under the creating profile; in an event automation it runs under
+`event_handler` (see above).
 
 Prefer a script where a script suffices.
 
