@@ -15,6 +15,7 @@ from .error_logs import ErrorLogsRepository
 from .events import EventsRepository
 from .history_compaction import HistoryCompactionRepository
 from .ios_push_token import IosPushTokenRepository
+from .mcp_event_cursors import MCPEventCursorsRepository
 from .memory_change_log import MemoryChangeLogRepository
 from .memory_review import MemoryReviewRepository
 from .memory_store import MemoryStoreRepository
@@ -45,6 +46,7 @@ __all__ = [
     "EventsRepository",
     "HistoryCompactionRepository",
     "IosPushTokenRepository",
+    "MCPEventCursorsRepository",
     "MemoryChangeLogRepository",
     "MemoryReviewRepository",
     "MemoryStoreRepository",

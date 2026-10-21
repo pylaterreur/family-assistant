@@ -1500,12 +1500,29 @@ class WebhookSourceConfig(BaseModel):
     )
 
 
+class MCPEventSourceConfig(BaseModel):
+    """Polling MCP servers' Events extension for event automations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    # How often enabled listeners are re-read to start and stop subscriptions.
+    reconcile_interval_seconds: float = Field(default=30.0, gt=0)
+    # Used when a server does not suggest an interval; a suggestion below the
+    # minimum is raised to it.
+    default_poll_interval_seconds: float = Field(default=30.0, gt=0)
+    min_poll_interval_seconds: float = Field(default=10.0, gt=0)
+    max_error_backoff_seconds: float = Field(default=300.0, gt=0)
+    request_timeout_seconds: float = Field(default=30.0, gt=0)
+
+
 class EventSourcesConfig(BaseModel):
     """Event sources configuration."""
 
     model_config = ConfigDict(extra="forbid")
 
     webhook: WebhookSourceConfig = Field(default_factory=WebhookSourceConfig)
+    mcp: MCPEventSourceConfig = Field(default_factory=MCPEventSourceConfig)
 
 
 class EventSystemConfig(BaseModel):

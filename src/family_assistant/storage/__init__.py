@@ -52,6 +52,7 @@ from family_assistant.storage.events import (
 )
 from family_assistant.storage.history_compaction import history_compaction_events_table
 from family_assistant.storage.ios_push_token import ios_push_tokens_table
+from family_assistant.storage.mcp_event_cursors import mcp_event_cursors_table
 from family_assistant.storage.memory_change_log import memory_change_log_table
 from family_assistant.storage.memory_review import (
     memory_contribution_state_table,
@@ -379,6 +380,7 @@ __all__ = [
     "history_compaction_events_table",
     "init_db",  # Now defined above
     "ios_push_tokens_table",
+    "mcp_event_cursors_table",
     "memory_change_log_table",
     "memory_contribution_state_table",
     "memory_review_watermarks_table",

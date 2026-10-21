@@ -15,10 +15,8 @@ from typing import (
     TypedDict,
     cast,
 )  # Added Tuple
-from urllib.parse import urljoin, urlsplit
 
 import anyio
-import httpx
 import jsonschema
 
 if TYPE_CHECKING:
@@ -48,6 +46,7 @@ from family_assistant.tools.mcp_auth import (
     MCPIdentityCheckConfig,
     MCPUserAuthConfig,
     MCPUserCredentialConfig,
+    verify_mcp_user_identity,
 )
 from family_assistant.tools.metadata import (
     ToolDescriptor,
@@ -1009,33 +1008,12 @@ class MCPToolsProvider:
 
     async def _verify_user_identity(self, url: str | None, token: str | None) -> None:
         """Fail before MCP initialization if a user credential is absent or misbound."""
-        if not token or not url or self._user_identity is None:
+        if self._user_identity is None:
             raise ValueError(
                 "MCP user credential is missing; configure its token environment variable"
             )
         user, check = self._user_identity
-        if check is None:
-            return
-        endpoint = urljoin(url, check.path)
-        if urlsplit(endpoint).netloc != urlsplit(url).netloc:
-            raise ValueError("MCP identity check must use the server origin")
-        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-            response = await client.get(
-                endpoint, headers={"Authorization": f"Bearer {token}"}
-            )
-        if response.status_code != 200:
-            raise ValueError(f"MCP identity check failed (HTTP {response.status_code})")
-        payload = response.json()
-        identity = payload.get("user") if isinstance(payload, dict) else None
-        if (
-            not isinstance(identity, dict)
-            or identity.get("id") != user.expected_user_id
-            or payload.get("agent") != check.expected_agent
-            or (check.require_write and payload.get("can_write") is not True)
-        ):
-            raise ValueError(
-                "MCP credential does not match the configured user, agent, or write capability"
-            )
+        await verify_mcp_user_identity(url, token, user, check)
 
     def _sync_user_tools(self) -> None:
         """Publish the common catalog without user-specific initialization instructions."""

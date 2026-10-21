@@ -52,6 +52,19 @@ use a condition script, which receives the event and returns a boolean:
   counts as above 25
 - Any motion sensor: `event.get('entity_id', '').startswith('binary_sensor.motion')`
 
+### Events from your other apps
+
+Some of the apps the assistant is connected to through MCP can announce changes, and an automation
+can wait for them. The Tuit task tracker is one:
+
+- "Tell me when Teija hands me a task in Tuit."
+- "Let me know whenever anything in my Tuit inbox becomes ready."
+- "Watch the gutters task and tell me when it's done."
+
+Ask "which apps can I get events from?" to see what's available. Each automation watches as you, so
+it only hears about what that app would show you. A change takes up to about half a minute to reach
+the assistant.
+
 ## Scheduled automations
 
 For anything recurring, use a scheduled automation rather than a chain of one-off reminders:

@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from datetime import tzinfo
 from typing import Any, TypedDict, cast
 
@@ -139,20 +139,42 @@ class EventProcessor:
             except Exception as e:
                 logger.exception(f"Failed to stop event source {source_id}: {e}")
 
-    # ast-grep-ignore: no-dict-any - event_data is arbitrary JSON from external sources (Home Assistant, webhooks) with no fixed schema
-    async def process_event(self, source_id: str, event_data: dict[str, Any]) -> None:
-        """Process an event from a source."""
+    async def process_event(
+        self,
+        source_id: str,
+        # ast-grep-ignore: no-dict-any - event_data is arbitrary JSON from external sources with no fixed schema
+        event_data: dict[str, Any],
+        *,
+        listener_ids: Collection[int] | None = None,
+    ) -> None:
+        """Process an event from a source.
+
+        ``listener_ids`` confines the event to those listeners, for a source
+        whose events were fetched on behalf of particular listeners -- with
+        their creator's credential -- and so must not reach anyone else's.
+        """
         if not self._running:
             return
 
         # Use lock to prevent concurrent cache refreshes
         async with self._process_lock:
-            # Refresh cache if needed
-            if time.time() - self._last_cache_refresh > self._cache_refresh_interval:
+            cached = self._listener_cache.get(source_id, [])
+            # A source that names its listeners read them from the database
+            # itself, so one created since the last refresh must not be missed.
+            if (
+                time.time() - self._last_cache_refresh > self._cache_refresh_interval
+                or (
+                    listener_ids is not None
+                    and not set(listener_ids) <= {item["id"] for item in cached}
+                )
+            ):
                 await self._refresh_listener_cache()
 
             # Get all active listeners for this source
             listeners = self._listener_cache.get(source_id, [])
+            if listener_ids is not None:
+                wanted = set(listener_ids)
+                listeners = [item for item in listeners if item["id"] in wanted]
 
         # Get database handle (for tests or via factory function)
         if self._db_context:

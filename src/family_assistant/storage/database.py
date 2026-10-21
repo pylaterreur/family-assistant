@@ -72,6 +72,7 @@ if TYPE_CHECKING:
         EventsRepository,
         HistoryCompactionRepository,
         IosPushTokenRepository,
+        MCPEventCursorsRepository,
         MemoryChangeLogRepository,
         MemoryReviewRepository,
         MemoryStoreRepository,
@@ -684,6 +685,15 @@ class DatabaseExecutor(ABC):
         )
 
         return self._repository(IosPushTokenRepository)
+
+    @property
+    def mcp_event_cursors(self) -> MCPEventCursorsRepository:
+        """Get the MCP event cursors repository instance."""
+        from family_assistant.storage.repositories import (  # noqa: PLC0415
+            MCPEventCursorsRepository,
+        )
+
+        return self._repository(MCPEventCursorsRepository)
 
     @property
     def worker_tasks(self) -> WorkerTasksRepository:

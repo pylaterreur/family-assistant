@@ -55,6 +55,7 @@ from family_assistant.embeddings import (
     OpenAIEmbeddingGenerator,
 )
 from family_assistant.events.indexing_source import IndexingSource
+from family_assistant.events.mcp_source import MCPEventSource
 from family_assistant.events.processor import EventProcessor
 from family_assistant.events.webhook_source import WebhookEventSource
 
@@ -162,6 +163,7 @@ from family_assistant.storage.database import (
     set_engine_history_taint_epoch,
     set_engine_memory_limits,
 )
+from family_assistant.storage.events import EventSourceType
 from family_assistant.storage.repositories.notes import NoteReadPolicy
 from family_assistant.storage.tasks import TaskPriority
 from family_assistant.task_worker import (
@@ -2123,6 +2125,14 @@ class Assistant:
                 logger.info("Created WebhookEventSource for incoming webhooks")
             else:
                 self.webhook_source = None
+
+            if event_config.sources.mcp.enabled:
+                event_sources[EventSourceType.mcp.value] = MCPEventSource(
+                    servers=self.config.mcp_config.mcpServers,
+                    database=self._database,
+                    config=event_config.sources.mcp,
+                )
+                logger.info("Created MCPEventSource for MCP server events")
 
             if event_sources:
                 sample_interval_hours = event_config.storage.sample_interval_hours
