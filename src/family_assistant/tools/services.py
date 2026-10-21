@@ -2028,9 +2028,9 @@ async def cancel_delegation_tool(
     poll or turn that finishes it at the same moment wins or loses cleanly
     rather than both landing. A turn running here is then cancelled, and a
     worker about to start one finds the run no longer ``running``; a provider
-    is asked to stop, and only that it was asked is recorded. The run is marked
-    delivered on the spot: the caller learns the outcome from this result, so
-    no failure notification follows.
+    is asked to stop, and only that it was asked is recorded. A top-level run
+    is marked delivered on the spot: the caller learns the outcome from this
+    result, so no failure notification follows.
     """
     if not delegation_tools_config(exec_context).async_delegation_enabled:
         return ToolResult(
@@ -2103,16 +2103,18 @@ async def cancel_delegation_tool(
             ),
             attachments=None,
         )
-    await db.delegation_runs.mark_notified(
-        delegation_id=delegation_id,
-        result_message_internal_id=None,
-        notified_at=now,
-    )
-    # A parent waiting on this run would otherwise wait on it forever: no
-    # completion of this run is coming to queue the parent's next turn.
-    await continue_waiting_parent(
+    # A run started by another delegation answers to that run, whose next turn
+    # must learn the branch was cancelled rather than find it gone -- and must
+    # be queued, since no completion of this run is coming to do it. Any other
+    # run's outcome is this result, so it is marked delivered.
+    if not await continue_waiting_parent(
         db, cancelled, now, exec_context.inherited_task_priority()
-    )
+    ):
+        await db.delegation_runs.mark_notified(
+            delegation_id=delegation_id,
+            result_message_internal_id=None,
+            notified_at=now,
+        )
 
     remote_note = ""
     if cancelled["remote_task_id"] is None and run["status"] != "awaiting_remote":

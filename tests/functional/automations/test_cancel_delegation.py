@@ -492,7 +492,7 @@ async def test_a_cancelled_remote_run_is_still_counted_in_the_metrics(
 
 
 @pytest.mark.asyncio
-async def test_cancelling_a_waiting_parents_last_child_queues_the_parents_next_turn(
+async def test_cancelling_a_waiting_parents_last_child_hands_it_to_the_parents_next_turn(
     db_engine: AsyncEngine,
 ) -> None:
     """Otherwise the parent waits forever on a child that will never finish."""
@@ -519,6 +519,10 @@ async def test_cancelling_a_waiting_parents_last_child_queues_the_parents_next_t
     parent = await db_context.delegation_runs.get_by_delegation_id("delegation_parent")
     assert parent is not None
     assert parent["status"] == "queued"
+    # Left for the parent's next turn, which is told the branch was cancelled.
+    [child] = await db_context.delegation_runs.list_undelivered_children(parent)
+    assert child["delegation_id"] == "delegation_child"
+    assert child["local_failure_kind"] == "cancelled"
     continuations = [
         task
         for task in await db_context.tasks.get_all()
