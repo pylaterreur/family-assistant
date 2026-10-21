@@ -1682,6 +1682,7 @@ async def test_outputs_past_the_caps_are_named_rather_than_returned(
         conversation_id="conv-1",
         taint_state=TurnTaintState.empty(),
         db_context=Database(db_engine),
+        submitted_at=None,
     )
 
     assert len(collected.attachment_ids) == 2
@@ -1706,6 +1707,7 @@ async def test_a_run_with_no_outputs_returns_nothing(
         conversation_id="conv-1",
         taint_state=TurnTaintState.empty(),
         db_context=Database(db_engine),
+        submitted_at=None,
     )
 
     assert collected.attachment_ids == []
@@ -1770,6 +1772,7 @@ async def test_an_output_over_the_attachment_limit_is_named_and_not_fetched(
         conversation_id="conv-1",
         taint_state=TurnTaintState.empty(),
         db_context=Database(db_engine),
+        submitted_at=None,
     )
 
     assert len(collected.attachment_ids) == 1
@@ -1802,6 +1805,7 @@ async def test_unlisted_sizes_are_capped_by_what_was_downloaded(
         conversation_id="conv-1",
         taint_state=TurnTaintState.empty(),
         db_context=Database(db_engine),
+        submitted_at=None,
     )
 
     assert len(collected.attachment_ids) == 1
@@ -1835,6 +1839,7 @@ async def test_a_retryable_download_failure_registers_nothing(
             conversation_id="conv-1",
             taint_state=TurnTaintState.empty(),
             db_context=db_context,
+            submitted_at=None,
         )
 
     assert await registry.list_attachments(db_context, acting_user_id="user-1") == []
@@ -1930,6 +1935,7 @@ async def test_a_resumed_run_returns_only_what_it_wrote(
         conversation_id="conv-1",
         taint_state=TurnTaintState.empty(),
         db_context=Database(db_engine),
+        submitted_at=None,
     )
 
     assert client.downloaded == [
@@ -1966,6 +1972,7 @@ async def _collect(
         conversation_id="conv-1",
         taint_state=TurnTaintState.empty(),
         db_context=Database(db_engine),
+        submitted_at=None,
     )
 
 
@@ -2190,3 +2197,53 @@ async def test_a_peek_shows_the_latest_steps_and_newest_files(
         "- /workspace/hat.stl (1,024 bytes, changed 08:05:00 UTC)",
         "- … and 1 more",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_run_without_a_provider_start_is_bounded_by_its_submit_time(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    """A completed Antigravity interaction omits its creation time (Tuit #98).
+
+    The submit time stands in, less a margin for clock skew, so a resume still
+    returns only what it wrote.
+    """
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, download = _client_with_outputs({})
+    submitted = datetime(2026, 10, 21, 9, 0, 0, tzinfo=UTC)
+    client.list_sandbox_files = AsyncMock(
+        return_value=[
+            SandboxFileEntry(
+                path=f"workspace/outputs/{name}",
+                size_bytes=1,
+                mime_type="text/plain",
+                modified=submitted + offset,
+            )
+            for name, offset in (
+                ("predecessor.stl", timedelta(minutes=-10)),
+                ("just-before.txt", timedelta(seconds=-3)),
+                ("new.stl", timedelta(minutes=2)),
+            )
+        ]
+    )
+
+    async def fetch(_environment_id: str, _path: str) -> bytes:
+        return b"x"
+
+    download.side_effect = fetch
+    service = _make_service(client, attachment_registry=registry)
+
+    await service.collect_outputs(
+        _finished_with_environment("env_prev"),
+        owner_user_id="user-1",
+        conversation_id="conv-1",
+        taint_state=TurnTaintState.empty(),
+        db_context=Database(db_engine),
+        submitted_at=submitted,
+    )
+
+    fetched = sorted(call.args[1] for call in download.await_args_list)
+    assert fetched == ["workspace/outputs/just-before.txt", "workspace/outputs/new.stl"]

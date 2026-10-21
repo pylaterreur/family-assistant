@@ -449,8 +449,12 @@ class OutputCollectingDelegationService(Protocol):
         conversation_id: str,
         taint_state: TurnTaintState,
         db_context: Database,
+        submitted_at: datetime | None,
     ) -> CollectedOutputs:
         """Register the run's output files as attachments owned by its user.
+
+        ``submitted_at`` is when this application submitted the run, which
+        bounds what the run itself wrote when the provider reports no start.
 
         Raises the delegation error taxonomy: a
         :class:`DelegationTransientError` leaves the run to be read again.

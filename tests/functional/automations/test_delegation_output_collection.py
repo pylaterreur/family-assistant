@@ -40,10 +40,13 @@ from tests.functional.automations.test_delegation_reconciliation import (
 )
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from family_assistant.processing.protocol import RemoteObservation
     from family_assistant.security.taint import TurnTaintState
+    from family_assistant.task_worker import DelegationPollPayload
 
 
 class _CollectCall(TypedDict):
@@ -64,6 +67,8 @@ class FakeCollectingService(FakeObservableService):
         super().__init__(observations)
         self._outputs = outputs
         self.collect_calls: list[_CollectCall] = []
+        self.submitted_at: list[datetime | None] = []
+        self.collected_starts: list[datetime | None] = []
 
     async def collect_outputs(
         self,
@@ -73,8 +78,11 @@ class FakeCollectingService(FakeObservableService):
         conversation_id: str,
         taint_state: TurnTaintState,
         db_context: Database,
+        submitted_at: datetime | None,
     ) -> CollectedOutputs:
         _ = db_context
+        self.submitted_at.append(submitted_at)
+        self.collected_starts.append(observation.remote_created_at)
         self.collect_calls.append({
             "environment_id": observation.environment_id,
             "owner_user_id": owner_user_id,
@@ -230,3 +238,41 @@ async def test_a_permanent_failure_fetching_files_still_delivers_the_text(
     assert "Both bookmarks are done." in run["result_text"]
     assert "output files could not be fetched" in run["result_text"]
     assert not run["result_attachment_ids_json"]
+
+
+@pytest.mark.asyncio
+async def test_the_providers_start_survives_its_terminal_reading(
+    db_engine: AsyncEngine,
+) -> None:
+    """Antigravity reports a run's creation time only while it is in progress.
+
+    The completed reading omits it, so the worker carries the earlier one
+    forward; collection gets both that and the run's own submit time.
+    """
+    started = SystemClock().now().replace(microsecond=0)
+    running = replace(
+        _observation(RemoteDisposition.PENDING), remote_created_at=started
+    )
+    target = FakeCollectingService(
+        [running, _completed()], CollectedOutputs(attachment_ids=[], omitted=[])
+    )
+    worker, processing_service, chat_interface = _worker_for(db_engine, target)
+    db_context = Database(engine=db_engine)
+    await _awaiting_run(db_context, "delegation_dated")
+    payload: DelegationPollPayload = {
+        "delegation_id": "delegation_dated",
+        "interface_type": TEST_INTERFACE_TYPE,
+        "conversation_id": TEST_CONVERSATION_ID,
+        "user_name": TEST_USER_NAME,
+    }
+
+    for _ in range(2):
+        await worker.handle_delegation_poll(
+            _tool_context(db_context, processing_service, chat_interface), payload
+        )
+
+    run = await db_context.delegation_runs.get_by_delegation_id("delegation_dated")
+    assert run is not None
+    assert run["status"] == "completed"
+    assert target.collected_starts == [started]
+    assert target.submitted_at == [run["started_at"]]

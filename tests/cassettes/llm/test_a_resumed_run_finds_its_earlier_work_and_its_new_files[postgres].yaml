@@ -23,8 +23,8 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAC/6tWykxRslIyMEuzMDdMM01OSUpKNUs1TjSwNDFISjNINDBKTbU0MFLSUSouSSwp
-        LQaqTUwuySxLVaoFAAnEr9Y7AAAA
+        H4sIAAAAAAAC/6tWykxRslIyNU1LTU1KTDNPMzMwNjYwTjIyTDUzBgqYGBuZWaQaKekoFZcklpQW
+        A9UmJpdklqUq1QIAlzMXMTsAAAA=
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -33,11 +33,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 05:42:16 GMT
+      - Wed, 21 Oct 2026 13:53:30 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=2283
+      - gfet4t7; dur=2611
       Transfer-Encoding:
       - chunked
       Vary:
@@ -57,7 +57,7 @@ interactions:
     body: '{"agent": "antigravity-preview-09-2026", "input": "Run `printf remembered
       > /workspace/note.txt`, then reply with just the word DONE.", "agent_config":
       {"model": "gemini-3.8-flash", "type": "antigravity"}, "background": true, "environment":
-      {"environment_id": "06f871f5cdbbe6e3a0940bf0a02ee902", "type": "remote"}, "stream":
+      {"environment_id": "55feebaf7f603303b21e63baf43268e2", "type": "remote"}, "stream":
       false, "system_instruction": "[Active Processing Profile: coder]\n\nYou are
       a coding agent working for Tester. You run in an isolated sandbox with code
       execution, a scratch filesystem and web access; you have no access to Tester''s
@@ -77,7 +77,9 @@ interactions:
       time: <pinned>\n\nFiles you are sent are in /workspace. Save every file meant
       for Tester (a model, image, document or data file) under /workspace/outputs:
       the files there are sent to Tester as attachments with your reply, up to 20
-      files and 50 MB in all. Nothing else in the sandbox is returned."}'
+      files and 50 MB in all. Only files saved or changed during this run are sent,
+      so to send again a file an earlier run already returned, save it again. Nothing
+      else in the sandbox is returned."}'
     headers:
       accept:
       - application/json
@@ -86,7 +88,7 @@ interactions:
       connection:
       - keep-alive
       content-length:
-      - '1885'
+      - '2008'
       content-type:
       - application/json
       host:
@@ -100,11 +102,11 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAC/5SPzU7DMBCE3yVXCFq7zY9zBAVUpAQ1Kk3JJXLsTXBRnchxDQXx7jh9A67fzszO
-        /ARKBlngSPvwLsn+o2re6vS7yUnJT0Ukc7Lt6OYi9P6++doc5L7J6/rRFbQqd/V0fDlU5esTU4V+
-        JttaBLfBbLk9zz5R6XYy42Bwnj0WBrnF5RMFGocEQkp2EGVrmpHkLmHpKmEJRDcAGYDXnyf5Lz1q
-        p8yoT6htex0EcZ8mpI+E7DqMccWBraHrgQNFZECXqmicEthahcY7fHMtuZH+MnZHFPY6wqLhwqpR
-        e8wHH+8p11YNhjtlL+Fk0Cn8DIGFS9Pg9w8AAP//AwDPKD8UUQEAAA==
+        H4sIAAAAAAAC/5SPUU+DMBSF/0tfFXPbSp08Ml2ciRjMFMYLKeXCillZSgduxv++sn/g63fPOfec
+        X6JrEpGRlsudOr2v4mKbp2wLr99qEzPVxWmSfzTJOY6Ln3X+1u3SLFtBsk+WxcvzVJv19Pn0BflZ
+        TWmmyC0ZnHTHwSdqUx5s31ocBo+VRelw/sSAiYBCwOiG8ijkEad3sAgFoyDYDUAE4PXHQ/0vPZpR
+        297s0bjyOigMG8RKNg+NAM6BV4yi4B7ccyYWyOaqaEetsHQarXf45qaWtvaXvupQuesIh1Yqp3vj
+        sWx9vKfSON1aOWp3Cg4WR41TAI/B3JT8XQAAAP//AwDD5obMUQEAAA==
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -113,11 +115,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 05:42:23 GMT
+      - Wed, 21 Oct 2026 13:53:35 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=6169
+      - gfet4t7; dur=5621
       Transfer-Encoding:
       - chunked
       Vary:
@@ -151,15 +153,15 @@ interactions:
       x-goog-api-client:
       - google-genai-sdk/2.24.0 gl-python/3.13.13
     method: GET
-    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_Chd1VkRZYW8zZE1NamM5dE1Qb2IycnVBZxIXdVZEWWFvM2RNTWpjOXRNUG9iMnJ1QWc?stream=false
+    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_ChcyOFBZYXQ2Y0JkcTB2cjBQNXRfNzBBZxIXMjhQWWF0NmNCZHEwdnIwUDV0XzcwQWc?stream=false
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAC/4yP0U6DMBSG36W3ijmtFAeXGjQzATMyx+SGlPaAnVkhpatO47tb9gTefuc///nO
-        D9GKZMTT9uFd0d1H1bzVq+8mp6U4FlzldNOx9Vma3X3ztd6rXZPX9aMvWFVu6+nwsq/K16dUF+aZ
-        bmpJrsnshDvNoVGbdrLjYHGeA5YWhcPlEgOWRBQiRrfAs5hlDG4YjzlnVwAZQAifJvX/MBqv7WiO
-        aFx7eQWSfnVHey5V12GCtwLSGLoeBDDEFNgiidZria3TaMNGcDZKWBUmY3dA6S76Dq2QTo8mYDGE
-        +kCFcXqwwmt3jiaLXuNnBGm0aJLfPwAAAP//AwDfbjrWSwEAAA==
+        H4sIAAAAAAAC/4yP0VKDMBBF/yWvGmeTCCqPVDvWGXFwqlBemBAWGpwGJqRg6/jvhn6Br2fv3j37
+        Q3RNIjKxcrVXp7d1XOzylO/g5UttY666OE3y9yY5x3Hxvclfu32aZWtIDsmqeH6aa7OZPx4/IT+r
+        Oc0UuSajk+44+kZtysH2rcVx9FhZlA6XSxx4SBlQzrZMRIGIhLgBARCwK4AIwIePQ/3/MJpJ294c
+        0Ljy8koQNIiVbO6aEIQAUXGGofDgVvDwHvkiiXbSCkun0foN72xqaWs/6asOlbvoO7RSOd0bj2Xr
+        6z2VxunWykm7Ex0sThpnCg900SS/fwAAAP//AwAZ1/yYSwEAAA==
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -168,11 +170,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 05:42:24 GMT
+      - Wed, 21 Oct 2026 13:53:37 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=1416
+      - gfet4t7; dur=1360
       Transfer-Encoding:
       - chunked
       Vary:
@@ -206,15 +208,15 @@ interactions:
       x-goog-api-client:
       - google-genai-sdk/2.24.0 gl-python/3.13.13
     method: GET
-    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_Chd1VkRZYW8zZE1NamM5dE1Qb2IycnVBZxIXdVZEWWFvM2RNTWpjOXRNUG9iMnJ1QWc?stream=false
+    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_ChcyOFBZYXQ2Y0JkcTB2cjBQNXRfNzBBZxIXMjhQWWF0NmNCZHEwdnIwUDV0XzcwQWc?stream=false
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAC/4yP0U6DMBSG36W3ijmtFAeXGjQzATMyx+SGlPaAnVkhpatO47tb9gTefuc///nO
-        D9GKZMTT9uFd0d1H1bzVq+8mp6U4FlzldNOx9Vma3X3ztd6rXZPX9aMvWFVu6+nwsq/K16dUF+aZ
-        bmpJrsnshDvNoVGbdrLjYHGeA5YWhcPlEgOWRBQiRrfAs5hlDG4YjzlnVwAZQAifJvX/MBqv7WiO
-        aFx7eQWSfnVHey5V12GCtwLSGLoeBDDEFNgiidZria3TaMNGcDZKWBUmY3dA6S76Dq2QTo8mYDGE
-        +kCFcXqwwmt3jiaLXuNnBGm0aJLfPwAAAP//AwDfbjrWSwEAAA==
+        H4sIAAAAAAAC/4yP0VKDMBBF/yWvGmeTCCqPVDvWGXFwqlBemBAWGpwGJqRg6/jvhn6Br2fv3j37
+        Q3RNIjKxcrVXp7d1XOzylO/g5UttY666OE3y9yY5x3Hxvclfu32aZWtIDsmqeH6aa7OZPx4/IT+r
+        Oc0UuSajk+44+kZtysH2rcVx9FhZlA6XSxx4SBlQzrZMRIGIhLgBARCwK4AIwIePQ/3/MJpJ294c
+        0Ljy8koQNIiVbO6aEIQAUXGGofDgVvDwHvkiiXbSCkun0foN72xqaWs/6asOlbvoO7RSOd0bj2Xr
+        6z2VxunWykm7Ex0sThpnCg900SS/fwAAAP//AwAZ1/yYSwEAAA==
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -223,11 +225,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 05:42:25 GMT
+      - Wed, 21 Oct 2026 13:53:38 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=1378
+      - gfet4t7; dur=1345
       Transfer-Encoding:
       - chunked
       Vary:
@@ -261,72 +263,35 @@ interactions:
       x-goog-api-client:
       - google-genai-sdk/2.24.0 gl-python/3.13.13
     method: GET
-    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_Chd1VkRZYW8zZE1NamM5dE1Qb2IycnVBZxIXdVZEWWFvM2RNTWpjOXRNUG9iMnJ1QWc?stream=false
+    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_ChcyOFBZYXQ2Y0JkcTB2cjBQNXRfNzBBZxIXMjhQWWF0NmNCZHEwdnIwUDV0XzcwQWc?stream=false
   response:
     body:
       string: !!binary |
-        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
+        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
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -335,11 +300,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 05:42:45 GMT
+      - Wed, 21 Oct 2026 13:53:59 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=4464
+      - gfet4t7; dur=5208
       Transfer-Encoding:
       - chunked
       Vary:
@@ -373,72 +338,35 @@ interactions:
       x-goog-api-client:
       - google-genai-sdk/2.24.0 gl-python/3.13.13
     method: GET
-    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_Chd1VkRZYW8zZE1NamM5dE1Qb2IycnVBZxIXdVZEWWFvM2RNTWpjOXRNUG9iMnJ1QWc?stream=false
+    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_ChcyOFBZYXQ2Y0JkcTB2cjBQNXRfNzBBZxIXMjhQWWF0NmNCZHEwdnIwUDV0XzcwQWc?stream=false
   response:
     body:
       string: !!binary |
-        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
+        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
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -447,11 +375,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 05:42:46 GMT
+      - Wed, 21 Oct 2026 13:54:00 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=900
+      - gfet4t7; dur=958
       Transfer-Encoding:
       - chunked
       Vary:
@@ -495,61 +423,7 @@ interactions:
       x-goog-upload-protocol:
       - resumable
     method: PUT
-    uri: https://generativelanguage.googleapis.com/upload/v1beta/environments/06f871f5cdbbe6e3a0940bf0a02ee902/files/workspace/ref.txt
-  response:
-    body:
-      string: '{"error":{"message":"Environment not found or not accessible.","code":"not_found"}}'
-    headers:
-      Alt-Svc:
-      - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
-      Content-Length:
-      - '83'
-      Content-Type:
-      - application/json; charset=UTF-8
-      Date:
-      - Wed, 21 Oct 2026 05:43:17 GMT
-      Server:
-      - UploadServer
-      Vary:
-      - Origin
-      - X-Origin
-      - Referer
-      X-GUploader-UploadID:
-      - AP6rU80Rbr9bVjwSyFu-ppV1YaOvVTBZP86NeQvtMWWdS8_IUuvQIMqPoAz0nGvsgjOzcUzM
-      X-Goog-Upload-Status:
-      - final
-    status:
-      code: 404
-      message: Not Found
-- request:
-    body: ''
-    headers:
-      accept:
-      - '*/*'
-      accept-encoding:
-      - gzip, deflate
-      connection:
-      - keep-alive
-      content-length:
-      - '0'
-      content-type:
-      - application/json
-      host:
-      - generativelanguage.googleapis.com
-      user-agent:
-      - speakeasy-sdk/python 2.4.1-preview.5 internal v1beta google-genai
-      x-goog-api-client:
-      - google-genai-sdk/2.24.0 gl-python/3.13.13
-      x-goog-upload-command:
-      - start
-      x-goog-upload-header-content-length:
-      - '15'
-      x-goog-upload-header-content-type:
-      - text/plain
-      x-goog-upload-protocol:
-      - resumable
-    method: PUT
-    uri: https://generativelanguage.googleapis.com/upload/v1beta/environments/06f871f5cdbbe6e3a0940bf0a02ee902/files/workspace/ref.txt
+    uri: https://generativelanguage.googleapis.com/upload/v1beta/environments/55feebaf7f603303b21e63baf43268e2/files/workspace/ref.txt
   response:
     body:
       string: ''
@@ -561,15 +435,15 @@ interactions:
       Content-Type:
       - text/plain; charset=utf-8
       Date:
-      - Wed, 21 Oct 2026 05:43:20 GMT
+      - Wed, 21 Oct 2026 13:54:02 GMT
       Server:
       - UploadServer
       X-GUploader-UploadID:
-      - AP6rU82kFhAjKBvrCXUpC2t3fBIAagDzOI6C7fDUPlKcaUCnXsgvJppjZ2Uo97jTfQZqy5GYyn9JzXFxWq__rwa1__GFO8V0oA94GNiRo-f8wg
+      - AP6rU82O-pOVGJFg8JnpahpMnXgEaEiPH1lwfAf6VEsKRoYES-0XIJ_ZUC67dO_sr1fOtsxeCWwHg0rMBh0f5y5a6edq22dQ9k4lj-FrPJmlOmk
       X-Goog-Upload-Chunk-Granularity:
       - '262144'
       X-Goog-Upload-Control-URL:
-      - https://generativelanguage.googleapis.com/upload/v1beta/environments/06f871f5cdbbe6e3a0940bf0a02ee902/files/workspace/ref.txt?upload_id=AP6rU82kFhAjKBvrCXUpC2t3fBIAagDzOI6C7fDUPlKcaUCnXsgvJppjZ2Uo97jTfQZqy5GYyn9JzXFxWq__rwa1__GFO8V0oA94GNiRo-f8wg&upload_protocol=resumable
+      - https://generativelanguage.googleapis.com/upload/v1beta/environments/55feebaf7f603303b21e63baf43268e2/files/workspace/ref.txt?upload_id=AP6rU82O-pOVGJFg8JnpahpMnXgEaEiPH1lwfAf6VEsKRoYES-0XIJ_ZUC67dO_sr1fOtsxeCWwHg0rMBh0f5y5a6edq22dQ9k4lj-FrPJmlOmk&upload_protocol=resumable
       X-Goog-Upload-Header-Content-Type:
       - application/json; charset=UTF-8
       X-Goog-Upload-Header-Vary:
@@ -577,9 +451,9 @@ interactions:
       - X-Origin
       - Referer
       X-Goog-Upload-Header-X-Google-Backends:
-      - unix:/tmp/esfbackend.1792489863.199536.2104321
+      - unix:/tmp/esfbackend.1792489862.987456.3834511
       X-Goog-Upload-Header-X-Google-GFE-Backend-Request-Cost:
-      - '21.8865'
+      - '15.7991'
       X-Goog-Upload-Header-X-Google-Security-Signals:
       - FRAMEWORK=ONE_PLATFORM,ENV=borg,ENV_DEBUG=borg_user:genai-api;borg_job:prod.genai-api
       X-Goog-Upload-Header-X-Google-Session-Info:
@@ -590,7 +464,7 @@ interactions:
       X-Goog-Upload-Status:
       - active
       X-Goog-Upload-URL:
-      - https://generativelanguage.googleapis.com/upload/v1beta/environments/06f871f5cdbbe6e3a0940bf0a02ee902/files/workspace/ref.txt?upload_id=AP6rU82kFhAjKBvrCXUpC2t3fBIAagDzOI6C7fDUPlKcaUCnXsgvJppjZ2Uo97jTfQZqy5GYyn9JzXFxWq__rwa1__GFO8V0oA94GNiRo-f8wg&upload_protocol=resumable
+      - https://generativelanguage.googleapis.com/upload/v1beta/environments/55feebaf7f603303b21e63baf43268e2/files/workspace/ref.txt?upload_id=AP6rU82O-pOVGJFg8JnpahpMnXgEaEiPH1lwfAf6VEsKRoYES-0XIJ_ZUC67dO_sr1fOtsxeCWwHg0rMBh0f5y5a6edq22dQ9k4lj-FrPJmlOmk&upload_protocol=resumable
     status:
       code: 200
       message: OK
@@ -610,7 +484,7 @@ interactions:
       x-goog-api-client:
       - google-genai-sdk/2.24.0 gl-python/3.13.13
     method: POST
-    uri: https://generativelanguage.googleapis.com/upload/v1beta/environments/06f871f5cdbbe6e3a0940bf0a02ee902/files/workspace/ref.txt?upload_id=AP6rU82kFhAjKBvrCXUpC2t3fBIAagDzOI6C7fDUPlKcaUCnXsgvJppjZ2Uo97jTfQZqy5GYyn9JzXFxWq__rwa1__GFO8V0oA94GNiRo-f8wg&upload_protocol=resumable
+    uri: https://generativelanguage.googleapis.com/upload/v1beta/environments/55feebaf7f603303b21e63baf43268e2/files/workspace/ref.txt?upload_id=AP6rU82O-pOVGJFg8JnpahpMnXgEaEiPH1lwfAf6VEsKRoYES-0XIJ_ZUC67dO_sr1fOtsxeCWwHg0rMBh0f5y5a6edq22dQ9k4lj-FrPJmlOmk&upload_protocol=resumable
   response:
     body:
       string: "{\n  \"files\": [\n    {\n      \"name\": \"ref.txt\",\n      \"path\":
@@ -624,7 +498,7 @@ interactions:
       Content-Type:
       - application/json; charset=UTF-8
       Date:
-      - Wed, 21 Oct 2026 05:43:34 GMT
+      - Wed, 21 Oct 2026 13:54:27 GMT
       Server:
       - UploadServer
       Vary:
@@ -632,7 +506,7 @@ interactions:
       - X-Origin
       - Referer
       X-GUploader-UploadID:
-      - AP6rU82kFhAjKBvrCXUpC2t3fBIAagDzOI6C7fDUPlKcaUCnXsgvJppjZ2Uo97jTfQZqy5GYyn9JzXFxWq__rwa1__GFO8V0oA94GNiRo-f8wg
+      - AP6rU82O-pOVGJFg8JnpahpMnXgEaEiPH1lwfAf6VEsKRoYES-0XIJ_ZUC67dO_sr1fOtsxeCWwHg0rMBh0f5y5a6edq22dQ9k4lj-FrPJmlOmk
       X-Goog-Upload-Status:
       - final
     status:
@@ -642,8 +516,8 @@ interactions:
     body: '{"agent": "antigravity-preview-09-2026", "input": "Run `cat /workspace/note.txt;
       echo; cat /workspace/ref.txt` and reply with the raw output only.", "agent_config":
       {"model": "gemini-3.8-flash", "type": "antigravity"}, "background": true, "environment":
-      {"environment_id": "06f871f5cdbbe6e3a0940bf0a02ee902", "type": "remote"}, "previous_interaction_id":
-      "v1_Chd1VkRZYW8zZE1NamM5dE1Qb2IycnVBZxIXdVZEWWFvM2RNTWpjOXRNUG9iMnJ1QWc", "stream":
+      {"environment_id": "55feebaf7f603303b21e63baf43268e2", "type": "remote"}, "previous_interaction_id":
+      "v1_ChcyOFBZYXQ2Y0JkcTB2cjBQNXRfNzBBZxIXMjhQWWF0NmNCZHEwdnIwUDV0XzcwQWc", "stream":
       false, "system_instruction": "[Active Processing Profile: coder]\n\nYou are
       a coding agent working for Tester. You run in an isolated sandbox with code
       execution, a scratch filesystem and web access; you have no access to Tester''s
@@ -663,7 +537,9 @@ interactions:
       time: <pinned>\n\nFiles you are sent are in /workspace. Save every file meant
       for Tester (a model, image, document or data file) under /workspace/outputs:
       the files there are sent to Tester as attachments with your reply, up to 20
-      files and 50 MB in all. Nothing else in the sandbox is returned."}'
+      files and 50 MB in all. Only files saved or changed during this run are sent,
+      so to send again a file an earlier run already returned, save it again. Nothing
+      else in the sandbox is returned."}'
     headers:
       accept:
       - application/json
@@ -672,7 +548,7 @@ interactions:
       connection:
       - keep-alive
       content-length:
-      - '1999'
+      - '2120'
       content-type:
       - application/json
       host:
@@ -686,11 +562,11 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAC/5SPzW6DMBCE38XXlmptfhI4pkpVKjVVUBMaLsjYC3VaDDIONKn67jF5g16/nZmd
-        +SVKkoSMtHz8lHT/lRWHfHkp1nTD29dQrum2YulZ6P2q+Ek/tlCkef40ZZdstWlfuGiL4+55/3b4
-        7qZdLsg9GSy3p8ElKl32pmsMDoPDwiC3OH9iwCKPgsfoO4RJ4Cd+9ABh5C8oDYM7gATA6U+9/Jce
-        9ahMp1vUtrwNgqheLmgdCllVGKHPIQ6gqoEDQ4yBzVXRjEpgaRUa53DNteRGuktXHVHY2wiLhgur
-        Ou0wb1y8o1xb1Rg+Knv2eoOjwsmD2Jubkr8rAAAA//8DAMudgNBRAQAA
+        H4sIAAAAAAAC/5SPwW6DMBBE/8XXlspeAy0cqZSoPRBBgyC5IGMW4lQxyDgktOq/18kf5Pp2Znbm
+        l6iWxGRm9ftBLptVst9VGezo57fcJiCPSZZWeZf+JMn++lHlp7Qoy9WlLYL118KumypPi3UAKT2w
+        rJTkmUxW2PPkEpWuRzP0BqfJYWlQWLx9Agqhx6gHbMt4HPgxRC8cIh6Fvh89URpT6vTnsX1Ij3pW
+        ZtAn1La+DwqCDrER3WsXUs4pb4BhyB3wOYRvCLeqaGYlsbYKjXO45roVpnWXoTmitPcRFo2QVg3a
+        YdG7eEeFtqo3YlZ28UaDs8KLRyPv1pT8/QMAAP//AwBfwwysUQEAAA==
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -699,11 +575,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 05:43:41 GMT
+      - Wed, 21 Oct 2026 13:54:35 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=6777
+      - gfet4t7; dur=7386
       Transfer-Encoding:
       - chunked
       Vary:
@@ -737,15 +613,15 @@ interactions:
       x-goog-api-client:
       - google-genai-sdk/2.24.0 gl-python/3.13.13
     method: GET
-    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_Chd1VkRZYW8zZE1NamM5dE1Qb2IycnVBZxIXQ0ZIWWFwRzRBNmJacmZjUHVOYlowUWc?stream=false
+    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_ChcyOFBZYXQ2Y0JkcTB2cjBQNXRfNzBBZxIXRmNUWWFwdU5GSy1xOXRNUG52N0h1QWc?stream=false
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAC/4yP0VKDMBBF/yWvirMJBYHHOnXEGeuUsWB5YUKyYKoEJqRg6/jvhn6Br2fv3j37
-        Q5QkCZlo9fAhaf6ZlYciupQbuuXdSyA3dFez9Cx0vi6/0/cdlGlRPM7ZJVtvu2cuuvK4f8pfD1/9
-        vC8EuSWj5fY0ukalq8H0rcFxdFgY5BaXSwxY6FHwGH2DIFn5iR/dQUwZozcACYALnwb5/zDqSZle
-        d6htdX0Fwia6p00gZF1jiD6HeAV1AxwYYgxskUQzKYGVVWjchnPWkhvpJn19RGGv+hYNF1b12mHe
-        unpHubaqNXxS9uwNBieFswext2iS3z8AAAD//wMAx+LvnEsBAAA=
+        H4sIAAAAAAAC/4yPQW6DMBBF7+JtSzW2Y9KypFKidkEEDYJkg4wZiFPFIOOQ0Kp3r5MTZPvmz583
+        v0Q3JCITrd4Pat6s4v2uTNkOPr/VNmbqGKdJmbXJTxzvrx9ldkryolhdmlysv2Z63ZRZkq8FS+BA
+        00KRZzI66c6jb9SmGmzfWRxHj5VF6fB2iQELAwoBo1vKI7GIOHuBJYNQPAFEAD58HprHw2gmbXtz
+        QuOq+ytCtIi1bJdtCJwDrxnFkHuw4Cx8RXaTRDtphZXTaP2GdzaNtI2f9PURlbvrO7RSOd0bj2Xn
+        6z2VxunOykm7ORgsThovAbwFN03y9w8AAP//AwB5HKgmSwEAAA==
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -754,11 +630,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 05:43:43 GMT
+      - Wed, 21 Oct 2026 13:54:37 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=1756
+      - gfet4t7; dur=1590
       Transfer-Encoding:
       - chunked
       Vary:
@@ -792,15 +668,15 @@ interactions:
       x-goog-api-client:
       - google-genai-sdk/2.24.0 gl-python/3.13.13
     method: GET
-    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_Chd1VkRZYW8zZE1NamM5dE1Qb2IycnVBZxIXQ0ZIWWFwRzRBNmJacmZjUHVOYlowUWc?stream=false
+    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_ChcyOFBZYXQ2Y0JkcTB2cjBQNXRfNzBBZxIXRmNUWWFwdU5GSy1xOXRNUG52N0h1QWc?stream=false
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAC/4yP0VKDMBBF/yWvirMJBYHHOnXEGeuUsWB5YUKyYKoEJqRg6/jvhn6Br2fv3j37
-        Q5QkCZlo9fAhaf6ZlYciupQbuuXdSyA3dFez9Cx0vi6/0/cdlGlRPM7ZJVtvu2cuuvK4f8pfD1/9
-        vC8EuSWj5fY0ukalq8H0rcFxdFgY5BaXSwxY6FHwGH2DIFn5iR/dQUwZozcACYALnwb5/zDqSZle
-        d6htdX0Fwia6p00gZF1jiD6HeAV1AxwYYgxskUQzKYGVVWjchnPWkhvpJn19RGGv+hYNF1b12mHe
-        unpHubaqNXxS9uwNBieFswext2iS3z8AAAD//wMAx+LvnEsBAAA=
+        H4sIAAAAAAAC/4yPQW6DMBBF7+JtSzW2Y9KypFKidkEEDYJkg4wZiFPFIOOQ0Kp3r5MTZPvmz583
+        v0Q3JCITrd4Pat6s4v2uTNkOPr/VNmbqGKdJmbXJTxzvrx9ldkryolhdmlysv2Z63ZRZkq8FS+BA
+        00KRZzI66c6jb9SmGmzfWRxHj5VF6fB2iQELAwoBo1vKI7GIOHuBJYNQPAFEAD58HprHw2gmbXtz
+        QuOq+ytCtIi1bJdtCJwDrxnFkHuw4Cx8RXaTRDtphZXTaP2GdzaNtI2f9PURlbvrO7RSOd0bj2Xn
+        6z2VxunOykm7ORgsThovAbwFN03y9w8AAP//AwB5HKgmSwEAAA==
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -809,11 +685,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 05:43:45 GMT
+      - Wed, 21 Oct 2026 13:54:38 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=1704
+      - gfet4t7; dur=1495
       Transfer-Encoding:
       - chunked
       Vary:
@@ -847,73 +723,36 @@ interactions:
       x-goog-api-client:
       - google-genai-sdk/2.24.0 gl-python/3.13.13
     method: GET
-    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_Chd1VkRZYW8zZE1NamM5dE1Qb2IycnVBZxIXQ0ZIWWFwRzRBNmJacmZjUHVOYlowUWc?stream=false
+    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_ChcyOFBZYXQ2Y0JkcTB2cjBQNXRfNzBBZxIXRmNUWWFwdU5GSy1xOXRNUG52N0h1QWc?stream=false
   response:
     body:
       string: !!binary |
-        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
+        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
+        iuVuI+z5QxH/BgAA//8DANyAgdhVCwAA
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -922,11 +761,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 05:44:05 GMT
+      - Wed, 21 Oct 2026 13:55:00 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=4768
+      - gfet4t7; dur=5811
       Transfer-Encoding:
       - chunked
       Vary:
