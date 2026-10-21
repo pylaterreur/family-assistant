@@ -34,6 +34,7 @@ from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
     is_interaction_terminal_error_status,
 )
+from family_assistant.processing import interactions_agent_service
 from family_assistant.processing.interactions_agent_service import (
     InteractionsAgentProcessingService,
 )
@@ -437,3 +438,43 @@ async def test_a_resumed_run_finds_its_earlier_work_and_its_new_files(
     assert "added on resume" in (resumed.output_text or "")
     assert resumed.previous_interaction_id == first.id
     assert resumed.environment_id == first.environment_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.llm_integration
+@pytest.mark.vcr(before_record_response=_sanitize_keeping_upload_sessions)
+async def test_a_peek_reports_what_the_agent_ran_and_wrote(
+    coder: InteractionsAgentProcessingService,
+    db_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A peek reads the real agent's steps and sandbox, and renders both.
+
+    Recorded with a read window long enough for the stream to end with the run:
+    VCR reads a whole response before recording it, so a mid-run peek -- whose
+    stream does not end -- cannot be recorded. That the stream and the file
+    listing are live mid-run was established against the API directly; this
+    pins the real event shapes and how they are rendered.
+    """
+    monkeypatch.setattr(interactions_agent_service, "PEEK_READ_SECONDS", 600.0)
+    submission = await coder.submit_async(
+        [
+            {
+                "type": "text",
+                "text": "Run `printf peeked > /workspace/a.txt`, then run "
+                "`echo hello-peek`, then reply with just the word DONE.",
+            }
+        ],
+        conversation_id="coder-integration",
+        subconversation_id=None,
+        user_name="Tester",
+        db_context=Database(db_engine),
+    )
+
+    account = await coder.peek_async(submission.remote_task_id)
+
+    # The agent may run the two commands as one step or two.
+    assert "ran: printf peeked > /workspace/a.txt" in account
+    assert "\n- output: hello-peek\n" in account
+    assert "/workspace/a.txt (6 bytes" in account

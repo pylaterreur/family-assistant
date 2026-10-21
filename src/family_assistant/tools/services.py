@@ -1546,7 +1546,11 @@ SERVICE_TOOLS_DEFINITION: list[ToolDefinition] = [
             "name": "get_delegation_status",
             "description": (
                 "Returns the status and available result for an asynchronous profile delegation reference. "
-                "Use this for references returned by delegate_to_service, not for spawn_worker task IDs."
+                "Use this for references returned by delegate_to_service, not for spawn_worker task IDs. "
+                "Set peek to true to also look at a run that is still going: for a coding agent, its "
+                "latest steps (commands run, their output, its thinking) and the files in its sandbox. "
+                "Peek when the user asks what the delegate is doing or a long run needs checking on; "
+                "it only looks and cannot steer or stop the run."
             ),
             "parameters": {
                 "type": "object",
@@ -1554,6 +1558,11 @@ SERVICE_TOOLS_DEFINITION: list[ToolDefinition] = [
                     "delegation_id": {
                         "type": "string",
                         "description": "The delegation reference ID returned by delegate_to_service, e.g. delegation_abc123.",
+                    },
+                    "peek": {
+                        "type": "boolean",
+                        "description": "Also report what a run still in progress has done so far. Takes a few seconds.",
+                        "default": False,
                     },
                 },
                 "required": ["delegation_id"],
@@ -1871,11 +1880,73 @@ async def await_started_delegation(
     )
 
 
+_PEEKABLE_STATUSES = frozenset({"awaiting_remote", "running"})
+
+
+async def _peek_at_delegation(
+    exec_context: ToolExecutionContext, run: DelegationRunDict
+) -> str:
+    """What a delegation still in progress has done so far, or why that is unknown.
+
+    The account is the delegate's own output, so it raises this turn's taint by
+    what the run's result would carry, before any of it is returned.
+    """
+    # Local import: the processing package imports the tools package.
+    from family_assistant.processing.protocol import (  # noqa: PLC0415
+        DelegationPermanentError,
+        DelegationTaskNotFoundError,
+        DelegationTransientError,
+        PeekableDelegationService,
+    )
+
+    if run["status"] not in _PEEKABLE_STATUSES:
+        return f"Nothing to peek at: the delegation is {run['status']}."
+    remote_task_id = run["remote_task_id"]
+    if remote_task_id is None:
+        return "Nothing to peek at yet: the run has not reached the agent."
+    processing_service = exec_context.processing_service
+    registry = (
+        processing_service.processing_services_registry
+        if processing_service is not None
+        else None
+    )
+    target = registry.get(run["target_service_id"]) if registry else None
+    if not isinstance(target, PeekableDelegationService):
+        return (
+            f"The {run['target_service_id']} profile does not report progress "
+            "while it runs."
+        )
+    try:
+        account = await target.peek_async(remote_task_id)
+    except (
+        DelegationTransientError,
+        DelegationPermanentError,
+        DelegationTaskNotFoundError,
+    ) as exc:
+        return f"Could not look at the run just now: {exc}"
+    if exec_context.taint_tracker is not None:
+        metadata = await delegation_run_result_taint_metadata(
+            exec_context.db_context, run
+        )
+        merge_taint_state_into_tracker(
+            exec_context.taint_tracker,
+            TurnTaintState.from_metadata(
+                metadata, preserve_origin=True
+            ).with_sensitive_reads_from(metadata),
+        )
+    return account
+
+
 async def get_delegation_status_tool(
     exec_context: ToolExecutionContext,
     delegation_id: str,
+    peek: bool = False,
 ) -> ToolResult:
-    """Return status for an asynchronous profile delegation."""
+    """Return status for an asynchronous profile delegation.
+
+    ``peek`` adds a live look at a run still in progress -- its latest steps
+    and the files it has written -- for a target that can report them.
+    """
     if not delegation_tools_config(exec_context).async_delegation_enabled:
         return ToolResult(
             text=(
@@ -1900,6 +1971,10 @@ async def get_delegation_status_tool(
     await _merge_delegation_runs_taint(exec_context, [run])
     summary = exec_context.db_context.delegation_runs.summarize_run(run)
     text = _format_delegation_summary(summary)
+    if peek:
+        text = (
+            f"{text}\n\nLive progress:\n{await _peek_at_delegation(exec_context, run)}"
+        )
     if _has_pending_delegation([summary]):
         text = f"{text}\n\n{_pending_delegation_nudge([run['origin_interface_type']])}"
     return ToolResult(

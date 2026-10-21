@@ -1,5 +1,6 @@
 """Test the Google Antigravity managed agent path through the Interactions API."""
 
+import asyncio
 import importlib
 from collections.abc import AsyncGenerator, Generator
 from dataclasses import dataclass
@@ -939,3 +940,78 @@ async def test_a_file_that_stays_missing_is_lost_not_the_run(
 
     with pytest.raises(DelegationPermanentError, match="could not be read back"):
         await client.download_sandbox_file("env_1", "workspace/outputs/a.stl")
+
+
+class _HangingEventStream:
+    """A running agent's event stream: its steps so far, then nothing, forever."""
+
+    def __init__(self, events: list[dict[str, object]]) -> None:
+        self._events = events
+        self.closed = False
+
+    def __aiter__(self) -> AsyncGenerator[dict[str, object]]:
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncGenerator[dict[str, object]]:
+        for event in self._events:
+            yield event
+        await asyncio.Event().wait()
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+# The shapes a live run's stream sent (2026-10-21 probe), trimmed.
+_RUNNING_AGENT_EVENTS: list[dict[str, object]] = [
+    {"event_type": "interaction.created", "interaction": {"status": "in_progress"}},
+    {"event_type": "step.start", "step": {"type": "thought"}},
+    {
+        "event_type": "step.delta",
+        "delta": {
+            "type": "thought_summary",
+            "content": {"text": "**Building** the plate"},
+        },
+    },
+    {"event_type": "step.stop"},
+    {
+        "event_type": "step.start",
+        "step": {
+            "type": "code_execution_call",
+            "id": "call_1",
+            "arguments": {"code": "python build.py", "language": "bash"},
+        },
+    },
+    {"event_type": "step.stop"},
+    {
+        "event_type": "step.start",
+        "step": {
+            "type": "code_execution_result",
+            "call_id": "call_1",
+            "result": "Traceback: boom",
+            "is_error": True,
+        },
+    },
+    {"event_type": "step.stop"},
+]
+
+
+@pytest.mark.asyncio
+async def test_a_peek_reads_a_running_agents_steps_then_lets_go(
+    mock_genai_client: MagicMock,
+) -> None:
+    """The stream of a run in progress never ends, so the read is time-boxed."""
+    client = _egress_client("disabled")
+    stream = _HangingEventStream(_RUNNING_AGENT_EVENTS)
+    mock_genai_client.aio.interactions.get = AsyncMock(return_value=stream)
+
+    steps = await client.peek_agent_interaction("inter_running", read_seconds=0.2)
+
+    assert [(step.kind, step.text, step.is_error) for step in steps] == [
+        ("thought", "**Building** the plate", False),
+        ("code_execution_call", "python build.py", False),
+        ("code_execution_result", "Traceback: boom", True),
+    ]
+    mock_genai_client.aio.interactions.get.assert_awaited_once_with(
+        "inter_running", stream=True
+    )
+    assert stream.closed

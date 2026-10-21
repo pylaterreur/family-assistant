@@ -408,6 +408,19 @@ class ObservableDelegationService(Protocol):
         ...
 
 
+@runtime_checkable
+class PeekableDelegationService(Protocol):
+    """A pollable target whose run in progress can be looked into."""
+
+    async def peek_async(self, remote_task_id: str) -> str:
+        """A short account of what the run has done so far, for a person.
+
+        Raises the delegation error taxonomy. Nothing is persisted, and the run
+        is not disturbed.
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class CollectedOutputs:
     """Files a finished remote run produced, registered as attachments."""
