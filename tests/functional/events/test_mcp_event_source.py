@@ -680,3 +680,23 @@ async def test_a_page_without_a_string_cursor_is_not_accepted(cursor: object) ->
         )
         with pytest.raises(MCPEventsError, match="no cursor"):
             await client.poll("a.b", {}, "1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("events", [None, {"name": "a.b"}])
+async def test_an_events_list_without_a_list_is_not_read_as_empty(
+    events: object,
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": body["id"], "result": {"events": events}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = MCPEventsClient(
+            url="https://x.example/mcp", token=None, http_client=http
+        )
+        with pytest.raises(MCPEventsError, match="no list of events"):
+            await client.list_events()

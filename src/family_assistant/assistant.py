@@ -2167,6 +2167,8 @@ class Assistant:
                 for service in self.processing_services_registry.values():
                     if isinstance(service, ProcessingService):
                         service.event_sources = self.event_processor.sources
+                if self.fastapi_app is not None:
+                    self.fastapi_app.state.event_sources = self.event_processor.sources
             else:
                 logger.info("Event system enabled but no event sources configured")
 

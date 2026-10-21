@@ -184,7 +184,10 @@ class MCPEventsClient:
         while True:
             params = {"cursor": cursor} if cursor else {}
             result = await self._request("events/list", params)
-            for entry in result.get("events") or []:
+            entries = result.get("events")
+            if not isinstance(entries, list):
+                raise MCPEventsError("events/list returned no list of events")
+            for entry in entries:
                 if isinstance(entry, dict) and isinstance(entry.get("name"), str):
                     event_types.append(_event_type(entry))
             next_cursor = result.get("nextCursor")

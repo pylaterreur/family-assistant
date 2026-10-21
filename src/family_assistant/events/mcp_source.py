@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 SERVER_KEY = "server_id"
 EVENT_KEY = "event"
 ARGUMENT_PREFIX = "arguments."
+_MAX_BACKOFF_EXPONENT = 20
 _HTTP_TRANSPORTS = frozenset({"streamable_http", "streamablehttp", "http"})
 
 type ArgumentValue = str | int | float | bool
@@ -250,7 +251,9 @@ class MCPEventSource(BaseEventSource, EventSource):
                 running.last_error = str(exc)
                 running.verified = False
                 delay = min(
-                    self._config.min_poll_interval_seconds * 2**running.failures,
+                    # The exponent is capped so a long outage cannot overflow it.
+                    self._config.min_poll_interval_seconds
+                    * 2 ** min(running.failures, _MAX_BACKOFF_EXPONENT),
                     self._config.max_error_backoff_seconds,
                 )
                 logger.warning(
