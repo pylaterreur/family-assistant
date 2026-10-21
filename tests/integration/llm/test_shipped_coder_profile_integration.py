@@ -36,6 +36,7 @@ from family_assistant.llm.providers.google_genai_client import (
 from family_assistant.processing.interactions_agent_service import (
     InteractionsAgentProcessingService,
 )
+from family_assistant.security.taint import TurnTaintState
 from family_assistant.storage.database import Database
 from tests.helpers import wait_for_condition
 
@@ -276,3 +277,71 @@ async def test_a_delegated_attachment_reaches_the_sandbox_intact(
         acting_user_id="tester",
         expected_output=hashlib.sha256(content).hexdigest(),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.llm_integration
+@pytest.mark.vcr(before_record_response=_sanitize_keeping_upload_sessions)
+async def test_files_the_agent_leaves_in_outputs_come_back_as_attachments(
+    coder: InteractionsAgentProcessingService,
+    db_engine: AsyncEngine,
+    llm_record_mode: str,
+) -> None:
+    """What the agent writes under /workspace/outputs is returned byte for byte.
+
+    Read back from the run's environment after it finishes and registered as
+    the run's user's attachments, nested paths included. A file outside the
+    outputs directory stays behind.
+    """
+    interaction = await _run_to_completion(
+        coder,
+        db_engine,
+        model_tier=None,
+        llm_record_mode=llm_record_mode,
+        content_parts=[
+            {
+                "type": "text",
+                "text": "Run exactly this, then reply with just the word DONE: "
+                "mkdir -p /workspace/outputs/data && "
+                "printf 'tps-1457' > /workspace/outputs/report.txt && "
+                "python3 -c \"open('/workspace/outputs/data/table.bin','wb')"
+                '.write(bytes(range(256))*4)" && '
+                "printf 'scratch' > /workspace/scratch.txt",
+            }
+        ],
+        expected_output="DONE",
+    )
+    assert interaction.id
+
+    db_context = Database(db_engine)
+    collected = await coder.collect_outputs(
+        interaction.id,
+        owner_user_id="tester",
+        conversation_id="coder-integration",
+        taint_state=TurnTaintState.empty(),
+        db_context=db_context,
+    )
+
+    assert collected.omitted == []
+    registry = coder.attachment_registry
+    assert registry is not None
+    returned: dict[str, tuple[bytes, str]] = {}
+    for attachment_id in collected.attachment_ids:
+        metadata = await registry.get_attachment(
+            db_context, attachment_id, acting_user_id="tester"
+        )
+        content = await registry.get_attachment_content(
+            db_context, attachment_id, acting_user_id="tester"
+        )
+        assert metadata is not None
+        assert content is not None
+        assert metadata.owner_user_id == "tester"
+        returned[str(metadata.metadata["original_filename"])] = (
+            content,
+            metadata.mime_type,
+        )
+    assert returned == {
+        "report.txt": (b"tps-1457", "text/plain"),
+        "data_table.bin": (bytes(range(256)) * 4, "application/octet-stream"),
+    }

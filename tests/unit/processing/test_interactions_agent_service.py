@@ -31,7 +31,9 @@ from family_assistant.llm.model_selection import ResolvedModelSelection
 from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
     SandboxFile,
+    SandboxFileEntry,
 )
+from family_assistant.processing import interactions_agent_service
 from family_assistant.processing.interactions_agent_service import (
     InteractionsAgentProcessingService,
 )
@@ -1542,3 +1544,90 @@ async def test_an_observation_is_stamped_when_the_read_was_issued() -> None:
 
     assert observation.observed_at == datetime(2026, 1, 1, tzinfo=UTC)
     assert observation.observed_at < clock.now()
+
+
+def _client_with_outputs(
+    files: dict[str, bytes],
+) -> tuple[GoogleGenAIClient, AsyncMock]:
+    """A client whose finished run left ``files`` under workspace/outputs.
+
+    Returned with its download stub, so a test can see what was fetched.
+    """
+    client = _antigravity_client("gemini-3.8-flash")
+    client.get_agent_interaction = AsyncMock(
+        return_value=Interaction(
+            id="inter_out", status="completed", environment_id="env_out"
+        )
+    )
+    client.list_sandbox_files = AsyncMock(
+        return_value=[
+            SandboxFileEntry(
+                path=f"workspace/outputs/{name}",
+                size_bytes=len(content),
+                mime_type="application/octet-stream",
+            )
+            for name, content in files.items()
+        ]
+    )
+    download = AsyncMock(
+        side_effect=lambda _env, path: files[path.removeprefix("workspace/outputs/")]
+    )
+    client.download_sandbox_file = download
+    return client, download
+
+
+@pytest.mark.asyncio
+async def test_outputs_past_the_caps_are_named_rather_than_returned(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that writes too much returns what fits and says what it left."""
+    monkeypatch.setattr(interactions_agent_service, "MAX_RETURNED_OUTPUT_FILES", 2)
+    monkeypatch.setattr(interactions_agent_service, "MAX_RETURNED_OUTPUT_BYTES", 10)
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, download = _client_with_outputs({
+        "a.txt": b"aaaa",
+        "b.bin": b"b" * 20,
+        "c.txt": b"cc",
+        "d.txt": b"dd",
+    })
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await service.collect_outputs(
+        "inter_out",
+        owner_user_id="user-1",
+        conversation_id="conv-1",
+        taint_state=TurnTaintState.empty(),
+        db_context=Database(db_engine),
+    )
+
+    assert len(collected.attachment_ids) == 2
+    assert [note.split(" ", 1)[0] for note in collected.omitted] == ["b.bin", "d.txt"]
+    downloaded = [call.args[1] for call in download.await_args_list]
+    assert downloaded == ["workspace/outputs/a.txt", "workspace/outputs/c.txt"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_no_outputs_returns_nothing(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, _ = _client_with_outputs({})
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await service.collect_outputs(
+        "inter_out",
+        owner_user_id="user-1",
+        conversation_id="conv-1",
+        taint_state=TurnTaintState.empty(),
+        db_context=Database(db_engine),
+    )
+
+    assert collected.attachment_ids == []
+    assert collected.omitted == []

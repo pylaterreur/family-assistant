@@ -710,3 +710,24 @@ async def test_a_misconfigured_egress_credential_still_fails_fast(
 
     with pytest.raises(AntigravityEgressError):
         await client.start_agent_interaction([UserMessage(content="Fix the bug.")])
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_wrote_no_outputs_lists_none(
+    mock_genai_client: MagicMock,
+) -> None:
+    """The API answers a missing directory with a 404, which must not read as
+    the run itself having vanished."""
+    client = _egress_client("disabled")
+    environments = _accept_environments(mock_genai_client)
+    request = httpx.Request("GET", "https://generativelanguage.googleapis.com/")
+    environments.files.list.side_effect = _SDK_COMPAT_ERRORS.NotFoundError(
+        "Path 'workspace/outputs' not found",
+        response=httpx.Response(404, request=request),
+        body=None,
+    )
+
+    assert await client.list_sandbox_files("env_1", "workspace/outputs") == []
+    environments.files.list.assert_awaited_once_with(
+        environment="env_1", path="workspace/outputs", recursive=True
+    )
