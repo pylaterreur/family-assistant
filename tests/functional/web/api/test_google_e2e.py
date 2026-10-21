@@ -281,6 +281,7 @@ class _FakeApiBackend:
         params: Mapping[str, str] | None = None,
         content: bytes | None = None,
         content_type: str | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> ApiResponse:
         self.requests.append((method, url, access_token))
         path = url.split("?", 1)[0]
