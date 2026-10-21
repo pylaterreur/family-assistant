@@ -90,8 +90,13 @@ registered for fan-out too.
 `_monitor_task_worker_health` periodically calls `_check_and_restart_workers`, which checks each
 worker **individually**. A worker whose `run()` task is done (crashed, exited, or cancelled) is
 restarted in place — the same `TaskWorker` instance (same engine, same handlers) is given a fresh
-`run()` task at the same pool index — without disturbing healthy siblings. A worker with no activity
-beyond `WORKER_INACTIVITY_TIMEOUT` is cancelled and restarted the same way.
+`run()` task at the same pool index — without disturbing healthy siblings. A stuck worker is
+cancelled and restarted the same way. A busy worker is stuck once its current task has run past its
+own handler timeout by `WORKER_STUCK_GRACE_SECONDS`, so a long-budget handler is judged against its
+budget; an idle one is stuck once it has completed no poll for `WORKER_IDLE_STUCK_SECONDS`. While a
+handler runs, its worker renews the task's claim every `TASK_CLAIM_RENEW_SECONDS`, so the
+stale-claim cutoff bounds how long a crashed worker's task waits rather than how long a handler may
+run.
 
 ### Per-task-type handler timeout overrides
 

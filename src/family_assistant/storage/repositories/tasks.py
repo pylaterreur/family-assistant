@@ -24,6 +24,7 @@ from family_assistant.storage.datetime_utils import normalize_datetime
 from family_assistant.storage.repositories.base import BaseRepository
 from family_assistant.storage.tasks import (
     ACTIVE_TASK_STATUSES,
+    STALE_TASK_TIMEOUT_MINUTES,
     TaskAlreadyExistsError,
     TaskPriority,
     notify_workers,
@@ -36,11 +37,6 @@ logger = logging.getLogger(__name__)
 # Statuses a system task's row can be in when it has finished with the
 # occurrence it holds, and so can be handed the next one.
 TERMINAL_TASK_STATUSES = ("done", "failed")
-
-# How long a task may sit in `processing` before dequeue treats its worker as
-# dead and reclaims it. Must be well above the handler timeout (300s), or a
-# running worker is reclaimed out from under itself.
-STALE_TASK_TIMEOUT_MINUTES = 15
 
 
 def _revive_if_terminal(
@@ -354,6 +350,25 @@ class TasksRepository(BaseRepository):
         stmt = delete(tasks_table).where(
             tasks_table.c.task_id == task_id,
             tasks_table.c.status == "pending",
+        )
+        return (await self._db.execute(stmt)).rowcount > 0
+
+    async def renew_claim(self, task_id: str, now: datetime, *, locked_by: str) -> bool:
+        """Refresh ``locked_by``'s claim on a task it is still running.
+
+        Keeps a live handler from looking stale to dequeue however long it is
+        allowed to run. Returns False when the worker no longer holds the claim.
+        """
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        stmt = (
+            update(tasks_table)
+            .where(
+                tasks_table.c.task_id == task_id,
+                tasks_table.c.status == "processing",
+                tasks_table.c.locked_by == locked_by,
+            )
+            .values(locked_at=now.astimezone(UTC))
         )
         return (await self._db.execute(stmt)).rowcount > 0
 

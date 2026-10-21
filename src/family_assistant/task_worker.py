@@ -192,6 +192,7 @@ from family_assistant.storage.database import (
 )
 from family_assistant.storage.message_history import message_history_table
 from family_assistant.storage.tasks import (
+    STALE_TASK_TIMEOUT_MINUTES,
     TaskAttempt,
     TaskPriority,
     notify_other_workers,
@@ -286,6 +287,15 @@ def _model_selection_from_delegation_run(
     if persisted is None:
         return None
     return ResolvedModelSelection.from_json(persisted)
+
+
+def _stuck_worker_error(reason: str) -> str:
+    """The failure recorded for a delegated run whose worker was restarted."""
+    return (
+        "The delegated run was stopped because the task worker running it "
+        f"stopped responding ({reason}) and was restarted. It was not retried, "
+        "because re-running it could repeat actions it had already taken."
+    )
 
 
 def _delegated_run_timeout_error(budget_seconds: float) -> str:
@@ -1310,6 +1320,17 @@ async def _schedule_reminder_follow_up(
 # --- Constants ---
 TASK_POLLING_INTERVAL = 5  # Seconds to wait between polling for tasks
 TASK_HANDLER_TIMEOUT = 300  # Seconds to wait for task handler execution (5 minutes)
+# How often a worker refreshes its claim on the task it is running, so a handler
+# allowed to run longer than the stale-claim cutoff is not reclaimed by a
+# sibling while it is still running.
+TASK_CLAIM_RENEW_SECONDS = 60.0
+# How far past its own handler timeout a task may run before the health monitor
+# treats its worker as stuck. The handler timeout fires first in any worker whose
+# event loop is still serving it, so this only catches one that is not.
+WORKER_STUCK_GRACE_SECONDS = 60.0
+# How long an idle worker may go without completing a poll before the health
+# monitor treats it as stuck.
+WORKER_IDLE_STUCK_SECONDS = 600.0
 CONFIRMATION_CANCELLATION_CLEANUP_TIMEOUT = 5.0
 
 
@@ -2086,6 +2107,7 @@ class TaskWorker:
         min_priority: TaskPriority | None = None,
         thread_turn_runner: ThreadTurnRunner | None = None,
         turn_lease_registry: TurnLeaseRegistry | None = None,
+        claim_renew_seconds: float = TASK_CLAIM_RENEW_SECONDS,
     ) -> None:
         """Initializes the TaskWorker with its dependencies.
 
@@ -2141,13 +2163,78 @@ class TaskWorker:
         # Update handler signature type hint
         self.task_handlers: dict[str, TaskHandler] = {}
         self.worker_id = f"worker-{uuid.uuid4()}"
+        if claim_renew_seconds * 3 > STALE_TASK_TIMEOUT_MINUTES * 60:
+            raise ValueError(
+                f"claim_renew_seconds ({claim_renew_seconds}) must leave the "
+                f"{STALE_TASK_TIMEOUT_MINUTES}-minute stale-claim cutoff room "
+                "for missed renewals"
+            )
+        self.claim_renew_seconds = claim_renew_seconds
         self.last_activity: datetime | None = None  # Track last activity time
         self._update_last_activity()  # Set initial activity
+        # The task this worker is running and when its handler timeout expires,
+        # which is what the health monitor judges a busy worker against.
+        self.current_task_id: str | None = None
+        self.current_task_deadline: datetime | None = None
+        # Why the health monitor cancelled this worker, so a handler being
+        # cancelled can record that instead of being left half-done.
+        self.stuck_cancellation_reason: str | None = None
         logger.info(f"TaskWorker instance {self.worker_id} created.")
 
     def _update_last_activity(self) -> None:
         """Updates the last activity timestamp."""
         self.last_activity = self.clock.now()
+
+    def stuck_reason(self) -> str | None:
+        """Why this worker looks stuck, or None if it does not.
+
+        A busy worker is judged against its current task's own handler
+        timeout, so a handler allowed to run for half an hour is not taken for
+        a stuck one ten minutes in. An idle worker is stuck once it has stopped
+        completing polls.
+        """
+        now = self.clock.now()
+        if self.current_task_deadline is not None:
+            overdue = (now - self.current_task_deadline).total_seconds()
+            if overdue > WORKER_STUCK_GRACE_SECONDS:
+                return (
+                    f"task {self.current_task_id} is {overdue:.0f}s past its "
+                    "handler timeout"
+                )
+            return None
+        if self.last_activity is None:
+            return None
+        idle = (now - self.last_activity).total_seconds()
+        if idle > WORKER_IDLE_STUCK_SECONDS:
+            return f"no activity for {idle:.0f}s"
+        return None
+
+    def mark_cancelled_as_stuck(self, reason: str) -> None:
+        """Record why the health monitor is about to cancel this worker."""
+        self.stuck_cancellation_reason = reason
+
+    async def _renew_claim_while_running(self, task_id: str) -> None:
+        """Refresh this worker's claim on ``task_id`` until cancelled."""
+        assert self.engine is not None
+        tasks = Database(engine=self.engine).tasks
+        while True:
+            await asyncio.sleep(self.claim_renew_seconds)
+            try:
+                renewed = await tasks.renew_claim(
+                    task_id, self.clock.now(), locked_by=self.worker_id
+                )
+            except Exception:
+                # A missed renewal is absorbed by the stale-claim margin.
+                logger.exception("Failed to renew the claim on task %s", task_id)
+                continue
+            if not renewed:
+                logger.warning(
+                    "Worker %s no longer holds the claim on task %s; "
+                    "stopped renewing it.",
+                    self.worker_id,
+                    task_id,
+                )
+                return
 
     def _timeout_for_task_type(self, task_type: str) -> float:
         """Resolve the handler timeout for a task type.
@@ -2383,6 +2470,14 @@ class TaskWorker:
                 result = await self._run_stoppable_delegated_turn(
                     exec_context, delegation_id, local_target, turn
                 )
+        except asyncio.CancelledError:
+            if self.stuck_cancellation_reason is not None:
+                await self._fail_delegation_run(
+                    exec_context,
+                    delegation_id=delegation_id,
+                    error=_stuck_worker_error(self.stuck_cancellation_reason),
+                )
+            raise
         except Exception:
             if deadline.expired():
                 await self._withdraw_stopped_turn_confirmations(
@@ -6341,6 +6436,7 @@ class TaskWorker:
         # registering it too means enqueue notifications still reach it.
         if wake_up_event is None:
             wake_up_event = asyncio.Event()
+        self.stuck_cancellation_reason = None
         register_worker_wake_event(wake_up_event)
         try:
             await self._run_loop(wake_up_event)
@@ -6419,9 +6515,23 @@ class TaskWorker:
                         process_context = Database(
                             engine=engine,
                         )
-                        advance_request = await self._process_task(
-                            process_context, task, wake_up_event
+                        self.current_task_id = task["task_id"]
+                        self.current_task_deadline = self.clock.now() + timedelta(
+                            seconds=self._timeout_for_task_type(task["task_type"])
                         )
+                        renewer = asyncio.create_task(
+                            self._renew_claim_while_running(task["task_id"])
+                        )
+                        try:
+                            advance_request = await self._process_task(
+                                process_context, task, wake_up_event
+                            )
+                        finally:
+                            renewer.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await renewer
+                            self.current_task_id = None
+                            self.current_task_deadline = None
                         if advance_request is not None:
                             advance_context = Database(
                                 engine=engine,

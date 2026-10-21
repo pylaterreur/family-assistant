@@ -2962,8 +2962,6 @@ class Assistant:
         logger.info(f"Registered task handlers for worker {worker.worker_id}")
         return worker
 
-    WORKER_INACTIVITY_TIMEOUT = 600
-
     async def _check_and_restart_workers(self) -> None:
         """Run one health-check pass over the pool, restarting dead/stuck workers.
 
@@ -2997,26 +2995,19 @@ class Assistant:
                 self.task_worker_tasks[index] = asyncio.create_task(worker.run())
                 continue
 
-            # Check last activity time for this worker
-            if worker.last_activity:
-                time_since_activity = (
-                    datetime.now(UTC) - worker.last_activity
-                ).total_seconds()
+            stuck_reason = worker.stuck_reason()
+            if stuck_reason is not None:
+                logger.error(
+                    f"Task worker {worker.worker_id} appears stuck ({stuck_reason}), "
+                    "cancelling and restarting..."
+                )
+                worker.mark_cancelled_as_stuck(stuck_reason)
+                worker_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await worker_task
 
-                if time_since_activity > self.WORKER_INACTIVITY_TIMEOUT:
-                    logger.error(
-                        f"Task worker {worker.worker_id} appears stuck (no activity "
-                        f"for {time_since_activity:.0f}s), cancelling and restarting..."
-                    )
-                    worker_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await worker_task
-
-                    self.task_worker_tasks[index] = asyncio.create_task(worker.run())
-                    logger.info(
-                        f"Task worker {worker.worker_id} restarted after inactivity "
-                        "timeout"
-                    )
+                self.task_worker_tasks[index] = asyncio.create_task(worker.run())
+                logger.info(f"Task worker {worker.worker_id} restarted after stalling")
 
     async def _monitor_task_worker_health(self) -> None:
         """Monitors the health of the task worker pool and restarts dead workers."""
