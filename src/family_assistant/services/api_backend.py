@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import httpx
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncIterator, Mapping
 
 # Default per-request timeout for REST calls (seconds).
 _DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -27,6 +27,11 @@ _DEFAULT_TIMEOUT_SECONDS = 30.0
 # Drive download (``alt=media``) or a hostile export can never be materialized in
 # memory. 25 MiB matches the Drive download pre-check in ``tools/google_data.py``.
 _DEFAULT_MAX_RESPONSE_BYTES = 25 * 1024 * 1024
+
+# Request bodies are sent in chunks of this size. The transport applies its
+# write timeout to each chunk, so a large upload on a slow link fails only when
+# it stalls, not when the whole body takes longer than the timeout.
+_REQUEST_BODY_CHUNK_BYTES = 256 * 1024
 
 
 class ApiBackendError(Exception):
@@ -142,12 +147,14 @@ class HttpApiBackend:
         request_headers["Authorization"] = f"Bearer {access_token}"
         if content_type is not None:
             request_headers["Content-Type"] = content_type
+        if content is not None:
+            request_headers["Content-Length"] = str(len(content))
         async with self._http_client.stream(
             method,
             url,
             headers=request_headers,
             params=dict(params) if params is not None else None,
-            content=content,
+            content=_chunked(content) if content is not None else None,
             timeout=self._timeout,
         ) as response:
             chunks: list[bytes] = []
@@ -167,3 +174,10 @@ class HttpApiBackend:
                     name.lower(): value for name, value in response.headers.items()
                 },
             )
+
+
+async def _chunked(content: bytes) -> AsyncIterator[bytes]:
+    """Yield ``content`` in ``_REQUEST_BODY_CHUNK_BYTES`` slices."""
+    view = memoryview(content)
+    for start in range(0, len(view), _REQUEST_BODY_CHUNK_BYTES):
+        yield bytes(view[start : start + _REQUEST_BODY_CHUNK_BYTES])
