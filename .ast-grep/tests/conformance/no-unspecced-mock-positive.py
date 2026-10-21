@@ -1,0 +1,54 @@
+"""Fixture: unspecced mocks and patches that substitute a bare MagicMock must be flagged."""
+
+import unittest.mock
+from unittest import mock
+from unittest.mock import (
+    AsyncMock,
+    MagicMock,
+    Mock,
+    NonCallableMagicMock,
+    PropertyMock,
+    create_autospec,
+    patch,
+)
+
+
+class Client:
+    def fetch(self) -> str:
+        return "real"
+
+
+def bare_constructions() -> None:
+    MagicMock()
+    Mock(return_value=1)
+    AsyncMock(side_effect=RuntimeError)
+    NonCallableMagicMock()
+    PropertyMock(return_value=3)
+    mock.MagicMock()
+    unittest.mock.AsyncMock()
+
+
+def spec_without_spec_set() -> None:
+    MagicMock(spec=Client)
+    MagicMock(spec_set=Client)
+    create_autospec(Client)
+    create_autospec(Client, instance=True)
+    create_autospec(Client, spec_set=False)
+
+
+def patches_without_spec() -> None:
+    with patch("module.Client"):
+        pass
+    with patch("module.Client", return_value=1):
+        pass
+    with patch.object(Client, "fetch"):
+        pass
+    with patch.object(Client, "fetch", return_value="x"):
+        pass
+    with mock.patch("module.Client", autospec=False):
+        pass
+
+
+@patch("module.Client")
+def decorated(client: object) -> None:
+    del client
