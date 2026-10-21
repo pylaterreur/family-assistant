@@ -93,6 +93,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+    from family_assistant.processing.delegation_turns import RunningDelegationTurns
     from family_assistant.storage.repositories.delegation_runs import (
         DelegationRunCreate,
         DelegationRunDict,
@@ -193,6 +194,7 @@ class FakeDelegatableService:
     """Minimal delegatable target service for async delegation tests."""
 
     kind = "local"
+    delegation_turns: RunningDelegationTurns | None = None
 
     def __init__(
         self,
@@ -482,8 +484,10 @@ def _source_processing_service(
     target_service: FakeDelegatableService,
     *,
     async_delegation_enabled: bool = True,
+    delegation_turns: RunningDelegationTurns | None = None,
 ) -> ProcessingService:
     source_service = SimpleNamespace(
+        delegation_turns=delegation_turns,
         service_config=SimpleNamespace(
             id="source_profile",
             tools_config=ToolsConfig(
@@ -3674,6 +3678,8 @@ async def test_deep_research_delegation_polls_to_completion_and_notifies(
     completed_interaction.created = "2026-01-01T00:00:00+00:00"
     completed_interaction.updated = "2026-01-01T00:04:30+00:00"
     completed_interaction.usage = None
+    # Deep Research runs in no sandbox, so it leaves no files to collect.
+    completed_interaction.environment_id = None
     llm_client.get_agent_interaction = AsyncMock(
         side_effect=[pending_interaction, completed_interaction]
     )

@@ -31,7 +31,9 @@ from family_assistant.llm.model_selection import ResolvedModelSelection
 from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
     SandboxFile,
+    SandboxFileEntry,
 )
+from family_assistant.processing import interactions_agent_service
 from family_assistant.processing.interactions_agent_service import (
     InteractionsAgentProcessingService,
 )
@@ -39,7 +41,9 @@ from family_assistant.processing.protocol import (
     MAX_OBSERVATION_ERROR_CHARS,
     PENDING,
     DelegationPermanentError,
+    DelegationTransientError,
     RemoteDisposition,
+    RemoteObservation,
     TaintedSinkRefusedError,
 )
 from family_assistant.processing.types import (
@@ -76,7 +80,7 @@ from tests.mocks.mock_llm import (  # pylint: disable=no-name-in-module
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from pydantic import BaseModel
@@ -1542,3 +1546,238 @@ async def test_an_observation_is_stamped_when_the_read_was_issued() -> None:
 
     assert observation.observed_at == datetime(2026, 1, 1, tzinfo=UTC)
     assert observation.observed_at < clock.now()
+
+
+def _finished_with_environment(environment_id: str) -> RemoteObservation:
+    return RemoteObservation(
+        remote_task_id="inter_out",
+        status="completed",
+        disposition=RemoteDisposition.COMPLETED,
+        observed_at=datetime(2026, 10, 21, tzinfo=UTC),
+        environment_id=environment_id,
+    )
+
+
+def _client_with_outputs(
+    files: dict[str, bytes | BaseException],
+    *,
+    sizes_listed: bool = True,
+) -> tuple[GoogleGenAIClient, AsyncMock]:
+    """A client whose finished run left ``files`` under workspace/outputs.
+
+    A file given as an exception fails to download with it. Returned with its
+    download stub, so a test can see what was fetched.
+    """
+    client = _antigravity_client("gemini-3.8-flash")
+    client.list_sandbox_files = AsyncMock(
+        return_value=[
+            SandboxFileEntry(
+                path=f"workspace/outputs/{name}",
+                size_bytes=len(content)
+                if sizes_listed and isinstance(content, bytes)
+                else None,
+                mime_type="application/octet-stream",
+            )
+            for name, content in files.items()
+        ]
+    )
+
+    async def fetch(_environment_id: str, path: str) -> bytes:
+        content = files[path.removeprefix("workspace/outputs/")]
+        if isinstance(content, BaseException):
+            raise content
+        return content
+
+    download = AsyncMock(side_effect=fetch)
+    client.download_sandbox_file = download
+    return client, download
+
+
+@pytest.mark.asyncio
+async def test_outputs_past_the_caps_are_named_rather_than_returned(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that writes too much returns what fits and says what it left."""
+    monkeypatch.setattr(interactions_agent_service, "MAX_RETURNED_OUTPUT_FILES", 2)
+    monkeypatch.setattr(interactions_agent_service, "MAX_RETURNED_OUTPUT_BYTES", 10)
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, download = _client_with_outputs({
+        "a.txt": b"aaaa",
+        "b.bin": b"b" * 20,
+        "c.txt": b"cc",
+        "d.txt": b"dd",
+    })
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await service.collect_outputs(
+        _finished_with_environment("env_out"),
+        owner_user_id="user-1",
+        conversation_id="conv-1",
+        taint_state=TurnTaintState.empty(),
+        db_context=Database(db_engine),
+    )
+
+    assert len(collected.attachment_ids) == 2
+    assert [note.split(" ", 1)[0] for note in collected.omitted] == ["b.bin", "d.txt"]
+    downloaded = [call.args[1] for call in download.await_args_list]
+    assert downloaded == ["workspace/outputs/a.txt", "workspace/outputs/c.txt"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_no_outputs_returns_nothing(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, _ = _client_with_outputs({})
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await service.collect_outputs(
+        _finished_with_environment("env_out"),
+        owner_user_id="user-1",
+        conversation_id="conv-1",
+        taint_state=TurnTaintState.empty(),
+        db_context=Database(db_engine),
+    )
+
+    assert collected.attachment_ids == []
+    assert collected.omitted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("agent_client", "told"),
+    [
+        (lambda: _antigravity_client("gemini-3.8-flash"), True),
+        (_google_client, False),
+    ],
+    ids=["sandboxed agent", "deep research"],
+)
+async def test_only_a_sandboxed_submission_is_told_where_to_leave_files(
+    db_engine: AsyncEngine,
+    agent_client: Callable[[], GoogleGenAIClient],
+    told: bool,
+) -> None:
+    """The submit path collects outputs, so only it promises them.
+
+    Deep Research has no sandbox to leave files in, and a run streamed straight
+    into a chat collects nothing, so neither is told files come back.
+    """
+    client = agent_client()
+    interaction = AsyncMock()
+    interaction.id = "inter_told"
+    client.start_agent_interaction = AsyncMock(return_value=interaction)
+    service = _make_service(client)
+
+    await service.submit_async(
+        [{"type": "text", "text": "Make the model."}],
+        conversation_id="conv-1",
+        subconversation_id=None,
+        user_name="Andrew",
+        db_context=Database(db_engine),
+    )
+
+    messages = client.start_agent_interaction.call_args.args[0]
+    system_prompt = str(messages[0].content)
+    assert ("/workspace/outputs" in system_prompt) is told
+    assert "You are a research assistant for Andrew." in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_an_output_over_the_attachment_limit_is_named_and_not_fetched(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    """An operator's lower per-file limit leaves the file behind, not the run."""
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path),
+        db_engine=db_engine,
+        config={"max_file_size": 8},
+    )
+    client, download = _client_with_outputs({
+        "big.glb": b"g" * 20,
+        "small.txt": b"ok",
+    })
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await service.collect_outputs(
+        _finished_with_environment("env_out"),
+        owner_user_id="user-1",
+        conversation_id="conv-1",
+        taint_state=TurnTaintState.empty(),
+        db_context=Database(db_engine),
+    )
+
+    assert len(collected.attachment_ids) == 1
+    assert collected.omitted == ["big.glb (20 bytes, over the attachment size limit)"]
+    downloaded = [call.args[1] for call in download.await_args_list]
+    assert downloaded == ["workspace/outputs/small.txt"]
+
+
+@pytest.mark.asyncio
+async def test_unlisted_sizes_are_capped_by_what_was_downloaded(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listing without sizes cannot dodge the caps, nor misreport a size."""
+    monkeypatch.setattr(interactions_agent_service, "MAX_RETURNED_OUTPUT_BYTES", 10)
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path),
+        db_engine=db_engine,
+        config={"max_file_size": 8},
+    )
+    client, _ = _client_with_outputs(
+        {"a.txt": b"aaaaaa", "b.txt": b"bbbbbb", "huge.glb": b"g" * 9},
+        sizes_listed=False,
+    )
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await service.collect_outputs(
+        _finished_with_environment("env_out"),
+        owner_user_id="user-1",
+        conversation_id="conv-1",
+        taint_state=TurnTaintState.empty(),
+        db_context=Database(db_engine),
+    )
+
+    assert len(collected.attachment_ids) == 1
+    assert collected.omitted == [
+        "b.txt (6 bytes, over the 0 MB a run returns)",
+        "huge.glb (9 bytes, over the attachment size limit)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_retryable_download_failure_registers_nothing(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    """The run is collected again from the start, so a partial batch would
+    leave a stored copy of every earlier file per attempt."""
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, _ = _client_with_outputs({
+        "a.txt": b"first",
+        "b.txt": DelegationTransientError("connection reset"),
+    })
+    service = _make_service(client, attachment_registry=registry)
+    db_context = Database(db_engine)
+
+    with pytest.raises(DelegationTransientError):
+        await service.collect_outputs(
+            _finished_with_environment("env_out"),
+            owner_user_id="user-1",
+            conversation_id="conv-1",
+            taint_state=TurnTaintState.empty(),
+            db_context=db_context,
+        )
+
+    assert await registry.list_attachments(db_context, acting_user_id="user-1") == []

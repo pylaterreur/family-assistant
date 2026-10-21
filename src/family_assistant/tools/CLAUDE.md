@@ -190,18 +190,22 @@ For **recurring** schedules use the automations framework (`create_automation` w
 
 All tool implementations are async, but declaring `async` is not enough: blocking work on the event
 loop freezes every other operation (database, HTTP, WebSockets, Telegram delivery) and can hang
-scripts waiting on async progress. The `jq_query` tool once timed out in scripts because
-`jq.compile()` blocked the loop.
+scripts waiting on async progress.
 
 Wrap in `asyncio.to_thread()` (or use `aiofiles`) any:
 
 - Filesystem call — `Path.read_bytes()`, `Path.exists()`, `Path.stat()`, `os.listdir()`, `open()`
 - `json.loads()` / `json.dumps()` on large data, CSV parsing, regex over large text
-- `jq.compile()` and `.input().all()`
 - PIL/Pillow work (`Image.open()`, `.resize()`, `.save()`), `ImageFont.truetype()`
 - Chart rendering (`vlc.vegalite_to_png()`, matplotlib)
 - `filetype.guess()`
 - Any third-party library without async support, or anything taking >10ms
+
+A thread only helps when the work releases the GIL. A C extension that holds it for the whole call
+freezes the loop from a thread just as it would inline, and a thread cannot be cancelled when the
+work runs away. Run such work, especially when its cost is set by model-supplied input, in a child
+process with a timeout and an output cap. `jq_query` does this: the jq binding holds the GIL while a
+program runs, so `run_jq_in_subprocess` executes it in `jq_worker.py` and kills it on timeout.
 
 You don't need it for SQLAlchemy async sessions, async HTTP clients, anything already inside
 `aiofiles.open()`, or small in-memory work.

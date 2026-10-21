@@ -24,6 +24,7 @@ from sqlalchemy import func, select, update
 
 # Removed storage import - using repository pattern
 from family_assistant.actions import (
+    EVENT_HANDLER_PROFILE_ID,
     ActionType,
     WakeDestinationError,
     WakeLlmProfileError,
@@ -48,6 +49,7 @@ from family_assistant.processing import (
     DelegationTaskNotFoundError,
     DelegationTransientError,
     ObservableDelegationService,
+    OutputCollectingDelegationService,
     PendingPoll,
     PollableDelegationService,
     ProcessingService,
@@ -105,13 +107,15 @@ from family_assistant.storage.delegation_runs import (
 )
 from family_assistant.tools.services import (
     DELEGATED_PROFILE_RUN_TASK_TYPE,
+    continue_waiting_parent,
     delegation_run_result_taint_metadata,
+    queue_continuation_if_ready,
     short_error_summary,
 )
 from family_assistant.tools.types import CalendarConfig, EventSourcesById
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping
     from zoneinfo import ZoneInfo
 
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -157,6 +161,7 @@ from family_assistant.interfaces import ChatDeliveryError, HistoryBackedChatInte
 from family_assistant.processing.quiet_turn import QUIET_END_TRIGGER_HINT
 from family_assistant.processing.types import ChatInteractionStatus
 from family_assistant.processing.utils import get_file_extension_from_mime_type
+from family_assistant.services.confirmation_service import ConfirmationService
 from family_assistant.services.deferred_tool_confirmation import (
     build_deferred_confirmation_callback,
 )
@@ -507,9 +512,10 @@ class LlmCallbackPayload(TypedDict, total=False):
     # for legacy tasks queued before this field existed, in which case confirm-gated
     # tools cannot be approved.
     created_by_user_id: str
-    # Profile the woken turn should run under. Event-listener wakes carry the
-    # restricted "event_handler" profile (untrusted trigger); schedule and
-    # future-callback wakes carry their originating profile. Absent for reminders
+    # Profile the woken turn should run under. Event-triggered wakes (an event
+    # listener's wake_llm, or wake_llm() from an event listener's script) carry
+    # the restricted "event_handler" profile (untrusted trigger); schedule,
+    # scheduled-script and future-callback wakes carry their originating profile. Absent for reminders
     # (which switch to the "reminder" profile) and legacy tasks (run as default).
     processing_profile_id: str
     # Reviewer-only trigger metadata. Kept separate from callback_context so an
@@ -1550,7 +1556,7 @@ async def handle_llm_callback(
     # Determine the profile the woken turn runs under.
     #  - Reminders switch to the specialized "reminder" profile (soft: falls back
     #    to default if it is not registered).
-    #  - Otherwise honor the wake's stamped execution profile: event-listener
+    #  - Otherwise honor the wake's stamped execution profile: event-triggered
     #    wakes carry the restricted "event_handler" profile (untrusted trigger),
     #    schedule/future-callback wakes carry their originating profile. This is a
     #    fail-loud resolve — a stamped non-default profile that cannot be resolved
@@ -2295,20 +2301,27 @@ class TaskWorker:
             return
 
         local_target = cast("ProcessingService", target_service)
+        confirmation_sources: set[int] = set()
+        if payload.get("continuation"):
+            turn = self._run_delegation_continuation(
+                exec_context, started, local_target, confirmation_sources
+            )
+        else:
+            turn = self._run_delegated_request(
+                exec_context, run, local_target, confirmation_sources
+            )
         turn_budget = self._delegated_turn_budget()
         deadline = asyncio.timeout(turn_budget)
         try:
             async with deadline:
-                if payload.get("continuation"):
-                    result = await self._run_delegation_continuation(
-                        exec_context, started, local_target
-                    )
-                else:
-                    result = await self._run_delegated_request(
-                        exec_context, run, local_target
-                    )
+                result = await self._run_stoppable_delegated_turn(
+                    exec_context, delegation_id, local_target, turn
+                )
         except Exception:
             if deadline.expired():
+                await self._withdraw_stopped_turn_confirmations(
+                    exec_context, started, confirmation_sources
+                )
                 await self._fail_timed_out_delegation_run(
                     exec_context,
                     delegation_id=delegation_id,
@@ -2331,13 +2344,103 @@ class TaskWorker:
             )
             return
 
+        if result is None:
+            await self._withdraw_stopped_turn_confirmations(
+                exec_context, started, confirmation_sources
+            )
+            return
         await self._settle_delegated_turn(exec_context, started, result)
+
+    async def _run_stoppable_delegated_turn(
+        self,
+        exec_context: ToolExecutionContext,
+        delegation_id: str,
+        local_target: ProcessingService,
+        turn_coro: Coroutine[object, object, ChatInteractionResult],
+    ) -> ChatInteractionResult | None:
+        """Run a delegated turn where ``cancel_delegation`` can stop it.
+
+        Returns ``None`` when the turn was stopped. The turn is registered,
+        held at a gate, before the run is read back, so a cancellation lands
+        either way: one committed before the read stops the turn before it
+        starts, and one after it finds the registered turn to cancel.
+        """
+        admitted = asyncio.Event()
+
+        async def run_when_admitted() -> ChatInteractionResult:
+            try:
+                await admitted.wait()
+            except asyncio.CancelledError:
+                turn_coro.close()
+                raise
+            return await turn_coro
+
+        turn = asyncio.create_task(run_when_admitted())
+        registry = local_target.delegation_turns
+        with (
+            registry.running(delegation_id, turn)
+            if registry is not None
+            else contextlib.nullcontext()
+        ):
+            try:
+                current = (
+                    await exec_context.db_context.delegation_runs.get_by_delegation_id(
+                        delegation_id
+                    )
+                )
+            except BaseException:
+                turn.cancel()
+                raise
+            if current is None or current["status"] != "running":
+                turn.cancel()
+            admitted.set()
+            try:
+                return await turn
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+                logger.info(
+                    "Delegated turn of run %s was stopped by a cancellation.",
+                    delegation_id,
+                )
+                return None
+
+    async def _withdraw_stopped_turn_confirmations(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        confirmation_sources: set[int],
+    ) -> None:
+        """Reject what a stopped turn left waiting for approval.
+
+        Approving one would run nothing -- delegated confirmations are
+        decision-only -- but the prompt would sit in the user's list asking
+        about a turn that no longer exists.
+        """
+        user_id = run["user_id"]
+        if user_id is None or not confirmation_sources:
+            return
+        unrejected = await ConfirmationService(
+            db=exec_context.db_context
+        ).withdraw_pending_for_messages(
+            user_id=user_id,
+            source_message_internal_ids=confirmation_sources,
+            interface=run["interface_type"],
+        )
+        if unrejected:
+            logger.warning(
+                "%d confirmation(s) of stopped delegation %s could not be withdrawn.",
+                unrejected,
+                run["delegation_id"],
+            )
 
     async def _run_delegated_request(
         self,
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
         local_target: ProcessingService,
+        confirmation_sources: set[int],
     ) -> ChatInteractionResult:
         """Run a delegation's first turn, on the request it was created with."""
         content_parts = cast(
@@ -2349,7 +2452,7 @@ class TaskWorker:
             run["interface_type"],
         )
         request_confirmation_callback = self._build_delegation_confirmation_callback(
-            exec_context, run
+            exec_context, run, confirmation_sources
         )
         return await local_target.handle_chat_interaction(
             db_context=exec_context.db_context,
@@ -2492,6 +2595,7 @@ class TaskWorker:
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
         local_target: ProcessingService,
+        confirmation_sources: set[int],
     ) -> ChatInteractionResult:
         """Run the turn that follows a run's own delegations finishing.
 
@@ -2571,7 +2675,7 @@ class TaskWorker:
             chat_interfaces=exec_context.chat_interfaces,
             confirmation_ui_managers=exec_context.confirmation_ui_managers,
             request_confirmation_callback=self._build_delegation_confirmation_callback(
-                exec_context, run
+                exec_context, run, confirmation_sources
             ),
             trigger_attachments=trigger_attachments or None,
             subconversation_id=run["subconversation_id"],
@@ -2640,65 +2744,10 @@ class TaskWorker:
             parked = await txn.delegation_runs.mark_awaiting_children(delegation_id)
             if parked is None:
                 return False
-            await self._queue_continuation_if_ready(txn, parked, clock, priority)
+            await queue_continuation_if_ready(txn, parked, clock.now(), priority)
             return True
 
         return await exec_context.db_context.atomic(_park)
-
-    async def _continue_when_children_finish(
-        self,
-        exec_context: ToolExecutionContext,
-        parent: DelegationRunDict,
-    ) -> bool:
-        """Queue a waiting run's next turn if none of its children is running.
-
-        Called when the run starts waiting and whenever one of its children
-        finishes, so whichever of those sees the last child finished queues the
-        turn. The conditional requeue is what makes that happen once.
-        """
-        clock = exec_context.clock or self.clock
-        priority = exec_context.inherited_task_priority()
-
-        async def _requeue(txn: DatabaseTransaction) -> bool:
-            return await self._queue_continuation_if_ready(txn, parent, clock, priority)
-
-        return await exec_context.db_context.atomic(_requeue)
-
-    @staticmethod
-    async def _queue_continuation_if_ready(
-        txn: DatabaseTransaction,
-        parent: DelegationRunDict,
-        clock: Clock,
-        priority: TaskPriority,
-    ) -> bool:
-        """Requeue a waiting run and enqueue its next turn, once its children are done."""
-        children = await txn.delegation_runs.list_undelivered_children(parent)
-        if any(
-            child["status"] not in TERMINAL_DELEGATION_STATUSES for child in children
-        ):
-            return False
-        if not await txn.delegation_runs.requeue_for_continuation(
-            parent["delegation_id"], clock.now()
-        ):
-            return False
-        await txn.tasks.enqueue(
-            task_id=f"{parent['task_id']}_continue_{uuid.uuid4().hex}",
-            task_type=DELEGATED_PROFILE_RUN_TASK_TYPE,
-            payload={
-                "delegation_id": parent["delegation_id"],
-                "interface_type": parent["interface_type"],
-                "conversation_id": parent["conversation_id"],
-                "user_name": parent["user_name"] or "",
-                "continuation": True,
-            },
-            max_retries_override=1,
-            priority=priority,
-        )
-        logger.info(
-            "Delegations started by run %s have finished; queued its next turn.",
-            parent["delegation_id"],
-        )
-        return True
 
     async def _deliver_to_waiting_parent(
         self,
@@ -2713,23 +2762,13 @@ class TaskWorker:
         -- a top-level turn started it, or the parent has already finished --
         and the result is delivered the ordinary way.
         """
-        parent_subconversation_id = run["source_subconversation_id"]
-        if parent_subconversation_id is None:
-            return False
-        parent = await exec_context.db_context.delegation_runs.get_active_for_subconversation(
-            conversation_id=run["conversation_id"],
-            subconversation_id=parent_subconversation_id,
+        clock = exec_context.clock or self.clock
+        return await continue_waiting_parent(
+            exec_context.db_context,
+            run,
+            clock.now(),
+            exec_context.inherited_task_priority,
         )
-        # A resumed run reuses its history, so a child the earlier run started
-        # is not this run's: it predates it, and is delivered the ordinary way.
-        if parent is None or run["created_at"] < parent["created_at"]:
-            return False
-        # Attempted whatever status was read: the requeue is conditioned on
-        # the parent waiting, and it waits on a parent parking in the same
-        # instant, so one of the two always sees this child finished. A parent
-        # still in its turn picks the result up when the turn ends.
-        await self._continue_when_children_finish(exec_context, parent)
-        return True
 
     @staticmethod
     async def _prepare_authenticated_run(
@@ -3376,7 +3415,67 @@ class TaskWorker:
             # about the run -- acting on it would finalize and notify from
             # state the provider has since left.
             return PENDING, None, True
-        return target_service.result_for_observation(observation), observation, False
+        result = target_service.result_for_observation(observation)
+        if (
+            isinstance(result, ChatInteractionResult)
+            and observation.disposition is RemoteDisposition.COMPLETED
+        ):
+            result = await self._with_collected_outputs(
+                exec_context, run, target_service, observation, result
+            )
+        return result, observation, False
+
+    async def _with_collected_outputs(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        target_service: PollableDelegationService | ObservableDelegationService,
+        observation: RemoteObservation,
+        result: ChatInteractionResult,
+    ) -> ChatInteractionResult:
+        """Attach the files a completed run left behind to its result.
+
+        The one place both terminal paths -- the poll that sees a run finish
+        and the recovery of one that finished after we gave up -- pick up a
+        run's output files, so neither can deliver the text without them. A
+        transient failure propagates so the run is read again; a permanent one
+        still delivers the text, saying the files could not be fetched.
+        """
+        if not isinstance(target_service, OutputCollectingDelegationService):
+            return result
+        taint_state = TurnTaintState.from_metadata(
+            await delegation_run_result_taint_metadata(exec_context.db_context, run),
+            preserve_origin=True,
+        )
+        try:
+            collected = await target_service.collect_outputs(
+                observation,
+                owner_user_id=run["user_id"],
+                conversation_id=run["conversation_id"],
+                taint_state=taint_state,
+                db_context=exec_context.db_context,
+            )
+        except DelegationPermanentError as exc:
+            logger.exception(
+                "Could not fetch the output files of delegation %s.",
+                run["delegation_id"],
+            )
+            return replace(
+                result,
+                text_reply=f"{result.text_reply}\n\nThe run's output files could "
+                f"not be fetched: {exc}",
+            )
+        text_reply = result.text_reply
+        if collected.omitted:
+            text_reply += "\n\nSome output files were not returned: " + "; ".join(
+                collected.omitted
+            )
+        return replace(
+            result,
+            text_reply=text_reply,
+            attachment_ids=[*(result.attachment_ids or []), *collected.attachment_ids]
+            or None,
+        )
 
     async def _request_remote_cancellation(
         self,
@@ -3768,8 +3867,13 @@ class TaskWorker:
         self,
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
+        confirmation_sources: set[int],
     ) -> RequestConfirmationCallback | None:
-        """Build a confirmation callback for a delegated profile background run."""
+        """Build a confirmation callback for a delegated profile background run.
+
+        Each confirmation's source message is added to ``confirmation_sources``,
+        which is how a stopped turn finds the requests it left pending.
+        """
         confirmation_ui_managers = (
             exec_context.confirmation_ui_managers or self.confirmation_ui_managers
         )
@@ -3811,6 +3915,7 @@ class TaskWorker:
                 )
                 if source_row is not None:
                     source_message_internal_id = source_row["internal_id"]
+                    confirmation_sources.add(source_message_internal_id)
 
             taint_state_json = (
                 context.taint_tracker.snapshot().to_metadata()
@@ -4043,7 +4148,7 @@ class TaskWorker:
         # most. Nothing is lost by declining: recovery is not a one-shot
         # opportunity, and the run stays eligible for the next read.
         if accepted is not None and await self._recover_late_completion(
-            exec_context, run, observation
+            exec_context, run, target_service, observation
         ):
             return
 
@@ -4053,6 +4158,7 @@ class TaskWorker:
         self,
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
+        target_service: ObservableDelegationService,
         observation: RemoteObservation,
     ) -> bool:
         """Deliver a result the provider produced after we failed the run.
@@ -4068,7 +4174,18 @@ class TaskWorker:
         ):
             return False
         clock = exec_context.clock or self.clock
-        result = observation.result
+        try:
+            result = await self._with_collected_outputs(
+                exec_context, run, target_service, observation, observation.result
+            )
+        except DelegationTransientError:
+            # The run stays eligible, so the next reading tries again.
+            logger.info(
+                "Output files of delegation %s were not fetched; retrying later.",
+                run["delegation_id"],
+                exc_info=True,
+            )
+            return False
         recovered = (
             await exec_context.db_context.delegation_runs.recover_late_completion(
                 delegation_id=run["delegation_id"],
@@ -6345,6 +6462,10 @@ async def _process_script_wake_llm(
     destination -- its owner's Home when its action config names Home, else
     the conversation it was created in.
 
+    A script fired by an event listener wakes under ``event_handler``, as the
+    listener's own wake_llm action would: the wake carries the untrusted event
+    to a turn that reads it. A scheduled script wakes under its own profile.
+
     Args:
         exec_context: The execution context with DB access
         wake_contexts: List of wake context dictionaries from script
@@ -6353,12 +6474,13 @@ async def _process_script_wake_llm(
         home_owner_user_id: Whose Home the script's own wakes land in, if any
     """
 
-    # A script's built-in wake_llm() enqueues an llm_callback stamped with the
-    # script's own profile (see the payload below). A script running under a
-    # confined profile (allow_wake_llm disabled) must not be able to wake at all:
-    # handle_llm_callback re-checks the flag and would raise at fire time. Refuse
-    # here, mirroring the create_automation/execute_action guard.
+    # A script running under a confined profile (allow_wake_llm disabled) must
+    # not be able to wake at all, whichever profile the wake would run under.
+    # Refuse here, mirroring the create_automation/execute_action guard.
     assert_wake_llm_allowed(ActionType.WAKE_LLM, exec_context.allow_wake_llm)
+    wake_profile_id = (
+        EVENT_HANDLER_PROFILE_ID if listener_id else exec_context.processing_profile_id
+    )
 
     to_source = [ctx for ctx in wake_contexts if not ctx.get("new_conversation")]
     to_new = [ctx for ctx in wake_contexts if ctx.get("new_conversation")]
@@ -6380,6 +6502,7 @@ async def _process_script_wake_llm(
             to_source,
             event_data,
             listener_id,
+            wake_profile_id=wake_profile_id,
             new_conversation=False,
             home_owner_user_id=home_owner_user_id,
         )
@@ -6389,6 +6512,7 @@ async def _process_script_wake_llm(
             to_new,
             event_data,
             listener_id,
+            wake_profile_id=wake_profile_id,
             new_conversation=True,
             home_owner_user_id=None,
         )
@@ -6401,6 +6525,7 @@ async def _enqueue_script_wake(
     event_data: dict[str, Any],
     listener_id: str | None,
     *,
+    wake_profile_id: str | None,
     new_conversation: bool,
     home_owner_user_id: str | None,
 ) -> None:
@@ -6552,9 +6677,8 @@ async def _enqueue_script_wake(
     }
     if exec_context.user_id is not None:
         payload["created_by_user_id"] = exec_context.user_id
-    # The woken turn runs under the script's own (originating) profile.
-    if exec_context.processing_profile_id is not None:
-        payload["processing_profile_id"] = exec_context.processing_profile_id
+    if wake_profile_id is not None:
+        payload["processing_profile_id"] = wake_profile_id
     if new_conversation:
         payload["new_conversation"] = True
     elif home_owner_user_id is not None:
@@ -6588,7 +6712,7 @@ def _resolve_execution_service(
     """Resolve the processing service a task should execute under.
 
     Used for both script execution (runs under the creating profile) and
-    profile-routed wake_llm turns (event listeners route to ``event_handler``;
+    profile-routed wake_llm turns (event-triggered wakes route to ``event_handler``;
     schedule/future-callback wakes carry their originating profile). Tasks with
     no recorded profile, or stamped with the default profile, fall back to the
     default processing service.
