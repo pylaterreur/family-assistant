@@ -275,4 +275,11 @@ async def test_the_providers_start_survives_its_terminal_reading(
     assert run is not None
     assert run["status"] == "completed"
     assert target.collected_starts == [started]
-    assert target.submitted_at == [run["started_at"]]
+    assert len(target.submitted_at) == 1
+    submitted_at = target.submitted_at[0]
+    # Aware on every backend: SQLite returns the column naive, and a naive
+    # time would switch the resume filter off.
+    assert submitted_at is not None
+    assert submitted_at.tzinfo is not None
+    assert run["started_at"] is not None
+    assert submitted_at.replace(tzinfo=None) == run["started_at"].replace(tzinfo=None)

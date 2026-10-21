@@ -3478,7 +3478,12 @@ class TaskWorker:
                 conversation_id=run["conversation_id"],
                 taint_state=taint_state,
                 db_context=exec_context.db_context,
-                submitted_at=run["started_at"],
+                # SQLite hands timestamps back naive; the filter needs UTC.
+                submitted_at=(
+                    _as_aware_utc(run["started_at"])
+                    if run["started_at"] is not None
+                    else None
+                ),
             )
         except DelegationPermanentError as exc:
             logger.exception(
