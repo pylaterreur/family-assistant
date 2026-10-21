@@ -74,7 +74,7 @@ class MCPPollResult:
     """One page of ``events/poll``."""
 
     events: list[MCPEventOccurrence]
-    cursor: str
+    cursor: str | None
     truncated: bool
     has_more: bool
     next_poll_ms: int | None
@@ -221,9 +221,10 @@ class MCPEventsClient:
             raise MCPEventsError(f"events/poll for {name} returned malformed events")
         events = [_occurrence(entry) for entry in entries]
         next_cursor = result.get("cursor")
-        if not isinstance(next_cursor, str):
-            # Polling on with a null cursor would restart from "now".
-            raise MCPEventsError(f"events/poll for {name} returned no cursor")
+        # A null cursor is how a server without replay says there is nothing to
+        # resume from; any other non-string is malformed.
+        if next_cursor is not None and not isinstance(next_cursor, str):
+            raise MCPEventsError(f"events/poll for {name} returned a malformed cursor")
         next_poll_ms = result.get("nextPollMs")
         return MCPPollResult(
             events=events,

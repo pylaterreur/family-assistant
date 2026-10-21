@@ -665,8 +665,8 @@ async def test_a_malformed_page_is_not_skipped(event: object) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cursor", [None, 9])
-async def test_a_page_without_a_string_cursor_is_not_accepted(cursor: object) -> None:
+@pytest.mark.parametrize("cursor", [9, {"at": 9}])
+async def test_a_page_with_a_malformed_cursor_is_not_accepted(cursor: object) -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         result = {"events": [], "cursor": cursor}
@@ -678,7 +678,7 @@ async def test_a_page_without_a_string_cursor_is_not_accepted(cursor: object) ->
         client = MCPEventsClient(
             url="https://x.example/mcp", token=None, http_client=http
         )
-        with pytest.raises(MCPEventsError, match="no cursor"):
+        with pytest.raises(MCPEventsError, match="malformed cursor"):
             await client.poll("a.b", {}, "1")
 
 
@@ -700,3 +700,27 @@ async def test_an_events_list_without_a_list_is_not_read_as_empty(
         )
         with pytest.raises(MCPEventsError, match="no list of events"):
             await client.list_events()
+
+
+@pytest.mark.asyncio
+async def test_a_server_without_replay_may_return_a_null_cursor() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        event = {
+            "eventId": "evt_1",
+            "name": "a.b",
+            "timestamp": "2026-10-21T09:00:00Z",
+            "data": {},
+        }
+        result = {"events": [event], "cursor": None}
+        return httpx.Response(
+            200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = MCPEventsClient(
+            url="https://x.example/mcp", token=None, http_client=http
+        )
+        page = await client.poll("a.b", {}, None)
+    assert [event.event_id for event in page.events] == ["evt_1"]
+    assert page.cursor is None
