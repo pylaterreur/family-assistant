@@ -387,9 +387,11 @@ reviews through native Codex GitHub review (`@codex review`).
   approval and proceed.
 - Significant changes should have the plan written to docs/design for approval and future
   documentation.
-- When completing a user-visible feature, update the user documentation and tell the assistant how
-  it works in the system prompt in prompts.yaml or in tool descriptions, since those are the only
-  way the assistant learns that the feature exists. See
+- When completing a user-visible feature, update the user documentation: the assistant answers "how
+  do I…" questions by reading `docs/user/` with `get_user_documentation_content`, so that is how it
+  learns what the apps can do. Change a tool's behaviour notes in its description, and the system
+  prompt in prompts.yaml only for behaviour the assistant needs on every turn. Do not add notes
+  about the web or iOS interface to the prompt: every line there is paid for on every turn. See
   **[Writing User Documentation](#writing-user-documentation)** below for where the change belongs.
 - When solving a problem, consider whether there's a better long term fix and ask the user whether
   they prefer the tactical pragmatic fix or the "proper" one. Look out for design or code smells.
