@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
@@ -29,7 +28,10 @@ from family_assistant.delegation_security import DelegationSecurityLevel
 from family_assistant.llm import LLMOutput
 from family_assistant.llm.messages import UserMessage
 from family_assistant.llm.model_selection import ResolvedModelSelection
-from family_assistant.llm.providers.google_genai_client import GoogleGenAIClient
+from family_assistant.llm.providers.google_genai_client import (
+    GoogleGenAIClient,
+    SandboxFile,
+)
 from family_assistant.processing.interactions_agent_service import (
     InteractionsAgentProcessingService,
 )
@@ -291,14 +293,13 @@ async def test_submit_async_mounts_attachments_into_the_sandbox(
         acting_user_id="user-1",
     )
 
-    sources = llm_client.start_agent_interaction.call_args.kwargs["environment_sources"]
-    assert sources == [
-        {
-            "type": "inline",
-            "content": base64.b64encode(b"a,b\n1,2\n").decode("ascii"),
-            "encoding": "base64",
-            "target": "/workspace/figures.txt",
-        }
+    files = llm_client.start_agent_interaction.call_args.kwargs["sandbox_files"]
+    assert files == [
+        SandboxFile(
+            path="/workspace/figures.txt",
+            content=b"a,b\n1,2\n",
+            mime_type="text/plain",
+        )
     ]
 
 
@@ -349,8 +350,8 @@ async def test_attachments_sharing_a_filename_get_distinct_mount_targets(
         acting_user_id="user-1",
     )
 
-    sources = llm_client.start_agent_interaction.call_args.kwargs["environment_sources"]
-    targets = [source["target"] for source in sources]
+    files = llm_client.start_agent_interaction.call_args.kwargs["sandbox_files"]
+    targets = [file.path for file in files]
     assert targets == ["/workspace/data.txt", "/workspace/data-2.txt"]
 
 
