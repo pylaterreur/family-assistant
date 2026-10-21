@@ -41,6 +41,7 @@ from family_assistant.processing.interactions_agent_service import (
 from family_assistant.processing.protocol import (
     MAX_OBSERVATION_ERROR_CHARS,
     PENDING,
+    CollectedOutputs,
     DelegationPermanentError,
     DelegationTransientError,
     RemoteDisposition,
@@ -1890,3 +1891,205 @@ async def test_a_resumed_run_returns_only_what_it_wrote(
     ]
     assert len(collected.attachment_ids) == 3
     assert collected.omitted == []
+
+
+async def _never_answers() -> bytes:
+    """A download stalled waiting for response headers, as the provider's do."""
+    await asyncio.Event().wait()
+    raise AssertionError("unreachable")
+
+
+def _quick_cutoffs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cut a stalled download off within a test's patience."""
+    monkeypatch.setattr(
+        interactions_agent_service, "OUTPUT_DOWNLOAD_BASE_SECONDS", 0.05
+    )
+    monkeypatch.setattr(
+        interactions_agent_service, "OUTPUT_DOWNLOAD_MIN_BYTES_PER_SECOND", 10**12
+    )
+
+
+async def _collect(
+    service: InteractionsAgentProcessingService, db_engine: AsyncEngine
+) -> CollectedOutputs:
+    return await service.collect_outputs(
+        _finished_with_environment("env_out"),
+        owner_user_id="user-1",
+        conversation_id="conv-1",
+        taint_state=TurnTaintState.empty(),
+        db_context=Database(db_engine),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_download_is_cut_off_and_retried(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One stall costs a short timeout, not the whole poll (Tuit #97)."""
+    _quick_cutoffs(monkeypatch)
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, download = _client_with_outputs({"model.3mf": b"3mf bytes"})
+    stalls = [True]
+
+    async def fetch(_environment_id: str, _path: str) -> bytes:
+        if stalls.pop() if stalls else False:
+            return await _never_answers()
+        return b"3mf bytes"
+
+    download.side_effect = fetch
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await _collect(service, db_engine)
+
+    assert len(collected.attachment_ids) == 1
+    assert download.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_file_that_keeps_stalling_is_retried_on_the_next_read_keeping_the_rest(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The poll is rescheduled, and the next attempt fetches only what is missing."""
+    _quick_cutoffs(monkeypatch)
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, download = _client_with_outputs({"a.stl": b"a", "b.stl": b"b"})
+    stalled = {"workspace/outputs/b.stl"}
+
+    async def fetch(_environment_id: str, path: str) -> bytes:
+        if path in stalled:
+            return await _never_answers()
+        return path.encode()
+
+    download.side_effect = fetch
+    service = _make_service(client, attachment_registry=registry)
+
+    with pytest.raises(DelegationTransientError, match="stalled 3 times"):
+        await _collect(service, db_engine)
+    stalled.clear()
+    collected = await _collect(service, db_engine)
+
+    fetched = [call.args[1] for call in download.await_args_list]
+    assert fetched.count("workspace/outputs/a.stl") == 1
+    assert len(collected.attachment_ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_running_out_of_collection_budget_reschedules_rather_than_fails(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient error is what keeps the poll task's retries unspent."""
+    monkeypatch.setattr(
+        interactions_agent_service, "OUTPUT_COLLECTION_BUDGET_SECONDS", 0.05
+    )
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, download = _client_with_outputs({"slow.glb": b"g"})
+
+    async def fetch(_environment_id: str, _path: str) -> bytes:
+        return await _never_answers()
+
+    download.side_effect = fetch
+    service = _make_service(client, attachment_registry=registry)
+
+    with pytest.raises(DelegationTransientError, match="took longer than"):
+        await _collect(service, db_engine)
+
+
+@pytest.mark.asyncio
+async def test_outputs_download_several_at_a_time(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    names = [f"part{i}.stl" for i in range(6)]
+    client, download = _client_with_outputs({name: b"x" for name in names})
+    in_flight = 0
+    peak = 0
+    all_started = asyncio.Event()
+
+    async def fetch(_environment_id: str, _path: str) -> bytes:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        if in_flight == interactions_agent_service.OUTPUT_DOWNLOAD_CONCURRENCY:
+            all_started.set()
+        await all_started.wait()
+        in_flight -= 1
+        return b"x"
+
+    download.side_effect = fetch
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await _collect(service, db_engine)
+
+    assert peak == interactions_agent_service.OUTPUT_DOWNLOAD_CONCURRENCY
+    assert len(collected.attachment_ids) == len(names)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_collection_leaves_no_download_running(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    """Siblings are cancelled, or they run on past the budget beside the retry."""
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, download = _client_with_outputs({"a.stl": b"a", "b.stl": b"b"})
+    cancelled: list[str] = []
+
+    async def fetch(_environment_id: str, path: str) -> bytes:
+        if path.endswith("a.stl"):
+            raise DelegationPermanentError("403 permission denied")
+        try:
+            return await _never_answers()
+        except asyncio.CancelledError:
+            cancelled.append(path)
+            raise
+
+    download.side_effect = fetch
+    service = _make_service(client, attachment_registry=registry)
+
+    with pytest.raises(DelegationPermanentError, match="403"):
+        await _collect(service, db_engine)
+
+    assert cancelled == ["workspace/outputs/b.stl"]
+
+
+@pytest.mark.asyncio
+async def test_an_unlisted_file_over_a_limit_frees_its_slot(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap counts files returned, not files fetched."""
+    monkeypatch.setattr(interactions_agent_service, "MAX_RETURNED_OUTPUT_FILES", 2)
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config={"max_file_size": 4}
+    )
+    client, _ = _client_with_outputs(
+        {"a-huge.bin": b"x" * 9, "b.txt": b"b", "c.txt": b"c", "d.txt": b"d"},
+        sizes_listed=False,
+    )
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await _collect(service, db_engine)
+
+    assert len(collected.attachment_ids) == 2
+    assert collected.omitted == [
+        "a-huge.bin (9 bytes, over the attachment size limit)",
+        "d.txt (beyond the first 2 files)",
+    ]

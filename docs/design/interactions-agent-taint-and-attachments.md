@@ -224,6 +224,13 @@ carries the taint of the run's own reply, since the agent produced both from the
 transient failure fetching them leaves the run to be read again; a permanent one delivers the text
 and says the files could not be fetched.
 
+Collection runs inside a delegation poll, whose handler is cut off at 300 s, and the provider's
+downloads occasionally stall waiting for response headers. So each download is bounded by what its
+size could need on a healthy connection and retried, several run at once, and collection as a whole
+has a budget well inside the handler's. Running out of either is a transient failure: the poll is
+rescheduled rather than its task retries spent, and files an earlier attempt fetched are kept in
+memory for the next.
+
 ### 5. A resumed run continues in the same sandbox
 
 Resuming a delegation chains onto the earlier run's interaction, and the resumed run executes in

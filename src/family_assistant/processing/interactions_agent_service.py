@@ -16,10 +16,13 @@ unchanged) still streams the interaction live for that interactive path.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import re
+from collections import OrderedDict, deque
 from datetime import datetime
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from family_assistant.llm.call_context import (
@@ -31,6 +34,7 @@ from family_assistant.llm.messages import UserMessage
 from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
     SandboxFile,
+    SandboxFileEntry,
     is_interaction_terminal_error_status,
 )
 from family_assistant.observability.metrics import record_llm_call
@@ -91,6 +95,23 @@ _SANDBOX_OUTPUT_DIR = "workspace/outputs"
 MAX_RETURNED_OUTPUT_FILES = 20
 MAX_RETURNED_OUTPUT_BYTES = 50 * 1024 * 1024
 
+# Collecting a run's outputs happens inside a delegation poll, whose handler is
+# cut off at 300 s. The provider's file downloads occasionally stall waiting for
+# response headers, and its SDK waits forever by default, so every download is
+# bounded and retried, several run at once, and the whole collection has a
+# budget of its own: running out of it is a transient failure, which reschedules
+# the poll instead of spending the task's retries on a handler timeout.
+OUTPUT_COLLECTION_BUDGET_SECONDS = 180.0
+OUTPUT_DOWNLOAD_CONCURRENCY = 4
+OUTPUT_DOWNLOAD_ATTEMPTS = 3
+# A transfer is allowed this long plus its size at this rate: generous for a
+# healthy connection, short enough that a stall is cut off and retried.
+OUTPUT_DOWNLOAD_BASE_SECONDS = 30.0
+OUTPUT_DOWNLOAD_MIN_BYTES_PER_SECOND = 256 * 1024
+# Files fetched by an attempt that then ran out of budget are kept for the next,
+# up to this much, so a retry continues rather than starting over.
+OUTPUT_DOWNLOAD_CACHE_BYTES = 200 * 1024 * 1024
+
 # Added to a sandboxed agent's prompt on the submit path only: that is the path
 # whose completion collects outputs. A run streamed directly into a chat does
 # not, so its prompt must not promise the files.
@@ -108,6 +129,62 @@ _OUTPUTS_INSTRUCTION = (
 # basename: no directory traversal, no separators, nothing that could land the
 # file outside the mount directory.
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _output_name(entry: SandboxFileEntry) -> str:
+    """An output's path within the outputs directory."""
+    return entry.path.removeprefix(f"{_SANDBOX_OUTPUT_DIR}/")
+
+
+def _first_failure(failures: BaseExceptionGroup) -> BaseException:
+    """The first leaf failure of a task group, to raise as itself."""
+    first = failures.exceptions[0]
+    while isinstance(first, BaseExceptionGroup):
+        first = first.exceptions[0]
+    return first
+
+
+class _OutputDownloadCache:
+    """Output files fetched for a collection that has not finished yet.
+
+    Keyed by the file's environment, path, size and modified time, so a file
+    the agent changed since is fetched afresh. Bounded: past ``max_bytes`` the
+    oldest entries go, which costs a re-fetch and nothing else. Kept in memory
+    for the life of the service, which is what a re-read poll in the same
+    process needs; a restart starts over.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self._max_bytes = max_bytes
+        self._entries: OrderedDict[tuple[str, str, int | None, str], bytes] = (
+            OrderedDict()
+        )
+        self._bytes = 0
+
+    @staticmethod
+    def _key(
+        environment_id: str, entry: SandboxFileEntry
+    ) -> tuple[str, str, int | None, str]:
+        modified = entry.modified.isoformat() if entry.modified else ""
+        return (environment_id, entry.path, entry.size_bytes, modified)
+
+    def get(self, environment_id: str, entry: SandboxFileEntry) -> bytes | None:
+        return self._entries.get(self._key(environment_id, entry))
+
+    def put(self, environment_id: str, entry: SandboxFileEntry, content: bytes) -> None:
+        key = self._key(environment_id, entry)
+        if key in self._entries or len(content) > self._max_bytes:
+            return
+        self._entries[key] = content
+        self._bytes += len(content)
+        while self._bytes > self._max_bytes:
+            _, evicted = self._entries.popitem(last=False)
+            self._bytes -= len(evicted)
+
+    def forget(self, environment_id: str) -> None:
+        """Drop an environment's files once its outputs have been delivered."""
+        for key in [key for key in self._entries if key[0] == environment_id]:
+            self._bytes -= len(self._entries.pop(key))
 
 
 def _output_over_limit(size: int, total_so_far: int, max_file_size: int) -> str | None:
@@ -646,38 +723,17 @@ class InteractionsAgentProcessingService(ProcessingService):
         # failure partway through is retried from the start, and registering
         # as we went would store another copy of every earlier file on each
         # retry, with nothing holding the ids of the last attempt's.
-        staged: list[tuple[str, bytes, str]] = []
-        omitted: list[str] = []
-        total_bytes = 0
-        for entry in sorted(entries, key=lambda e: e.path):
-            relative = entry.path.removeprefix(f"{_SANDBOX_OUTPUT_DIR}/")
-            if len(staged) >= MAX_RETURNED_OUTPUT_FILES:
-                omitted.append(
-                    f"{relative} (beyond the first {MAX_RETURNED_OUTPUT_FILES} files)"
+        try:
+            async with asyncio.timeout(OUTPUT_COLLECTION_BUDGET_SECONDS):
+                staged, omitted = await self._download_outputs(
+                    client, environment_id, entries, registry.max_file_size
                 )
-                continue
-            # The listed size, when given, spares downloading a file that
-            # cannot be returned; the downloaded size is what decides.
-            listed = entry.size_bytes
-            reason = (
-                _output_over_limit(listed, total_bytes, registry.max_file_size)
-                if listed is not None
-                else None
-            )
-            if reason is None:
-                content = await client.download_sandbox_file(environment_id, entry.path)
-                reason = _output_over_limit(
-                    len(content), total_bytes, registry.max_file_size
-                )
-            if reason is not None:
-                omitted.append(f"{relative} ({reason})")
-                continue
-            total_bytes += len(content)
-            staged.append((
-                relative,
-                content,
-                _output_mime_type(entry.mime_type, relative),
-            ))
+        except TimeoutError as exc:
+            raise DelegationTransientError(
+                "Collecting the run's output files took longer than "
+                f"{OUTPUT_COLLECTION_BUDGET_SECONDS:.0f} s; the run will be "
+                "read again, keeping the files already fetched."
+            ) from exc
 
         attachment_ids: list[str] = []
         for relative, content, mime_type in staged:
@@ -693,7 +749,126 @@ class InteractionsAgentProcessingService(ProcessingService):
                 taint_state=taint_state,
             )
             attachment_ids.append(metadata.attachment_id)
+        self._output_downloads.forget(environment_id)
         return CollectedOutputs(attachment_ids=attachment_ids, omitted=omitted)
+
+    @cached_property
+    def _output_downloads(self) -> _OutputDownloadCache:
+        return _OutputDownloadCache(OUTPUT_DOWNLOAD_CACHE_BYTES)
+
+    async def _download_outputs(
+        self,
+        client: GoogleGenAIClient,
+        environment_id: str,
+        entries: Sequence[SandboxFileEntry],
+        max_file_size: int,
+    ) -> tuple[list[tuple[str, bytes, str]], list[str]]:
+        """Fetch the returnable outputs; name the rest and why.
+
+        Files are taken in path order, in waves that fill the slots still free,
+        and each wave is fetched several at a time. A listed size rules a file
+        out before it is fetched; the downloaded size is what finally decides,
+        and a file it rules out frees its slot for the next wave.
+        """
+        pending = deque(sorted(entries, key=lambda e: e.path))
+        staged: list[tuple[str, bytes, str]] = []
+        omitted: list[str] = []
+        total_bytes = 0
+        while pending and len(staged) < MAX_RETURNED_OUTPUT_FILES:
+            wave: list[SandboxFileEntry] = []
+            projected = total_bytes
+            while pending and len(staged) + len(wave) < MAX_RETURNED_OUTPUT_FILES:
+                entry = pending.popleft()
+                if entry.size_bytes is not None:
+                    reason = _output_over_limit(
+                        entry.size_bytes, projected, max_file_size
+                    )
+                    if reason is not None:
+                        omitted.append(f"{_output_name(entry)} ({reason})")
+                        continue
+                    projected += entry.size_bytes
+                wave.append(entry)
+            contents = await self._fetch_outputs(client, environment_id, wave)
+            for entry, content in zip(wave, contents, strict=True):
+                reason = _output_over_limit(len(content), total_bytes, max_file_size)
+                if reason is not None:
+                    omitted.append(f"{_output_name(entry)} ({reason})")
+                    continue
+                total_bytes += len(content)
+                staged.append((
+                    _output_name(entry),
+                    content,
+                    _output_mime_type(entry.mime_type, _output_name(entry)),
+                ))
+        omitted.extend(
+            f"{_output_name(entry)} (beyond the first {MAX_RETURNED_OUTPUT_FILES} files)"
+            for entry in pending
+        )
+        return staged, omitted
+
+    async def _fetch_outputs(
+        self,
+        client: GoogleGenAIClient,
+        environment_id: str,
+        entries: Sequence[SandboxFileEntry],
+    ) -> list[bytes]:
+        """Fetch ``entries`` several at a time, in their order."""
+        gate = asyncio.Semaphore(OUTPUT_DOWNLOAD_CONCURRENCY)
+
+        async def fetch(entry: SandboxFileEntry) -> bytes:
+            async with gate:
+                return await self._download_output(client, environment_id, entry)
+
+        # A task group, not gather: when one download fails, the rest are
+        # cancelled and awaited before the failure propagates, so none keeps
+        # running past the collection's budget beside the next attempt's.
+        try:
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(fetch(entry)) for entry in entries]
+        except BaseExceptionGroup as failures:
+            raise _first_failure(failures) from failures
+        return [task.result() for task in tasks]
+
+    async def _download_output(
+        self,
+        client: GoogleGenAIClient,
+        environment_id: str,
+        entry: SandboxFileEntry,
+    ) -> bytes:
+        """One output file: from an earlier attempt if it fetched it, else fetched.
+
+        Each transfer is cut off once it outlasts what its size could need on a
+        healthy connection, and tried again: the provider's stalls are of the
+        request, not the connection, so a fresh request usually goes through.
+        """
+        cached = self._output_downloads.get(environment_id, entry)
+        if cached is not None:
+            return cached
+        limit = OUTPUT_DOWNLOAD_BASE_SECONDS + (entry.size_bytes or 0) / (
+            OUTPUT_DOWNLOAD_MIN_BYTES_PER_SECOND
+        )
+        for attempt in range(1, OUTPUT_DOWNLOAD_ATTEMPTS + 1):
+            try:
+                async with asyncio.timeout(limit):
+                    content = await client.download_sandbox_file(
+                        environment_id, entry.path
+                    )
+            except TimeoutError:
+                logger.warning(
+                    "Download of %s from %s stalled past %.0f s (attempt %d of %d).",
+                    entry.path,
+                    environment_id,
+                    limit,
+                    attempt,
+                    OUTPUT_DOWNLOAD_ATTEMPTS,
+                )
+                continue
+            self._output_downloads.put(environment_id, entry, content)
+            return content
+        raise DelegationTransientError(
+            f"Downloading {entry.path} stalled {OUTPUT_DOWNLOAD_ATTEMPTS} times; "
+            "the run will be read again."
+        )
 
     async def observe_async(self, remote_task_id: str) -> RemoteObservation:
         """Read the interaction once and classify it. The only classifier.
