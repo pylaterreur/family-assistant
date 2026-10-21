@@ -65,7 +65,7 @@ from family_assistant.tools.policy import (
     ToolPolicyConfig,
     ToolPolicyDecision,
 )
-from family_assistant.tools.types import ToolExecutionContext
+from family_assistant.tools.types import ToolDefinition, ToolExecutionContext
 from family_assistant.utils.clock import SystemClock
 from tests.helpers import deliver_queued_delegations
 from tests.mocks.mock_llm import MatcherArgs, RuleBasedMockLLMClient
@@ -133,14 +133,17 @@ class _WakeTurnLLM(RuleBasedMockLLMClient):
             ],
         )
 
-    async def generate_response(  # type: ignore[override]
-        self, messages: list[LLMMessage], *args: object, **kwargs: object
+    async def generate_response(
+        self,
+        messages: list[LLMMessage],
+        tools: list[ToolDefinition] | None = None,
+        tool_choice: str | None = "auto",
     ) -> LLMOutput:
         self.calls.append(list(messages))
         if _has_tool_result(messages):
             self.reply_requested.set()
             await self.hold_reply.wait()
-        return await super().generate_response(messages, *args, **kwargs)  # type: ignore[arg-type]
+        return await super().generate_response(messages, tools, tool_choice)
 
     def hold(self) -> None:
         self.hold_reply.clear()
