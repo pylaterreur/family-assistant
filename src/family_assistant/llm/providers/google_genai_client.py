@@ -288,6 +288,16 @@ def _peek_stream_error(
     return DelegationTransientError(message)
 
 
+class SandboxFileMissingError(DelegationPermanentError):
+    """A listed sandbox file that the environment cannot produce.
+
+    The environments listing keeps an entry for a file the agent moved or
+    deleted after writing it -- a moved directory included, reported as a file
+    -- and downloading one answers 404 or 503 for a while and then an empty
+    200. That is one file gone, not a failure of the run's other outputs.
+    """
+
+
 @dataclass(frozen=True)
 class SandboxFileEntry:
     """One file an agent run left in its environment."""
@@ -2484,7 +2494,7 @@ class GoogleGenAIClient(BaseLLMClient):
             # Missing for good, the file is lost -- not the run, which a 404
             # would otherwise classify as, and resubmit.
             if _http_status(e) == 404:
-                raise DelegationPermanentError(
+                raise SandboxFileMissingError(
                     f"{path} could not be read back from the sandbox: {e}"
                 ) from e
             raise self._classify_agent_delegation_error(e) from e
