@@ -24,7 +24,7 @@ from family_assistant.tools.automations import (
 )
 from family_assistant.tools.infrastructure import CompositeToolsProvider
 from family_assistant.tools.types import ToolExecutionContext
-from tests.mocks.mock_llm import RuleBasedMockLLMClient
+from tests.mocks.idle_processing_service import IdleLLMClient
 
 if TYPE_CHECKING:
     from family_assistant.storage.types import ActionConfig
@@ -431,7 +431,7 @@ async def test_create_automation_accepts_configured_keychute_api(
     """Scheduled-script validation uses the configured runtime API namespace."""
     db_ctx = Database(engine=db_engine)
     processing_service = ProcessingService(
-        llm_client=RuleBasedMockLLMClient(rules=[]),
+        llm_client=IdleLLMClient(),
         tools_provider=CompositeToolsProvider(providers=[]),
         service_config=ProcessingServiceConfig(
             id="default_assistant",
