@@ -293,6 +293,10 @@ class MCPEventSource(BaseEventSource, EventSource):
                 },
                 listener_ids=running.listener_ids,
             )
+            # A processor that stopped meanwhile dropped the event, so the
+            # page must not be marked delivered.
+            if not self.processor.is_running:
+                raise RuntimeError("Event processor stopped while polling")
         if result.cursor is not None and result.cursor != running.cursor:
             await db.mcp_event_cursors.set(
                 subscription_key=subscription.key,

@@ -139,6 +139,11 @@ class EventProcessor:
             except Exception as e:
                 logger.exception(f"Failed to stop event source {source_id}: {e}")
 
+    @property
+    def is_running(self) -> bool:
+        """Whether events handed to :meth:`process_event` are processed."""
+        return self._running
+
     async def process_event(
         self,
         source_id: str,
@@ -158,15 +163,13 @@ class EventProcessor:
 
         # Use lock to prevent concurrent cache refreshes
         async with self._process_lock:
-            cached = self._listener_cache.get(source_id, [])
             # A source that names its listeners read them from the database
-            # itself, so one created since the last refresh must not be missed.
+            # itself, so the cache must be at least as new as that read: a
+            # listener created or edited since the last refresh would otherwise
+            # be missed or matched against its old conditions.
             if (
-                time.time() - self._last_cache_refresh > self._cache_refresh_interval
-                or (
-                    listener_ids is not None
-                    and not set(listener_ids) <= {item["id"] for item in cached}
-                )
+                listener_ids is not None
+                or time.time() - self._last_cache_refresh > self._cache_refresh_interval
             ):
                 await self._refresh_listener_cache()
 

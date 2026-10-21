@@ -203,11 +203,13 @@ class MCPEventsClient:
             },
             name=name,
         )
-        events = [
-            _occurrence(entry)
-            for entry in result.get("events") or []
-            if isinstance(entry, dict)
-        ]
+        entries = result.get("events") or []
+        if not isinstance(entries, list) or not all(
+            isinstance(entry, dict) for entry in entries
+        ):
+            # Skipping a malformed entry and advancing past it would lose it.
+            raise MCPEventsError(f"events/poll for {name} returned malformed events")
+        events = [_occurrence(entry) for entry in entries]
         next_cursor = result.get("cursor")
         next_poll_ms = result.get("nextPollMs")
         return MCPPollResult(

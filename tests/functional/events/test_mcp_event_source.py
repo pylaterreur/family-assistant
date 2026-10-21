@@ -15,6 +15,7 @@ from family_assistant.events.mcp_client import (
     EVENTS_EXTENSION,
     PROTOCOL_VERSION,
     MCPEventsClient,
+    MCPEventsError,
 )
 from family_assistant.events.mcp_source import MCPEventSource
 from family_assistant.events.processor import EventProcessor
@@ -544,3 +545,60 @@ async def test_discovery_reports_an_unreachable_server_instead_of_hiding_it(
     [server] = listed["servers"]
     assert server["server_id"] == "tasks"
     assert "connection refused" in server["error"]
+
+
+@pytest.mark.asyncio
+async def test_an_edited_trigger_is_matched_with_its_new_conditions(
+    db_engine: AsyncEngine,
+    servers: dict[str, MCPServerConfig],
+    http_client: httpx.AsyncClient,
+    fake_server: FakeEventsServer,
+) -> None:
+    db = Database(db_engine)
+    listener_id = await add_listener(db, "inbox", ANDREW)
+    listener = await db.events.get_event_listener_by_id(listener_id)
+    assert listener is not None
+    processor = await make_processor(db_engine)
+    source = make_source(db_engine, servers, http_client)
+    source.processor = processor
+    await source.reconcile(start_polling=False)
+    await poll_all(source)
+
+    await db.events.update_event_listener(
+        listener_id=listener_id,
+        conversation_id=listener["conversation_id"],
+        name=listener["name"],
+        description=None,
+        match_conditions={
+            "server_id": "tasks",
+            "event": "inbox.changed",
+            "arguments.actor": "teija",
+        },
+        action_config=listener["action_config"],
+        one_time=False,
+        enabled=True,
+        created_by_user_id=ANDREW,
+    )
+    await source.reconcile(start_polling=False)
+    await poll_all(source)
+    fake_server.publish("andrew", "handoff", "Seen through the edited watch")
+    await poll_all(source)
+
+    assert await executions(db, listener_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_page_is_not_skipped() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        result = {"events": ["not an event"], "cursor": "9"}
+        return httpx.Response(
+            200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = MCPEventsClient(
+            url="https://x.example/mcp", token=None, http_client=http
+        )
+        with pytest.raises(MCPEventsError, match="malformed"):
+            await client.poll("a.b", {}, "1")
