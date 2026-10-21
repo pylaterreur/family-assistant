@@ -508,6 +508,31 @@ class DelegationRunsRepository(BaseRepository):
         row = await self._db.fetch_one(stmt)
         return self._row_to_dict(row) if row is not None else None
 
+    async def has_active_children(self, parent: DelegationRunDict) -> bool:
+        """Whether a run this run started is still unfinished.
+
+        Unlike :meth:`list_undelivered_children`, this counts a child the
+        run's turn is still waiting on inline, before any handoff.
+        """
+        if parent["subconversation_id"] is None:
+            return False
+        stmt = (
+            select(delegation_runs_table.c.id)
+            .where(delegation_runs_table.c.conversation_id == parent["conversation_id"])
+            .where(
+                delegation_runs_table.c.source_subconversation_id
+                == parent["subconversation_id"]
+            )
+            .where(delegation_runs_table.c.created_at >= parent["created_at"])
+            .where(
+                delegation_runs_table.c.status.notin_(
+                    list(TERMINAL_DELEGATION_STATUSES)
+                )
+            )
+            .limit(1)
+        )
+        return await self._db.fetch_one(stmt) is not None
+
     async def list_undelivered_children(
         self, parent: DelegationRunDict
     ) -> list[DelegationRunDict]:

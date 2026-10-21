@@ -1593,9 +1593,9 @@ SERVICE_TOOLS_DEFINITION: list[ToolDefinition] = [
                 "Stops an asynchronous profile delegation that is no longer wanted -- a duplicate, "
                 "or one the user has called off -- so its result is never delivered. Works on a "
                 "delegation that is queued, running a turn here, or running on a remote agent (such "
-                "as coder or research), which is asked to stop. A running turn stops at once and a "
-                "remote agent may finish its current step first; anything already done stays "
-                "done. A delegation waiting on delegations of its own cannot be cancelled "
+                "as coder or research). A running turn stops at once. A remote agent is asked to "
+                "stop but may still run to the end; its result is ignored either way. Anything "
+                "already done stays done. A delegation waiting on delegations of its own cannot be cancelled "
                 "until they finish. Use list_delegations to find the reference. This is distinct "
                 "from cancel_worker_task, which stops spawn_worker jobs."
             ),
@@ -2079,11 +2079,12 @@ async def cancel_delegation_tool(
             ),
             attachments=None,
         )
-    # A turn that has handed work off is still ``running`` until it ends, and
-    # stopping it then would leave those delegations to report to nobody.
-    if run["status"] not in CANCELLABLE_DELEGATION_STATUSES or any(
-        child["status"] not in TERMINAL_DELEGATION_STATUSES
-        for child in await db.delegation_runs.list_undelivered_children(run)
+    # A turn with delegations of its own still out -- handed off, or awaited
+    # inline -- is still ``running``, and stopping it would leave them to
+    # report to nobody.
+    if (
+        run["status"] not in CANCELLABLE_DELEGATION_STATUSES
+        or await db.delegation_runs.has_active_children(run)
     ):
         return ToolResult(
             text=(

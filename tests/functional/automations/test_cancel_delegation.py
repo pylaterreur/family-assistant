@@ -538,10 +538,13 @@ async def test_cancelling_a_waiting_parents_last_child_hands_it_to_the_parents_n
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("handed_off", [True, False], ids=["handed_off", "inline"])
 async def test_a_turn_with_delegations_still_out_is_not_cancelled(
     db_engine: AsyncEngine,
+    handed_off: bool,
 ) -> None:
-    """It is still running, but stopping it would orphan what it handed off."""
+    """It is still running, but stopping it would orphan the child it started,
+    whether handed off or still awaited inline."""
     delegation_turns = RunningDelegationTurns()
     target = BlockingTurnService(delegation_turns)
     processing_service = _source_processing_service(
@@ -557,9 +560,10 @@ async def test_a_turn_with_delegations_still_out_is_not_cancelled(
         delegation_id="delegation_child",
         source_subconversation_id="sub_delegation_parent",
     )
-    await db_context.delegation_runs.mark_handed_off(
-        "delegation_child", SystemClock().now()
-    )
+    if handed_off:
+        await db_context.delegation_runs.mark_handed_off(
+            "delegation_child", SystemClock().now()
+        )
 
     result = await cancel_delegation_tool(
         _tool_context(db_context, processing_service), "delegation_parent"
