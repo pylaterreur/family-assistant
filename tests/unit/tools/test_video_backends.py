@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, Literal, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace, TracebackType
+from typing import TYPE_CHECKING, Literal, Self, cast
+from unittest.mock import patch
 
 import pytest
+from google.genai import types as genai_types
 from pydantic import SecretStr
 
 from family_assistant.config_models import AppConfig
@@ -23,6 +23,7 @@ from family_assistant.tools.video_backends import (
 from family_assistant.tools.video_generation import (
     _create_video_backend,  # noqa: PLC2701 - testing internal backend selection
 )
+from tests.mocks.recording_async_call import RecordingAsyncCall
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -142,87 +143,101 @@ async def test_mock_backend_returns_placeholder() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Fake genai client
+# --------------------------------------------------------------------------- #
+
+
+class FakeGenaiClient:
+    """Stands in for ``genai.Client`` and the async client its ``.aio`` yields.
+
+    Each SDK coroutine the backends call is a ``RecordingAsyncCall``; a test
+    scripts the ones it expects by replacing them, and any call it did not
+    script fails.
+    """
+
+    def __init__(self) -> None:
+        self.models = SimpleNamespace(generate_videos=RecordingAsyncCall[object]())
+        self.operations = SimpleNamespace(get=RecordingAsyncCall[object]())
+        self.files = SimpleNamespace(download=RecordingAsyncCall[bytes]())
+        self.interactions = SimpleNamespace(
+            create=RecordingAsyncCall[object](), get=RecordingAsyncCall[object]()
+        )
+        self.api_keys: list[str] = []
+        self.open_sessions = 0
+
+    def create(self, api_key: str) -> Self:
+        self.api_keys.append(api_key)
+        return self
+
+    @property
+    def aio(self) -> Self:
+        return self
+
+    async def __aenter__(self) -> Self:
+        self.open_sessions += 1
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.open_sessions -= 1
+
+
+async def _no_sleep(_delay: float) -> None:
+    return None
+
+
+@pytest.fixture
+def fake_genai() -> Generator[FakeGenaiClient]:
+    client = FakeGenaiClient()
+    with (
+        patch(
+            "family_assistant.tools.video_backends._create_genai_client",
+            new=client.create,
+        ),
+        patch("asyncio.sleep", new=_no_sleep),
+    ):
+        yield client
+
+
+# --------------------------------------------------------------------------- #
 # Veo backend
 # --------------------------------------------------------------------------- #
 
 
-@dataclass
-class _FakeImage:
-    image_bytes: bytes
-    mime_type: str
-
-
-@dataclass
-class _FakeGenerateVideosSource:
-    prompt: str
-    image: _FakeImage | None = None
-
-
-@dataclass
-class _FakeVideoGenerationReferenceImage:
-    image: _FakeImage
-
-
-@dataclass
-class _FakeGenerateVideosConfig:
-    negative_prompt: str | None = None
-    aspect_ratio: str | None = None
-    duration_seconds: int | None = None
-    last_frame: _FakeImage | None = None
-    reference_images: list[_FakeVideoGenerationReferenceImage] | None = None
-
-
-def _fake_genai_types() -> SimpleNamespace:
-    return SimpleNamespace(
-        Image=_FakeImage,
-        GenerateVideosConfig=_FakeGenerateVideosConfig,
-        GenerateVideosSource=_FakeGenerateVideosSource,
-        VideoGenerationReferenceImage=_FakeVideoGenerationReferenceImage,
-    )
-
-
-def _aio_client(async_client: MagicMock) -> MagicMock:
-    """Wrap an async client in a mock exposing it via the ``.aio`` async CM."""
-    client = MagicMock()
-    aio = MagicMock()
-    aio.__aenter__ = AsyncMock(return_value=async_client)
-    aio.__aexit__ = AsyncMock(return_value=None)
-    client.aio = aio
-    return client
+def _veo_operation(
+    *, name: str = "operation/123", done: bool = True
+) -> genai_types.GenerateVideosOperation:
+    return genai_types.GenerateVideosOperation.model_validate({
+        "name": name,
+        "done": done,
+        "response": (
+            genai_types.GenerateVideosResponse(
+                generated_videos=[
+                    genai_types.GeneratedVideo(
+                        video=genai_types.Video(uri="files/file-ref")
+                    )
+                ]
+            )
+            if done
+            else None
+        ),
+    })
 
 
 @pytest.fixture
-def veo_async_client() -> Generator[MagicMock]:
-    operation = MagicMock()
-    operation.name = "operation/123"
-    operation.done = True
-    operation.error = None
-    video_asset = MagicMock()
-    video_asset.video = "file-ref"
-    operation.response.generated_videos = [video_asset]
-
-    async_client = MagicMock()
-    async_client.models.generate_videos = AsyncMock(return_value=operation)
-    async_client.operations.get = AsyncMock(return_value=operation)
-    async_client.files.download = AsyncMock(return_value=b"video-content")
-
-    with (
-        patch(
-            "family_assistant.tools.video_backends._create_genai_client",
-            return_value=_aio_client(async_client),
-        ),
-        patch(
-            "family_assistant.tools.video_backends._lazy_import_genai_types",
-            return_value=_fake_genai_types(),
-        ),
-        patch("asyncio.sleep", AsyncMock()),
-    ):
-        yield async_client
+def veo_client(fake_genai: FakeGenaiClient) -> FakeGenaiClient:
+    fake_genai.models.generate_videos = RecordingAsyncCall[object](_veo_operation())
+    fake_genai.files.download = RecordingAsyncCall(b"video-content")
+    return fake_genai
 
 
 @pytest.mark.asyncio
 async def test_veo_generate_returns_downloaded_bytes(
-    veo_async_client: MagicMock,
+    veo_client: FakeGenaiClient,
 ) -> None:
     backend = VeoVideoBackend("key")
     result = await backend.generate_video(
@@ -233,16 +248,21 @@ async def test_veo_generate_returns_downloaded_bytes(
     assert result.mime_type == "video/mp4"
     assert result.model == "veo-3.1-generate-preview"
 
-    _, kwargs = veo_async_client.models.generate_videos.call_args
+    assert veo_client.api_keys == ["key"]
+    assert veo_client.open_sessions == 0
+    kwargs = veo_client.models.generate_videos.last_call.kwargs
     assert kwargs["model"] == "veo-3.1-generate-preview"
-    assert isinstance(kwargs["source"], _FakeGenerateVideosSource)
-    assert kwargs["source"].prompt == "A cat"
-    veo_async_client.files.download.assert_called_once_with(file="file-ref")
+    source = kwargs["source"]
+    assert isinstance(source, genai_types.GenerateVideosSource)
+    assert source.prompt == "A cat"
+    assert [call.kwargs for call in veo_client.files.download.calls] == [
+        {"file": genai_types.Video(uri="files/file-ref")}
+    ]
 
 
 @pytest.mark.asyncio
 async def test_veo_forces_duration_with_reference_images(
-    veo_async_client: MagicMock,
+    veo_client: FakeGenaiClient,
 ) -> None:
     backend = VeoVideoBackend("key")
     await backend.generate_video(
@@ -257,61 +277,65 @@ async def test_veo_forces_duration_with_reference_images(
         )
     )
 
-    _, kwargs = veo_async_client.models.generate_videos.call_args
+    kwargs = veo_client.models.generate_videos.last_call.kwargs
     config = kwargs["config"]
+    assert isinstance(config, genai_types.GenerateVideosConfig)
     assert config.duration_seconds == 8
     assert config.reference_images is not None
-    assert config.reference_images[0].image.image_bytes == b"img"
+    reference_image = config.reference_images[0].image
+    assert reference_image is not None
+    assert reference_image.image_bytes == b"img"
+    assert config.last_frame is not None
     assert config.last_frame.image_bytes == b"last"
-    assert kwargs["source"].image.image_bytes == b"first"
+    source = kwargs["source"]
+    assert isinstance(source, genai_types.GenerateVideosSource)
+    assert source.image is not None
+    assert source.image.image_bytes == b"first"
 
 
 @pytest.mark.asyncio
-async def test_veo_polls_until_done(veo_async_client: MagicMock) -> None:
-    pending = MagicMock()
-    pending.done = False
-    pending.name = "op/pending"
-    done = MagicMock()
-    done.done = True
-    done.error = None
-    done.response.generated_videos = [MagicMock(video="file-ref")]
-
-    veo_async_client.models.generate_videos.return_value = pending
-    veo_async_client.operations.get.side_effect = [pending, done]
+async def test_veo_polls_until_done(veo_client: FakeGenaiClient) -> None:
+    pending = _veo_operation(name="op/pending", done=False)
+    veo_client.models.generate_videos = RecordingAsyncCall[object](pending)
+    veo_client.operations.get = RecordingAsyncCall[object](pending, _veo_operation())
 
     backend = VeoVideoBackend("key")
-    await backend.generate_video(VideoGenerationRequest(prompt="dog"))
+    result = await backend.generate_video(VideoGenerationRequest(prompt="dog"))
 
-    assert veo_async_client.operations.get.call_count == 2
+    assert len(veo_client.operations.get.calls) == 2
+    assert veo_client.operations.get.calls[0].args == (pending,)
+    assert result.content == b"video-content"
 
 
 @pytest.mark.asyncio
-async def test_veo_raises_on_operation_error(veo_async_client: MagicMock) -> None:
-    operation = MagicMock()
-    operation.done = True
-    operation.error = SimpleNamespace(message="Safety violation", code=400)
-    veo_async_client.models.generate_videos.return_value = operation
-    veo_async_client.operations.get.return_value = operation
+async def test_veo_raises_on_operation_error(veo_client: FakeGenaiClient) -> None:
+    veo_client.models.generate_videos = RecordingAsyncCall[object](
+        genai_types.GenerateVideosOperation.model_validate({
+            "name": "operation/123",
+            "done": True,
+            "error": {"message": "Safety violation", "code": 400},
+        })
+    )
 
     backend = VeoVideoBackend("key")
-    with pytest.raises(VideoGenerationError, match="Safety violation"):
+    with pytest.raises(VideoGenerationError, match=r"Safety violation \(code: 400\)"):
         await backend.generate_video(VideoGenerationRequest(prompt="unsafe"))
 
 
 @pytest.mark.asyncio
-async def test_veo_raises_on_timeout(veo_async_client: MagicMock) -> None:
-    pending = MagicMock()
-    pending.done = False
-    pending.name = "op/pending"
-    veo_async_client.models.generate_videos.return_value = pending
-    veo_async_client.operations.get.return_value = pending
+async def test_veo_raises_on_timeout(veo_client: FakeGenaiClient) -> None:
+    veo_client.models.generate_videos = RecordingAsyncCall[object](
+        _veo_operation(name="op/pending", done=False)
+    )
 
     backend = VeoVideoBackend("key")
     with (
-        patch("family_assistant.tools.video_backends.time.time") as mock_time,
+        patch(
+            "family_assistant.tools.video_backends.time.time",
+            new=iter([1000.0, 1700.0]).__next__,
+        ),
         pytest.raises(VideoGenerationError, match="timed out"),
     ):
-        mock_time.side_effect = [1000.0, 1700.0]
         await backend.generate_video(VideoGenerationRequest(prompt="slow"))
 
 
@@ -336,26 +360,15 @@ def _omni_interaction(
 
 
 @pytest.fixture
-def omni_async_client() -> Generator[MagicMock]:
-    async_client = MagicMock()
-    async_client.interactions.create = AsyncMock(
-        return_value=_omni_interaction(output_video=_video_output(b"omni-video"))
+def omni_client(fake_genai: FakeGenaiClient) -> FakeGenaiClient:
+    fake_genai.interactions.create = RecordingAsyncCall[object](
+        _omni_interaction(output_video=_video_output(b"omni-video"))
     )
-    async_client.interactions.get = AsyncMock()
-    async_client.files.download = AsyncMock(return_value=b"uri-video")
-
-    with (
-        patch(
-            "family_assistant.tools.video_backends._create_genai_client",
-            return_value=_aio_client(async_client),
-        ),
-        patch("asyncio.sleep", AsyncMock()),
-    ):
-        yield async_client
+    return fake_genai
 
 
 @pytest.mark.asyncio
-async def test_omni_returns_video_bytes(omni_async_client: MagicMock) -> None:
+async def test_omni_returns_video_bytes(omni_client: FakeGenaiClient) -> None:
     backend = GeminiOmniVideoBackend("key")
     result = await backend.generate_video(
         VideoGenerationRequest(prompt="a dancing robot", aspect_ratio="9:16")
@@ -365,7 +378,7 @@ async def test_omni_returns_video_bytes(omni_async_client: MagicMock) -> None:
     assert result.mime_type == "video/mp4"
     assert result.model == "gemini-omni-1.1-flash"
 
-    _, kwargs = omni_async_client.interactions.create.call_args
+    kwargs = omni_client.interactions.create.last_call.kwargs
     assert kwargs["model"] == "gemini-omni-1.1-flash"
     assert kwargs["input"] == "a dancing robot"
     assert kwargs["response_format"] == {
@@ -377,19 +390,21 @@ async def test_omni_returns_video_bytes(omni_async_client: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_omni_passes_duration_to_response_format(
-    omni_async_client: MagicMock,
+    omni_client: FakeGenaiClient,
 ) -> None:
     backend = GeminiOmniVideoBackend("key")
     await backend.generate_video(
         VideoGenerationRequest(prompt="a quick clip", duration_seconds=3)
     )
 
-    _, kwargs = omni_async_client.interactions.create.call_args
-    assert kwargs["response_format"]["duration"] == "3s"
+    kwargs = omni_client.interactions.create.last_call.kwargs
+    response_format = kwargs["response_format"]
+    assert isinstance(response_format, dict)
+    assert response_format["duration"] == "3s"
 
 
 @pytest.mark.asyncio
-async def test_omni_builds_image_input_blocks(omni_async_client: MagicMock) -> None:
+async def test_omni_builds_image_input_blocks(omni_client: FakeGenaiClient) -> None:
     backend = GeminiOmniVideoBackend("key")
     await backend.generate_video(
         VideoGenerationRequest(
@@ -401,51 +416,61 @@ async def test_omni_builds_image_input_blocks(omni_async_client: MagicMock) -> N
         )
     )
 
-    _, kwargs = omni_async_client.interactions.create.call_args
-    blocks = kwargs["input"]
-    assert blocks[0] == {
-        "type": "image",
-        "data": base64.b64encode(b"first").decode("ascii"),
-        "mime_type": "image/jpeg",
-    }
-    assert blocks[1]["type"] == "image"
-    assert blocks[1]["data"] == base64.b64encode(b"ref").decode("ascii")
-    assert blocks[2] == {"type": "text", "text": "animate this"}
+    blocks = omni_client.interactions.create.last_call.kwargs["input"]
+    assert blocks == [
+        {
+            "type": "image",
+            "data": base64.b64encode(b"first").decode("ascii"),
+            "mime_type": "image/jpeg",
+        },
+        {
+            "type": "image",
+            "data": base64.b64encode(b"ref").decode("ascii"),
+            "mime_type": "image/png",
+        },
+        {"type": "text", "text": "animate this"},
+    ]
 
 
 @pytest.mark.asyncio
-async def test_omni_polls_until_completed(omni_async_client: MagicMock) -> None:
-    omni_async_client.interactions.create.return_value = _omni_interaction(
-        status="in_progress"
+async def test_omni_polls_until_completed(omni_client: FakeGenaiClient) -> None:
+    omni_client.interactions.create = RecordingAsyncCall[object](
+        _omni_interaction(status="in_progress")
     )
-    omni_async_client.interactions.get.side_effect = [
+    omni_client.interactions.get = RecordingAsyncCall[object](
         _omni_interaction(status="in_progress"),
         _omni_interaction(output_video=_video_output(b"polled-video")),
-    ]
+    )
 
     backend = GeminiOmniVideoBackend("key")
     result = await backend.generate_video(VideoGenerationRequest(prompt="slow video"))
 
     assert result.content == b"polled-video"
-    assert omni_async_client.interactions.get.call_count == 2
+    assert [call.args for call in omni_client.interactions.get.calls] == [
+        ("interaction-1",),
+        ("interaction-1",),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_omni_downloads_uri_when_no_inline_data(
-    omni_async_client: MagicMock,
+    omni_client: FakeGenaiClient,
 ) -> None:
     uri_output = SimpleNamespace(
         data=None, uri="https://files/video", mime_type="video/mp4"
     )
-    omni_async_client.interactions.create.return_value = _omni_interaction(
-        output_video=uri_output
+    omni_client.interactions.create = RecordingAsyncCall[object](
+        _omni_interaction(output_video=uri_output)
     )
+    omni_client.files.download = RecordingAsyncCall(b"uri-video")
 
     backend = GeminiOmniVideoBackend("key")
     result = await backend.generate_video(VideoGenerationRequest(prompt="big video"))
 
     assert result.content == b"uri-video"
-    omni_async_client.files.download.assert_called_once_with(file="https://files/video")
+    assert [call.kwargs for call in omni_client.files.download.calls] == [
+        {"file": "https://files/video"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -460,20 +485,20 @@ async def test_omni_downloads_uri_when_no_inline_data(
     ],
 )
 async def test_omni_rejects_unsupported_veo_features(
-    omni_async_client: MagicMock, video_request: VideoGenerationRequest
+    omni_client: FakeGenaiClient, video_request: VideoGenerationRequest
 ) -> None:
     backend = GeminiOmniVideoBackend("key")
 
     with pytest.raises(VideoGenerationError, match="use a Veo model"):
         await backend.generate_video(video_request)
 
-    omni_async_client.interactions.create.assert_not_awaited()
+    assert omni_client.interactions.create.calls == []
 
 
 @pytest.mark.asyncio
-async def test_omni_raises_when_no_video_output(omni_async_client: MagicMock) -> None:
-    omni_async_client.interactions.create.return_value = _omni_interaction(
-        output_video=None
+async def test_omni_raises_when_no_video_output(omni_client: FakeGenaiClient) -> None:
+    omni_client.interactions.create = RecordingAsyncCall[object](
+        _omni_interaction(output_video=None)
     )
 
     backend = GeminiOmniVideoBackend("key")
@@ -482,9 +507,9 @@ async def test_omni_raises_when_no_video_output(omni_async_client: MagicMock) ->
 
 
 @pytest.mark.asyncio
-async def test_omni_raises_on_failed_status(omni_async_client: MagicMock) -> None:
-    omni_async_client.interactions.create.return_value = _omni_interaction(
-        status="failed"
+async def test_omni_raises_on_failed_status(omni_client: FakeGenaiClient) -> None:
+    omni_client.interactions.create = RecordingAsyncCall[object](
+        _omni_interaction(status="failed")
     )
 
     backend = GeminiOmniVideoBackend("key")

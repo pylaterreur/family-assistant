@@ -93,7 +93,7 @@ class PushNotificationService:
             except WebPushException as e:
                 # The pywebpush library automatically handles JSON responses
                 # and raises exceptions with response objects.
-                if e.response and e.response.status_code == 410:
+                if e.response is not None and e.response.status_code == 410:
                     logger.info(
                         f"Subscription for user {user_identifier} is stale (410 Gone). Deleting."
                     )

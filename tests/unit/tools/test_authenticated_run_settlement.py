@@ -14,7 +14,6 @@ import uuid
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -22,7 +21,7 @@ import pytest
 from sqlalchemy import update
 
 from family_assistant.config_models import BrowserHandoffConfig, RemoteA2AAuthConfig
-from family_assistant.interfaces import ChatInterface
+from family_assistant.embeddings import MockEmbeddingGenerator
 from family_assistant.llm.model_selection import ModelTierEligibility
 from family_assistant.processing.types import ChatInteractionResult
 from family_assistant.storage.database import Database
@@ -44,6 +43,7 @@ from family_assistant.tools.browser_backend import (
 )
 from family_assistant.tools.types import ToolExecutionContext
 from family_assistant.utils.clock import SystemClock
+from tests.mocks.recording_chat_interface import RecordingChatInterface
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+    from family_assistant.interfaces import ChatInterface
     from family_assistant.storage.delegation_runs import (
         AuthenticatedSiteEnvelope,
         DelegationLocalFailureKind,
@@ -287,15 +288,14 @@ async def test_the_envelope_is_published_with_the_terminal_run_row(
         plugins=None,
         attachment_registry=None,
     )
-    chat_interface = cast("ChatInterface", AsyncMock(spec=ChatInterface))
-    cast("AsyncMock", chat_interface.send_message).return_value = "delivered"
+    chat_interface = cast("ChatInterface", RecordingChatInterface())
     exec_context = _context(db, processing_service, chat_interface)
     worker = TaskWorker(
         processing_service=cast("Any", processing_service),
         chat_interface=chat_interface,
         calendar_config={},
         timezone=ZoneInfo("UTC"),
-        embedding_generator=MagicMock(),
+        embedding_generator=MockEmbeddingGenerator(),
         engine=db_engine,
     )
 
@@ -393,7 +393,7 @@ async def test_unknown_browser_state_cannot_settle_successfully(
             backend=_backend(session_body=session_body),
         ),
     )
-    chat_interface = cast("ChatInterface", AsyncMock(spec=ChatInterface))
+    chat_interface = cast("ChatInterface", RecordingChatInterface())
     processing_service = SimpleNamespace(
         service_config=SimpleNamespace(id="default_assistant"),
         processing_services_registry={},

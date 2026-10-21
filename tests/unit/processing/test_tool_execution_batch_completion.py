@@ -8,7 +8,7 @@ wedges the rest of the response's tool calls.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import Mock
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -22,7 +22,15 @@ from .test_tool_execution_safety_confirmation import (
     make_tool_executor,
 )
 
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture
+def db_context(db_engine: AsyncEngine) -> Database:
+    return Database(engine=db_engine)
 
 
 def _tool_call(call_id: str, name: str = "browser_click") -> ToolCallItem:
@@ -41,7 +49,10 @@ def _batch() -> ToolCallBatch:
 
 
 async def _run(
-    provider: MinimalToolsProvider, batch: ToolCallBatch, call_id: str
+    provider: MinimalToolsProvider,
+    batch: ToolCallBatch,
+    call_id: str,
+    db_context: Database,
 ) -> None:
     executor = make_tool_executor(provider)
     await executor.execute(
@@ -50,39 +61,42 @@ async def _run(
         conversation_id="conv_batch",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=None,
         tool_call_batch=batch,
     )
 
 
-async def test_successful_call_reports_completion() -> None:
+async def test_successful_call_reports_completion(db_context: Database) -> None:
     batch = _batch()
     await _run(
-        MinimalToolsProvider(result=ToolResult(data={"ok": True})), batch, "call_1"
+        MinimalToolsProvider(result=ToolResult(data={"ok": True})),
+        batch,
+        "call_1",
+        db_context,
     )
     await asyncio.wait_for(batch.wait_done(["call_1"]), timeout=1)
 
 
-async def test_denied_call_reports_completion() -> None:
+async def test_denied_call_reports_completion(db_context: Database) -> None:
     """A policy denial returns an error result; siblings must not wait on it."""
     batch = _batch()
     provider = MinimalToolsProvider(
         error=ToolPolicyDeniedError("browser_click", "denied by policy")
     )
-    await _run(provider, batch, "call_1")
+    await _run(provider, batch, "call_1", db_context)
     await asyncio.wait_for(batch.wait_done(["call_1"]), timeout=1)
 
 
-async def test_failing_call_reports_completion() -> None:
+async def test_failing_call_reports_completion(db_context: Database) -> None:
     batch = _batch()
     provider = MinimalToolsProvider(error=RuntimeError("boom"))
-    await _run(provider, batch, "call_1")
+    await _run(provider, batch, "call_1", db_context)
     await asyncio.wait_for(batch.wait_done(["call_1"]), timeout=1)
 
 
-async def test_malformed_arguments_report_completion() -> None:
+async def test_malformed_arguments_report_completion(db_context: Database) -> None:
     """The call is rejected before it reaches the tool, and still reports."""
     batch = _batch()
     executor = make_tool_executor(MinimalToolsProvider())
@@ -96,7 +110,7 @@ async def test_malformed_arguments_report_completion() -> None:
         conversation_id="conv_batch",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=None,
         tool_call_batch=batch,
@@ -104,7 +118,7 @@ async def test_malformed_arguments_report_completion() -> None:
     await asyncio.wait_for(batch.wait_done(["call_1"]), timeout=1)
 
 
-async def test_call_without_a_batch_still_executes() -> None:
+async def test_call_without_a_batch_still_executes(db_context: Database) -> None:
     provider = MinimalToolsProvider(result=ToolResult(data={"ok": True}))
     executor = make_tool_executor(provider)
     result = await executor.execute(
@@ -113,7 +127,7 @@ async def test_call_without_a_batch_still_executes() -> None:
         conversation_id="conv_batch",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=None,
     )

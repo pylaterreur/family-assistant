@@ -2,11 +2,9 @@
 
 import asyncio
 import contextlib
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
-from mcp.types import ListToolsResult, Tool, ToolAnnotations
+from mcp.types import Tool, ToolAnnotations
 
 from family_assistant.tools.infrastructure import PolicyEnforcingToolsProvider
 from family_assistant.tools.mcp import (
@@ -28,6 +26,7 @@ from family_assistant.tools.policy import (
     ToolPolicyDecision,
 )
 from family_assistant.tools.types import MCPServerConfig, ToolDefinition
+from tests.mocks.fake_mcp_session import FakeListToolsSession
 
 
 def _tool_definition(name: str) -> ToolDefinition:
@@ -80,9 +79,7 @@ async def test_get_server_statuses_returns_per_server_diagnostics() -> None:
                 )
                 for definition in definitions
             ]
-            session = SimpleNamespace(
-                list_tools=AsyncMock(return_value=ListToolsResult(tools=[]))
-            )
+            session = FakeListToolsSession().as_client_session()
             provider._server_statuses[server_id] = MCP_SERVER_STATUS_CONNECTED
             return (
                 session,
@@ -479,18 +476,14 @@ async def test_health_check_retries_failed_and_cancelled_servers() -> None:
         server_id: str, server_conf: MCPServerConfig
     ) -> tuple[object | None, list[ToolDefinition], list, dict[str, str]]:
         if server_id == "healthy":
-            session = SimpleNamespace(
-                list_tools=AsyncMock(return_value=ListToolsResult(tools=[]))
-            )
+            session = FakeListToolsSession().as_client_session()
             provider._server_statuses[server_id] = MCP_SERVER_STATUS_CONNECTED
             return session, [], [], {}
         # On first call (init), fail. On retry via _reconnect_server, succeed.
         if server_id not in retried_servers:
             provider._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
             return None, [], [], {}
-        session = SimpleNamespace(
-            list_tools=AsyncMock(return_value=ListToolsResult(tools=[]))
-        )
+        session = FakeListToolsSession().as_client_session()
         provider._server_statuses[server_id] = MCP_SERVER_STATUS_CONNECTED
         return session, [], [], {}
 
@@ -542,9 +535,7 @@ async def test_initialize_starts_health_check_with_no_sessions() -> None:
         if not reconnected.is_set():
             provider._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
             return None, [], [], {}
-        session = SimpleNamespace(
-            list_tools=AsyncMock(return_value=ListToolsResult(tools=[]))
-        )
+        session = FakeListToolsSession().as_client_session()
         provider._server_statuses[server_id] = MCP_SERVER_STATUS_CONNECTED
         return session, [], [], {}
 

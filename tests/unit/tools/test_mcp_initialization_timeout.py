@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock
+from typing import TYPE_CHECKING
 
 import pytest
-from mcp.types import ListToolsResult, Tool
+from mcp.types import Tool
 
 from family_assistant.tools.mcp import (
     MCP_SERVER_STATUS_CANCELLED,
     MCP_SERVER_STATUS_CONNECTED,
     MCPToolsProvider,
 )
+from tests.mocks.fake_mcp_session import FakeMcpSession
 
 if TYPE_CHECKING:
     from mcp import ClientSession
@@ -27,13 +26,7 @@ SLOW = "slow-server"
 
 
 def _session() -> ClientSession:
-    return cast(
-        "ClientSession",
-        SimpleNamespace(
-            send_ping=AsyncMock(return_value=None),
-            list_tools=AsyncMock(return_value=ListToolsResult(tools=[])),
-        ),
-    )
+    return FakeMcpSession().as_client_session()
 
 
 def _discovered(
@@ -77,10 +70,7 @@ async def test_timeout_keeps_finished_servers_and_retries_the_hung_one() -> None
             await never_set.wait()
         return _discovered(provider, server_id, f"{server_id}_tool")
 
-    provider._connect_and_discover_mcp = AsyncMock(  # type: ignore[method-assign]
-        side_effect=fake_connect
-    )
-    provider._close_server_connections = AsyncMock()  # type: ignore[method-assign]
+    provider._connect_and_discover_mcp = fake_connect  # type: ignore[method-assign]
 
     try:
         await provider.initialize()
@@ -136,9 +126,7 @@ async def test_cancelling_initialize_waits_for_connection_cleanup() -> None:
             cleaned_up = True
         raise AssertionError("unreachable")
 
-    provider._connect_and_discover_mcp = AsyncMock(  # type: ignore[method-assign]
-        side_effect=fake_connect
-    )
+    provider._connect_and_discover_mcp = fake_connect  # type: ignore[method-assign]
     init_task = asyncio.create_task(provider.initialize())
     await connecting.wait()
 

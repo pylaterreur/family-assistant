@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import caldav
@@ -50,9 +49,12 @@ from family_assistant.tools.types import (
     CalendarEvent,
     ToolExecutionContext,
 )
+from family_assistant.utils.clock import MockClock
 from tests.mocks.fake_jev import FakeJevClient
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
     from family_assistant.processing.service import ProcessingService
 
 
@@ -71,11 +73,8 @@ async def _get_radicale_event_by_summary(
     return None
 
 
-def _create_mock_context() -> ToolExecutionContext:
-    db = MagicMock(spec=Database)
-    db.calendar_provenance.record = AsyncMock()
-    db.calendar_provenance.get_many = AsyncMock(return_value={})
-    db.calendar_provenance.known_event_uids = AsyncMock(return_value=set())
+def _create_context(db_engine: AsyncEngine) -> ToolExecutionContext:
+    db = Database(db_engine)
     return ToolExecutionContext(
         interface_type="test",
         conversation_id="test_conv",
@@ -95,16 +94,16 @@ def _create_mock_context() -> ToolExecutionContext:
 
 
 @pytest.mark.asyncio
-async def test_list_calendars_empty_config() -> None:
-    ctx = _create_mock_context()
+async def test_list_calendars_empty_config(db_engine: AsyncEngine) -> None:
+    ctx = _create_context(db_engine)
     config: CalendarConfig = {}
     result = await list_calendars_tool(ctx, config)
     assert result == "No calendars configured."
 
 
 @pytest.mark.asyncio
-async def test_list_calendars_mixed_sources() -> None:
-    ctx = _create_mock_context()
+async def test_list_calendars_mixed_sources(db_engine: AsyncEngine) -> None:
+    ctx = _create_context(db_engine)
     config: CalendarConfig = {
         "caldav": {
             "username": "user",
@@ -163,7 +162,7 @@ def test_list_calendars_registration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_calendars_via_local_tools_provider() -> None:
+async def test_list_calendars_via_local_tools_provider(db_engine: AsyncEngine) -> None:
     calendar_config: CalendarConfig = {
         "caldav": {
             "username": "u",
@@ -175,7 +174,7 @@ async def test_list_calendars_via_local_tools_provider() -> None:
         definitions=CALENDAR_TOOLS_DEFINITION,
         implementations={"list_calendars": list_calendars_tool},
     )
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
     ctx.calendar_config = calendar_config
 
     result = await provider.execute_tool("list_calendars", {}, context=ctx)
@@ -185,8 +184,8 @@ async def test_list_calendars_via_local_tools_provider() -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_calendar_events_empty_config() -> None:
-    ctx = _create_mock_context()
+async def test_search_calendar_events_empty_config(db_engine: AsyncEngine) -> None:
+    ctx = _create_context(db_engine)
     config: CalendarConfig = {}
     result = await search_calendar_events_tool(ctx, config, search_text="meeting")
     assert result == "Error: No calendars configured. Cannot search calendar events."
@@ -195,11 +194,11 @@ async def test_search_calendar_events_empty_config() -> None:
 @pytest.mark.asyncio
 async def test_search_calendar_events_with_ical_feed(
     monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
 ) -> None:
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
     now = datetime(2026, 4, 1, 10, 0, 0, tzinfo=UTC)
-    mock_clock = MagicMock()
-    mock_clock.now.return_value = now
+    clock = MockClock(now)
     ctx = ToolExecutionContext(
         interface_type=ctx.interface_type,
         conversation_id=ctx.conversation_id,
@@ -207,7 +206,7 @@ async def test_search_calendar_events_with_ical_feed(
         turn_id=ctx.turn_id,
         db_context=ctx.db_context,
         processing_service=ctx.processing_service,
-        clock=mock_clock,
+        clock=clock,
         plugins=ctx.plugins,
         event_sources=ctx.event_sources,
         attachment_registry=ctx.attachment_registry,
@@ -266,11 +265,11 @@ async def test_search_calendar_events_with_ical_feed(
 @pytest.mark.asyncio
 async def test_search_calendar_events_source_ids_filtering(
     monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
 ) -> None:
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
     now = datetime(2026, 4, 1, 10, 0, 0, tzinfo=UTC)
-    mock_clock = MagicMock()
-    mock_clock.now.return_value = now
+    clock = MockClock(now)
     ctx = ToolExecutionContext(
         interface_type=ctx.interface_type,
         conversation_id=ctx.conversation_id,
@@ -278,7 +277,7 @@ async def test_search_calendar_events_source_ids_filtering(
         turn_id=ctx.turn_id,
         db_context=ctx.db_context,
         processing_service=ctx.processing_service,
-        clock=mock_clock,
+        clock=clock,
         plugins=ctx.plugins,
         event_sources=ctx.event_sources,
         attachment_registry=ctx.attachment_registry,
@@ -371,8 +370,9 @@ async def test_search_calendar_events_source_ids_filtering(
 @pytest.mark.asyncio
 async def test_duplicate_detection_checks_ical_feeds(
     monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
 ) -> None:
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
     ctx.taint_tracker = InMemoryTurnTaintTracker()
     event_start = "2026-04-10T14:00:00Z"
     event_end = "2026-04-10T15:00:00Z"
@@ -433,7 +433,9 @@ async def test_duplicate_detection_checks_ical_feeds(
 
 
 @pytest.mark.asyncio
-async def test_add_calendar_event_targeting_and_read_only() -> None:
+async def test_add_calendar_event_targeting_and_read_only(
+    db_engine: AsyncEngine,
+) -> None:
     config: CalendarConfig = {
         "caldav": {
             "username": "user",
@@ -462,7 +464,7 @@ async def test_add_calendar_event_targeting_and_read_only() -> None:
             ]
         },
     }
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
 
     # 1. Reject read-only iCal source
     ro_result = await add_calendar_event_tool(
@@ -495,6 +497,7 @@ async def test_add_calendar_event_targeting_and_read_only() -> None:
 @pytest.mark.asyncio
 async def test_add_calendar_event_targeting_succeeds_on_named_calendar(
     radicale_server: tuple[str, str, str, str],
+    db_engine: AsyncEngine,
 ) -> None:
     base_url, user, passwd, calendar_url = radicale_server
     config: CalendarConfig = {
@@ -512,7 +515,7 @@ async def test_add_calendar_event_targeting_succeeds_on_named_calendar(
             ],
         },
     }
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
     summary = f"Work Meeting {uuid.uuid4()}"
 
     success_result = await add_calendar_event_tool(
@@ -534,8 +537,10 @@ async def test_add_calendar_event_targeting_succeeds_on_named_calendar(
 
 
 @pytest.mark.asyncio
-async def test_modify_calendar_event_targeting_and_read_only() -> None:
-    ctx = _create_mock_context()
+async def test_modify_calendar_event_targeting_and_read_only(
+    db_engine: AsyncEngine,
+) -> None:
+    ctx = _create_context(db_engine)
     config: CalendarConfig = {
         "caldav": {
             "username": "user",
@@ -612,6 +617,7 @@ async def test_modify_calendar_event_targeting_and_read_only() -> None:
 @pytest.mark.asyncio
 async def test_modify_calendar_event_targeting_succeeds_on_named_calendar(
     radicale_server: tuple[str, str, str, str],
+    db_engine: AsyncEngine,
 ) -> None:
     base_url, user, passwd, calendar_url = radicale_server
     config: CalendarConfig = {
@@ -629,7 +635,7 @@ async def test_modify_calendar_event_targeting_succeeds_on_named_calendar(
             ],
         },
     }
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
     original_summary = f"Old {uuid.uuid4()}"
     new_summary = f"New Work Title {uuid.uuid4()}"
 
@@ -671,8 +677,10 @@ async def test_modify_calendar_event_targeting_succeeds_on_named_calendar(
 
 
 @pytest.mark.asyncio
-async def test_delete_calendar_event_targeting_and_read_only() -> None:
-    ctx = _create_mock_context()
+async def test_delete_calendar_event_targeting_and_read_only(
+    db_engine: AsyncEngine,
+) -> None:
+    ctx = _create_context(db_engine)
     config: CalendarConfig = {
         "caldav": {
             "username": "user",
@@ -745,6 +753,7 @@ async def test_delete_calendar_event_targeting_and_read_only() -> None:
 @pytest.mark.asyncio
 async def test_delete_calendar_event_targeting_succeeds_on_named_calendar(
     radicale_server: tuple[str, str, str, str],
+    db_engine: AsyncEngine,
 ) -> None:
     base_url, user, passwd, calendar_url = radicale_server
     config: CalendarConfig = {
@@ -762,7 +771,7 @@ async def test_delete_calendar_event_targeting_succeeds_on_named_calendar(
             ],
         },
     }
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
     summary = f"Meeting {uuid.uuid4()}"
 
     add_result = await add_calendar_event_tool(
@@ -796,8 +805,9 @@ async def test_delete_calendar_event_targeting_succeeds_on_named_calendar(
 @pytest.mark.asyncio
 async def test_confirmation_renderers_resolve_calendar_id(
     monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
 ) -> None:
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
     config: CalendarConfig = {
         "caldav": {
             "username": "user",
@@ -897,7 +907,9 @@ def test_search_calendar_events_uses_dynamic_event_taint() -> None:
     assert taint_source is None
 
 
-async def test_resolve_target_caldav_url_conflict_rejection() -> None:
+async def test_resolve_target_caldav_url_conflict_rejection(
+    db_engine: AsyncEngine,
+) -> None:
     config: CalendarConfig = {
         "caldav": {
             "username": "user",
@@ -936,7 +948,7 @@ async def test_resolve_target_caldav_url_conflict_rejection() -> None:
     assert err is not None
     assert "Conflicting calendar targets" in err
 
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
     # Modify tool execution also rejects conflict
     mod_result = await modify_calendar_event_tool(
         exec_context=ctx,
@@ -962,8 +974,9 @@ async def test_resolve_target_caldav_url_conflict_rejection() -> None:
 async def test_search_calendar_events_chronological_sorting(
     monkeypatch: pytest.MonkeyPatch,
     radicale_server: tuple[str, str, str, str],
+    db_engine: AsyncEngine,
 ) -> None:
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
     base_url, user, passwd, calendar_url = radicale_server
     config: CalendarConfig = {
         "caldav": {
@@ -1055,6 +1068,7 @@ async def test_search_calendar_events_chronological_sorting(
 
 
 def _jev_context(
+    db_engine: AsyncEngine,
     respond: dict[str, float],
     *,
     calendar_duplicates: JevFilterConfig | None = None,
@@ -1076,7 +1090,7 @@ def _jev_context(
             nouls[label] = respond.get(str(candidate["summary"]), 0.0)
         return JevAnswers("jev-test", nouls, {}, 10)
 
-    ctx = _create_mock_context()
+    ctx = _create_context(db_engine)
     ctx.taint_tracker = InMemoryTurnTaintTracker()
     ctx.processing_service = cast(
         "ProcessingService",
@@ -1130,9 +1144,11 @@ _FUZZY_FEED_CONFIG: CalendarConfig = {
 @pytest.mark.asyncio
 async def test_active_jev_duplicate_check_catches_differently_worded_event(
     monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
 ) -> None:
     _serve_ics(monkeypatch, ("dentist-1", "20260410T143000Z", "Dr Lee checkup"))
     ctx = _jev_context(
+        db_engine,
         {"Dr Lee checkup": 0.9},
         calendar_duplicates=JevFilterConfig(mode="active", threshold=0.6),
     )
@@ -1154,9 +1170,11 @@ async def test_active_jev_duplicate_check_catches_differently_worded_event(
 @pytest.mark.asyncio
 async def test_active_jev_duplicate_check_clears_similar_but_different_event(
     monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
 ) -> None:
     _serve_ics(monkeypatch, ("swim-1", "20260410T140000Z", "Swimming - Mia"))
     ctx = _jev_context(
+        db_engine,
         {"Swimming - Mia": 0.1},
         calendar_duplicates=JevFilterConfig(mode="active", threshold=0.6),
     )
@@ -1176,9 +1194,11 @@ async def test_active_jev_duplicate_check_clears_similar_but_different_event(
 @pytest.mark.asyncio
 async def test_shadow_jev_duplicate_check_keeps_title_similarity(
     monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
 ) -> None:
     _serve_ics(monkeypatch, ("swim-1", "20260410T140000Z", "Swimming - Mia"))
     ctx = _jev_context(
+        db_engine,
         {"Swimming - Mia": 0.1},
         calendar_duplicates=JevFilterConfig(mode="shadow"),
     )
@@ -1199,6 +1219,7 @@ async def test_shadow_jev_duplicate_check_keeps_title_similarity(
 @pytest.mark.asyncio
 async def test_active_jev_calendar_search_returns_jev_matches(
     monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
 ) -> None:
     _serve_ics(
         monkeypatch,
@@ -1206,6 +1227,7 @@ async def test_active_jev_calendar_search_returns_jev_matches(
         ("swim-1", "20260411T090000Z", "Swimming"),
     )
     ctx = _jev_context(
+        db_engine,
         {"Dr Smith checkup": 0.85, "Swimming": 0.05},
         calendar_search=JevFilterConfig(mode="active"),
     )

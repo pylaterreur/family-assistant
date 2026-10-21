@@ -2,14 +2,22 @@ import asyncio
 import struct
 import wave
 from array import array
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
 import pytest
-from google.genai.types import Blob, Part
+from google.genai.types import (
+    Blob,
+    Content,
+    LiveServerContent,
+    LiveServerMessage,
+    Part,
+)
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.websockets import WebSocketState
 
@@ -19,57 +27,155 @@ from family_assistant.storage.database import Database
 from family_assistant.storage.repositories.notes import NoteReadPolicy, NoteWritePolicy
 from family_assistant.web.models import GeminiLiveConfig, GeminiLiveGreetingConfig
 from family_assistant.web.routers.asterisk_live_api import AsteriskLiveHandler
+from tests.mocks.idle_processing_service import make_idle_processing_service
+
+if TYPE_CHECKING:
+    from fastapi import WebSocket
+    from google.genai.live import AsyncSession
+
+    from family_assistant.processing import ProcessingService
+    from family_assistant.web.audio_utils import StatefulResampler
+    from family_assistant.web.voice_client import LiveAudioClient
+
+
+class FakeAsteriskWebSocket:
+    """Stands in for the Asterisk side of the websocket.
+
+    Serves scripted inbound messages and records everything sent back.
+    """
+
+    def __init__(self, inbound: Sequence[dict[str, object]] = ()) -> None:
+        self.client_state = WebSocketState.CONNECTED
+        self.inbound = list(inbound)
+        self.receive_count = 0
+        self.sent_bytes: list[bytes] = []
+        self.sent_text: list[str] = []
+
+    async def accept(self) -> None:
+        return None
+
+    async def close(self, code: int = 1000) -> None:
+        self.client_state = WebSocketState.DISCONNECTED
+
+    async def receive(self) -> dict[str, object]:
+        self.receive_count += 1
+        assert self.inbound, "the handler read past the scripted messages"
+        return self.inbound.pop(0)
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.sent_bytes.append(data)
+
+    async def send_text(self, data: str) -> None:
+        self.sent_text.append(data)
+
+    def as_websocket(self) -> "WebSocket":
+        return cast("WebSocket", self)
+
+
+class FakeLiveSession:
+    """A Gemini Live session that records sent input and replays scripted responses once."""
+
+    def __init__(self, responses: Sequence[LiveServerMessage] = ()) -> None:
+        self._responses = list(responses)
+        self.realtime_inputs: list[dict[str, object]] = []
+
+    async def send_realtime_input(self, **kwargs: object) -> None:
+        self.realtime_inputs.append(kwargs)
+
+    async def send_tool_response(self, **kwargs: object) -> None:
+        raise AssertionError(f"No tool call was made, got a response: {kwargs}")
+
+    async def receive(self) -> AsyncIterator[LiveServerMessage]:
+        responses, self._responses = self._responses, []
+        for response in responses:
+            yield response
+
+    def as_session(self) -> "AsyncSession":
+        return cast("AsyncSession", self)
+
+
+class FakeLiveClient:
+    """Stands in for ``GoogleGeminiLiveClient``, handing out one session."""
+
+    def __init__(
+        self,
+        session: FakeLiveSession,
+        on_connect: Callable[[], None] | None = None,
+    ) -> None:
+        self._session = session
+        self._on_connect = on_connect
+        self.connect_configs: list[object] = []
+
+    @asynccontextmanager
+    async def connect(self, config: object) -> AsyncIterator[FakeLiveSession]:
+        self.connect_configs.append(config)
+        if self._on_connect is not None:
+            self._on_connect()
+        yield self._session
+
+    def as_client(self) -> "LiveAudioClient":
+        return cast("LiveAudioClient", self)
+
+
+class FixedResampler:
+    """A resampler that records its input and answers with fixed output."""
+
+    def __init__(self, output: bytes) -> None:
+        self._output = output
+        self.inputs: list[bytes] = []
+
+    def resample(self, data: bytes) -> bytes:
+        self.inputs.append(data)
+        return self._output
 
 
 @pytest.fixture
-def mock_websocket() -> AsyncMock:
-    ws = AsyncMock()
-    ws.client_state = WebSocketState.CONNECTED
-    return ws
+def websocket() -> FakeAsteriskWebSocket:
+    return FakeAsteriskWebSocket()
 
 
 @pytest.fixture
-def mock_config() -> MagicMock:
-    config = MagicMock()
-    config.vad = MagicMock(automatic=True)
-    config.greeting = MagicMock(enabled=True, wav_path=None)
-    return config
+def live_config() -> GeminiLiveConfig:
+    return GeminiLiveConfig(greeting=GeminiLiveGreetingConfig(enabled=True))
 
 
 @pytest.fixture
-def handler(mock_websocket: AsyncMock, mock_config: MagicMock) -> AsteriskLiveHandler:
+def handler(
+    websocket: FakeAsteriskWebSocket, live_config: GeminiLiveConfig
+) -> AsteriskLiveHandler:
     h = AsteriskLiveHandler(
-        websocket=mock_websocket,
-        client=MagicMock(),
-        gemini_live_config=mock_config,
+        websocket=websocket.as_websocket(),
+        client=FakeLiveClient(FakeLiveSession()).as_client(),
+        gemini_live_config=live_config,
     )
     h.format = "slin16"
     return h
 
 
-def _make_gemini_response(raw_audio: bytes) -> MagicMock:
+def _make_gemini_response(raw_audio: bytes) -> LiveServerMessage:
     blob = Blob(data=raw_audio, mime_type="audio/pcm;rate=24000")
-    part = Part(inline_data=blob)
-    resp = MagicMock()
-    resp.server_content.model_turn.parts = [part]
-    resp.server_content.input_transcription = None
-    resp.server_content.output_transcription = None
-    resp.tool_call = None
-    return resp
+    return LiveServerMessage(
+        server_content=LiveServerContent(
+            model_turn=Content(parts=[Part(inline_data=blob)])
+        )
+    )
 
 
-def _single_response_session(response: MagicMock) -> MagicMock:
-    async def mock_receive() -> AsyncGenerator[MagicMock]:
-        yield response
+def _single_response_session(response: LiveServerMessage) -> "AsyncSession":
+    return FakeLiveSession([response]).as_session()
 
-    session = MagicMock()
-    session.receive.return_value = mock_receive()
-    return session
+
+def _transcript_service(labels: list[str]) -> "ProcessingService":
+    service = make_idle_processing_service()
+    service.service_config = replace(
+        service.service_config, default_note_visibility_labels=labels
+    )
+    return service
 
 
 class TestReceiveFromGemini:
     async def test_forwards_audio(
-        self, handler: AsteriskLiveHandler, mock_websocket: AsyncMock
+        self, handler: AsteriskLiveHandler, websocket: FakeAsteriskWebSocket
     ) -> None:
         """Audio received from Gemini is forwarded as the resampled output, not the raw input."""
         raw_audio = b"\x01\x02\x03\x04" * 100
@@ -77,16 +183,16 @@ class TestReceiveFromGemini:
         handler.gemini_session = _single_response_session(
             _make_gemini_response(raw_audio)
         )
-        handler.gemini_to_asterisk_resampler = MagicMock()
-        handler.gemini_to_asterisk_resampler.resample.return_value = resampled_audio
+        resampler = FixedResampler(resampled_audio)
+        handler.gemini_to_asterisk_resampler = cast("StatefulResampler", resampler)
 
         await handler._receive_from_gemini()
 
-        sent_data = b"".join(c[0][0] for c in mock_websocket.send_bytes.call_args_list)
-        assert sent_data == resampled_audio
+        assert resampler.inputs == [raw_audio]
+        assert b"".join(websocket.sent_bytes) == resampled_audio
 
     async def test_handles_invalid_format_gracefully(
-        self, handler: AsteriskLiveHandler, mock_websocket: AsyncMock
+        self, handler: AsteriskLiveHandler, websocket: FakeAsteriskWebSocket
     ) -> None:
         """Valid-but-odd audio data doesn't crash the handler."""
         raw_audio = b"\x00\x01\x02"
@@ -101,13 +207,11 @@ class TestReceiveFromGemini:
         await handler._receive_from_gemini()
 
         assert handler.audio_buffer == bytearray()
-        calls = mock_websocket.send_bytes.call_args_list
-        assert len(calls) == 3
-        sent_data = b"".join(c[0][0] for c in calls)
-        assert sent_data == raw_audio
+        assert len(websocket.sent_bytes) == 3
+        assert b"".join(websocket.sent_bytes) == raw_audio
 
     async def test_respects_flow_control(
-        self, handler: AsteriskLiveHandler, mock_websocket: AsyncMock
+        self, handler: AsteriskLiveHandler, websocket: FakeAsteriskWebSocket
     ) -> None:
         """MEDIA_XOFF halts sends until MEDIA_XON is received."""
         raw_audio = b"\x00\x01" * 50
@@ -132,14 +236,14 @@ class TestReceiveFromGemini:
         await asyncio.sleep(0)
 
         # No bytes should have been sent while flow control is paused
-        assert not mock_websocket.send_bytes.called
+        assert websocket.sent_bytes == []
 
         # Simulate MEDIA_XON — unblock the sender
         handler.media_send_allowed.set()
         await task
 
         # After unblocking, bytes should have been sent
-        assert len(mock_websocket.send_bytes.call_args_list) > 0
+        assert len(websocket.sent_bytes) > 0
 
 
 class TestApplyDucking:
@@ -208,25 +312,23 @@ class TestPrecannedGreeting:
     async def test_sends_audio_to_websocket(
         self,
         handler: AsteriskLiveHandler,
-        mock_websocket: AsyncMock,
-        mock_config: MagicMock,
+        websocket: FakeAsteriskWebSocket,
+        live_config: GeminiLiveConfig,
         tmp_path: Path,
     ) -> None:
         """Pre-canned greeting sends audio frames to WebSocket."""
-        mock_config.greeting.wav_path = str(
+        live_config.greeting.wav_path = str(
             _make_wav_file(tmp_path, rate=16000, num_frames=1600)
         )
 
         await handler._send_precanned_greeting()
 
-        calls = mock_websocket.send_bytes.call_args_list
         # 1600 frames * 2 bytes = 3200 bytes total, frame_size = 640 -> 5 frames
-        assert len(calls) == 5
-        sent_data = b"".join(c[0][0] for c in calls)
-        assert len(sent_data) == 3200
+        assert len(websocket.sent_bytes) == 5
+        assert len(b"".join(websocket.sent_bytes)) == 3200
 
     async def test_sends_audio_with_real_path(
-        self, handler: AsteriskLiveHandler, mock_websocket: AsyncMock
+        self, handler: AsteriskLiveHandler, websocket: FakeAsteriskWebSocket
     ) -> None:
         """Greeting sends audio using the actual greeting.wav resource."""
         greeting_path = WEB_RESOURCES_DIR / "greeting.wav"
@@ -235,15 +337,14 @@ class TestPrecannedGreeting:
 
         await handler._send_precanned_greeting()
 
-        calls = mock_websocket.send_bytes.call_args_list
+        calls = websocket.sent_bytes
         expected_frames = -(-total_bytes // handler.send_frame_size)  # ceil division
         assert len(calls) == expected_frames
-        sent_data = b"".join(c[0][0] for c in calls)
-        assert len(sent_data) == total_bytes
-        assert all(len(c[0][0]) <= handler.send_frame_size for c in calls)
+        assert len(b"".join(calls)) == total_bytes
+        assert all(len(frame) <= handler.send_frame_size for frame in calls)
 
     async def test_resamples_when_rate_differs(
-        self, handler: AsteriskLiveHandler, mock_websocket: AsyncMock
+        self, handler: AsteriskLiveHandler, websocket: FakeAsteriskWebSocket
     ) -> None:
         """Greeting resamples WAV when Asterisk rate differs from WAV rate."""
         handler.sample_rate = 8000
@@ -255,24 +356,23 @@ class TestPrecannedGreeting:
 
         await handler._send_precanned_greeting()
 
-        calls = mock_websocket.send_bytes.call_args_list
-        sent_bytes = sum(len(c[0][0]) for c in calls)
+        sent_bytes = sum(len(frame) for frame in websocket.sent_bytes)
         expected = original_bytes // 2
         assert abs(sent_bytes - expected) < expected * 0.05
 
     async def test_handles_missing_file(
         self,
         handler: AsteriskLiveHandler,
-        mock_websocket: AsyncMock,
-        mock_config: MagicMock,
+        websocket: FakeAsteriskWebSocket,
+        live_config: GeminiLiveConfig,
         tmp_path: Path,
     ) -> None:
         """Missing greeting.wav is handled gracefully."""
-        mock_config.greeting.wav_path = str(tmp_path / "missing.wav")
+        live_config.greeting.wav_path = str(tmp_path / "missing.wav")
 
         await handler._send_precanned_greeting()
 
-        assert not mock_websocket.send_bytes.called
+        assert websocket.sent_bytes == []
 
 
 class TestMediaRelay:
@@ -282,14 +382,15 @@ class TestMediaRelay:
         self, handler: AsteriskLiveHandler
     ) -> None:
         """Audio goes directly to Gemini as the sent audio blob."""
-        mock_session = AsyncMock()
-        handler.gemini_session = mock_session
+        session = FakeLiveSession()
+        handler.gemini_session = session.as_session()
         raw_audio = b"\x01\x02" * 100
 
         await handler._handle_media_message(raw_audio)
 
-        mock_session.send_realtime_input.assert_called_once()
-        sent_blob = mock_session.send_realtime_input.call_args.kwargs["audio"]
+        assert len(session.realtime_inputs) == 1
+        sent_blob = session.realtime_inputs[0]["audio"]
+        assert isinstance(sent_blob, Blob)
         assert sent_blob.data == raw_audio
         assert sent_blob.mime_type == "audio/pcm;rate=16000"
 
@@ -302,27 +403,6 @@ class TestGeminiConnectFlow:
     right after MEDIA_START reaching the newly-connected session, and the
     greeting being (or not being) played while connecting.
     """
-
-    @staticmethod
-    def _make_fake_client(session: MagicMock) -> MagicMock:
-        connect_cm = AsyncMock()
-        connect_cm.__aenter__.return_value = session
-        connect_cm.__aexit__.return_value = None
-        client = MagicMock()
-        client.connect.return_value = connect_cm
-        return client
-
-    @staticmethod
-    def _make_session() -> MagicMock:
-        session = MagicMock()
-        session.send_realtime_input = AsyncMock()
-
-        async def empty_receive() -> AsyncIterator[None]:
-            for _ in ():
-                yield
-
-        session.receive.return_value = empty_receive()
-        return session
 
     @staticmethod
     def _connect_then_disconnect_messages() -> list[dict[str, object]]:
@@ -338,66 +418,64 @@ class TestGeminiConnectFlow:
         ]
 
     async def test_audio_following_media_start_reaches_gemini_in_order(
-        self, mock_websocket: AsyncMock
+        self,
     ) -> None:
         """Caller audio sent straight after MEDIA_START is relayed to Gemini, in order.
 
         run() does not read the websocket while Gemini connects, so these
         frames wait in the transport and are relayed once the session is up.
         """
-        session = self._make_session()
-        client = self._make_fake_client(session)
-        config = GeminiLiveConfig(greeting=GeminiLiveGreetingConfig(enabled=False))
-        handler = AsteriskLiveHandler(
-            websocket=mock_websocket,
-            client=client,
-            gemini_live_config=config,
-        )
-        handler.database_engine = None
         chunk1 = b"\x01\x02" * 100
         chunk2 = b"\x03\x04" * 100
-        receive_calls_before_connect: list[int] = []
-        client.connect.side_effect = lambda **_: (
-            receive_calls_before_connect.append(mock_websocket.receive.await_count)
-            or client.connect.return_value
-        )
         media_start, disconnect = self._connect_then_disconnect_messages()
-        mock_websocket.receive.side_effect = [
+        websocket = FakeAsteriskWebSocket([
             media_start,
             {"type": "websocket.receive", "bytes": chunk1},
             {"type": "websocket.receive", "bytes": chunk2},
             disconnect,
-        ]
+        ])
+        session = FakeLiveSession()
+        receive_calls_before_connect: list[int] = []
+        client = FakeLiveClient(
+            session,
+            on_connect=lambda: receive_calls_before_connect.append(
+                websocket.receive_count
+            ),
+        )
+        config = GeminiLiveConfig(greeting=GeminiLiveGreetingConfig(enabled=False))
+        handler = AsteriskLiveHandler(
+            websocket=websocket.as_websocket(),
+            client=client.as_client(),
+            gemini_live_config=config,
+        )
+        handler.database_engine = None
 
         await handler.run()
 
         assert receive_calls_before_connect == [1]
-        sent_blobs = [
-            call.kwargs["audio"] for call in session.send_realtime_input.call_args_list
-        ]
-        assert [blob.data for blob in sent_blobs] == [chunk1, chunk2]
-        assert all(blob.mime_type == "audio/pcm;rate=16000" for blob in sent_blobs)
+        sent_blobs = [inputs["audio"] for inputs in session.realtime_inputs]
+        assert all(isinstance(blob, Blob) for blob in sent_blobs)
+        blobs = cast("list[Blob]", sent_blobs)
+        assert [blob.data for blob in blobs] == [chunk1, chunk2]
+        assert all(blob.mime_type == "audio/pcm;rate=16000" for blob in blobs)
 
-    async def test_greeting_not_sent_when_disabled(
-        self, mock_websocket: AsyncMock
-    ) -> None:
+    async def test_greeting_not_sent_when_disabled(self) -> None:
         """No greeting frames reach the websocket when greeting.enabled is False."""
-        session = self._make_session()
-        client = self._make_fake_client(session)
+        websocket = FakeAsteriskWebSocket(self._connect_then_disconnect_messages())
+        client = FakeLiveClient(FakeLiveSession())
         config = GeminiLiveConfig(greeting=GeminiLiveGreetingConfig(enabled=False))
         handler = AsteriskLiveHandler(
-            websocket=mock_websocket,
-            client=client,
+            websocket=websocket.as_websocket(),
+            client=client.as_client(),
             gemini_live_config=config,
         )
         handler.database_engine = None
-        mock_websocket.receive.side_effect = self._connect_then_disconnect_messages()
 
         await handler.run()
 
-        mock_websocket.send_text.assert_any_call("ANSWER")
-        client.connect.assert_called_once()
-        assert not mock_websocket.send_bytes.called
+        assert "ANSWER" in websocket.sent_text
+        assert len(client.connect_configs) == 1
+        assert websocket.sent_bytes == []
 
 
 class TestCallTranscriptSaving:
@@ -484,13 +562,7 @@ class TestCallTranscriptSaving:
         handler.database_engine = db_engine
         handler._transcript_segments = [("Caller", "Hello", 0.0)]
 
-        mock_service = MagicMock()
-        mock_service.service_config.default_note_visibility_labels = ["telephone_logs"]
-        mock_service.service_config.visibility_grants = None
-        mock_service.service_config.required_note_visibility_labels = None
-        mock_service.service_config.allowed_note_visibility_labels = None
-        mock_service.service_config.timezone = ZoneInfo("UTC")
-        handler.processing_service = mock_service
+        handler.processing_service = _transcript_service(["telephone_logs"])
 
         await handler._save_call_transcript()
 
@@ -513,10 +585,7 @@ class TestCallTranscriptSaving:
         handler.database_engine = db_engine
         handler._transcript_segments = [("Caller", "Hello", 0.0)]
 
-        mock_service = MagicMock()
-        mock_service.service_config.default_note_visibility_labels = ["telephone_logs"]
-        mock_service.service_config.timezone = ZoneInfo("UTC")
-        handler.processing_service = mock_service
+        handler.processing_service = _transcript_service(["telephone_logs"])
 
         call_time = datetime.fromtimestamp(handler._call_start_time, tz=ZoneInfo("UTC"))
         title = f"Call Transcript: 100 - {call_time.strftime('%Y-%m-%d %H:%M')}"

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -16,6 +15,7 @@ from family_assistant.plugins.home_assistant.instance import HomeAssistantInstan
 from family_assistant.plugins.home_assistant.plugin import HOME_ASSISTANT_PLUGIN
 from family_assistant.plugins.home_assistant.tools import get_home_status_tool
 from family_assistant.plugins.runtime import ProfilePlugins, withheld_profile_tools
+from family_assistant.storage.base import create_engine_with_sqlite_optimizations
 from family_assistant.storage.database import Database
 from family_assistant.tools.types import ToolExecutionContext
 
@@ -54,7 +54,9 @@ def _exec_context(plugins: ProfilePlugins | None) -> ToolExecutionContext:
         conversation_id="home-status-test",
         user_name="Tester",
         turn_id=None,
-        db_context=MagicMock(spec=Database),
+        db_context=Database(
+            create_engine_with_sqlite_optimizations("sqlite+aiosqlite:///:memory:")
+        ),
         processing_service=None,
         clock=None,
         plugins=plugins,

@@ -11,8 +11,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import pytest
 from telegram import Chat, Message, PhotoSize, Update, User
@@ -27,6 +26,27 @@ if TYPE_CHECKING:
     from telegram.ext import ContextTypes
 
     from family_assistant.telegram.types import AttachmentData
+
+
+class BatchCall(NamedTuple):
+    chat_id: int
+    batch: list[tuple[Update, list[AttachmentData] | None]]
+    context: ContextTypes.DEFAULT_TYPE
+
+
+class RecordingBatchProcessor:
+    """BatchProcessor fake that records every batch it is handed."""
+
+    def __init__(self) -> None:
+        self.calls: list[BatchCall] = []
+
+    async def process_batch(
+        self,
+        chat_id: int,
+        batch: list[tuple[Update, list[AttachmentData] | None]],
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        self.calls.append(BatchCall(chat_id, list(batch), context))
 
 
 def _make_context() -> ContextTypes.DEFAULT_TYPE:
@@ -81,7 +101,7 @@ def _make_text_update(
 async def test_no_batch_batcher_flushes_quickly_when_downloads_complete() -> None:
     """When notify_pending and add_to_batch are paired, the album flushes
     on the short quiet delay rather than waiting for the long max-wait."""
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=0.1,
@@ -100,13 +120,13 @@ async def test_no_batch_batcher_flushes_quickly_when_downloads_complete() -> Non
         await batcher.add_to_batch(update, context, attachments=None)
 
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 1,
+        lambda: len(processor.calls) >= 1,
         timeout=2.0,
         description="album flushes via quiet delay",
     )
 
-    assert processor.process_batch.await_count == 1
-    chat_id, batch, _ctx = processor.process_batch.await_args.args
+    assert len(processor.calls) == 1
+    chat_id, batch, _ctx = processor.calls[-1]
     assert chat_id == 123
     assert len(batch) == 4
     assert [u.update_id for u, _ in batch] == [1, 2, 3, 4]
@@ -116,7 +136,7 @@ async def test_no_batch_batcher_flushes_quickly_when_downloads_complete() -> Non
 async def test_no_batch_batcher_waits_for_outstanding_downloads() -> None:
     """While downloads are outstanding (notify without matching add_to_batch),
     the batcher uses the long max-wait, not the short quiet delay."""
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=0.001,
@@ -144,7 +164,7 @@ async def test_no_batch_batcher_waits_for_outstanding_downloads() -> None:
     timer = batcher.media_group_timers[key]
     remaining = timer.when() - loop.time()
     assert remaining > batcher.media_group_quiet_seconds + 1.0
-    assert processor.process_batch.await_count == 0
+    assert len(processor.calls) == 0
 
     # Deliver the slow message; this drops outstanding downloads to zero,
     # which switches the timer to the quiet delay.
@@ -152,11 +172,11 @@ async def test_no_batch_batcher_waits_for_outstanding_downloads() -> None:
     await batcher.add_to_batch(update_2, context, attachments=None)
 
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 1,
+        lambda: len(processor.calls) >= 1,
         timeout=2.0,
         description="album flushes once last download arrives",
     )
-    _, batch, _ = processor.process_batch.await_args.args
+    _, batch, _ = processor.calls[-1]
     assert len(batch) == 2
     assert [u.update_id for u, _ in batch] == [1, 2]
 
@@ -164,7 +184,7 @@ async def test_no_batch_batcher_waits_for_outstanding_downloads() -> None:
 @pytest.mark.asyncio
 async def test_no_batch_batcher_max_wait_flushes_when_download_never_arrives() -> None:
     """If a download never arrives, the album flushes after max_wait elapses."""
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=10.0,
@@ -183,18 +203,18 @@ async def test_no_batch_batcher_max_wait_flushes_when_download_never_arrives() -
     await batcher.add_to_batch(update, context, attachments=None)
 
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 1,
+        lambda: len(processor.calls) >= 1,
         timeout=3.0,
         description="album flushes via max-wait safety net",
     )
-    _, batch, _ = processor.process_batch.await_args.args
+    _, batch, _ = processor.calls[-1]
     assert len(batch) == 1
 
 
 @pytest.mark.asyncio
 async def test_no_batch_batcher_processes_non_album_messages_immediately() -> None:
     """Plain text messages (no media_group_id) skip buffering."""
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=5.0,
@@ -205,8 +225,8 @@ async def test_no_batch_batcher_processes_non_album_messages_immediately() -> No
     update = _make_text_update(update_id=1, message_id=101, text="hello")
     await batcher.add_to_batch(update, context, attachments=None)
 
-    assert processor.process_batch.await_count == 1
-    chat_id, batch, _ctx = processor.process_batch.await_args.args
+    assert len(processor.calls) == 1
+    chat_id, batch, _ctx = processor.calls[-1]
     assert chat_id == 123
     assert len(batch) == 1
     assert batch[0][0].update_id == 1
@@ -215,7 +235,7 @@ async def test_no_batch_batcher_processes_non_album_messages_immediately() -> No
 @pytest.mark.asyncio
 async def test_no_batch_batcher_flushes_album_when_text_arrives() -> None:
     """A non-album message arriving mid-album flushes the album first."""
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=5.0,
@@ -232,19 +252,19 @@ async def test_no_batch_batcher_flushes_album_when_text_arrives() -> None:
     text = _make_text_update(update_id=10, message_id=200, text="caption follow-up")
     await batcher.add_to_batch(text, context, attachments=None)
 
-    assert processor.process_batch.await_count == 2
-    first_call = processor.process_batch.await_args_list[0]
-    second_call = processor.process_batch.await_args_list[1]
-    assert len(first_call.args[1]) == 3
-    assert [u.update_id for u, _ in first_call.args[1]] == [1, 2, 3]
-    assert len(second_call.args[1]) == 1
-    assert second_call.args[1][0][0].update_id == 10
+    assert len(processor.calls) == 2
+    first_call = processor.calls[0]
+    second_call = processor.calls[1]
+    assert len(first_call.batch) == 3
+    assert [u.update_id for u, _ in first_call.batch] == [1, 2, 3]
+    assert len(second_call.batch) == 1
+    assert second_call.batch[0][0].update_id == 10
 
 
 @pytest.mark.asyncio
 async def test_default_batcher_uses_quiet_delay_when_no_pending_downloads() -> None:
     """For album messages with no outstanding downloads, the quiet delay is used."""
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = DefaultMessageBatcher(
         batch_processor=processor,
         batch_delay_seconds=0.05,
@@ -267,17 +287,17 @@ async def test_default_batcher_uses_quiet_delay_when_no_pending_downloads() -> N
     assert remaining <= batcher.media_group_quiet_seconds + 0.05
 
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 1,
+        lambda: len(processor.calls) >= 1,
         timeout=2.0,
         description="album batch flushes via quiet delay",
     )
-    assert processor.process_batch.await_count == 1
+    assert len(processor.calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_default_batcher_uses_max_wait_when_downloads_outstanding() -> None:
     """While outstanding downloads exist, the long max-wait is used."""
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = DefaultMessageBatcher(
         batch_processor=processor,
         batch_delay_seconds=0.05,
@@ -312,7 +332,7 @@ async def test_default_batcher_uses_max_wait_when_downloads_outstanding() -> Non
 @pytest.mark.asyncio
 async def test_default_batcher_uses_short_delay_for_non_group_messages() -> None:
     """Plain text messages still flush quickly using ``batch_delay_seconds``."""
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = DefaultMessageBatcher(
         batch_processor=processor,
         batch_delay_seconds=0.05,
@@ -325,20 +345,20 @@ async def test_default_batcher_uses_short_delay_for_non_group_messages() -> None
     await batcher.add_to_batch(update, context, attachments=None)
 
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 1,
+        lambda: len(processor.calls) >= 1,
         # A generous ceiling distinguishes the 0.05s batch_delay_seconds path
         # from the 60s media_group paths without risking flakiness on a
         # loaded CI box; the assertion below still pins the exact count.
         timeout=10.0,
         description="text message flushes using short delay",
     )
-    assert processor.process_batch.await_count == 1
+    assert len(processor.calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_no_batch_batcher_attachments_preserved() -> None:
     """Per-message attachments survive media-group buffering."""
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=0.1,
@@ -369,12 +389,12 @@ async def test_no_batch_batcher_attachments_preserved() -> None:
         await batcher.add_to_batch(update, context, attachments=attachments)
 
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 1,
+        lambda: len(processor.calls) >= 1,
         timeout=2.0,
         description="album with attachments flushes",
     )
 
-    _, batch, _ = processor.process_batch.await_args.args
+    _, batch, _ = processor.calls[-1]
     actual_attachments = [a for _, a in batch]
     assert actual_attachments == expected_attachments
 
@@ -386,7 +406,7 @@ async def test_default_batcher_cancel_clears_pending_state_when_no_buffer() -> N
     plain-text message uses ``batch_delay_seconds`` instead of the long
     ``media_group_max_wait_seconds``.
     """
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = DefaultMessageBatcher(
         batch_processor=processor,
         batch_delay_seconds=0.05,
@@ -406,14 +426,14 @@ async def test_default_batcher_cancel_clears_pending_state_when_no_buffer() -> N
     await batcher.add_to_batch(text, context, attachments=None)
 
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 1,
+        lambda: len(processor.calls) >= 1,
         # The flush itself is a short debounce, but a loaded CI box can take
         # longer than 1s just to schedule it; the assertion below still pins the
         # count, so a longer ceiling costs nothing when the behaviour is right.
         timeout=10.0,
         description="plain text after cancel flushes via short delay",
     )
-    assert processor.process_batch.await_count == 1
+    assert len(processor.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -421,7 +441,7 @@ async def test_no_batch_batcher_cancel_clears_pending_state_when_no_buffer() -> 
     """Same as above but for ``NoBatchMessageBatcher``: a cancel with no
     buffered album messages must release the chat back to pass-through mode.
     """
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=10.0,
@@ -445,7 +465,7 @@ async def test_no_batch_batcher_cancel_clears_pending_state_when_no_buffer() -> 
     await batcher.add_to_batch(text, context, attachments=None)
 
     # Plain text takes the immediate-process path, so no waiting is needed.
-    assert processor.process_batch.await_count == 1
+    assert len(processor.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -454,7 +474,7 @@ async def test_default_batcher_cancel_preserves_buffered_album_messages() -> Non
     must NOT discard them — but the timer should fall back to the quiet delay
     once outstanding downloads reach zero.
     """
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = DefaultMessageBatcher(
         batch_processor=processor,
         batch_delay_seconds=0.05,
@@ -482,11 +502,11 @@ async def test_default_batcher_cancel_preserves_buffered_album_messages() -> Non
     )
 
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 1,
+        lambda: len(processor.calls) >= 1,
         timeout=2.0,
         description="partial album flushes via quiet delay after cancel",
     )
-    _, batch, _ = processor.process_batch.await_args.args
+    _, batch, _ = processor.calls[-1]
     assert len(batch) == 1
     assert batch[0][0].update_id == 1
 
@@ -497,7 +517,7 @@ async def test_no_batch_batcher_keeps_overlapping_albums_isolated() -> None:
     so two albums arriving back-to-back are NOT merged into one batch and
     are NOT flushed prematurely just because the other started.
     """
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=0.1,
@@ -520,11 +540,11 @@ async def test_no_batch_batcher_keeps_overlapping_albums_isolated() -> None:
 
     # Both albums are now buffered in their own per-album slots; nothing has
     # been flushed yet.
-    assert processor.process_batch.await_count == 0
+    assert len(processor.calls) == 0
 
     # Wait for both timers to fire — each album flushes as its own batch.
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 2,
+        lambda: len(processor.calls) >= 2,
         timeout=2.0,
         description="both albums flush as separate batches",
     )
@@ -532,10 +552,12 @@ async def test_no_batch_batcher_keeps_overlapping_albums_isolated() -> None:
     # Group the two flushed batches by their album to keep the assertions
     # independent of timer-fire order.
     batches_by_album: dict[str, list[int]] = {}
-    for call in processor.process_batch.await_args_list:
-        batch = call.args[1]
-        group_id = batch[0][0].message.media_group_id
-        batches_by_album[group_id] = [u.update_id for u, _ in batch]
+    for call in processor.calls:
+        batch = call.batch
+        first_message = batch[0][0].message
+        assert first_message is not None
+        assert first_message.media_group_id is not None
+        batches_by_album[first_message.media_group_id] = [u.update_id for u, _ in batch]
     assert batches_by_album["album-A"] == [1, 2]
     assert batches_by_album["album-B"] == [10]
 
@@ -549,7 +571,7 @@ async def test_no_batch_batcher_preserves_album_a_when_album_b_starts_mid_downlo
     until its own pending downloads complete (or the max-wait fires), and B
     accumulates independently.
     """
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=0.1,
@@ -577,7 +599,7 @@ async def test_no_batch_batcher_preserves_album_a_when_album_b_starts_mid_downlo
 
     # Album A is preserved (NOT partially flushed). Its outstanding-download
     # counter is still 1 so its timer is the long max-wait.
-    assert processor.process_batch.await_count == 0
+    assert len(processor.calls) == 0
 
     # A's third item finally arrives; its counter drops to 0 and the quiet
     # timer takes over.
@@ -587,16 +609,18 @@ async def test_no_batch_batcher_preserves_album_a_when_album_b_starts_mid_downlo
     await batcher.add_to_batch(update_a3, context, attachments=None)
 
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 2,
+        lambda: len(processor.calls) >= 2,
         timeout=2.0,
         description="both albums flush as separate batches",
     )
 
     batches_by_album: dict[str, list[int]] = {}
-    for call in processor.process_batch.await_args_list:
-        batch = call.args[1]
-        group_id = batch[0][0].message.media_group_id
-        batches_by_album[group_id] = [u.update_id for u, _ in batch]
+    for call in processor.calls:
+        batch = call.batch
+        first_message = batch[0][0].message
+        assert first_message is not None
+        assert first_message.media_group_id is not None
+        batches_by_album[first_message.media_group_id] = [u.update_id for u, _ in batch]
     # Album A is delivered as a single, complete batch — not fragmented.
     assert batches_by_album["album-A"] == [1, 2, 3]
     assert batches_by_album["album-B"] == [10]
@@ -610,7 +634,7 @@ async def test_no_batch_batcher_text_preserves_pre_armed_album_with_no_buffer() 
     still delivered as a single batch when its items finally land — instead
     of fragmenting into individual quiet-delay flushes.
     """
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=0.1,
@@ -630,8 +654,8 @@ async def test_no_batch_batcher_text_preserves_pre_armed_album_with_no_buffer() 
 
     # Text was processed immediately as its own batch; album A's pre-arm
     # state is preserved.
-    assert processor.process_batch.await_count == 1
-    _, text_batch, _ = processor.process_batch.await_args_list[0].args
+    assert len(processor.calls) == 1
+    _, text_batch, _ = processor.calls[0]
     assert [u.update_id for u, _ in text_batch] == [99]
 
     a_key = (123, "album-A")
@@ -647,13 +671,13 @@ async def test_no_batch_batcher_text_preserves_pre_armed_album_with_no_buffer() 
         await batcher.add_to_batch(update, context, attachments=None)
 
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 2,
+        lambda: len(processor.calls) >= 2,
         timeout=2.0,
         description="album A flushes as a complete batch",
     )
 
-    assert processor.process_batch.await_count == 2
-    _, batch_a, _ = processor.process_batch.await_args_list[1].args
+    assert len(processor.calls) == 2
+    _, batch_a, _ = processor.calls[1]
     assert [u.update_id for u, _ in batch_a] == [1, 2, 3]
 
 
@@ -666,7 +690,7 @@ async def test_no_batch_batcher_text_preserves_album_with_partial_buffer_and_pen
     must keep its existing items, counter, and timer so when the remaining
     items download they all flush together as one batch.
     """
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=0.1,
@@ -692,8 +716,8 @@ async def test_no_batch_batcher_text_preserves_album_with_partial_buffer_and_pen
     # Text was processed immediately as its own batch; A's partial buffer
     # is preserved (NOT flushed as a fragment) along with its pending
     # counter.
-    assert processor.process_batch.await_count == 1
-    _, text_batch, _ = processor.process_batch.await_args_list[0].args
+    assert len(processor.calls) == 1
+    _, text_batch, _ = processor.calls[0]
     assert [u.update_id for u, _ in text_batch] == [99]
 
     # A's third item finally downloads; counter drops to 0 and the album
@@ -704,13 +728,13 @@ async def test_no_batch_batcher_text_preserves_album_with_partial_buffer_and_pen
     await batcher.add_to_batch(update_a3, context, attachments=None)
 
     await wait_for_condition(
-        lambda: processor.process_batch.await_count >= 2,
+        lambda: len(processor.calls) >= 2,
         timeout=2.0,
         description="album A flushes as a complete batch after text",
     )
 
-    assert processor.process_batch.await_count == 2
-    _, batch_a, _ = processor.process_batch.await_args_list[1].args
+    assert len(processor.calls) == 2
+    _, batch_a, _ = processor.calls[1]
     assert [u.update_id for u, _ in batch_a] == [1, 2, 3]
 
 
@@ -720,7 +744,7 @@ async def test_no_batch_batcher_text_flushes_active_albums_in_arrival_order() ->
     BOTH albums as separate batches in the order they were started, before
     the non-album message is processed.
     """
-    processor = AsyncMock()
+    processor = RecordingBatchProcessor()
     batcher = NoBatchMessageBatcher(
         batch_processor=processor,
         media_group_quiet_seconds=10.0,
@@ -743,8 +767,8 @@ async def test_no_batch_batcher_text_flushes_active_albums_in_arrival_order() ->
     await batcher.add_to_batch(text, context, attachments=None)
 
     # Three batches: album A, album B, text — in that order.
-    assert processor.process_batch.await_count == 3
-    batches = [call.args[1] for call in processor.process_batch.await_args_list]
+    assert len(processor.calls) == 3
+    batches = [call.batch for call in processor.calls]
     assert [u.update_id for u, _ in batches[0]] == [1, 2]
     assert [u.update_id for u, _ in batches[1]] == [10]
     assert [u.update_id for u, _ in batches[2]] == [99]

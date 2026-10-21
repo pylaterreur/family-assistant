@@ -9,11 +9,11 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from family_assistant.config_models import AppConfig
 from family_assistant.plugins.reolink.fake import FakeCameraBackend
 from family_assistant.plugins.reolink.instance import ReolinkInstance
 from family_assistant.plugins.reolink.protocol import CameraEvent, Recording
@@ -30,6 +30,8 @@ from family_assistant.tools.automations import (
 from family_assistant.tools.events import _format_event_timestamp  # noqa: PLC2701
 from family_assistant.tools.types import ToolExecutionContext, ToolResult
 from family_assistant.tools.workspace_files import workspace_glob_tool
+from tests.mocks.idle_processing_service import make_idle_processing_service
+from tests.mocks.unconnected_database import unconnected_database
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -132,7 +134,7 @@ def sydney_exec_context(
         conversation_id="test_conv",
         user_name="test_user",
         turn_id=None,
-        db_context=Mock(),
+        db_context=unconnected_database(),
         processing_service=None,
         clock=None,
         plugins=ProfilePlugins((ReolinkInstance(camera_backend_with_events),)),
@@ -258,9 +260,9 @@ class TestWorkspaceFilesTimezone:
         workspace_file.write_text("report")
         modified_at = datetime(2025, 1, 15, tzinfo=UTC).timestamp()
         os.utime(workspace_file, (modified_at, modified_at))
-        processing_service = Mock()
-        processing_service.app_config.shared_workspace_path = str(tmp_path)
-        sydney_exec_context.processing_service = processing_service
+        sydney_exec_context.processing_service = make_idle_processing_service(
+            app_config=AppConfig(shared_workspace_path=str(tmp_path))
+        )
 
         result = await workspace_glob_tool(
             sydney_exec_context, pattern="report.txt", include_info=True

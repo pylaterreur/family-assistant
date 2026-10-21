@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -37,6 +38,8 @@ from family_assistant.tools.types import (
     ToolExecutionContext,
     ToolResult,
 )
+from tests.mocks.recording_async_call import RecordedCall, RecordingAsyncCall
+from tests.mocks.unconnected_database import unconnected_database
 
 if TYPE_CHECKING:
     from family_assistant.tools.browser_backend import JsonDict
@@ -156,14 +159,23 @@ def exec_context(
 
     monkeypatch.setattr(cu_module, "get_browser_backend", mock_get_backend)
 
-    ctx = MagicMock(spec=ToolExecutionContext)
-    ctx.conversation_id = "test-conversation"
-    ctx.subconversation_id = None
-    # No batch: these tools are called one at a time, so the chokepoint only
-    # has its lock to take.
-    ctx.tool_call_batch = None
-    ctx.tool_call_id = None
-    return ctx
+    # No tool_call_batch: these tools are called one at a time, so the
+    # chokepoint only has its lock to take.
+    return ToolExecutionContext(
+        interface_type="test",
+        conversation_id="test-conversation",
+        user_name="test-user",
+        turn_id=None,
+        db_context=unconnected_database(),
+        processing_service=None,
+        clock=None,
+        plugins=None,
+        event_sources=None,
+        attachment_registry=None,
+        credential_resolvers=None,
+        api_backend=None,
+        timezone=ZoneInfo("UTC"),
+    )
 
 
 KEY_MAPPING_CASES = [
@@ -572,21 +584,24 @@ class TestWait:
 
     @pytest.mark.asyncio
     async def test_wait_default(self, exec_context: ToolExecutionContext) -> None:
-        with patch.object(cu_module.asyncio, "sleep", new=AsyncMock()) as sleep_mock:
+        sleep = RecordingAsyncCall[None](None)
+        with patch.object(cu_module.asyncio, "sleep", new=sleep):
             await computer_use_wait(exec_context)
-        sleep_mock.assert_awaited_once_with(1)
+        assert sleep.calls == [RecordedCall(args=(1,), kwargs={})]
 
     @pytest.mark.asyncio
     async def test_wait_clamped_zero(self, exec_context: ToolExecutionContext) -> None:
-        with patch.object(cu_module.asyncio, "sleep", new=AsyncMock()) as sleep_mock:
+        sleep = RecordingAsyncCall[None](None)
+        with patch.object(cu_module.asyncio, "sleep", new=sleep):
             await computer_use_wait(exec_context, -10)
-        sleep_mock.assert_awaited_once_with(0)
+        assert sleep.calls == [RecordedCall(args=(0,), kwargs={})]
 
     @pytest.mark.asyncio
     async def test_wait_clamped_max(self, exec_context: ToolExecutionContext) -> None:
-        with patch.object(cu_module.asyncio, "sleep", new=AsyncMock()) as sleep_mock:
+        sleep = RecordingAsyncCall[None](None)
+        with patch.object(cu_module.asyncio, "sleep", new=sleep):
             await computer_use_wait(exec_context, 100)
-        sleep_mock.assert_awaited_once_with(30)
+        assert sleep.calls == [RecordedCall(args=(30,), kwargs={})]
 
 
 class TestToolDefinitions:

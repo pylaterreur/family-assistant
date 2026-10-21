@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock
 
 import pytest
 from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
@@ -93,6 +92,29 @@ class _FakeRichBot:
             "reply_markup": reply_markup,
         })
         return SimpleNamespace(message_id=300 + len(self.standard_sent))
+
+
+class _FakeNativeRichBot:
+    """Bot exposing a native ``send_rich_message`` method, recording its kwargs."""
+
+    def __init__(self) -> None:
+        self.native_calls: list[dict[str, object]] = []
+
+    async def send_rich_message(self, **kwargs: object) -> SimpleNamespace:
+        self.native_calls.append(kwargs)
+        return SimpleNamespace(message_id=777)
+
+
+class _FakeTransportBotWithInvalidResponse:
+    """Bot whose ``_send_message`` transport returns an unrecognised response."""
+
+    async def _send_message(
+        self,
+        endpoint: str,
+        data: dict[str, object],
+        **kwargs: object,
+    ) -> str:
+        return "not a message object or dict"
 
 
 def test_input_rich_message_validation() -> None:
@@ -187,9 +209,7 @@ async def test_send_rich_message_via_internal_transport() -> None:
 
 @pytest.mark.asyncio
 async def test_send_rich_message_via_native_bot_method() -> None:
-    bot = SimpleNamespace(
-        send_rich_message=AsyncMock(return_value=SimpleNamespace(message_id=777))
-    )
+    bot = _FakeNativeRichBot()
 
     result = await send_rich_message(
         bot=cast("Any", bot),
@@ -199,20 +219,22 @@ async def test_send_rich_message_via_native_bot_method() -> None:
     )
 
     assert result.message_id == 777
-    bot.send_rich_message.assert_awaited_once_with(
-        chat_id=54321,
-        rich_message={"html": "<b>Hello</b>"},
-        reply_to_message_id=None,
-        reply_markup=None,
-        message_thread_id=None,
-        disable_notification=None,
-        protect_content=None,
-        read_timeout=None,
-        write_timeout=None,
-        connect_timeout=None,
-        pool_timeout=None,
-        api_kwargs=None,
-    )
+    assert bot.native_calls == [
+        dict(
+            chat_id=54321,
+            rich_message={"html": "<b>Hello</b>"},
+            reply_to_message_id=None,
+            reply_markup=None,
+            message_thread_id=None,
+            disable_notification=None,
+            protect_content=None,
+            read_timeout=None,
+            write_timeout=None,
+            connect_timeout=None,
+            pool_timeout=None,
+            api_kwargs=None,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -325,15 +347,13 @@ async def test_chat_interface_does_not_fallback_on_transient_network_error() -> 
 
 @pytest.mark.asyncio
 async def test_send_rich_message_raises_unsupported_error_on_invalid_response() -> None:
-    mock_bot = AsyncMock()
-    mock_bot.send_rich_message = None
-    mock_bot._send_message = AsyncMock(return_value="not a message object or dict")
+    bot = _FakeTransportBotWithInvalidResponse()
 
     with pytest.raises(
         RichMessageUnsupportedError, match="Unexpected response from sendRichMessage"
     ):
         await send_rich_message(
-            bot=cast("Any", mock_bot),
+            bot=cast("Any", bot),
             chat_id=12345,
             text="Hello world",
         )

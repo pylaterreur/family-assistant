@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -19,6 +19,7 @@ from family_assistant.assistant import (
     _build_profile_policy_engine,  # noqa: PLC2701 - the smallest helper that applies the synthetic self-delegation allow
 )
 from family_assistant.config_models import AppConfig, ToolsConfig
+from family_assistant.llm.messages import AssistantMessage
 from family_assistant.llm.model_selection import (
     ModelSelectionRequest,
     ModelTierEligibility,
@@ -58,6 +59,7 @@ from family_assistant.tools.types import (
     ToolExecutionContext,
     ToolResult,
 )
+from tests.mocks.recording_async_call import RecordingAsyncCall
 from tests.unit.conftest import shipped_profile
 
 if TYPE_CHECKING:
@@ -140,24 +142,61 @@ def _unknown_external_tracker() -> InMemoryTurnTaintTracker:
     return tracker
 
 
-def _db_without_history() -> Database:
-    """A database whose turn history is empty.
+class RecordingChatHandler:
+    """A delegation target's ``handle_chat_interaction``, recording each call.
 
-    Delegation reads the delegating turn for the human request behind the goal.
-    These tests exercise policy and plumbing, not that lookup, so the read is
-    real enough to be awaited and returns nothing.
+    Answers with ``result``; a call when no result was given fails, so a
+    delegated turn the test did not expect is visible. With ``row_taint`` it
+    persists one assistant row stamped with that taint into the delegated
+    subconversation, as a real delegate turn would.
     """
-    db = MagicMock(spec=Database)
-    db.message_history = MagicMock()
-    db.message_history.get_by_turn_id = AsyncMock(return_value=[])
-    db.message_history.get_merged_taint_metadata_for_subconversation = AsyncMock(
-        return_value=None
+
+    def __init__(
+        self,
+        result: ChatInteractionResult | None = None,
+        *,
+        row_taint: TaintMetadata | None = None,
+    ) -> None:
+        self._result = result
+        self._row_taint = row_taint
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(self, **kwargs: object) -> ChatInteractionResult:
+        self.calls.append(kwargs)
+        if self._result is None:
+            raise AssertionError("The delegated turn was not expected to run")
+        if self._row_taint is not None:
+            db_context = cast("Database", kwargs["db_context"])
+            await db_context.message_history.add_message(
+                AssistantMessage(content="delegated", taint_metadata=self._row_taint),
+                interface_type=cast("str", kwargs["interface_type"]),
+                conversation_id=cast("str", kwargs["conversation_id"]),
+                timestamp=datetime.now(UTC),
+                turn_id="delegated-turn",
+                processing_profile_id="target_profile",
+                subconversation_id=cast("str", kwargs["subconversation_id"]),
+            )
+        return self._result
+
+
+def _delegated_reply() -> RecordingChatHandler:
+    return RecordingChatHandler(
+        ChatInteractionResult(
+            status=ChatInteractionStatus.SUCCESS, text_reply="delegated"
+        )
     )
-    return cast("Database", db)
+
+
+@pytest.fixture
+def db(db_engine: AsyncEngine) -> Database:
+    """The test database; delegation reads the delegating turn from it."""
+    return Database(db_engine)
 
 
 @pytest.mark.asyncio
-async def test_delegate_to_service_blocks_disallowed_source_profile() -> None:
+async def test_delegate_to_service_blocks_disallowed_source_profile(
+    db: Database,
+) -> None:
     target_service = _Namespace(
         service_config=_Namespace(
             id="target_profile",
@@ -177,7 +216,7 @@ async def test_delegate_to_service_blocks_disallowed_source_profile() -> None:
         conversation_id="conversation",
         user_name="User",
         turn_id=None,
-        db_context=_db_without_history(),
+        db_context=db,
         processing_service=cast("ProcessingService", source_service),
         clock=None,
         plugins=None,
@@ -201,11 +240,13 @@ async def test_delegate_to_service_blocks_disallowed_source_profile() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_long_confirm_gated_request_reaches_the_confirmation() -> None:
+async def test_a_long_confirm_gated_request_reaches_the_confirmation(
+    db: Database,
+) -> None:
     # The delegation tool no longer applies a size rule of its own: a long
     # request is put to the approver, whose interface decides whether it can
     # render it (docs/design/confirmation-prompt-capacity.md).
-    target_handler = AsyncMock()
+    target_handler = RecordingChatHandler()
     target_service = _Namespace(
         service_config=_Namespace(
             id="target_profile",
@@ -221,15 +262,15 @@ async def test_a_long_confirm_gated_request_reaches_the_confirmation() -> None:
         processing_services_registry={"target_profile": target_service},
     )
 
-    confirmation_callback = AsyncMock(
-        return_value=ConfirmationOutcome(kind="rejected", result="not now")
+    confirmation_callback = RecordingAsyncCall(
+        ConfirmationOutcome(kind="rejected", result="not now")
     )
     context = ToolExecutionContext(
         interface_type="test",
         conversation_id="conversation",
         user_name="User",
         turn_id=None,
-        db_context=_db_without_history(),
+        db_context=db,
         processing_service=cast("ProcessingService", source_service),
         clock=None,
         plugins=None,
@@ -249,10 +290,11 @@ async def test_a_long_confirm_gated_request_reaches_the_confirmation() -> None:
         confirm_delegation=True,
     )
 
-    confirmation_callback.assert_awaited_once()
-    await_args = confirmation_callback.await_args
-    assert await_args is not None
-    assert await_args.kwargs["tool_args"]["user_request"] == long_request
+    assert len(confirmation_callback.calls) == 1
+    tool_args = confirmation_callback.last_call.kwargs["tool_args"]
+    assert isinstance(tool_args, dict)
+    assert tool_args["user_request"] == long_request
+    assert target_handler.calls == []
 
 
 @pytest.mark.parametrize(
@@ -269,14 +311,16 @@ async def test_a_long_confirm_gated_request_reaches_the_confirmation() -> None:
 )
 @pytest.mark.asyncio
 async def test_a_confirmed_delegation_returns_the_executed_runs_taint(
-    outcome_taint: TaintMetadata | None, expected_tier: SourceTrustTier
+    db: Database,
+    outcome_taint: TaintMetadata | None,
+    expected_tier: SourceTrustTier,
 ) -> None:
     target_service = _Namespace(
         service_config=_Namespace(
             id="target_profile",
             allowed_delegation_sources=None,
         ),
-        handle_chat_interaction=AsyncMock(),
+        handle_chat_interaction=RecordingChatHandler(),
     )
     source_service = _Namespace(
         service_config=_Namespace(
@@ -291,7 +335,7 @@ async def test_a_confirmed_delegation_returns_the_executed_runs_taint(
         conversation_id="conversation",
         user_name="User",
         turn_id=None,
-        db_context=_db_without_history(),
+        db_context=db,
         processing_service=cast("ProcessingService", source_service),
         clock=None,
         plugins=None,
@@ -301,8 +345,8 @@ async def test_a_confirmed_delegation_returns_the_executed_runs_taint(
         taint_tracker=tracker,
         credential_resolvers=None,
         api_backend=None,
-        request_confirmation_callback=AsyncMock(
-            return_value=ConfirmationOutcome(
+        request_confirmation_callback=RecordingAsyncCall(
+            ConfirmationOutcome(
                 kind="completed",
                 result=ToolResult(text="delegated"),
                 taint_metadata=outcome_taint,
@@ -321,13 +365,10 @@ async def test_a_confirmed_delegation_returns_the_executed_runs_taint(
 
 
 @pytest.mark.asyncio
-async def test_synchronous_delegate_to_service_passes_parent_taint_sources() -> None:
-    target_handler = AsyncMock(
-        return_value=ChatInteractionResult(
-            status=ChatInteractionStatus.SUCCESS,
-            text_reply="delegated",
-        )
-    )
+async def test_synchronous_delegate_to_service_passes_parent_taint_sources(
+    db: Database,
+) -> None:
+    target_handler = _delegated_reply()
     target_service = _Namespace(
         service_config=_Namespace(
             id="target_profile",
@@ -349,7 +390,7 @@ async def test_synchronous_delegate_to_service_passes_parent_taint_sources() -> 
         conversation_id="conversation",
         user_name="User",
         turn_id="turn-1",
-        db_context=_db_without_history(),
+        db_context=db,
         processing_service=cast("ProcessingService", source_service),
         clock=None,
         plugins=None,
@@ -368,10 +409,10 @@ async def test_synchronous_delegate_to_service_passes_parent_taint_sources() -> 
     )
 
     assert result.text == "delegated"
-    target_handler.assert_awaited_once()
-    await_args = target_handler.await_args
-    assert await_args is not None
-    initial_sources = await_args.kwargs["initial_taint_sources"]
+    assert len(target_handler.calls) == 1
+    initial_sources = cast(
+        "list[TaintSource]", target_handler.calls[0]["initial_taint_sources"]
+    )
     assert len(initial_sources) == 1
     assert initial_sources[0].tier is SourceTrustTier.UNKNOWN_EXTERNAL
     assert initial_sources[0].source_type is TaintSourceType.EMAIL
@@ -380,7 +421,9 @@ async def test_synchronous_delegate_to_service_passes_parent_taint_sources() -> 
 @pytest.mark.parametrize(
     ("delegate_taint", "expected_tier"),
     [
-        (TurnTaintState.empty().to_metadata(), SourceTrustTier.TRUSTED_USER),
+        # An assistant row is stamped with the authorship floor, so a clean
+        # delegate's stored reply is trusted_internal, below every external tier.
+        (TurnTaintState.empty().to_metadata(), SourceTrustTier.TRUSTED_INTERNAL),
         (
             unknown_external_taint_metadata("delegate browsed the web"),
             SourceTrustTier.UNKNOWN_EXTERNAL,
@@ -391,18 +434,21 @@ async def test_synchronous_delegate_to_service_passes_parent_taint_sources() -> 
 )
 @pytest.mark.asyncio
 async def test_synchronous_delegation_returns_the_delegate_turns_taint(
-    delegate_taint: TaintMetadata | None, expected_tier: SourceTrustTier
+    db: Database,
+    delegate_taint: TaintMetadata | None,
+    expected_tier: SourceTrustTier,
 ) -> None:
     target_service = _Namespace(
         service_config=_Namespace(
             id="target_profile",
             allowed_delegation_sources=None,
         ),
-        handle_chat_interaction=AsyncMock(
-            return_value=ChatInteractionResult(
+        handle_chat_interaction=RecordingChatHandler(
+            ChatInteractionResult(
                 status=ChatInteractionStatus.SUCCESS,
                 text_reply="delegated",
-            )
+            ),
+            row_taint=delegate_taint,
         ),
     )
     source_service = _Namespace(
@@ -411,12 +457,6 @@ async def test_synchronous_delegation_returns_the_delegate_turns_taint(
             tools_config=ToolsConfig(async_delegation_enabled=False),
         ),
         processing_services_registry={"target_profile": target_service},
-    )
-    db = _db_without_history()
-    cast(
-        "MagicMock", db.message_history
-    ).get_merged_taint_metadata_for_subconversation = AsyncMock(
-        return_value=delegate_taint
     )
     tracker = InMemoryTurnTaintTracker()
     context = ToolExecutionContext(
@@ -446,9 +486,9 @@ async def test_synchronous_delegation_returns_the_delegate_turns_taint(
 
 
 @pytest.mark.asyncio
-async def test_synchronous_delegation_returns_the_delegate_turns_sensitive_reads() -> (
-    None
-):
+async def test_synchronous_delegation_returns_the_delegate_turns_sensitive_reads(
+    db: Database,
+) -> None:
     """The caller holds what its delegate read, so it holds the read too."""
     delegate_read = SensitiveReadScope(
         kind="notes", qualifier="search_notes", surfaced_ids=frozenset({"note-1"})
@@ -464,11 +504,12 @@ async def test_synchronous_delegation_returns_the_delegate_turns_sensitive_reads
             id="target_profile",
             allowed_delegation_sources=None,
         ),
-        handle_chat_interaction=AsyncMock(
-            return_value=ChatInteractionResult(
+        handle_chat_interaction=RecordingChatHandler(
+            ChatInteractionResult(
                 status=ChatInteractionStatus.SUCCESS,
                 text_reply="delegated",
-            )
+            ),
+            row_taint=delegate_taint,
         ),
     )
     source_service = _Namespace(
@@ -477,12 +518,6 @@ async def test_synchronous_delegation_returns_the_delegate_turns_sensitive_reads
             tools_config=ToolsConfig(async_delegation_enabled=False),
         ),
         processing_services_registry={"target_profile": target_service},
-    )
-    db = _db_without_history()
-    cast(
-        "MagicMock", db.message_history
-    ).get_merged_taint_metadata_for_subconversation = AsyncMock(
-        return_value=delegate_taint
     )
     tracker = InMemoryTurnTaintTracker()
     context = ToolExecutionContext(
@@ -514,7 +549,9 @@ async def test_synchronous_delegation_returns_the_delegate_turns_sensitive_reads
 
 
 @pytest.mark.asyncio
-async def test_synchronous_remote_delegation_accepts_review_trigger() -> None:
+async def test_synchronous_remote_delegation_accepts_review_trigger(
+    db: Database,
+) -> None:
     """Remote targets accept the shared review-trigger keyword without TypeError."""
     remote_client = _SynchronousRemoteClient()
     target_service = RemoteA2AService(
@@ -537,7 +574,7 @@ async def test_synchronous_remote_delegation_accepts_review_trigger() -> None:
         conversation_id="conversation",
         user_name="User",
         turn_id="turn-remote-sync",
-        db_context=_db_without_history(),
+        db_context=db,
         processing_service=cast("ProcessingService", source_service),
         clock=None,
         plugins=None,
@@ -617,7 +654,7 @@ async def test_async_delegate_to_service_persists_parent_taint_state(
     assert sources[0]["source_type"] == "email"
 
 
-def _tiered_target(handler: AsyncMock) -> _Namespace:
+def _tiered_target(handler: RecordingChatHandler) -> _Namespace:
     """A delegation target admitting `deep` automatically but not `frontier`,
     plus the `gpt_6_sol` preset for delegations only."""
     return _Namespace(
@@ -670,15 +707,13 @@ def _delegating_context(
 
 
 @pytest.mark.asyncio
-async def test_delegating_at_an_automatically_admitted_tier_runs_on_it() -> None:
-    handler = AsyncMock(
-        return_value=ChatInteractionResult(
-            status=ChatInteractionStatus.SUCCESS, text_reply="delegated"
-        )
-    )
+async def test_delegating_at_an_automatically_admitted_tier_runs_on_it(
+    db: Database,
+) -> None:
+    handler = _delegated_reply()
     context = _delegating_context(
         _tiered_target(handler),
-        db_context=_db_without_history(),
+        db_context=db,
         async_delegation_enabled=False,
     )
 
@@ -690,24 +725,19 @@ async def test_delegating_at_an_automatically_admitted_tier_runs_on_it() -> None
     )
 
     assert result.text == "delegated"
-    await_args = handler.await_args
-    assert await_args is not None
-    selection = await_args.kwargs["model_selection"]
+    assert len(handler.calls) == 1
+    selection = cast("ResolvedModelSelection", handler.calls[0]["model_selection"])
     assert selection == ResolvedModelSelection(
         tier="deep", requested="deep", source="model"
     )
 
 
 @pytest.mark.asyncio
-async def test_delegating_at_a_delegation_preset_runs_on_it() -> None:
-    handler = AsyncMock(
-        return_value=ChatInteractionResult(
-            status=ChatInteractionStatus.SUCCESS, text_reply="delegated"
-        )
-    )
+async def test_delegating_at_a_delegation_preset_runs_on_it(db: Database) -> None:
+    handler = _delegated_reply()
     context = _delegating_context(
         _tiered_target(handler),
-        db_context=_db_without_history(),
+        db_context=db,
         async_delegation_enabled=False,
     )
 
@@ -719,20 +749,21 @@ async def test_delegating_at_a_delegation_preset_runs_on_it() -> None:
     )
 
     assert result.text == "delegated"
-    await_args = handler.await_args
-    assert await_args is not None
-    assert await_args.kwargs["model_selection"] == ResolvedModelSelection(
+    assert len(handler.calls) == 1
+    assert handler.calls[0]["model_selection"] == ResolvedModelSelection(
         tier="gpt_6_sol", requested="gpt_6_sol", source="model"
     )
 
 
 @pytest.mark.asyncio
-async def test_delegating_at_a_tier_only_a_user_may_choose_is_refused() -> None:
+async def test_delegating_at_a_tier_only_a_user_may_choose_is_refused(
+    db: Database,
+) -> None:
     """A model cannot spend its way past what the target admits from it."""
-    handler = AsyncMock()
+    handler = RecordingChatHandler()
     context = _delegating_context(
         _tiered_target(handler),
-        db_context=_db_without_history(),
+        db_context=db,
         async_delegation_enabled=False,
     )
 
@@ -746,20 +777,18 @@ async def test_delegating_at_a_tier_only_a_user_may_choose_is_refused() -> None:
     assert result.text is not None
     assert result.text.startswith("Error:")
     assert "frontier" in result.text
-    handler.assert_not_awaited()
+    assert handler.calls == []
 
 
 @pytest.mark.asyncio
-async def test_a_delegation_naming_no_tier_runs_on_the_targets_default() -> None:
+async def test_a_delegation_naming_no_tier_runs_on_the_targets_default(
+    db: Database,
+) -> None:
     """A parent's own tier never propagates: the default is the absence of one."""
-    handler = AsyncMock(
-        return_value=ChatInteractionResult(
-            status=ChatInteractionStatus.SUCCESS, text_reply="delegated"
-        )
-    )
+    handler = _delegated_reply()
     context = _delegating_context(
         _tiered_target(handler),
-        db_context=_db_without_history(),
+        db_context=db,
         async_delegation_enabled=False,
     )
 
@@ -769,9 +798,8 @@ async def test_a_delegation_naming_no_tier_runs_on_the_targets_default() -> None
         user_request="do the thing",
     )
 
-    await_args = handler.await_args
-    assert await_args is not None
-    selection = await_args.kwargs["model_selection"]
+    assert len(handler.calls) == 1
+    selection = cast("ResolvedModelSelection", handler.calls[0]["model_selection"])
     assert selection.tier == "standard"
     assert selection.source == "default"
     assert selection.requested is None
@@ -784,7 +812,7 @@ async def test_a_queued_delegation_persists_its_resolved_tier(
     """The envelope is frozen at enqueue, not re-resolved when a worker runs it."""
     db_context = Database(db_engine)
     context = _delegating_context(
-        _tiered_target(AsyncMock()),
+        _tiered_target(RecordingChatHandler()),
         db_context=db_context,
         async_delegation_enabled=True,
     )
@@ -815,7 +843,7 @@ async def test_a_refused_tier_never_becomes_a_queued_run(
 ) -> None:
     db_context = Database(db_engine)
     context = _delegating_context(
-        _tiered_target(AsyncMock()),
+        _tiered_target(RecordingChatHandler()),
         db_context=db_context,
         async_delegation_enabled=True,
     )
@@ -924,6 +952,7 @@ def _delegate_descriptor() -> ToolDescriptor:
 
 @pytest.mark.asyncio
 async def test_the_synthetic_self_delegation_allow_does_not_bypass_the_tier_gate(
+    db: Database,
     shipped_config: AppConfig,
 ) -> None:
     """A profile delegating to itself is still held to its `auto_model_tiers`.
@@ -964,7 +993,7 @@ async def test_the_synthetic_self_delegation_allow_does_not_bypass_the_tier_gate
     )
     assert admitted.tier == "deep"
 
-    self_delegation_handler = AsyncMock()
+    self_delegation_handler = RecordingChatHandler()
     target_service = _Namespace(
         service_config=_Namespace(
             id=profile.id,
@@ -986,7 +1015,7 @@ async def test_the_synthetic_self_delegation_allow_does_not_bypass_the_tier_gate
         conversation_id="conversation",
         user_name="User",
         turn_id=None,
-        db_context=_db_without_history(),
+        db_context=db,
         processing_service=cast("ProcessingService", source_service),
         clock=None,
         plugins=None,
@@ -1006,4 +1035,4 @@ async def test_the_synthetic_self_delegation_allow_does_not_bypass_the_tier_gate
 
     assert result.text is not None
     assert result.text.startswith("Error:")
-    self_delegation_handler.assert_not_awaited()
+    assert self_delegation_handler.calls == []

@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -41,6 +39,10 @@ from family_assistant.processing.attachments import (
 )
 from family_assistant.processing.context import ContextPreparer
 from family_assistant.processing.types import ToolExecutionResult
+from family_assistant.services.attachment_registry import (
+    AttachmentMetadata,
+    AttachmentRegistry,
+)
 from family_assistant.storage.database import Database
 from family_assistant.tools.types import (
     ToolAttachment,
@@ -51,14 +53,20 @@ from family_assistant.utils.clock import SystemClock
 from tests.mocks.mock_llm import (  # pylint: disable=no-name-in-module
     RuleBasedMockLLMClient,
 )
+from tests.mocks.recording_async_call import RecordingAsyncCall
+from tests.mocks.recording_chat_interface import RecordingChatInterface
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from datetime import datetime
+    from pathlib import Path
 
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from family_assistant.interfaces import ChatInterface
     from family_assistant.llm.messages import ContentPartDict
+    from family_assistant.security.taint import TurnTaintState
+    from family_assistant.storage.database import DatabaseExecutor
     from family_assistant.tools.types import ToolDefinition, ToolExecutionContext
 
 
@@ -115,6 +123,101 @@ class RecordingContextToolsProvider(SimpleToolsProvider):
         return "recorded"
 
 
+class _FixedResultToolsProvider(SimpleToolsProvider):
+    """Answers every tool call with the same result."""
+
+    def __init__(self, result: str | ToolResult) -> None:
+        self.result = result
+
+    async def execute_tool(
+        self,
+        name: str,
+        # ast-grep-ignore: no-dict-any - tool args are dynamic
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+        call_id: str | None = None,
+    ) -> str | ToolResult:
+        del name, arguments, context, call_id
+        return self.result
+
+
+class _OneAttachmentRegistry(AttachmentRegistry):
+    """A registry whose only attachment is the metadata it was given."""
+
+    def __init__(
+        self, storage_path: Path, db_engine: AsyncEngine, metadata: AttachmentMetadata
+    ) -> None:
+        super().__init__(storage_path=str(storage_path), db_engine=db_engine)
+        self.metadata = metadata
+
+    async def get_attachment(
+        self,
+        db_context: DatabaseExecutor,
+        attachment_id: str,
+        *,
+        acting_user_id: str | None,
+    ) -> AttachmentMetadata | None:
+        del db_context, acting_user_id
+        return self.metadata if attachment_id == self.metadata.attachment_id else None
+
+
+class _UnqueryableAttachmentRegistry(AttachmentRegistry):
+    """A registry whose recent-attachments query fails."""
+
+    async def get_recent_attachments_for_conversation(
+        self,
+        db_context: DatabaseExecutor,
+        conversation_id: str,
+        max_age: datetime,
+        *,
+        acting_user_id: str | None,
+    ) -> list[AttachmentMetadata]:
+        del db_context, conversation_id, max_age, acting_user_id
+        raise RuntimeError("attachment context query failed")
+
+
+class _UnwritableAttachmentRegistry(AttachmentRegistry):
+    """A registry that cannot store tool attachments."""
+
+    async def store_and_register_tool_attachment(
+        self,
+        file_content: bytes,
+        filename: str,
+        content_type: str,
+        tool_name: str,
+        description: str | None = None,
+        conversation_id: str | None = None,
+        message_id: int | None = None,
+        owner_user_id: str | None = None,
+        # ast-grep-ignore: no-dict-any - mirrors the overridden signature
+        metadata: dict[str, Any] | None = None,
+        db_context: DatabaseExecutor | None = None,
+        *,
+        taint_state: TurnTaintState,
+    ) -> AttachmentMetadata:
+        del file_content, filename, content_type, tool_name, description
+        del conversation_id, message_id, owner_user_id, metadata, db_context
+        del taint_state
+        raise RuntimeError("attachment storage failed")
+
+
+def _tool_result(call_id: str, auto_attachment_ids: list[str]) -> ToolExecutionResult:
+    return ToolExecutionResult(
+        stream_event=LLMStreamEvent(
+            type="tool_result",
+            tool_call_id=call_id,
+            tool_result="ok",
+        ),
+        llm_message=ToolMessage(
+            tool_call_id=call_id,
+            content="ok",
+            name="example_tool",
+        ),
+        auto_attachment_ids=auto_attachment_ids,
+        explicit_attachment_ids=None,
+    )
+
+
 def _make_llm_that_calls_example_tool_once() -> RuleBasedMockLLMClient:
     tool_call = ToolCallItem(
         id="call-recording",
@@ -135,6 +238,10 @@ def _make_llm_that_calls_example_tool_once() -> RuleBasedMockLLMClient:
         ],
         default_response=LLMOutput(content="done"),
     )
+
+
+def _default_llm() -> RuleBasedMockLLMClient:
+    return RuleBasedMockLLMClient(rules=[], default_response=LLMOutput(content="ok"))
 
 
 def _make_service(
@@ -201,7 +308,7 @@ async def test_sync_forwards_chat_interfaces_to_process_message(
     service = _make_service(llm_client=_make_llm_that_calls_example_tool_once())
     service.tools_provider = tools_provider
     service.tool_executor.tools_provider = tools_provider
-    web_interface = MagicMock()
+    web_interface = RecordingChatInterface()
 
     db_context = Database(db_engine)
     result = await service.handle_chat_interaction(
@@ -404,7 +511,6 @@ async def test_steer_echo_is_published_only_after_it_is_persisted(
     assert any(event.type == "error" for event in events)
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mime_type", "expected_display_type"),
@@ -421,6 +527,8 @@ async def test_done_event_attachment_type_reflects_mime_type(
     mime_type: str | None,
     expected_display_type: str,
     monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
+    tmp_path: Path,
 ) -> None:
     """The display type on the stream's done event, not the private helper that fills it in."""
 
@@ -455,32 +563,26 @@ async def test_done_event_attachment_type_reflects_mime_type(
     monkeypatch.setattr(
         service.tool_executor,
         "execute",
-        AsyncMock(
-            return_value=ToolExecutionResult(
-                stream_event=LLMStreamEvent(
-                    type="tool_result",
-                    tool_call_id="call-1",
-                    tool_result="ok",
-                ),
-                llm_message=ToolMessage(
-                    tool_call_id="call-1",
-                    content="ok",
-                    name="example_tool",
-                ),
-                auto_attachment_ids=["att-1"],
-                explicit_attachment_ids=None,
-            )
+        RecordingAsyncCall(_tool_result("call-1", ["att-1"])),
+    )
+    service.attachment_processor.attachment_registry = _OneAttachmentRegistry(
+        tmp_path,
+        db_engine,
+        AttachmentMetadata(
+            attachment_id="att-1",
+            source_type="tool",
+            source_id="example_tool",
+            # The registry's column is non-null; None stands for a row whose
+            # MIME type a caller could not determine.
+            mime_type=cast("str", mime_type),
+            description="an attachment",
+            size=123,
         ),
     )
-    mock_registry = AsyncMock()
-    mock_registry.get_attachment.return_value = MagicMock(
-        mime_type=mime_type, description="an attachment", size=123
-    )
-    service.attachment_processor.attachment_registry = mock_registry
 
     done_event = None
     async for event, _message in service.llm_loop.run_stream(
-        db_context=MagicMock(),
+        db_context=Database(db_engine),
         messages=[
             SystemMessage(content="system"),
             UserMessage(content="hello"),
@@ -600,8 +702,8 @@ async def test_sync_fails_fast_when_tool_executor_raises_unexpected_exception(
         default_response=LLMOutput(content=None, tool_calls=[tool_call]),
     )
     service = _make_service(llm_client=llm_client, max_iterations=3)
-    service.tool_executor.execute = AsyncMock(  # type: ignore[method-assign]
-        side_effect=RuntimeError("unexpected tool executor crash")
+    service.tool_executor.execute = RecordingAsyncCall(  # type: ignore[method-assign]
+        RuntimeError("unexpected tool executor crash")
     )
 
     db_context = Database(db_engine)
@@ -644,8 +746,8 @@ async def test_stream_emits_error_when_tool_executor_raises_unexpected_exception
         default_response=LLMOutput(content=None, tool_calls=[tool_call]),
     )
     service = _make_service(llm_client=llm_client, max_iterations=3)
-    service.tool_executor.execute = AsyncMock(  # type: ignore[method-assign]
-        side_effect=RuntimeError("unexpected tool executor crash")
+    service.tool_executor.execute = RecordingAsyncCall(  # type: ignore[method-assign]
+        RuntimeError("unexpected tool executor crash")
     )
 
     db_context = Database(db_engine)
@@ -964,87 +1066,97 @@ async def test_delegation_catalog_addition_lists_profiles_when_advertised() -> N
     assert "- ID: browser_profile, Description: Drives a web browser." in addition
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_process_content_parts_missing_attachment_id_raises() -> None:
+async def test_process_content_parts_missing_attachment_id_raises(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
     processor = AttachmentProcessor(
-        attachment_registry=AsyncMock(),
+        attachment_registry=AttachmentRegistry(str(tmp_path), db_engine),
         app_config=AppConfig(),
         clock=SystemClock(),
     )
 
     with pytest.raises(ValueError, match="missing required 'attachment_id'"):
         await processor.process_content_parts(
-            db_context=MagicMock(),
+            db_context=Database(db_engine),
             conversation_id="conv",
             content_parts=cast("list[ContentPartDict]", [{"type": "attachment"}]),
             acting_user_id=None,
-            llm_client=MagicMock(),
+            llm_client=_default_llm(),
         )
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_process_content_parts_missing_attachment_metadata_raises() -> None:
-    mock_registry = AsyncMock()
-    mock_registry.get_attachment.return_value = None
+async def test_process_content_parts_missing_attachment_metadata_raises(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
     processor = AttachmentProcessor(
-        attachment_registry=mock_registry,
+        attachment_registry=AttachmentRegistry(str(tmp_path), db_engine),
         app_config=AppConfig(),
         clock=SystemClock(),
     )
 
     with pytest.raises(ValueError, match="was not found in attachment registry"):
         await processor.process_content_parts(
-            db_context=MagicMock(),
+            db_context=Database(db_engine),
             conversation_id="conv",
             content_parts=cast(
                 "list[ContentPartDict]",
                 [{"type": "attachment", "attachment_id": "att-1"}],
             ),
             acting_user_id=None,
-            llm_client=MagicMock(),
+            llm_client=_default_llm(),
         )
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_process_content_parts_missing_attachment_content_raises() -> None:
-    mock_registry = AsyncMock()
-    mock_registry.get_attachment.return_value = MagicMock(mime_type="text/plain")
-    mock_registry.get_attachment_content.return_value = None
+async def test_process_content_parts_missing_attachment_content_raises(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    registry = AttachmentRegistry(str(tmp_path), db_engine)
+    db_context = Database(db_engine)
+    # A metadata row with no stored file behind it.
+    await registry.register_attachment(
+        db_context=db_context,
+        attachment_id="att-1",
+        source_type="user",
+        source_id="user-1",
+        mime_type="text/plain",
+        description="A file that was never stored",
+        size=10,
+    )
     processor = AttachmentProcessor(
-        attachment_registry=mock_registry,
+        attachment_registry=registry,
         app_config=AppConfig(),
         clock=SystemClock(),
     )
 
     with pytest.raises(RuntimeError, match="content could not be retrieved"):
         await processor.process_content_parts(
-            db_context=MagicMock(),
+            db_context=db_context,
             conversation_id="conv",
             content_parts=cast(
                 "list[ContentPartDict]",
                 [{"type": "attachment", "attachment_id": "att-1"}],
             ),
             acting_user_id=None,
-            llm_client=MagicMock(),
+            llm_client=_default_llm(),
         )
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_convert_urls_to_data_uris_invalid_internal_url_raises() -> None:
-    mock_registry = MagicMock()
+async def test_convert_urls_to_data_uris_invalid_internal_url_raises(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
     processor = AttachmentProcessor(
-        attachment_registry=mock_registry,
+        attachment_registry=AttachmentRegistry(str(tmp_path), db_engine),
         app_config=AppConfig(),
         clock=SystemClock(),
     )
 
     with pytest.raises(ValueError, match="Invalid attachment URL format"):
         await processor.convert_urls_to_data_uris(
-            MagicMock(),
+            Database(db_engine),
             [
                 {
                     "type": "image_url",
@@ -1055,22 +1167,31 @@ async def test_convert_urls_to_data_uris_invalid_internal_url_raises() -> None:
         )
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_convert_urls_to_data_uris_missing_file_raises() -> None:
-    mock_registry = MagicMock()
-    mock_registry.resolve_attachment_path = AsyncMock(
-        return_value=Path("/tmp/file-does-not-exist.png")
+async def test_convert_urls_to_data_uris_missing_file_raises(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    registry = AttachmentRegistry(str(tmp_path), db_engine)
+    db_context = Database(db_engine)
+    # A metadata row with no stored file behind it.
+    await registry.register_attachment(
+        db_context=db_context,
+        attachment_id="550e8400-e29b-41d4-a716-446655440000",
+        source_type="user",
+        source_id="user-1",
+        mime_type="image/png",
+        description="An image that was never stored",
+        size=10,
     )
     processor = AttachmentProcessor(
-        attachment_registry=mock_registry,
+        attachment_registry=registry,
         app_config=AppConfig(),
         clock=SystemClock(),
     )
 
     with pytest.raises(FileNotFoundError, match="Attachment file not found"):
         await processor.convert_urls_to_data_uris(
-            MagicMock(),
+            db_context,
             [
                 {
                     "type": "image_url",
@@ -1083,22 +1204,19 @@ async def test_convert_urls_to_data_uris_missing_file_raises() -> None:
         )
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_extract_conversation_context_propagates_registry_failures() -> None:
-    mock_registry = AsyncMock()
-    mock_registry.get_recent_attachments_for_conversation.side_effect = RuntimeError(
-        "attachment context query failed"
-    )
+async def test_extract_conversation_context_propagates_registry_failures(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
     processor = AttachmentProcessor(
-        attachment_registry=mock_registry,
+        attachment_registry=_UnqueryableAttachmentRegistry(str(tmp_path), db_engine),
         app_config=AppConfig(),
         clock=SystemClock(),
     )
 
     with pytest.raises(RuntimeError, match="attachment context query failed"):
         await processor.extract_conversation_context(
-            db_context=MagicMock(),
+            db_context=Database(db_engine),
             conversation_id="conv",
             max_age_hours=24,
             prompts={},
@@ -1106,9 +1224,10 @@ async def test_extract_conversation_context_propagates_registry_failures() -> No
         )
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_stream_done_attachment_metadata_lookup_propagates_failures() -> None:
+async def test_stream_done_attachment_metadata_lookup_propagates_failures(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
     class TwoStepToolThenContentLLM:
         def __init__(self) -> None:
             self.call_count = 0
@@ -1137,31 +1256,18 @@ async def test_stream_done_attachment_metadata_lookup_propagates_failures() -> N
             yield LLMStreamEvent(type="done", metadata={})
 
     service = _make_service(llm_client=cast("Any", TwoStepToolThenContentLLM()))
-    service.tool_executor.execute = AsyncMock(  # type: ignore[method-assign]
-        return_value=ToolExecutionResult(
-            stream_event=LLMStreamEvent(
-                type="tool_result",
-                tool_call_id="call-1",
-                tool_result="ok",
-            ),
-            llm_message=ToolMessage(
-                tool_call_id="call-1",
-                content="ok",
-                name="example_tool",
-            ),
-            auto_attachment_ids=["missing-att"],
-            explicit_attachment_ids=None,
-        )
+    service.tool_executor.execute = RecordingAsyncCall(  # type: ignore[method-assign]
+        _tool_result("call-1", ["missing-att"])
     )
-    mock_registry = AsyncMock()
-    mock_registry.get_attachment.return_value = None
-    service.attachment_processor.attachment_registry = mock_registry
+    service.attachment_processor.attachment_registry = AttachmentRegistry(
+        str(tmp_path), db_engine
+    )
 
     with pytest.raises(
         ValueError, match="Missing metadata for pending attachment 'missing-att'"
     ):
         async for _event, _message in service.llm_loop.run_stream(
-            db_context=MagicMock(),
+            db_context=Database(db_engine),
             messages=[
                 SystemMessage(content="system"),
                 UserMessage(content="hello"),
@@ -1178,11 +1284,10 @@ async def test_stream_done_attachment_metadata_lookup_propagates_failures() -> N
             pass
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_denial_escalation_ends_after_complete_tool_result_batch_without_model() -> (
-    None
-):
+async def test_denial_escalation_ends_after_complete_tool_result_batch_without_model(
+    db_engine: AsyncEngine,
+) -> None:
     class ModelCallMustNotRepeat:
         def __init__(self) -> None:
             self.call_count = 0
@@ -1241,7 +1346,7 @@ async def test_denial_escalation_ends_after_complete_tool_result_batch_without_m
     service.tool_executor.execute = execute_with_terminal_escalation  # type: ignore[method-assign]
     emitted: list[tuple[LLMStreamEvent, object | None]] = []
     async for event, message in service.llm_loop.run_stream(
-        db_context=MagicMock(),
+        db_context=Database(db_engine),
         messages=[
             SystemMessage(content="system"),
             UserMessage(content="hello"),
@@ -1283,9 +1388,10 @@ async def test_denial_escalation_ends_after_complete_tool_result_batch_without_m
     )
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_stream_attachment_selection_failure_uses_capped_auto_queue() -> None:
+async def test_stream_attachment_selection_failure_uses_capped_auto_queue(
+    db_engine: AsyncEngine,
+) -> None:
     class TwoStepToolThenContentLLM:
         def __init__(self) -> None:
             self.call_count = 0
@@ -1324,45 +1430,27 @@ async def test_stream_attachment_selection_failure_uses_capped_auto_queue() -> N
     service = _make_service(llm_client=cast("Any", TwoStepToolThenContentLLM()))
     service.app_config.attachment_selection_threshold = 0
     service.app_config.max_response_attachments = 1
-    service.tool_executor.execute = AsyncMock(  # type: ignore[method-assign]
-        side_effect=[
-            ToolExecutionResult(
-                stream_event=LLMStreamEvent(
-                    type="tool_result",
-                    tool_call_id="call-1",
-                    tool_result="ok",
-                ),
-                llm_message=ToolMessage(
-                    tool_call_id="call-1",
-                    content="ok",
-                    name="example_tool",
-                ),
-                auto_attachment_ids=["att-1"],
-                explicit_attachment_ids=None,
-            ),
-            ToolExecutionResult(
-                stream_event=LLMStreamEvent(
-                    type="tool_result",
-                    tool_call_id="call-2",
-                    tool_result="ok",
-                ),
-                llm_message=ToolMessage(
-                    tool_call_id="call-2",
-                    content="ok",
-                    name="example_tool",
-                ),
-                auto_attachment_ids=["att-2"],
-                explicit_attachment_ids=None,
-            ),
-        ],
+    results_by_call_id = {
+        "call-1": _tool_result("call-1", ["att-1"]),
+        "call-2": _tool_result("call-2", ["att-2"]),
+    }
+
+    async def execute_by_call_id(
+        tool_call: ToolCallItem, **kwargs: object
+    ) -> ToolExecutionResult:
+        del kwargs
+        return results_by_call_id[tool_call.id]
+
+    service.tool_executor.execute = execute_by_call_id  # type: ignore[method-assign]
+    selection = RecordingAsyncCall[list[str]](
+        AttachmentSelectionError("selection failed")
     )
-    service.attachment_processor.select_for_response = AsyncMock(  # type: ignore[method-assign]
-        side_effect=AttachmentSelectionError("selection failed")
-    )
+    service.attachment_processor.select_for_response = selection  # type: ignore[method-assign]
+    db_context = Database(db_engine)
 
     done_event = None
     async for event, _message in service.llm_loop.run_stream(
-        db_context=MagicMock(),
+        db_context=db_context,
         messages=[
             SystemMessage(content="system"),
             UserMessage(content="hello"),
@@ -1383,30 +1471,29 @@ async def test_stream_attachment_selection_failure_uses_capped_auto_queue() -> N
     assert done_event.metadata is not None
     attachment_ids = done_event.metadata.get("attachment_ids")
     assert attachment_ids == ["att-1"]
+    assert len(selection.calls) == 1
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_tool_executor_propagates_attachment_storage_failures() -> None:
+async def test_tool_executor_propagates_attachment_storage_failures(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
     service = _make_service()
-    mock_tools_provider = AsyncMock()
-    mock_tools_provider.execute_tool.return_value = ToolResult(
-        text="ok",
-        attachments=[
-            ToolAttachment(
-                mime_type="image/png",
-                content=b"test-bytes",
-                description="test attachment",
-            )
-        ],
+    service.tool_executor.tools_provider = _FixedResultToolsProvider(
+        ToolResult(
+            text="ok",
+            attachments=[
+                ToolAttachment(
+                    mime_type="image/png",
+                    content=b"test-bytes",
+                    description="test attachment",
+                )
+            ],
+        )
     )
-    service.tool_executor.tools_provider = mock_tools_provider
-
-    mock_registry = AsyncMock()
-    mock_registry.store_and_register_tool_attachment.side_effect = RuntimeError(
-        "attachment storage failed"
+    service.tool_executor.attachment_registry = _UnwritableAttachmentRegistry(
+        str(tmp_path), db_engine
     )
-    service.tool_executor.attachment_registry = mock_registry
 
     tool_call = ToolCallItem(
         id="call_attachment_store_fail",
@@ -1421,25 +1508,23 @@ async def test_tool_executor_propagates_attachment_storage_failures() -> None:
             conversation_id="conv",
             user_name="tester",
             turn_id="turn",
-            db_context=MagicMock(),
+            db_context=Database(db_engine),
             chat_interface=None,
             request_confirmation_callback=None,
         )
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_tool_executor_propagates_attach_to_response_metadata_failures() -> None:
+async def test_tool_executor_propagates_attach_to_response_metadata_failures(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
     service = _make_service()
-    mock_tools_provider = AsyncMock()
-    mock_tools_provider.execute_tool.return_value = (
+    service.tool_executor.tools_provider = _FixedResultToolsProvider(
         '{"status":"attachments_queued","attachment_ids":["missing-attachment"]}'
     )
-    service.tool_executor.tools_provider = mock_tools_provider
-
-    mock_registry = AsyncMock()
-    mock_registry.get_attachment.return_value = None
-    service.tool_executor.attachment_registry = mock_registry
+    service.tool_executor.attachment_registry = AttachmentRegistry(
+        str(tmp_path), db_engine
+    )
 
     tool_call = ToolCallItem(
         id="call_attach_metadata_fail",
@@ -1457,15 +1542,16 @@ async def test_tool_executor_propagates_attach_to_response_metadata_failures() -
             conversation_id="conv",
             user_name="tester",
             turn_id="turn",
-            db_context=MagicMock(),
+            db_context=Database(db_engine),
             chat_interface=None,
             request_confirmation_callback=None,
         )
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_tool_executor_rejects_missing_tool_call_id() -> None:
+async def test_tool_executor_rejects_missing_tool_call_id(
+    db_engine: AsyncEngine,
+) -> None:
     service = _make_service()
     tool_call = ToolCallItem(
         id="",
@@ -1480,7 +1566,7 @@ async def test_tool_executor_rejects_missing_tool_call_id() -> None:
             conversation_id="conv",
             user_name="tester",
             turn_id="turn",
-            db_context=MagicMock(),
+            db_context=Database(db_engine),
             chat_interface=None,
             request_confirmation_callback=None,
         )

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock
+from typing import TYPE_CHECKING
 
 import pytest
-from mcp.types import ListToolsResult, Tool, ToolAnnotations
+from mcp.types import Tool, ToolAnnotations
 
 from family_assistant.tools.mcp import (
     MCP_SERVER_STATUS_CONNECTED,
@@ -15,6 +13,7 @@ from family_assistant.tools.mcp import (
     MCPToolsProvider,
 )
 from family_assistant.tools.metadata import ToolTag
+from tests.mocks.fake_mcp_session import FakeListToolsSession
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -42,26 +41,12 @@ def _tool(
 
 def _session(tools: Sequence[Tool]) -> ClientSession:
     """A stand-in session that reports a fixed tool list."""
-    list_tools = AsyncMock(return_value=ListToolsResult(tools=list(tools)))
-    return cast("ClientSession", SimpleNamespace(list_tools=list_tools))
+    return FakeListToolsSession(tools).as_client_session()
 
 
 def _paginated_session(pages: Sequence[Sequence[Tool]]) -> ClientSession:
     """A stand-in session that hands out its tool list one page at a time."""
-    results = [
-        ListToolsResult(
-            tools=list(page),
-            nextCursor=str(index + 1) if index + 1 < len(pages) else None,
-        )
-        for index, page in enumerate(pages)
-    ]
-
-    async def list_tools(cursor: str | None = None) -> ListToolsResult:
-        return results[int(cursor) if cursor else 0]
-
-    return cast(
-        "ClientSession", SimpleNamespace(list_tools=AsyncMock(wraps=list_tools))
-    )
+    return FakeListToolsSession(pages=pages).as_client_session()
 
 
 def _provider(
@@ -256,10 +241,7 @@ async def test_failed_health_check_does_not_drop_the_cached_tools() -> None:
     """Tools survive a transport error until the reconnect decides otherwise."""
     provider = _provider(SERVER_ID)
     _register(provider, SERVER_ID, [_tool("search")])
-    session = cast(
-        "ClientSession",
-        SimpleNamespace(list_tools=AsyncMock(side_effect=TimeoutError())),
-    )
+    session = FakeListToolsSession(list_tools_error=TimeoutError()).as_client_session()
     provider._sessions[SERVER_ID] = session
 
     await provider._run_health_checks()

@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import time
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock
+from typing import TYPE_CHECKING
 
 import pytest
-from mcp.types import ListToolsResult
 
 from family_assistant.tools.mcp import (
     DEFAULT_RECONNECT_BACKOFF_MAX_SECONDS,
@@ -17,6 +14,7 @@ from family_assistant.tools.mcp import (
     MCPToolsProvider,
     reconnect_backoff_delay,
 )
+from tests.mocks.fake_mcp_session import FakeMcpSession
 
 if TYPE_CHECKING:
     from mcp import ClientSession
@@ -37,33 +35,33 @@ def _provider(**kwargs: float) -> MCPToolsProvider:
 def _make_session(*, healthy: bool = True) -> ClientSession:
     """A stand-in session whose health check passes or reports a dead transport."""
     error = None if healthy else ConnectionError("connection closed by peer")
-    send_ping = AsyncMock(return_value=None, side_effect=error)
-    list_tools = AsyncMock(
-        return_value=ListToolsResult(tools=[]),
-        side_effect=error,
-    )
-    return cast(
-        "ClientSession",
-        SimpleNamespace(send_ping=send_ping, list_tools=list_tools),
-    )
+    return FakeMcpSession(ping_error=error, list_tools_error=error).as_client_session()
 
 
-def _connect_stub(provider: MCPToolsProvider, *, succeed: bool) -> AsyncMock:
-    """Replace ``_connect_and_discover_mcp`` with a stub of a fixed outcome."""
+class _ConnectStub:
+    """Stands in for ``_connect_and_discover_mcp`` with a fixed outcome, counting calls."""
 
-    async def fake_connect(
-        server_id: str, server_conf: MCPServerConfig
+    def __init__(self, provider: MCPToolsProvider, *, succeed: bool) -> None:
+        self._provider = provider
+        self._succeed = succeed
+        self.await_count = 0
+
+    async def __call__(
+        self, server_id: str, server_conf: MCPServerConfig
     ) -> tuple[ClientSession | None, list[ToolDefinition], list[ToolDescriptor], dict]:
         del server_conf
-        if not succeed:
-            provider._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
+        self.await_count += 1
+        if not self._succeed:
+            self._provider._server_statuses[server_id] = MCP_SERVER_STATUS_FAILED
             return None, [], [], {}
-        provider._server_statuses[server_id] = MCP_SERVER_STATUS_CONNECTED
+        self._provider._server_statuses[server_id] = MCP_SERVER_STATUS_CONNECTED
         return _make_session(), [], [], {}
 
-    stub = AsyncMock(side_effect=fake_connect)
+
+def _connect_stub(provider: MCPToolsProvider, *, succeed: bool) -> _ConnectStub:
+    """Replace ``_connect_and_discover_mcp`` with a stub of a fixed outcome."""
+    stub = _ConnectStub(provider, succeed=succeed)
     provider._connect_and_discover_mcp = stub  # type: ignore[method-assign]
-    provider._close_server_connections = AsyncMock()  # type: ignore[method-assign]
     return stub
 
 

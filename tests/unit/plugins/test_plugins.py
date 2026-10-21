@@ -3,7 +3,7 @@
 from collections.abc import Iterator
 from pathlib import Path
 from typing import get_args
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from pydantic import SecretStr
@@ -20,6 +20,7 @@ from family_assistant.plugins.registry import PLUGINS, PLUGINS_BY_ID
 from family_assistant.plugins.runtime import PluginRuntime
 from family_assistant.tools.catalog import LOCAL_TOOL_METADATA_BY_NAME, TOOLS_DEFINITION
 from family_assistant.tools.metadata import ToolTag, join_tool_registrations
+from tests.mocks.home_assistant_client import make_home_assistant_client
 
 
 def _ha(**overrides: object) -> HomeAssistantConfig:
@@ -175,10 +176,10 @@ plugins:
 
 class TestRuntime:
     @pytest.fixture(autouse=True)
-    def _fake_client(self) -> Iterator[None]:
+    def _offline_sdk_client(self) -> Iterator[None]:
         with patch(
             "family_assistant.plugins.home_assistant.plugin.create_home_assistant_client",
-            side_effect=lambda **_: MagicMock(),
+            new=lambda **kwargs: make_home_assistant_client(**kwargs).wrapper,
         ):
             yield
 

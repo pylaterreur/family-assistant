@@ -2,14 +2,55 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 
 from family_assistant.plugins.ai_workers.backend import WorkerStatus
 from family_assistant.plugins.ai_workers.backends.docker import DockerBackend
 from family_assistant.plugins.ai_workers.config import DockerBackendConfig
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+class FakeDockerProcess:
+    """A finished ``docker`` CLI process with canned output."""
+
+    def __init__(self, stdout: bytes, stderr: bytes, returncode: int) -> None:
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, self._stderr
+
+
+class FakeDockerCli:
+    """Stands in for ``asyncio.create_subprocess_exec``, recording each argv."""
+
+    def __init__(self, stdout: bytes, stderr: bytes, returncode: int) -> None:
+        self._stdout = stdout
+        self._stderr = stderr
+        self._returncode = returncode
+        self.commands: list[tuple[str, ...]] = []
+
+    async def __call__(self, *argv: str, **_kwargs: object) -> FakeDockerProcess:
+        self.commands.append(argv)
+        return FakeDockerProcess(self._stdout, self._stderr, self._returncode)
+
+
+@contextmanager
+def fake_docker(
+    stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0
+) -> Iterator[FakeDockerCli]:
+    cli = FakeDockerCli(stdout, stderr, returncode)
+    with patch.object(asyncio, "create_subprocess_exec", new=cli):
+        yield cli
 
 
 @pytest.fixture
@@ -42,12 +83,7 @@ async def spawn_tracked_task(
     (tmp_path / "tasks" / task_id / "output").mkdir(exist_ok=True)
     (tmp_path / "tasks" / task_id / "prompt.md").write_text("Test prompt")
 
-    with patch("asyncio.create_subprocess_exec") as mock_exec:
-        mock_proc = AsyncMock()
-        mock_proc.returncode = 0
-        mock_proc.communicate.return_value = (f"{container_id}\n".encode(), b"")
-        mock_exec.return_value = mock_proc
-
+    with fake_docker(stdout=f"{container_id}\n".encode()) as docker:
         job_id = await backend.spawn_task(
             task_id=task_id,
             prompt_path=f"tasks/{task_id}/prompt.md",
@@ -58,6 +94,7 @@ async def spawn_tracked_task(
         )
 
     assert job_id == container_id
+    assert docker.commands[0][:2] == ("docker", "run")
     return job_id
 
 
@@ -112,12 +149,7 @@ class TestDockerBackendSpawnTask:
         (tmp_path / "tasks" / "task-123" / "output").mkdir()
         (tmp_path / "tasks" / "task-123" / "prompt.md").write_text("Test prompt")
 
-        with patch("asyncio.create_subprocess_exec") as mock_exec:
-            mock_proc = AsyncMock()
-            mock_proc.returncode = 0
-            mock_proc.communicate.return_value = (b"abc123containerid\n", b"")
-            mock_exec.return_value = mock_proc
-
+        with fake_docker(stdout=b"abc123containerid\n") as docker:
             job_id = await backend.spawn_task(
                 task_id="task-123",
                 prompt_path="tasks/task-123/prompt.md",
@@ -133,46 +165,40 @@ class TestDockerBackendSpawnTask:
             assert task.task_id == "task-123"
             assert task.status == WorkerStatus.RUNNING
             assert task.model == "claude"
+            assert len(docker.commands) == 1
+            assert docker.commands[0][:2] == ("docker", "run")
 
     @pytest.mark.asyncio
     async def test_spawn_task_failure(self, backend: DockerBackend) -> None:
         """Test spawn task handles docker failure."""
-        with patch("asyncio.create_subprocess_exec") as mock_exec:
-            mock_proc = AsyncMock()
-            mock_proc.returncode = 1
-            mock_proc.communicate.return_value = (b"", b"Error: image not found\n")
-            mock_exec.return_value = mock_proc
-
-            with pytest.raises(RuntimeError, match="Failed to start Docker container"):
-                await backend.spawn_task(
-                    task_id="task-123",
-                    prompt_path="tasks/task-123/prompt.md",
-                    output_dir="tasks/task-123/output",
-                    webhook_url="http://localhost:8000/webhook/event",
-                    model="claude",
-                    timeout_minutes=30,
-                )
+        with (
+            fake_docker(stderr=b"Error: image not found\n", returncode=1),
+            pytest.raises(RuntimeError, match="Failed to start Docker container"),
+        ):
+            await backend.spawn_task(
+                task_id="task-123",
+                prompt_path="tasks/task-123/prompt.md",
+                output_dir="tasks/task-123/output",
+                webhook_url="http://localhost:8000/webhook/event",
+                model="claude",
+                timeout_minutes=30,
+            )
 
     @pytest.mark.asyncio
     async def test_spawn_task_empty_container_id(self, backend: DockerBackend) -> None:
         """Test spawn task handles empty container ID."""
-        with patch("asyncio.create_subprocess_exec") as mock_exec:
-            mock_proc = AsyncMock()
-            mock_proc.returncode = 0
-            mock_proc.communicate.return_value = (b"", b"")
-            mock_exec.return_value = mock_proc
-
-            with pytest.raises(
-                RuntimeError, match="Docker returned empty container ID"
-            ):
-                await backend.spawn_task(
-                    task_id="task-123",
-                    prompt_path="tasks/task-123/prompt.md",
-                    output_dir="tasks/task-123/output",
-                    webhook_url="http://localhost:8000/webhook/event",
-                    model="claude",
-                    timeout_minutes=30,
-                )
+        with (
+            fake_docker(),
+            pytest.raises(RuntimeError, match="Docker returned empty container ID"),
+        ):
+            await backend.spawn_task(
+                task_id="task-123",
+                prompt_path="tasks/task-123/prompt.md",
+                output_dir="tasks/task-123/output",
+                webhook_url="http://localhost:8000/webhook/event",
+                model="claude",
+                timeout_minutes=30,
+            )
 
 
 class TestDockerBackendBuildCommand:
@@ -308,14 +334,18 @@ class TestDockerBackendGetTaskStatus:
         """Test getting status of running container."""
         container_id = await spawn_tracked_task(backend, tmp_path)
 
-        with patch("asyncio.create_subprocess_exec") as mock_exec:
-            mock_proc = AsyncMock()
-            mock_proc.returncode = 0
-            mock_proc.communicate.return_value = (b"running:0\n", b"")
-            mock_exec.return_value = mock_proc
-
+        with fake_docker(stdout=b"running:0\n") as docker:
             result = await backend.get_task_status(container_id)
             assert result.status == WorkerStatus.RUNNING
+            assert docker.commands == [
+                (
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.State.Status}}:{{.State.ExitCode}}",
+                    container_id,
+                )
+            ]
 
     @pytest.mark.asyncio
     async def test_get_status_exited_success(
@@ -324,15 +354,19 @@ class TestDockerBackendGetTaskStatus:
         """Test getting status of successfully exited container."""
         container_id = await spawn_tracked_task(backend, tmp_path)
 
-        with patch("asyncio.create_subprocess_exec") as mock_exec:
-            mock_proc = AsyncMock()
-            mock_proc.returncode = 0
-            mock_proc.communicate.return_value = (b"exited:0\n", b"")
-            mock_exec.return_value = mock_proc
-
+        with fake_docker(stdout=b"exited:0\n") as docker:
             result = await backend.get_task_status(container_id)
             assert result.status == WorkerStatus.SUCCESS
             assert result.exit_code == 0
+            assert docker.commands == [
+                (
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.State.Status}}:{{.State.ExitCode}}",
+                    container_id,
+                )
+            ]
 
         task = backend.get_task(container_id)
         assert task is not None
@@ -345,15 +379,19 @@ class TestDockerBackendGetTaskStatus:
         """Test getting status of container that exited with error."""
         container_id = await spawn_tracked_task(backend, tmp_path)
 
-        with patch("asyncio.create_subprocess_exec") as mock_exec:
-            mock_proc = AsyncMock()
-            mock_proc.returncode = 0
-            mock_proc.communicate.return_value = (b"exited:1\n", b"")
-            mock_exec.return_value = mock_proc
-
+        with fake_docker(stdout=b"exited:1\n") as docker:
             result = await backend.get_task_status(container_id)
             assert result.status == WorkerStatus.FAILED
             assert result.exit_code == 1
+            assert docker.commands == [
+                (
+                    "docker",
+                    "inspect",
+                    "--format",
+                    "{{.State.Status}}:{{.State.ExitCode}}",
+                    container_id,
+                )
+            ]
 
 
 class TestDockerBackendCancelTask:
@@ -366,14 +404,10 @@ class TestDockerBackendCancelTask:
         """Test cancelling a running task."""
         container_id = await spawn_tracked_task(backend, tmp_path)
 
-        with patch("asyncio.create_subprocess_exec") as mock_exec:
-            mock_proc = AsyncMock()
-            mock_proc.returncode = 0
-            mock_proc.communicate.return_value = (f"{container_id}\n".encode(), b"")
-            mock_exec.return_value = mock_proc
-
+        with fake_docker(stdout=f"{container_id}\n".encode()) as docker:
             result = await backend.cancel_task(container_id)
             assert result is True
+            assert docker.commands == [("docker", "stop", "--time=10", container_id)]
 
         task = backend.get_task(container_id)
         assert task is not None
@@ -392,11 +426,7 @@ class TestDockerBackendCancelTask:
         """Test cancelling already completed task returns False."""
         container_id = await spawn_tracked_task(backend, tmp_path)
 
-        with patch("asyncio.create_subprocess_exec") as mock_exec:
-            mock_proc = AsyncMock()
-            mock_proc.returncode = 0
-            mock_proc.communicate.return_value = (b"exited:0\n", b"")
-            mock_exec.return_value = mock_proc
+        with fake_docker(stdout=b"exited:0\n"):
             status_result = await backend.get_task_status(container_id)
         assert status_result.status == WorkerStatus.SUCCESS
 
