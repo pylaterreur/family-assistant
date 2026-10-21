@@ -8,6 +8,7 @@ from unittest.mock import (
     Mock,
     NonCallableMagicMock,
     PropertyMock,
+    ThreadingMock,
     create_autospec,
     patch,
 )
@@ -31,6 +32,7 @@ def bare_constructions() -> None:
     AsyncMock(side_effect=RuntimeError)
     NonCallableMagicMock()
     PropertyMock(return_value=3)
+    ThreadingMock()
     mock.MagicMock()
     unittest.mock.AsyncMock()
 

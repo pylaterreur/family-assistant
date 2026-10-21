@@ -23,7 +23,7 @@ note: |
   replacement (which would otherwise substitute a bare MagicMock).
 utils:
   mock-function:
-    regex: '^(((unittest\.)?mock|(\w+\.)*mocker)\.)?(Mock|MagicMock|AsyncMock|NonCallableMock|NonCallableMagicMock|PropertyMock)$'
+    regex: '^(((unittest\.)?mock|(\w+\.)*mocker)\.)?(Mock|MagicMock|AsyncMock|NonCallableMock|NonCallableMagicMock|PropertyMock|ThreadingMock)$'
   spec-set-true:
     kind: keyword_argument
     all:
@@ -81,7 +81,9 @@ rule:
     # any of its names is itself banned.
     - kind: aliased_import
       any:
-        - has: {field: name, regex: '^(unittest\.)?mock$'}
+        - all:
+            - has: {field: name, regex: '^unittest\.mock$'}
+            - inside: {kind: import_statement}
         - inside:
             kind: import_from_statement
             has: {field: module_name, regex: '^unittest\.mock$'}

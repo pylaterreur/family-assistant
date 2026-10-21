@@ -1,6 +1,7 @@
 """Fixture: specced mocks, explicit replacements and real fakes must not be flagged."""
 
 import os
+import unittest.mock
 from unittest import mock
 from unittest.mock import create_autospec, patch
 
@@ -15,6 +16,12 @@ class Client:
 class FakeClient:
     def fetch(self) -> str:
         return "fake"
+
+
+def unrelated_mock_alias() -> None:
+    from some_package import mock as helper  # noqa: PLC0415
+
+    del helper, unittest.mock
 
 
 def specced() -> None:
