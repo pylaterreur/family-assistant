@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -83,7 +84,7 @@ from tests.mocks.mock_llm import (  # pylint: disable=no-name-in-module
 from tests.mocks.recording_async_call import RecordingAsyncCall
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
     from pydantic import BaseModel
@@ -256,8 +257,14 @@ class _ScriptedAgentClient(GoogleGenAIClient):
         self.cancel_error: Exception | None = None
         self.cancelled: list[str] = []
         self.sandbox_entries: list[SandboxFileEntry] = []
-        self.respond_to_download: Callable[[str], bytes] | None = None
+        # May return the bytes or an awaitable of them, so a test can make a
+        # download stall the way the provider's do.
+        self.respond_to_download: (
+            Callable[[str], bytes] | Callable[[str], Awaitable[bytes]] | None
+        ) = None
         self.downloaded: list[str] = []
+        self.peek_steps: list[AgentStep] = []
+        self.peeked: list[tuple[str, float]] = []
 
     def only_start(self) -> _StartedInteraction:
         assert len(self.started) == 1, f"Expected one start, got {len(self.started)}"
@@ -301,7 +308,16 @@ class _ScriptedAgentClient(GoogleGenAIClient):
         _ = environment_id
         self.downloaded.append(path)
         assert self.respond_to_download is not None, "No download was scripted"
-        return self.respond_to_download(path)
+        content = self.respond_to_download(path)
+        if inspect.isawaitable(content):
+            return await content
+        return content
+
+    async def peek_agent_interaction(
+        self, interaction_id: str, *, read_seconds: float
+    ) -> list[AgentStep]:
+        self.peeked.append((interaction_id, read_seconds))
+        return list(self.peek_steps)
 
 
 def _google_client(started_id: str = "inter_started") -> _ScriptedAgentClient:
@@ -1964,21 +1980,21 @@ async def test_a_stalled_download_is_cut_off_and_retried(
     registry = AttachmentRegistry(
         storage_path=str(tmp_path), db_engine=db_engine, config=None
     )
-    client, download = _client_with_outputs({"model.3mf": b"3mf bytes"})
+    client = _client_with_outputs({"model.3mf": b"3mf bytes"})
     stalls = [True]
 
-    async def fetch(_environment_id: str, _path: str) -> bytes:
+    async def fetch(_path: str) -> bytes:
         if stalls.pop() if stalls else False:
             return await _never_answers()
         return b"3mf bytes"
 
-    download.side_effect = fetch
+    client.respond_to_download = fetch
     service = _make_service(client, attachment_registry=registry)
 
     collected = await _collect(service, db_engine)
 
     assert len(collected.attachment_ids) == 1
-    assert download.await_count == 2
+    assert len(client.downloaded) == 2
 
 
 @pytest.mark.asyncio
@@ -1992,15 +2008,15 @@ async def test_a_file_that_keeps_stalling_is_retried_on_the_next_read_keeping_th
     registry = AttachmentRegistry(
         storage_path=str(tmp_path), db_engine=db_engine, config=None
     )
-    client, download = _client_with_outputs({"a.stl": b"a", "b.stl": b"b"})
+    client = _client_with_outputs({"a.stl": b"a", "b.stl": b"b"})
     stalled = {"workspace/outputs/b.stl"}
 
-    async def fetch(_environment_id: str, path: str) -> bytes:
+    async def fetch(path: str) -> bytes:
         if path in stalled:
             return await _never_answers()
         return path.encode()
 
-    download.side_effect = fetch
+    client.respond_to_download = fetch
     service = _make_service(client, attachment_registry=registry)
 
     with pytest.raises(DelegationTransientError, match="stalled 3 times"):
@@ -2008,7 +2024,7 @@ async def test_a_file_that_keeps_stalling_is_retried_on_the_next_read_keeping_th
     stalled.clear()
     collected = await _collect(service, db_engine)
 
-    fetched = [call.args[1] for call in download.await_args_list]
+    fetched = list(client.downloaded)
     assert fetched.count("workspace/outputs/a.stl") == 1
     assert len(collected.attachment_ids) == 2
 
@@ -2026,12 +2042,12 @@ async def test_running_out_of_collection_budget_reschedules_rather_than_fails(
     registry = AttachmentRegistry(
         storage_path=str(tmp_path), db_engine=db_engine, config=None
     )
-    client, download = _client_with_outputs({"slow.glb": b"g"})
+    client = _client_with_outputs({"slow.glb": b"g"})
 
-    async def fetch(_environment_id: str, _path: str) -> bytes:
+    async def fetch(_path: str) -> bytes:
         return await _never_answers()
 
-    download.side_effect = fetch
+    client.respond_to_download = fetch
     service = _make_service(client, attachment_registry=registry)
 
     with pytest.raises(DelegationTransientError, match="took longer than"):
@@ -2047,12 +2063,12 @@ async def test_outputs_download_several_at_a_time(
         storage_path=str(tmp_path), db_engine=db_engine, config=None
     )
     names = [f"part{i}.stl" for i in range(6)]
-    client, download = _client_with_outputs({name: b"x" for name in names})
+    client = _client_with_outputs({name: b"x" for name in names})
     in_flight = 0
     peak = 0
     all_started = asyncio.Event()
 
-    async def fetch(_environment_id: str, _path: str) -> bytes:
+    async def fetch(_path: str) -> bytes:
         nonlocal in_flight, peak
         in_flight += 1
         peak = max(peak, in_flight)
@@ -2062,7 +2078,7 @@ async def test_outputs_download_several_at_a_time(
         in_flight -= 1
         return b"x"
 
-    download.side_effect = fetch
+    client.respond_to_download = fetch
     service = _make_service(client, attachment_registry=registry)
 
     collected = await _collect(service, db_engine)
@@ -2080,10 +2096,10 @@ async def test_a_failed_collection_leaves_no_download_running(
     registry = AttachmentRegistry(
         storage_path=str(tmp_path), db_engine=db_engine, config=None
     )
-    client, download = _client_with_outputs({"a.stl": b"a", "b.stl": b"b"})
+    client = _client_with_outputs({"a.stl": b"a", "b.stl": b"b"})
     cancelled: list[str] = []
 
-    async def fetch(_environment_id: str, path: str) -> bytes:
+    async def fetch(path: str) -> bytes:
         if path.endswith("a.stl"):
             raise DelegationPermanentError("403 permission denied")
         try:
@@ -2092,7 +2108,7 @@ async def test_a_failed_collection_leaves_no_download_running(
             cancelled.append(path)
             raise
 
-    download.side_effect = fetch
+    client.respond_to_download = fetch
     service = _make_service(client, attachment_registry=registry)
 
     with pytest.raises(DelegationPermanentError, match="403"):
@@ -2112,7 +2128,7 @@ async def test_an_unlisted_file_over_a_limit_frees_its_slot(
     registry = AttachmentRegistry(
         storage_path=str(tmp_path), db_engine=db_engine, config={"max_file_size": 4}
     )
-    client, _ = _client_with_outputs(
+    client = _client_with_outputs(
         {"a-huge.bin": b"x" * 9, "b.txt": b"b", "c.txt": b"c", "d.txt": b"d"},
         sizes_listed=False,
     )
@@ -2135,37 +2151,31 @@ async def test_a_peek_shows_the_latest_steps_and_newest_files(
     monkeypatch.setattr(interactions_agent_service, "PEEK_RECENT_STEPS", 2)
     monkeypatch.setattr(interactions_agent_service, "PEEK_FILES", 2)
     client = _antigravity_client("gemini-3.8-flash")
-    client.get_agent_interaction = AsyncMock(
-        return_value=Interaction(
-            id="inter_peek", status="in_progress", environment_id="env_peek"
-        )
+    client.poll_returns(
+        Interaction(id="inter_peek", status="in_progress", environment_id="env_peek")
     )
-    client.peek_agent_interaction = AsyncMock(
-        return_value=[
-            AgentStep(kind="thought", text="planning"),
-            AgentStep(kind="code_execution_call", text="python build.py"),
-            AgentStep(
-                kind="code_execution_result",
-                text="[STDOUT]\nbuilt 2 parts\n[STDERR]\nwarning: thin wall\n",
-            ),
-        ]
-    )
+    client.peek_steps = [
+        AgentStep(kind="thought", text="planning"),
+        AgentStep(kind="code_execution_call", text="python build.py"),
+        AgentStep(
+            kind="code_execution_result",
+            text="[STDOUT]\nbuilt 2 parts\n[STDERR]\nwarning: thin wall\n",
+        ),
+    ]
     at = datetime(2026, 10, 21, 8, 0, tzinfo=UTC)
-    client.list_sandbox_files = AsyncMock(
-        return_value=[
-            SandboxFileEntry(
-                path=f"workspace/{name}",
-                size_bytes=size,
-                mime_type=None,
-                modified=at + timedelta(minutes=minutes),
-            )
-            for name, size, minutes in (
-                ("old.stl", 10, 0),
-                ("plate.3mf", 2048, 9),
-                ("hat.stl", 1024, 5),
-            )
-        ]
-    )
+    client.sandbox_entries = [
+        SandboxFileEntry(
+            path=f"workspace/{name}",
+            size_bytes=size,
+            mime_type=None,
+            modified=at + timedelta(minutes=minutes),
+        )
+        for name, size, minutes in (
+            ("old.stl", 10, 0),
+            ("plate.3mf", 2048, 9),
+            ("hat.stl", 1024, 5),
+        )
+    ]
     service = _make_service(client)
 
     account = await service.peek_async("inter_peek")
