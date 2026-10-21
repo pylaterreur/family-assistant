@@ -13,7 +13,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 
 import httpx
 import sqlalchemy as sa
@@ -24,8 +24,18 @@ from sqlalchemy.sql.functions import (
 )
 
 from family_assistant.llm.messages import UserMessage
+from family_assistant.services.delegation_delivery import (
+    DELEGATION_DELIVERY_TASK_TYPE,
+)
 from family_assistant.storage.database import Database
 from family_assistant.storage.tasks import tasks_table
+
+if TYPE_CHECKING:
+    from family_assistant.services.delegation_delivery import (
+        DelegationDeliveryPayload,
+    )
+    from family_assistant.task_worker import TaskWorker
+    from family_assistant.tools.types import ToolExecutionContext
 
 T = TypeVar("T")
 
@@ -420,3 +430,38 @@ __all__ = [
     "wait_for_server",
     "wait_for_tasks_to_complete",
 ]
+
+
+async def deliver_queued_delegations(
+    worker: "TaskWorker",
+    exec_context: "ToolExecutionContext",
+    *,
+    exhaust_failures: bool = False,
+) -> int:
+    """Run the delegation deliveries the worker queued, as its queue would.
+
+    Terminal runs are delivered by a task of their own, so a test that drives a
+    handler directly runs the deliveries it queued with this. Each one is
+    marked done once it succeeds. A failure propagates and leaves it pending,
+    the way a retry would find it -- or, with ``exhaust_failures``, marks it
+    failed and moves on, as once its retries are spent, which leaves the run
+    to a later cleanup pass. Returns how many were run.
+    """
+    pending = await exec_context.db_context.tasks.get_all(
+        status="pending", task_type=DELEGATION_DELIVERY_TASK_TYPE
+    )
+    for task in pending:
+        payload = cast("DelegationDeliveryPayload", task["payload"])
+        try:
+            await worker.handle_delegation_delivery(exec_context, payload)
+        except Exception:
+            if not exhaust_failures:
+                raise
+            await exec_context.db_context.tasks.update_status(
+                task_id=task["task_id"], status="failed"
+            )
+            continue
+        await exec_context.db_context.tasks.update_status(
+            task_id=task["task_id"], status="done"
+        )
+    return len(pending)

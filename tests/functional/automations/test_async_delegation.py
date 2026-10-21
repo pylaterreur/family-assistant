@@ -51,6 +51,7 @@ from family_assistant.security.taint import (
     unknown_external_taint_metadata,
 )
 from family_assistant.services.attachment_registry import AttachmentRegistry
+from family_assistant.services.delegation_delivery import DELEGATION_DELIVERY_TASK_TYPE
 from family_assistant.services.tool_call_review import (
     ACTION_REVIEW_VERDICTS,
     ToolCallReviewConstraints,
@@ -86,7 +87,7 @@ from family_assistant.tools.types import (
     ToolExecutionContext,
 )
 from family_assistant.utils.clock import SystemClock
-from tests.helpers import wait_for_condition
+from tests.helpers import deliver_queued_delegations, wait_for_condition
 from tests.mocks.recording_chat_interface import ScriptedChatInterface
 
 if TYPE_CHECKING:
@@ -594,6 +595,7 @@ async def test_voice_delegation_delivers_direct_notice_without_waking_chat(
             "user_name": TEST_USER_NAME,
         },
     )
+    await deliver_queued_delegations(worker, context)
     assert source_service.wake_call_count == 0
     completed = await db_context.delegation_runs.get_by_delegation_id(
         result.data["delegation_id"]
@@ -681,6 +683,9 @@ async def test_delegate_to_service_background_reference_and_completion_notificat
             "conversation_id": TEST_CONVERSATION_ID,
             "user_name": TEST_USER_NAME,
         },
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
 
     assert len(target_service.calls) == 1
@@ -1075,6 +1080,9 @@ async def test_terminal_run_renotifies_when_not_yet_notified(
         _tool_context(db_context, processing_service, chat_interface),
         _payload("delegation_renotify"),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     # The terminal run was not re-executed, but the notification was delivered.
     assert target_service.calls == []
@@ -1095,6 +1103,93 @@ async def test_terminal_run_renotifies_when_not_yet_notified(
     assert notification_rows[0]["taint_metadata_version"] == "runtime_v3"
     assert notification_rows[0]["taint_metadata_json"] is not None
     assert notification_rows[0]["taint_metadata_json"]["max_tier"] == "unknown_external"
+
+
+@pytest.mark.asyncio
+async def test_a_poll_retry_queues_the_delivery_its_cut_off_attempt_never_did(
+    db_engine: AsyncEngine,
+) -> None:
+    """A poll that finalized a run but died before queuing delivery is repaired.
+
+    Its retry finds the run terminal; with the run still unnotified it queues
+    the delivery rather than returning, so the result is not left for the
+    hourly cleanup.
+    """
+    processing_service = _source_processing_service(FakeDelegatableService())
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
+    clock = SystemClock()
+    db_context = Database(engine=db_engine)
+    await _create_run(db_context, delegation_id="delegation_poll_retry")
+    await db_context.delegation_runs.mark_handed_off(
+        "delegation_poll_retry", clock.now()
+    )
+    await db_context.delegation_runs.mark_completed(
+        delegation_id="delegation_poll_retry",
+        result_text="finished remotely",
+        result_attachment_ids=[],
+        completed_at=clock.now(),
+    )
+    worker = _build_worker(db_engine, processing_service, chat_interface)
+
+    await worker.handle_delegation_poll(
+        _tool_context(db_context, processing_service, chat_interface),
+        _delegation_payload("delegation_poll_retry"),
+    )
+
+    assert chat_interface.sent == []
+    queued = await db_context.tasks.get_all(
+        status="pending", task_type=DELEGATION_DELIVERY_TASK_TYPE
+    )
+    assert [task["payload"] for task in queued] == [
+        {"delegation_id": "delegation_poll_retry", "force": False}
+    ]
+    assert (
+        await deliver_queued_delegations(
+            worker, _tool_context(db_context, processing_service, chat_interface)
+        )
+        == 1
+    )
+    assert len(chat_interface.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_finishing_a_run_queues_its_delivery_rather_than_delivering_inline(
+    db_engine: AsyncEngine,
+) -> None:
+    """The task that finishes a run leaves the follow-up to a task of its own.
+
+    Delivery can be a whole turn of the delegating profile, which must not run
+    in whatever is left of the finishing task's budget.
+    """
+    target_service = FakeDelegatableService()
+    processing_service = FakeWakeCapableSourceService(target_service)
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
+    db_context = Database(engine=db_engine)
+    await _create_run(db_context, delegation_id="delegation_queued_delivery")
+    await db_context.delegation_runs.mark_handed_off(
+        "delegation_queued_delivery", SystemClock().now()
+    )
+    worker = _build_worker(
+        db_engine, cast("ProcessingService", processing_service), chat_interface
+    )
+    context = _tool_context(
+        db_context, cast("ProcessingService", processing_service), chat_interface
+    )
+
+    await worker.handle_delegated_profile_run(
+        context, _payload("delegation_queued_delivery")
+    )
+
+    assert len(target_service.calls) == 1
+    assert processing_service.wake_call_count == 0
+    assert chat_interface.sent == []
+    assert await deliver_queued_delegations(worker, context) == 1
+    assert processing_service.wake_call_count == 1
+    run = await db_context.delegation_runs.get_by_delegation_id(
+        "delegation_queued_delivery"
+    )
+    assert run is not None
+    assert run["notified_at"] is not None
 
 
 @pytest.mark.asyncio
@@ -1131,6 +1226,9 @@ async def test_notification_uses_delegated_result_taint_not_trusted_parent(
     await worker.handle_delegated_profile_run(
         _tool_context(db_context, processing_service, chat_interface),
         _payload("delegation_tainted_result"),
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
 
     # The delegated turn ran (and read untrusted content) before notifying.
@@ -1200,6 +1298,9 @@ async def test_failed_delivery_is_not_recorded_as_notified(
             _tool_context(db_context, processing_service, chat_interface),
             _payload("delegation_send_fails"),
         )
+        await deliver_queued_delegations(
+            worker, _tool_context(db_context, processing_service, chat_interface)
+        )
 
     assert len(chat_interface.sent) == 1
     db_context = Database(engine=db_engine)
@@ -1260,6 +1361,14 @@ async def test_source_wake_delivery_failure_falls_back_without_recording_deliver
             chat_interface,
         ),
         _payload("delegation_source_send_fails"),
+    )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            db_context,
+            cast("ProcessingService", processing_service),
+            chat_interface,
+        ),
     )
 
     assert processing_service.wake_call_count == 1
@@ -1352,6 +1461,14 @@ async def test_source_wake_retry_resumes_at_delivery_without_rerunning_the_turn(
             ),
             _payload("delegation_source_wake_retry"),
         )
+        await deliver_queued_delegations(
+            worker,
+            _tool_context(
+                Database(engine=db_engine),
+                cast("ProcessingService", processing_service),
+                chat_interface,
+            ),
+        )
 
     await worker.handle_delegated_profile_run(
         _tool_context(
@@ -1360,6 +1477,14 @@ async def test_source_wake_retry_resumes_at_delivery_without_rerunning_the_turn(
             chat_interface,
         ),
         _payload("delegation_source_wake_retry"),
+    )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            Database(engine=db_engine),
+            cast("ProcessingService", processing_service),
+            chat_interface,
+        ),
     )
 
     # The retry resumed at delivery: the source profile was woken exactly once,
@@ -1427,6 +1552,14 @@ async def test_source_wake_error_result_falls_back_to_direct_notification(
             chat_interface,
         ),
         _payload("delegation_source_errors"),
+    )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            db_context,
+            cast("ProcessingService", processing_service),
+            chat_interface,
+        ),
     )
 
     assert processing_service.wake_call_count == 1
@@ -1497,6 +1630,14 @@ async def test_worker_commits_delegated_attachments_before_notification(
         ),
         _payload("delegation_with_attachment"),
     )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            db_context,
+            processing_service,
+            cast("ChatInterface", chat_interface),
+        ),
+    )
 
     assert chat_interface.sent_attachment_ids is not None
     assert len(chat_interface.sent_attachment_ids) == 1
@@ -1554,6 +1695,14 @@ async def test_source_wake_preserves_delegated_attachments(
             cast("ChatInterface", chat_interface),
         ),
         _payload("delegation_source_attachment"),
+    )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            db_context,
+            cast("ProcessingService", processing_service),
+            cast("ChatInterface", chat_interface),
+        ),
     )
 
     assert chat_interface.sent_attachment_ids is not None
@@ -1628,6 +1777,15 @@ async def test_source_wake_creates_history_row_for_attachment_only_web_response(
             attachment_registry=attachment_registry,
         ),
         _payload("delegation_web_attachment_only"),
+    )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            db_context,
+            cast("ProcessingService", processing_service),
+            chat_interface,
+            attachment_registry=attachment_registry,
+        ),
     )
 
     assert chat_interface.sent == []
@@ -1721,6 +1879,14 @@ async def test_source_wake_publishes_history_backed_nested_response_to_main_hist
         ),
         _payload("delegation_web_nested_visible"),
     )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            db_context,
+            cast("ProcessingService", processing_service),
+            chat_interface,
+        ),
+    )
 
     assert chat_interface.sent == []
 
@@ -1787,6 +1953,14 @@ async def test_source_wake_publishes_non_history_nested_response_to_main_thread(
             chat_interface,
         ),
         _payload("delegation_nested_ext_visible"),
+    )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            db_context,
+            cast("ProcessingService", processing_service),
+            chat_interface,
+        ),
     )
 
     assert len(chat_interface.sent) == 1
@@ -1863,6 +2037,15 @@ async def test_source_wake_sends_text_for_attachment_only_non_history_response(
         ),
         _payload("delegation_attachment_only_send"),
     )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            db_context,
+            cast("ProcessingService", processing_service),
+            cast("ChatInterface", chat_interface),
+            attachment_registry=attachment_registry,
+        ),
+    )
 
     assert chat_interface.sent_text == "Delegated task finished."
     assert chat_interface.sent_attachment_ids is not None
@@ -1919,6 +2102,9 @@ async def test_running_run_is_failed_not_reexecuted(db_engine: AsyncEngine) -> N
         _tool_context(db_context, processing_service, chat_interface),
         _payload("delegation_interrupted"),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     assert target_service.calls == []
     assert len(chat_interface.sent) == 1
@@ -1968,6 +2154,9 @@ async def test_a_run_that_outlasts_its_budget_is_failed_as_timed_out(
         _tool_context(db_context, processing_service, chat_interface),
         _payload("delegation_slow"),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     assert len(target_service.calls) == 1
     assert len(chat_interface.sent) == 1
@@ -2016,6 +2205,9 @@ async def test_reaper_fails_and_notifies_stale_run(
     await worker.handle_delegation_run_cleanup(
         _tool_context(db_context, processing_service, chat_interface),
         {"running_timeout_seconds": 60.0},
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
 
     assert len(chat_interface.sent) == 1
@@ -2122,6 +2314,9 @@ async def test_cleanup_recovers_terminal_unnotified_run(
     await worker.handle_delegation_run_cleanup(
         _tool_context(db_context, processing_service, chat_interface),
         {"running_timeout_seconds": 60.0},
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
 
     assert len(chat_interface.sent) == 1
@@ -2647,6 +2842,9 @@ async def test_api_delegation_completion_stored_in_history(
         _tool_context(db_context, processing_service, chat_interface),
         _payload("delegation_api"),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     assert chat_interface.sent == []
     db_context = Database(engine=db_engine)
@@ -2842,6 +3040,14 @@ async def test_source_wake_can_request_durable_confirmation(
             chat_interface,
         ),
         _payload("delegation_wake_confirm"),
+    )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            db_context,
+            cast("ProcessingService", processing_service),
+            chat_interface,
+        ),
     )
 
     assert processing_service.confirmation_outcome is not None
@@ -3226,6 +3432,9 @@ async def test_pollable_delegation_deterministic_submit_error_fails_fast(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
@@ -3385,6 +3594,9 @@ async def test_pollable_delegation_polls_to_completion(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     poll_payload = _delegation_payload(delegation_id)
     # First poll: still pending -> reschedules, bumps the attempt counter.
@@ -3392,6 +3604,9 @@ async def test_pollable_delegation_polls_to_completion(
     await worker.handle_delegation_poll(
         _tool_context(db_context, processing_service, chat_interface),
         poll_payload,
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
@@ -3404,6 +3619,9 @@ async def test_pollable_delegation_polls_to_completion(
     await worker.handle_delegation_poll(
         _tool_context(db_context, processing_service, chat_interface),
         poll_payload,
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
@@ -3532,10 +3750,16 @@ async def test_a_pollable_run_that_persists_no_history_is_tainted_conservatively
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
     db_context = Database(engine=db_engine)
     await worker.handle_delegation_poll(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
 
     assert len(chat_interface.sent) == 1
@@ -3740,6 +3964,9 @@ async def test_deep_research_delegation_polls_to_completion_and_notifies(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
@@ -3756,6 +3983,9 @@ async def test_deep_research_delegation_polls_to_completion_and_notifies(
         _tool_context(db_context, processing_service, chat_interface),
         poll_payload,
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
     assert run["status"] == "awaiting_remote"
@@ -3766,6 +3996,9 @@ async def test_deep_research_delegation_polls_to_completion_and_notifies(
     await worker.handle_delegation_poll(
         _tool_context(db_context, processing_service, chat_interface),
         poll_payload,
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
@@ -3830,6 +4063,9 @@ async def test_coder_list_environment_delivers_result(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
@@ -3846,6 +4082,9 @@ async def test_coder_list_environment_delivers_result(
         _tool_context(db_context, processing_service, chat_interface),
         poll_payload,
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
     assert run["status"] == "awaiting_remote"
@@ -3856,6 +4095,9 @@ async def test_coder_list_environment_delivers_result(
     await worker.handle_delegation_poll(
         _tool_context(db_context, processing_service, chat_interface),
         poll_payload,
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
@@ -3891,6 +4133,9 @@ async def test_pollable_delegation_synchronous_remote_completes_on_submit(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
@@ -3921,6 +4166,9 @@ async def test_reap_stale_awaiting_remote_cancels_and_fails(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
     # Age the run past the wall-clock cap so the reaper gives up on it.
     await db_context.execute(
         update(delegation_runs_table)
@@ -3932,6 +4180,9 @@ async def test_reap_stale_awaiting_remote_cancels_and_fails(
     await worker.handle_delegation_run_cleanup(
         _tool_context(db_context, processing_service, chat_interface),
         {},
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
 
     assert target.cancelled == [target.submitted[0][2]]
@@ -3966,6 +4217,9 @@ async def test_late_poll_past_cap_delivers_terminal_result(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
     # Age the run past the cap so the poll fires "late".
     await db_context.execute(
         update(delegation_runs_table)
@@ -3977,6 +4231,9 @@ async def test_late_poll_past_cap_delivers_terminal_result(
     await worker.handle_delegation_poll(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
@@ -4007,6 +4264,9 @@ async def test_late_poll_past_cap_cancels_when_still_pending(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
     await db_context.execute(
         update(delegation_runs_table)
         .where(delegation_runs_table.c.delegation_id == delegation_id)
@@ -4017,6 +4277,9 @@ async def test_late_poll_past_cap_cancels_when_still_pending(
     await worker.handle_delegation_poll(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
@@ -4094,12 +4357,18 @@ async def test_pollable_delegation_poll_permanent_error_fails_fast(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     # A non-transport error fails the run immediately rather than looping to cap.
     db_context = Database(engine=db_engine)
     await worker.handle_delegation_poll(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
@@ -4189,6 +4458,9 @@ async def test_pollable_delegation_recovers_when_submit_never_landed(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
     assert run["status"] == "awaiting_remote"
@@ -4200,6 +4472,9 @@ async def test_pollable_delegation_recovers_when_submit_never_landed(
     await worker.handle_delegation_poll(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
@@ -4213,6 +4488,9 @@ async def test_pollable_delegation_recovers_when_submit_never_landed(
     await worker.handle_delegation_poll(
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
@@ -5092,6 +5370,12 @@ async def test_background_authenticated_outcome_survives_generic_worker_prose(
             db, cast("ProcessingService", processing_service), chat_interface
         ),
         _payload(delegation_id),
+    )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            db, cast("ProcessingService", processing_service), chat_interface
+        ),
     )
     rows = await db.fetch_all(
         select(message_history_table).where(

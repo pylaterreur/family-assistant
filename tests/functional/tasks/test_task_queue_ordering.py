@@ -7,8 +7,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from family_assistant.storage.database import Database
-from family_assistant.storage.repositories.tasks import TaskAlreadyExistsError
-from family_assistant.storage.tasks import TaskPriority
+from family_assistant.storage.tasks import TaskAlreadyExistsError, TaskPriority
 
 TASK_TYPE = "ordering_probe"
 

@@ -126,6 +126,17 @@ class TaskPriority(IntEnum):
         return self.name.lower()
 
 
+class TaskAlreadyExistsError(RuntimeError):
+    """A non-system task id is already in the queue.
+
+    A deterministic task id is how a producer says "one of these at a time",
+    so the collision is information rather than a failure: the work is already
+    in flight. Typed, so a producer that means it can catch this and nothing
+    else; a subclass of RuntimeError, because that is what this has always
+    raised and a caller that catches the general case still does.
+    """
+
+
 @dataclass(frozen=True)
 class TaskAttempt:
     """Which attempt of a task is running, and whether it is the last one.

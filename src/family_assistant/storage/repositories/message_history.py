@@ -2106,11 +2106,20 @@ class MessageHistoryRepository(BaseRepository):
         turn_id: str,
     ) -> MessageHistoryRow | None:
         """Retrieves the user message row that started a processing turn."""
+        return await self.get_first_row_by_turn_id(turn_id, role="user")
+
+    async def get_first_row_by_turn_id(
+        self,
+        turn_id: str,
+        *,
+        role: Literal["user", "system"],
+    ) -> MessageHistoryRow | None:
+        """The turn's earliest row with ``role``: the trigger a turn was started by."""
         stmt = (
             select(message_history_table)
             .where(
                 message_history_table.c.turn_id == turn_id,
-                message_history_table.c.role == "user",
+                message_history_table.c.role == role,
             )
             .order_by(message_history_table.c.internal_id.asc())
             .limit(1)

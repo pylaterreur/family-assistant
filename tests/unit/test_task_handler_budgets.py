@@ -6,6 +6,10 @@ parking handler with the timeout but not the exclusion would occupy the very
 capacity that has to run the task releasing it.
 """
 
+from family_assistant.services.delegation_delivery import (
+    DELEGATION_DELIVERY_TASK_TYPE,
+)
+from family_assistant.storage.repositories.tasks import STALE_TASK_TIMEOUT_MINUTES
 from family_assistant.task_worker import (
     DEFAULT_TASK_HANDLER_BUDGETS,
     DEFAULT_TASK_HANDLER_TIMEOUT_OVERRIDES,
@@ -68,3 +72,13 @@ def test_the_delegated_run_deadline_expires_before_the_worker_cancels_it() -> No
     assert DELEGATED_RUN_TURN_BUDGET_SECONDS >= 1800
     assert handler_timeout > DELEGATED_RUN_TURN_BUDGET_SECONDS
     assert handler_timeout < DELEGATION_RUN_STALE_SECONDS
+
+
+def test_a_delegation_delivery_finishes_before_its_claim_goes_stale() -> None:
+    """A live delivery is never reclaimed into a second, concurrent wake turn."""
+    handler_timeout = DEFAULT_TASK_HANDLER_TIMEOUT_OVERRIDES[
+        DELEGATION_DELIVERY_TASK_TYPE
+    ]
+    assert handler_timeout > TASK_HANDLER_TIMEOUT
+    assert handler_timeout < STALE_TASK_TIMEOUT_MINUTES * 60
+    assert DELEGATION_DELIVERY_TASK_TYPE not in PARKING_TASK_TYPES

@@ -49,6 +49,7 @@ from family_assistant.interfaces import ChatInterface
 from family_assistant.processing import ProcessingService  # Import ProcessingService
 from family_assistant.processing.message_time import strip_sent_at_label
 from family_assistant.services.attachment_registry import AttachmentRegistry
+from family_assistant.services.delegation_delivery import DELEGATION_DELIVERY_TASK_TYPE
 
 # Import the metadata and the original engine object from your storage base
 from family_assistant.storage import init_db  # Import init_db
@@ -846,6 +847,10 @@ async def task_worker_manager(
             worker.register_task_handler(
                 "delegation_run_cleanup",
                 worker.handle_delegation_run_cleanup,
+            )
+            worker.register_task_handler(
+                DELEGATION_DELIVERY_TASK_TYPE,
+                worker.handle_delegation_delivery,
             )
         worker.register_task_handler(
             SCHEDULE_AUTOMATION_ADVANCE_TASK_TYPE,

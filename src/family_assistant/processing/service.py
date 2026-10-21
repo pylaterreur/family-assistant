@@ -1750,8 +1750,15 @@ class ProcessingService:
     def _replace_historical_delegation_wake_with_active_system_trigger(
         messages_for_llm: list[LLMMessage],
         trigger_content: str,
+        *,
+        in_place: bool = False,
     ) -> None:
-        """Make the current wake a system trigger without replaying old wakes as system."""
+        """Make the current wake a system trigger without replaying old wakes as system.
+
+        ``in_place`` keeps the trigger where its row is: on a resume the turn's
+        own tool calls follow it, and moving it after them would ask the model
+        to start the work again.
+        """
         delegation_reference_line = next(
             (
                 line
@@ -1772,6 +1779,9 @@ class ProcessingService:
                 )
                 and delegation_reference_line in msg.content
             ) or msg.content == historical_trigger:
+                if in_place:
+                    messages_for_llm[index] = SystemMessage(content=trigger_content)
+                    return
                 messages_for_llm.pop(index)
                 break
         messages_for_llm.append(SystemMessage(content=trigger_content))
@@ -1975,12 +1985,19 @@ class ProcessingService:
         # producer before it runs still leaves the prompt durable. Only the web
         # path sets this; other callers insert here as usual, so we avoid an extra
         # read on their (often single-connection SQLite) db_context.
+        #
+        # A resumed system-triggered turn (a delegation wake) finds its trigger
+        # the same way. Its caller persists the turn's data row before the
+        # trigger, so a run cut off between the two leaves no trigger behind;
+        # that one is saved now, which is all the original run would have done.
         existing_user_row = (
-            await db_context.message_history.get_user_row_by_turn_id(turn_id)
-            if (reuse_existing_user_row or resume) and trigger_role == "user"
+            await db_context.message_history.get_first_row_by_turn_id(
+                turn_id, role=trigger_role
+            )
+            if resume or (reuse_existing_user_row and trigger_role == "user")
             else None
         )
-        if resume and existing_user_row is None:
+        if resume and existing_user_row is None and trigger_role == "user":
             raise RuntimeError(
                 f"Cannot resume turn {turn_id}: its user message is not in history"
             )
@@ -2037,6 +2054,7 @@ class ProcessingService:
             self._replace_historical_delegation_wake_with_active_system_trigger(
                 active_messages,
                 user_content_for_history,
+                in_place=resume,
             )
         window_messages = self._repaired_window(window_messages, conversation_id)
         synthesized, dropped = self._repair_unmatched_tool_calls(active_messages)

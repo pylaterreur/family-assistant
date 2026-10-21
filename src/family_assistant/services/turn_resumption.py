@@ -84,6 +84,8 @@ class TurnResumePayload(BaseModel):
     model_selection: dict[str, str | None] | None = None
     # How many times this turn has been relaunched before this run.
     attempt: int = 0
+    # The delegation a wake turn reports on, for the resumer that redelivers it.
+    delegation_id: str | None = None
 
     def next_attempt(self) -> TurnResumePayload:
         return self.model_copy(update={"attempt": self.attempt + 1})
