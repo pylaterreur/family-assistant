@@ -450,3 +450,56 @@ class TestThoughtSignatureConversion:
             f"Thought signature mismatch: expected {test_function_sig}, "
             f"got {fc_part.thought_signature}"
         )
+
+    async def test_stream_reads_only_the_first_candidate(
+        self, google_client: GoogleGenAIClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Alternative candidates are not merged into the answer or run as calls."""
+
+        def candidate(text: str, tool: str) -> genai_types.Candidate:
+            return genai_types.Candidate(
+                content=genai_types.Content(
+                    role="model",
+                    parts=[
+                        genai_types.Part(text=text),
+                        genai_types.Part(
+                            function_call=genai_types.FunctionCall(name=tool, args={})
+                        ),
+                    ],
+                )
+            )
+
+        chunk = genai_types.GenerateContentResponse(
+            candidates=[candidate("First.", "first_tool"), candidate("Second.", "x")]
+        )
+
+        async def stream() -> "AsyncIterator[genai_types.GenerateContentResponse]":
+            yield chunk
+
+        async def generate_content_stream(
+            *,
+            model: str,
+            contents: object,
+            config: object = None,
+        ) -> "AsyncIterator[genai_types.GenerateContentResponse]":
+            return stream()
+
+        monkeypatch.setattr(
+            google_client.client.aio.models,
+            "generate_content_stream",
+            generate_content_stream,
+        )
+
+        events = [
+            event
+            async for event in google_client.generate_response_stream(
+                messages=[UserMessage(role="user", content="Go.")]
+            )
+        ]
+
+        assert [e.content for e in events if e.type == "content"] == ["First."]
+        assert [
+            e.tool_call.function.name
+            for e in events
+            if e.type == "tool_call" and e.tool_call is not None
+        ] == ["first_tool"]
