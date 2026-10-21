@@ -72,8 +72,9 @@ await page.locator('[data-testid="assistant-message"]').first.wait_for(state="vi
 **Pattern**: constructing `Mock`, `MagicMock`, `AsyncMock`, `NonCallableMock`,
 `NonCallableMagicMock` or `PropertyMock` directly; `create_autospec(...)` without `spec_set=True`;
 and `patch(...)` / `patch.object(...)` with neither `autospec=True` nor an explicit replacement
-(`new=` or the positional `new` argument), since those substitute a bare `MagicMock`. Applies to all
-Python files; `patch.dict` is not affected.
+(`new=` or the positional `new` argument), since those substitute a bare `MagicMock`. Aliasing
+`unittest.mock` or any name imported from it is banned too, because an alias would hide the call
+from every other pattern. Applies to all Python files; `patch.dict` is not affected.
 
 **Why it's banned**: a bare mock accepts any attribute and any call signature, so the test keeps
 passing after the interface it stands in for changes, and heavily mocked tests tend to assert the
@@ -90,8 +91,10 @@ with patch("family_assistant.module.ExternalClient", autospec=True) as client_cl
 with patch.object(service, "fetch", new=fake_fetch): ...
 ```
 
-Files that predate the rule are listed in the baseline exemption in `exemptions.yml`. That list only
-shrinks: remove a file once its mocks are replaced, and never add one.
+Files that predate the rule are listed in the baseline exemption in `exemptions.yml`. The exemption
+is per file, so it does not stop new bare mocks inside a listed file; it exists only while the
+burn-down removes those files. The list only shrinks: remove a file once its mocks are replaced, and
+never add one.
 
 ## Datetime Correctness
 

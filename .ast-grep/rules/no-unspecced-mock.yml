@@ -38,34 +38,48 @@ utils:
     kind: keyword_argument
     has: {field: name, regex: '^new$'}
 rule:
-  kind: call
   any:
-    - has:
-        field: function
-        matches: mock-function
-    - all:
+    - kind: call
+      any:
         - has:
             field: function
-            regex: '^((unittest\.)?mock\.)?create_autospec$'
-        - not:
-            has: {field: arguments, has: {matches: spec-set-true}}
-    - all:
-        - has:
-            field: function
-            regex: '^((unittest\.)?mock\.)?patch$'
-        - not:
-            has: {field: arguments, has: {any: [{matches: autospec-true}, {matches: new-keyword}]}}
-        - not:
-            has:
-              field: arguments
-              has: {nthChild: 2, not: {any: [{kind: keyword_argument}, {kind: list_splat}, {kind: dictionary_splat}]}}
-    - all:
-        - has:
-            field: function
-            regex: '^((unittest\.)?mock\.)?patch\.object$'
-        - not:
-            has: {field: arguments, has: {any: [{matches: autospec-true}, {matches: new-keyword}]}}
-        - not:
-            has:
-              field: arguments
-              has: {nthChild: 3, not: {any: [{kind: keyword_argument}, {kind: list_splat}, {kind: dictionary_splat}]}}
+            matches: mock-function
+        - all:
+            - has:
+                field: function
+                regex: '^((unittest\.)?mock\.)?create_autospec$'
+            - not:
+                has: {field: arguments, has: {matches: spec-set-true}}
+        - all:
+            - has:
+                field: function
+                regex: '^((unittest\.)?mock\.)?patch$'
+            - not:
+                has: {field: arguments, has: {any: [{matches: autospec-true}, {matches: new-keyword}]}}
+            - not:
+                has:
+                  field: arguments
+                  has: {nthChild: 2, not: {any: [{kind: keyword_argument}, {kind: list_splat}, {kind: dictionary_splat}]}}
+        - all:
+            - has:
+                field: function
+                regex: '^((unittest\.)?mock\.)?patch\.object$'
+            - not:
+                has: {field: arguments, has: {any: [{matches: autospec-true}, {matches: new-keyword}]}}
+            - not:
+                has:
+                  field: arguments
+                  has: {nthChild: 3, not: {any: [{kind: keyword_argument}, {kind: list_splat}, {kind: dictionary_splat}]}}
+    # An alias would hide every pattern above, so aliasing the mock module or
+    # any of its names is itself banned.
+    - kind: aliased_import
+      any:
+        - has: {field: name, regex: '^(unittest\.)?mock$'}
+        - inside:
+            kind: import_from_statement
+            has: {field: module_name, regex: '^unittest\.mock$'}
+        - all:
+            - has: {field: name, regex: '^mock$'}
+            - inside:
+                kind: import_from_statement
+                has: {field: module_name, regex: '^unittest$'}

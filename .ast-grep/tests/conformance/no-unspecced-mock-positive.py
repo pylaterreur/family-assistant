@@ -52,3 +52,12 @@ def patches_without_spec() -> None:
 @patch("module.Client")
 def decorated(client: object) -> None:
     del client
+
+
+def aliased_imports() -> None:
+    import unittest.mock as um  # noqa: PLC0415
+    from unittest import mock as mocker  # noqa: PLC0415
+    from unittest.mock import MagicMock as Magic  # noqa: PLC0415
+    from unittest.mock import patch as p  # noqa: PLC0415
+
+    del um, mocker, Magic, p
