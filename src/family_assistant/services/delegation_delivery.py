@@ -68,6 +68,23 @@ async def queue_delegation_delivery(
         "force": force,
     }
     await tasks.delete_finished(task_id)
+    if await _enqueue_delivery(tasks, task_id, payload):
+        return
+    # The row in the way may have finished between the delete and the insert,
+    # in which case nothing is left to deliver. Once more settles it: a row
+    # that is still there now is active.
+    if await tasks.delete_finished(task_id) and await _enqueue_delivery(
+        tasks, task_id, payload
+    ):
+        return
+    logger.info(
+        "Delivery of delegation %s is already queued or running.", delegation_id
+    )
+
+
+async def _enqueue_delivery(
+    tasks: TasksRepository, task_id: str, payload: DelegationDeliveryPayload
+) -> bool:
     try:
         await tasks.enqueue(
             task_id=task_id,
@@ -76,22 +93,22 @@ async def queue_delegation_delivery(
             priority=TaskPriority.INTERACTIVE,
         )
     except TaskAlreadyExistsError:
-        logger.info(
-            "Delivery of delegation %s is already queued or running.", delegation_id
-        )
+        return False
+    return True
 
 
 async def redeliver_now(
-    tasks: TasksRepository, delegation_id: str, *, now: datetime
+    tasks: TasksRepository, delegation_id: str, *, now: datetime, claimed_by: str
 ) -> None:
     """Run the delegation's delivery as soon as a worker is free.
 
-    A claimed delivery is released: this is called once the process that
-    claimed it stopped renewing its turn lease. A finished one is queued
-    again, forced -- a wake turn exists only because its delivery was due.
+    ``claimed_by``'s claim is released: this is called once the process that
+    holds it stopped renewing its turn lease. A finished delivery is queued
+    again, forced -- a wake turn exists only because its delivery was due. A
+    delivery another worker has claimed since is left to it.
     """
     task_id = delegation_delivery_task_id(delegation_id)
-    if await tasks.release_claim(task_id, now):
+    if await tasks.release_claim(task_id, now, locked_by=claimed_by):
         return
     if await tasks.reschedule_pending([task_id], now):
         return
@@ -116,10 +133,14 @@ class DelegationWakeResumer:
         await self._redeliver(payload)
 
     async def _redeliver(self, payload: TurnResumePayload) -> None:
-        if payload.delegation_id is None:
+        if payload.delegation_id is None or payload.claimed_by is None:
             raise ValueError(
-                f"Delegation wake turn {payload.turn_id} has no delegation id"
+                f"Delegation wake turn {payload.turn_id} has no delegation id "
+                "or claiming worker"
             )
         await redeliver_now(
-            self._database.tasks, payload.delegation_id, now=self._clock.now()
+            self._database.tasks,
+            payload.delegation_id,
+            now=self._clock.now(),
+            claimed_by=payload.claimed_by,
         )

@@ -4803,6 +4803,7 @@ class TaskWorker:
                 processing_profile_id=source_service.service_config.id,
                 attempt=attempt.retry_count if attempt is not None else 0,
                 delegation_id=run["delegation_id"],
+                claimed_by=self.worker_id,
             ),
         )
 

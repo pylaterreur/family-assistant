@@ -38,6 +38,7 @@ from family_assistant.services.delegation_delivery import (
     DelegationWakeResumer,
     delegation_delivery_task_id,
     queue_delegation_delivery,
+    redeliver_now,
 )
 from family_assistant.services.turn_resumption import (
     TURN_RESUME_TASK_TYPE,
@@ -46,6 +47,7 @@ from family_assistant.services.turn_resumption import (
 from family_assistant.storage import message_history_table
 from family_assistant.storage.database import Database
 from family_assistant.storage.repositories.notes import NoteReadPolicy
+from family_assistant.storage.repositories.tasks import TasksRepository
 from family_assistant.storage.tasks import TaskPriority, tasks_table
 from family_assistant.task_worker import TaskWorker
 from family_assistant.tools.catalog import (
@@ -417,7 +419,7 @@ async def test_a_turn_suspended_by_a_shutdown_is_resumed_through_its_lease(
     delegation_id = await _finished_run(db_engine)
     await queue_delegation_delivery(db.tasks, delegation_id, force=False)
     claimed = await db.tasks.dequeue(
-        worker_id="dying-worker",
+        worker_id=dying_worker.worker_id,
         task_types=[DELEGATION_DELIVERY_TASK_TYPE],
         current_time=SystemClock().now(),
     )
@@ -506,6 +508,82 @@ async def test_a_finished_delivery_is_queued_again_when_the_run_still_needs_one(
     task_id = delegation_delivery_task_id(delegation_id)
     await queue_delegation_delivery(db.tasks, delegation_id, force=False)
     await db.tasks.update_status(task_id=task_id, status="failed")
+
+    await queue_delegation_delivery(db.tasks, delegation_id, force=True)
+
+    rows = await db.tasks.get_all(task_type=DELEGATION_DELIVERY_TASK_TYPE)
+    assert [(row["status"], row["payload"]) for row in rows] == [
+        ("pending", {"delegation_id": delegation_id, "force": True})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_late_lease_leaves_a_newer_claim_on_the_delivery_alone(
+    db_engine: AsyncEngine,
+) -> None:
+    """A lease that comes due after the stale-claim reclaim releases nothing.
+
+    The reclaiming worker is running the delivery; handing its claim back to
+    the queue would let a third worker resume the same turn alongside it.
+    """
+    db = Database(engine=db_engine)
+    delegation_id = await _finished_run(db_engine)
+    task_id = delegation_delivery_task_id(delegation_id)
+    await queue_delegation_delivery(db.tasks, delegation_id, force=False)
+    assert await db.tasks.dequeue(
+        worker_id="reclaiming-worker",
+        task_types=[DELEGATION_DELIVERY_TASK_TYPE],
+        current_time=SystemClock().now(),
+    )
+
+    await redeliver_now(
+        db.tasks, delegation_id, now=SystemClock().now(), claimed_by="dead-worker"
+    )
+
+    delivery = await db.fetch_one(
+        select(tasks_table).where(tasks_table.c.task_id == task_id)
+    )
+    assert delivery is not None
+    assert (delivery["status"], delivery["locked_by"], delivery["retry_count"]) == (
+        "processing",
+        "reclaiming-worker",
+        0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_finishing_while_it_is_queued_again_is_replaced(
+    db_engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The running delivery can finish between the delete and the insert.
+
+    Its row then still blocks the insert although nothing is delivering any
+    more, so queuing has to look again rather than take the clash as a live
+    delivery.
+    """
+    db = Database(engine=db_engine)
+    delegation_id = await _finished_run(db_engine)
+    task_id = delegation_delivery_task_id(delegation_id)
+    await queue_delegation_delivery(db.tasks, delegation_id, force=False)
+    assert await db.tasks.dequeue(
+        worker_id="finishing-worker",
+        task_types=[DELEGATION_DELIVERY_TASK_TYPE],
+        current_time=SystemClock().now(),
+    )
+
+    delete_finished = TasksRepository.delete_finished
+    finished = False
+
+    async def finish_after_first_delete(self: TasksRepository, task_id_: str) -> bool:
+        nonlocal finished
+        deleted = await delete_finished(self, task_id_)
+        if not finished:
+            finished = True
+            await db.tasks.update_status(task_id=task_id, status="done")
+        return deleted
+
+    monkeypatch.setattr(TasksRepository, "delete_finished", finish_after_first_delete)
 
     await queue_delegation_delivery(db.tasks, delegation_id, force=True)
 
