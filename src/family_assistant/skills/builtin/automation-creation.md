@@ -54,7 +54,62 @@ event automation more capability than the list above.
 
 So when an event response needs more than `event_handler` can do, have the script do the work
 deterministically and leave the outcome in data — a note the user (or a later scheduled automation)
-picks up.
+picks up. If it genuinely needs judgement over the event content, that judgement belongs in
+`event_handler`, within the tools listed above.
+
+One more thing worth knowing: an automation owned by a different profile cannot be updated from
+here. `update_automation` fails with an ownership error naming the owning profile. Recreate it here
+instead.
+
+## Procedure
+
+The goal is an automation that works without manual intervention. Validate assumptions with tools
+rather than guessing; the cost of a wrong entity ID or a mistaken event shape is a silent weekly
+failure that nobody notices for a month.
+
+### 1. Understand the request, and look at what exists
+
+Parse what should happen, and when. Then call `list_automations` to see whether something similar
+already exists — an existing automation that already fires correctly is the best available template,
+and `get_automation_stats` tells you whether it actually runs. Ask the user if the request is
+ambiguous.
+
+### 2. Work out the trigger
+
+**Schedule automations** need an RRULE and a timezone. Times in an RRULE are interpreted in the
+user's configured timezone, not UTC — `BYHOUR=9` means 9am local, and DST is handled for you. The
+Scheduling skill covers RRULE patterns in detail.
+
+**Event automations** need an event source and a filter. Never guess the shape of an event: call
+`query_recent_events` and read a real one.
+
+```
+query_recent_events(source_id="home_assistant", hours=24, limit=10)
+```
+
+Simple equality conditions go in `match_conditions`, using exact field names with dot notation for
+nested fields (`new_state.state`). Anything else — a genuine state transition, a numeric threshold,
+a pattern across entities — needs a `condition_script`, a Python expression receiving `event` and
+returning a boolean.
+
+Then confirm the filter would actually have matched:
+
+```
+test_event_listener(
+    source="home_assistant",
+    match_conditions={"entity_id": "sensor.motion", "new_state.state": "on"},
+    hours=24,
+    limit=5,
+)
+```
+
+A filter that matches nothing in recent history is the single most common way an automation ends up
+silently dead. If it matches nothing, find out why before creating it.
+
+For Home Assistant entity IDs and states, load the Home Assistant skill and check the entity
+directly rather than trusting a name from the conversation.
+
+### 3. Choose the action type
 
 Use `action_type="script"` when the response is fixed and deterministic — logging, a notification
 with known content, data collection. Scripts run immediately, cost nothing per run, and behave
