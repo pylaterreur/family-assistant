@@ -105,7 +105,9 @@ from family_assistant.storage.delegation_runs import (
 )
 from family_assistant.tools.services import (
     DELEGATED_PROFILE_RUN_TASK_TYPE,
+    continue_waiting_parent,
     delegation_run_result_taint_metadata,
+    queue_continuation_if_ready,
     short_error_summary,
 )
 from family_assistant.tools.types import CalendarConfig, EventSourcesById
@@ -2657,65 +2659,10 @@ class TaskWorker:
             parked = await txn.delegation_runs.mark_awaiting_children(delegation_id)
             if parked is None:
                 return False
-            await self._queue_continuation_if_ready(txn, parked, clock, priority)
+            await queue_continuation_if_ready(txn, parked, clock.now(), priority)
             return True
 
         return await exec_context.db_context.atomic(_park)
-
-    async def _continue_when_children_finish(
-        self,
-        exec_context: ToolExecutionContext,
-        parent: DelegationRunDict,
-    ) -> bool:
-        """Queue a waiting run's next turn if none of its children is running.
-
-        Called when the run starts waiting and whenever one of its children
-        finishes, so whichever of those sees the last child finished queues the
-        turn. The conditional requeue is what makes that happen once.
-        """
-        clock = exec_context.clock or self.clock
-        priority = exec_context.inherited_task_priority()
-
-        async def _requeue(txn: DatabaseTransaction) -> bool:
-            return await self._queue_continuation_if_ready(txn, parent, clock, priority)
-
-        return await exec_context.db_context.atomic(_requeue)
-
-    @staticmethod
-    async def _queue_continuation_if_ready(
-        txn: DatabaseTransaction,
-        parent: DelegationRunDict,
-        clock: Clock,
-        priority: TaskPriority,
-    ) -> bool:
-        """Requeue a waiting run and enqueue its next turn, once its children are done."""
-        children = await txn.delegation_runs.list_undelivered_children(parent)
-        if any(
-            child["status"] not in TERMINAL_DELEGATION_STATUSES for child in children
-        ):
-            return False
-        if not await txn.delegation_runs.requeue_for_continuation(
-            parent["delegation_id"], clock.now()
-        ):
-            return False
-        await txn.tasks.enqueue(
-            task_id=f"{parent['task_id']}_continue_{uuid.uuid4().hex}",
-            task_type=DELEGATED_PROFILE_RUN_TASK_TYPE,
-            payload={
-                "delegation_id": parent["delegation_id"],
-                "interface_type": parent["interface_type"],
-                "conversation_id": parent["conversation_id"],
-                "user_name": parent["user_name"] or "",
-                "continuation": True,
-            },
-            max_retries_override=1,
-            priority=priority,
-        )
-        logger.info(
-            "Delegations started by run %s have finished; queued its next turn.",
-            parent["delegation_id"],
-        )
-        return True
 
     async def _deliver_to_waiting_parent(
         self,
@@ -2730,23 +2677,13 @@ class TaskWorker:
         -- a top-level turn started it, or the parent has already finished --
         and the result is delivered the ordinary way.
         """
-        parent_subconversation_id = run["source_subconversation_id"]
-        if parent_subconversation_id is None:
-            return False
-        parent = await exec_context.db_context.delegation_runs.get_active_for_subconversation(
-            conversation_id=run["conversation_id"],
-            subconversation_id=parent_subconversation_id,
+        clock = exec_context.clock or self.clock
+        return await continue_waiting_parent(
+            exec_context.db_context,
+            run,
+            clock.now(),
+            exec_context.inherited_task_priority(),
         )
-        # A resumed run reuses its history, so a child the earlier run started
-        # is not this run's: it predates it, and is delivered the ordinary way.
-        if parent is None or run["created_at"] < parent["created_at"]:
-            return False
-        # Attempted whatever status was read: the requeue is conditioned on
-        # the parent waiting, and it waits on a parent parking in the same
-        # instant, so one of the two always sees this child finished. A parent
-        # still in its turn picks the result up when the turn ends.
-        await self._continue_when_children_finish(exec_context, parent)
-        return True
 
     @staticmethod
     async def _prepare_authenticated_run(

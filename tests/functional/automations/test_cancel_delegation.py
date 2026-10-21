@@ -154,6 +154,20 @@ class DurableBlockingConfirmationManager:
         raise AssertionError("the confirmation was never answered")
 
 
+class MeteredPollableService(FakePollableService):
+    """A remote target that accounts for each run once it is over."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.recorded: list[tuple[str, bool]] = []
+
+    async def record_terminal_metrics(
+        self, remote_task_id: str, *, outcome: str = "success", cancelled: bool = False
+    ) -> None:
+        _ = outcome
+        self.recorded.append((remote_task_id, cancelled))
+
+
 class FailingCancelService(FakePollableService):
     """A remote target whose cancel request does not get through."""
 
@@ -490,3 +504,55 @@ async def test_a_failed_remote_cancel_still_cancels_and_says_the_agent_may_conti
     assert run["status"] == "failed"
     assert run["local_failure_kind"] == "cancelled"
     assert run["cancel_requested_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_remote_run_is_still_counted_in_the_metrics(
+    db_engine: AsyncEngine,
+) -> None:
+    """No poll reads a cancelled run again, so the cancel owes its accounting."""
+    target = MeteredPollableService()
+    db_context = Database(engine=db_engine)
+    await _remote_run(db_context, "delegation_metered")
+
+    await cancel_delegation_tool(
+        _tool_context(db_context, _processing_service(target)), "delegation_metered"
+    )
+
+    assert target.recorded == [(REMOTE_TASK_ID, True)]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_waiting_parents_last_child_queues_the_parents_next_turn(
+    db_engine: AsyncEngine,
+) -> None:
+    """Otherwise the parent waits forever on a child that will never finish."""
+    target = FakePollableService()
+    db_context = Database(engine=db_engine)
+    await _create_run(db_context, delegation_id="delegation_parent")
+    await db_context.delegation_runs.mark_running(
+        "delegation_parent", SystemClock().now()
+    )
+    await _create_run(
+        db_context,
+        delegation_id="delegation_child",
+        source_subconversation_id="sub_delegation_parent",
+    )
+    await db_context.delegation_runs.mark_handed_off(
+        "delegation_child", SystemClock().now()
+    )
+    await db_context.delegation_runs.mark_awaiting_children("delegation_parent")
+
+    await cancel_delegation_tool(
+        _tool_context(db_context, _processing_service(target)), "delegation_child"
+    )
+
+    parent = await db_context.delegation_runs.get_by_delegation_id("delegation_parent")
+    assert parent is not None
+    assert parent["status"] == "queued"
+    continuations = [
+        task
+        for task in await db_context.tasks.get_all()
+        if task["task_id"].startswith("task_delegation_parent_continue_")
+    ]
+    assert len(continuations) == 1
