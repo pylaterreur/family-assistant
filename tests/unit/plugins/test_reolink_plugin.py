@@ -3,7 +3,6 @@
 import json
 import logging
 from pathlib import Path
-from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -21,6 +20,8 @@ from family_assistant.plugins.reolink.instance import ReolinkInstance
 from family_assistant.plugins.reolink.plugin import REOLINK_PLUGIN
 from family_assistant.plugins.reolink.tools import list_cameras_tool
 from family_assistant.plugins.runtime import PluginRuntime, ProfilePlugins
+from family_assistant.storage.base import create_engine_with_sqlite_optimizations
+from family_assistant.storage.database import Database
 from family_assistant.tools.catalog import LOCAL_TOOL_METADATA_BY_NAME
 from family_assistant.tools.types import ToolExecutionContext
 
@@ -42,7 +43,9 @@ def _context(plugins: ProfilePlugins) -> ToolExecutionContext:
         conversation_id="conv",
         user_name="user",
         turn_id=None,
-        db_context=Mock(),
+        db_context=Database(
+            create_engine_with_sqlite_optimizations("sqlite+aiosqlite:///:memory:")
+        ),
         processing_service=None,
         clock=None,
         plugins=plugins,

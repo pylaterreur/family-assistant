@@ -5,11 +5,13 @@ import base64
 import json
 import threading
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock, patch
+from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from family_assistant.config_models import KeychuteConfig
 from family_assistant.scripting.apis.keychute import (
@@ -26,6 +28,7 @@ from family_assistant.security.taint import (
     TaintSource,
     TaintSourceType,
 )
+from family_assistant.storage.database import Database
 from family_assistant.tools.infrastructure import (
     CompositeToolsProvider,
     TaintTrackingToolsProvider,
@@ -38,40 +41,41 @@ _GRANT_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def _taint_execution_context(
+    db: Database,
     tracker: InMemoryTurnTaintTracker,
     *,
     policy: TaintPolicyConfig | None = None,
-) -> Mock:
-    provider = TaintTrackingToolsProvider(
-        CompositeToolsProvider([]),
-        taint_policy=policy,
+    provider: TaintTrackingToolsProvider | None = None,
+) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        interface_type="test",
+        conversation_id="conversation",
+        user_name="tester",
+        turn_id="turn",
+        db_context=db,
+        processing_service=None,
+        clock=None,
+        plugins=None,
+        event_sources=None,
+        attachment_registry=None,
+        credential_resolvers=None,
+        api_backend=None,
+        timezone=ZoneInfo("UTC"),
+        user_id="user",
+        processing_profile_id="profile",
+        tools_provider=provider
+        or TaintTrackingToolsProvider(CompositeToolsProvider([]), taint_policy=policy),
+        taint_tracker=tracker,
+        tool_call_review_state=ToolCallReviewTurnState(),
+        tool_call_review_messages=(),
     )
-    execution_context = Mock(spec=ToolExecutionContext)
-    execution_context.taint_tracker = tracker
-    execution_context.tools_provider = provider
-    execution_context.processing_service = None
-    execution_context.request_confirmation_callback = None
-    execution_context.confirmation_ui_managers = None
-    execution_context.prepared_script = None
-    execution_context.script_execution = None
-    execution_context.tool_call_review_state = ToolCallReviewTurnState()
-    execution_context.tool_call_review_messages = ()
-    execution_context.tool_call_review_trigger = None
-    execution_context.interface_type = "test"
-    execution_context.conversation_id = "conversation"
-    execution_context.turn_id = "turn"
-    execution_context.processing_profile_id = "profile"
-    execution_context.subconversation_id = None
-    execution_context.user_id = "user"
-    execution_context.db_context = Mock()
-    execution_context.db_context.taint_audit_events.add = AsyncMock()
-    return execution_context
 
 
 @pytest.mark.asyncio
 async def test_request_uses_direct_api_and_preserves_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
 ) -> None:
     monkeypatch.delenv("KEYCHUTE_TOKEN", raising=False)
     token_file = tmp_path / "token"
@@ -128,7 +132,8 @@ async def test_request_uses_direct_api_and_preserves_response(
         )
 
     tracker = InMemoryTurnTaintTracker()
-    execution_context = _taint_execution_context(tracker)
+    db = Database(engine=db_engine)
+    execution_context = _taint_execution_context(db, tracker)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
         client = KeychuteScriptHttpClient(
             KeychuteConfig(
@@ -170,11 +175,13 @@ async def test_request_uses_direct_api_and_preserves_response(
         "reason": "forecast",
         "structured": {"script": script_source},
     }
-    execution_context.db_context.taint_audit_events.add.assert_awaited_once()
+    assert len(await db.taint_audit_events.list_for_turn("turn")) == 1
 
 
 @pytest.mark.asyncio
-async def test_request_denies_high_taint_before_contacting_keychute() -> None:
+async def test_request_denies_high_taint_before_contacting_keychute(
+    db_engine: AsyncEngine,
+) -> None:
     """A script with no confirmation channel is refused without reaching Keychute."""
     tracker = InMemoryTurnTaintTracker()
     tracker.add_source(
@@ -186,7 +193,9 @@ async def test_request_denies_high_taint_before_contacting_keychute() -> None:
             reason="Untrusted external content entered the script.",
         )
     )
+    db = Database(engine=db_engine)
     execution_context = _taint_execution_context(
+        db,
         tracker,
         policy=TaintPolicyConfig(mode=TaintPolicyMode.ENFORCE),
     )
@@ -211,31 +220,42 @@ async def test_request_denies_high_taint_before_contacting_keychute() -> None:
         ):
             await client.request("weather", "https://example.test/x")
 
-    audit = execution_context.db_context.taint_audit_events.add
-    policy_calls = [
-        call
-        for call in audit.await_args_list
-        if call.kwargs["event_type"] == "policy_evaluation"
-    ]
-    review_calls = [
-        call
-        for call in audit.await_args_list
-        if call.kwargs["event_type"] == "tool_call_review"
-    ]
-    assert len(policy_calls) == 1
-    assert len(review_calls) == 1
-    assert policy_calls[0].kwargs["sink_class"] == SinkClass.SANDBOX_NETWORK.value
-    assert policy_calls[0].kwargs["effective_outcome"] == "adjudicate"
-    assert review_calls[0].kwargs["review_verdict"] == "confirm"
+    audit = await db.taint_audit_events.list_for_turn("turn")
+    policy_events = [e for e in audit if e["event_type"] == "policy_evaluation"]
+    review_events = [e for e in audit if e["event_type"] == "tool_call_review"]
+    assert len(policy_events) == 1
+    assert len(review_events) == 1
+    assert policy_events[0]["sink_class"] == SinkClass.SANDBOX_NETWORK.value
+    assert policy_events[0]["effective_outcome"] == "adjudicate"
+    assert review_events[0]["review_verdict"] == "confirm"
 
 
-def _denying_review() -> AsyncMock:
-    """Stand in for the taint reviewer, refusing so the request stops before Keychute."""
-    return AsyncMock(
-        side_effect=ToolPolicyDeniedError(
-            "keychute_http_request", "held for inspection"
-        )
-    )
+class _DenyingReviewToolsProvider(TaintTrackingToolsProvider):
+    """Taint reviewer that refuses, so the request stops before Keychute."""
+
+    def __init__(self) -> None:
+        super().__init__(CompositeToolsProvider([]))
+        # ast-grep-ignore: no-dict-any - records the reviewer's keyword arguments verbatim
+        self.review_requests: list[dict[str, Any]] = []
+
+    async def authorize_taint_sink(
+        self,
+        *,
+        name: str,
+        sink_class: SinkClass,
+        # ast-grep-ignore: no-dict-any - mirrors the sink arguments of the real reviewer
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+        call_id: str | None = None,
+        taint_policy: TaintPolicyConfig | None = None,
+    ) -> None:
+        self.review_requests.append({
+            "name": name,
+            "sink_class": sink_class,
+            "arguments": arguments,
+            "context": context,
+        })
+        raise ToolPolicyDeniedError("keychute_http_request", "held for inspection")
 
 
 def _fail_if_keychute_contacted(_request: httpx.Request) -> httpx.Response:
@@ -243,11 +263,13 @@ def _fail_if_keychute_contacted(_request: httpx.Request) -> httpx.Response:
 
 
 @pytest.mark.asyncio
-async def test_request_review_receives_complete_outbound_envelope() -> None:
-    execution_context = _taint_execution_context(InMemoryTurnTaintTracker())
-    authorizer = execution_context.tools_provider
-    assert isinstance(authorizer, TaintTrackingToolsProvider)
-    authorize = _denying_review()
+async def test_request_review_receives_complete_outbound_envelope(
+    db_engine: AsyncEngine,
+) -> None:
+    authorizer = _DenyingReviewToolsProvider()
+    execution_context = _taint_execution_context(
+        Database(engine=db_engine), InMemoryTurnTaintTracker(), provider=authorizer
+    )
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(_fail_if_keychute_contacted)
@@ -260,12 +282,9 @@ async def test_request_review_receives_complete_outbound_envelope() -> None:
             execution_context,
             http_client,
         )
-        with (
-            patch.object(authorizer, "authorize_taint_sink", authorize),
-            pytest.raises(
-                KeychuteScriptError,
-                match="egress denied by runtime taint policy: held for inspection",
-            ),
+        with pytest.raises(
+            KeychuteScriptError,
+            match="egress denied by runtime taint policy: held for inspection",
         ):
             await client.request(
                 "weather",
@@ -280,11 +299,11 @@ async def test_request_review_receives_complete_outbound_envelope() -> None:
                 request_timeout_seconds=5.0,
             )
 
-    authorize.assert_awaited_once()
-    awaited = authorize.await_args
-    assert awaited is not None
-    assert awaited.kwargs["sink_class"] is SinkClass.SANDBOX_NETWORK
-    assert awaited.kwargs["arguments"] == {
+    assert len(authorizer.review_requests) == 1
+    review = authorizer.review_requests[0]
+    assert review["context"] is execution_context
+    assert review["sink_class"] is SinkClass.SANDBOX_NETWORK
+    assert review["arguments"] == {
         "secret_name": "weather",
         "url": "https://example.test/x",
         "method": "POST",
@@ -301,11 +320,12 @@ async def test_request_review_receives_complete_outbound_envelope() -> None:
 @pytest.mark.asyncio
 async def test_large_binary_review_body_is_encoded_off_event_loop(
     monkeypatch: pytest.MonkeyPatch,
+    db_engine: AsyncEngine,
 ) -> None:
-    execution_context = _taint_execution_context(InMemoryTurnTaintTracker())
-    authorizer = execution_context.tools_provider
-    assert isinstance(authorizer, TaintTrackingToolsProvider)
-    authorize = _denying_review()
+    authorizer = _DenyingReviewToolsProvider()
+    execution_context = _taint_execution_context(
+        Database(engine=db_engine), InMemoryTurnTaintTracker(), provider=authorizer
+    )
     request_body = b"\xff" * (4 * 1024 * 1024)
     encoding_started = threading.Event()
     release_encoding = threading.Event()
@@ -330,32 +350,29 @@ async def test_large_binary_review_body_is_encoded_off_event_loop(
             execution_context,
             http_client,
         )
-        with patch.object(authorizer, "authorize_taint_sink", authorize):
-            request_task = asyncio.create_task(
-                client.request(
-                    "binary-api",
-                    "https://example.test/upload",
-                    method="POST",
-                    headers={"Content-Type": "application/octet-stream"},
-                    body=request_body,
-                    reason="upload exact payload",
-                )
+        request_task = asyncio.create_task(
+            client.request(
+                "binary-api",
+                "https://example.test/upload",
+                method="POST",
+                headers={"Content-Type": "application/octet-stream"},
+                body=request_body,
+                reason="upload exact payload",
             )
-            try:
-                encoding_started_in_time = await asyncio.to_thread(
-                    encoding_started.wait, 10
-                )
-            finally:
-                release_encoding.set()
-            with pytest.raises(KeychuteScriptError, match="held for inspection"):
-                await request_task
+        )
+        try:
+            encoding_started_in_time = await asyncio.to_thread(
+                encoding_started.wait, 10
+            )
+        finally:
+            release_encoding.set()
+        with pytest.raises(KeychuteScriptError, match="held for inspection"):
+            await request_task
 
     assert encoding_started_in_time
     assert released_by_event_loop == [True]
-    authorize.assert_awaited_once()
-    awaited = authorize.await_args
-    assert awaited is not None
-    body = awaited.kwargs["arguments"]["body"]
+    assert len(authorizer.review_requests) == 1
+    body = authorizer.review_requests[0]["arguments"]["body"]
     assert body["encoding"] == "base64"
     assert base64.b64decode(body["content"]) == request_body
 

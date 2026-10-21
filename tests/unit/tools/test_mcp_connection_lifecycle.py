@@ -9,13 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock
+from typing import TYPE_CHECKING
 
 import anyio
 import pytest
-from mcp.types import ListToolsResult
 
 from family_assistant.tools.mcp import (
     CONSECUTIVE_PING_TIMEOUTS_BEFORE_RECONNECT,
@@ -23,6 +20,7 @@ from family_assistant.tools.mcp import (
     MCP_SERVER_STATUS_FAILED,
     MCPToolsProvider,
 )
+from tests.mocks.fake_mcp_session import FakeMcpSession
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -55,14 +53,23 @@ def _provider(
     )
 
 
-def _session(*, ping_error: BaseException | None = None) -> ClientSession:
-    return cast(
-        "ClientSession",
-        SimpleNamespace(
-            send_ping=AsyncMock(return_value=None, side_effect=ping_error),
-            list_tools=AsyncMock(return_value=ListToolsResult(tools=[])),
-        ),
-    )
+def _session() -> ClientSession:
+    return FakeMcpSession().as_client_session()
+
+
+class _RecordingConnect:
+    """Stands in for ``_connect_and_discover_mcp``, always yielding one session."""
+
+    def __init__(self, session: ClientSession) -> None:
+        self._session = session
+        self.calls: list[str] = []
+
+    async def __call__(
+        self, server_id: str, server_conf: MCPServerConfig
+    ) -> DiscoveryResult:
+        del server_conf
+        self.calls.append(server_id)
+        return self._session, [], [], {}
 
 
 class _FakeTransport:
@@ -307,10 +314,10 @@ async def test_repeated_ping_timeouts_reconnect(
     provider = _provider(reconnect_backoff_base_seconds=0.0)
     provider._initialized = True
     provider._server_statuses[SERVER_ID] = MCP_SERVER_STATUS_CONNECTED
-    unresponsive = _session(ping_error=TimeoutError())
+    unresponsive = FakeMcpSession(ping_error=TimeoutError()).as_client_session()
     provider._sessions[SERVER_ID] = unresponsive
     replacement = _session()
-    connect = AsyncMock(return_value=(replacement, [], [], {}))
+    connect = _RecordingConnect(replacement)
     monkeypatch.setattr(provider, "_connect_and_discover_mcp", connect)
 
     for _ in range(CONSECUTIVE_PING_TIMEOUTS_BEFORE_RECONNECT - 1):
@@ -318,7 +325,7 @@ async def test_repeated_ping_timeouts_reconnect(
         assert provider._sessions[SERVER_ID] is unresponsive
     await provider._run_health_checks()
 
-    assert connect.await_count == 1
+    assert connect.calls == [SERVER_ID]
     assert provider._sessions[SERVER_ID] is replacement
 
 
@@ -329,17 +336,17 @@ async def test_a_passing_ping_resets_the_timeout_count(
     provider = _provider()
     provider._initialized = True
     provider._server_statuses[SERVER_ID] = MCP_SERVER_STATUS_CONNECTED
-    connect = AsyncMock(return_value=(_session(), [], [], {}))
+    connect = _RecordingConnect(_session())
     monkeypatch.setattr(provider, "_connect_and_discover_mcp", connect)
 
-    slow = _session(ping_error=TimeoutError())
-    provider._sessions[SERVER_ID] = slow
+    slow = FakeMcpSession(ping_error=TimeoutError())
+    provider._sessions[SERVER_ID] = slow.as_client_session()
     for _ in range(CONSECUTIVE_PING_TIMEOUTS_BEFORE_RECONNECT - 1):
         await provider._run_health_checks()
-    cast("AsyncMock", slow.send_ping).side_effect = None
+    slow.ping_error = None
     await provider._run_health_checks()
-    cast("AsyncMock", slow.send_ping).side_effect = TimeoutError()
+    slow.ping_error = TimeoutError()
     await provider._run_health_checks()
 
-    assert connect.await_count == 0
+    assert connect.calls == []
     assert provider._sessions[SERVER_ID] is slow

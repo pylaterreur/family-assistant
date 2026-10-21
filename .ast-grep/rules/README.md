@@ -96,11 +96,6 @@ with patch("family_assistant.module.ExternalClient", autospec=True) as client_cl
 with patch.object(service, "fetch", new=fake_fetch): ...
 ```
 
-Files that predate the rule are listed in the baseline exemption in `exemptions.yml`. The exemption
-is per file, so it does not stop new bare mocks inside a listed file; it exists only while the
-burn-down removes those files. The list only shrinks: remove a file once its mocks are replaced, and
-never add one.
-
 ## Datetime Correctness
 
 ### `no-naive-datetime-now`

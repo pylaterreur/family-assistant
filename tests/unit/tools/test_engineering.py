@@ -1,14 +1,16 @@
 """Tests for engineering diagnostic tools.
 
-Pure logic tests and tests that must mock external services (GitHub API, ripgrep).
+Pure logic tests and tests that fake external services (the GitHub API).
 Database-dependent tests are in tests/functional/tools/test_engineering_database.py.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, Mock, patch
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -20,6 +22,7 @@ from family_assistant.llm.request_buffer import (
     get_request_buffer,
     reset_request_buffer,
 )
+from family_assistant.storage.database import Database, DatabaseTransaction
 from family_assistant.tools.catalog import (
     AVAILABLE_FUNCTIONS,
     LOCAL_TOOL_METADATA_BY_NAME,
@@ -42,25 +45,58 @@ from family_assistant.web.frontend_telemetry import (
     get_frontend_telemetry_buffer,
     reset_frontend_telemetry_buffer,
 )
+from tests.mocks.recording_async_call import RecordingAsyncCall
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+_RealAsyncClient = httpx.AsyncClient
+
+
+class AtomicSpy:
+    """Records the keyword arguments of each ``atomic`` call, then runs it for real."""
+
+    def __init__(self, db: Database) -> None:
+        self._atomic = db.atomic
+        self.kwargs: list[dict[str, object]] = []
+
+    async def __call__[T](
+        self,
+        body: Callable[[DatabaseTransaction], Awaitable[T]],
+        *,
+        log_errors: bool = True,
+    ) -> T:
+        self.kwargs.append({"log_errors": log_errors})
+        return await self._atomic(body, log_errors=log_errors)
+
+
+class FakeGitHubApi:
+    """Serves the GitHub issues endpoint through an httpx mock transport."""
+
+    def __init__(self, response: httpx.Response) -> None:
+        self._response = response
+        self.requests: list[httpx.Request] = []
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return self._response
+
+    def client(self, **kwargs: object) -> httpx.AsyncClient:
+        assert not kwargs
+        return _RealAsyncClient(transport=httpx.MockTransport(self._handle))
 
 
 @pytest.fixture
-def exec_context() -> ToolExecutionContext:
-    """Create a minimal ToolExecutionContext for testing.
-
-    For tests that don't touch the database, the mock db_context is sufficient.
-    """
-    mock_db_context = Mock()
-    mock_db_context.engine = Mock()
-    mock_db_context.engine.dialect = Mock()
-    mock_db_context.engine.dialect.name = "sqlite"
-
+def exec_context(db_engine: AsyncEngine) -> ToolExecutionContext:
+    """Create a minimal ToolExecutionContext over the test database."""
     return ToolExecutionContext(
         interface_type="test",
         conversation_id="test_conv",
         user_name="test_user",
         turn_id=None,
-        db_context=mock_db_context,
+        db_context=Database(db_engine),
         processing_service=None,
         clock=None,
         plugins=None,
@@ -149,16 +185,15 @@ class TestQueryDatabase:
         exec_context: ToolExecutionContext,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        exec_context.db_context.atomic = AsyncMock(
-            side_effect=DBAPIError("SELECT 1", {}, Exception("syntax error"))
-        )
         with caplog.at_level(logging.DEBUG):
-            result = await query_database(exec_context, "SELECT 1")
+            result = await query_database(
+                exec_context, "SELECT * FROM no_such_diagnostic_table"
+            )
 
         data = result.get_data()
         assert isinstance(data, dict)
         assert "error" in data
-        assert "syntax error" in data["error"]
+        assert "no_such_diagnostic_table" in data["error"]
 
         error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert not error_records
@@ -179,15 +214,20 @@ class TestQueryDatabase:
         exec_context: ToolExecutionContext,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        exec_context.db_context.atomic = AsyncMock(
-            side_effect=DBAPIError(
-                "SELECT 1",
-                {},
-                Exception("server closed the connection"),
-                connection_invalidated=True,
-            )
+        dropped = DBAPIError(
+            "SELECT 1",
+            {},
+            Exception("server closed the connection"),
+            connection_invalidated=True,
         )
-        with caplog.at_level(logging.DEBUG):
+        with (
+            patch.object(
+                exec_context.db_context,
+                "atomic",
+                new=RecordingAsyncCall[list[dict[str, object]]](dropped),
+            ),
+            caplog.at_level(logging.DEBUG),
+        ):
             result = await query_database(exec_context, "SELECT 1")
 
         data = result.get_data()
@@ -202,14 +242,13 @@ class TestQueryDatabase:
         self,
         exec_context: ToolExecutionContext,
     ) -> None:
-        exec_context.db_context.atomic = AsyncMock(return_value=[{"val": 1}])
-        result = await query_database(exec_context, "SELECT 1 AS val")
+        spy = AtomicSpy(exec_context.db_context)
+        with patch.object(exec_context.db_context, "atomic", new=spy):
+            result = await query_database(exec_context, "SELECT 1 AS val")
         data = result.get_data()
         assert isinstance(data, dict)
         assert data["rows"] == [{"val": 1}]
-        assert exec_context.db_context.atomic.call_count == 1
-        call_kwargs = exec_context.db_context.atomic.call_args.kwargs
-        assert call_kwargs.get("log_errors") is False
+        assert spy.kwargs == [{"log_errors": False}]
 
     @pytest.mark.asyncio
     async def test_unexpected_exception_logged_at_error(
@@ -217,10 +256,16 @@ class TestQueryDatabase:
         exec_context: ToolExecutionContext,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        exec_context.db_context.atomic = AsyncMock(
-            side_effect=RuntimeError("unexpected storage failure")
-        )
-        with caplog.at_level(logging.DEBUG):
+        with (
+            patch.object(
+                exec_context.db_context,
+                "atomic",
+                new=RecordingAsyncCall[list[dict[str, object]]](
+                    RuntimeError("unexpected storage failure")
+                ),
+            ),
+            caplog.at_level(logging.DEBUG),
+        ):
             result = await query_database(exec_context, "SELECT 1")
 
         data = result.get_data()
@@ -299,6 +344,7 @@ class TestReadSourceFile:
         """File deleted between exists() check and open() is handled gracefully."""
         with patch(
             "family_assistant.tools.engineering.aiofiles.open",
+            autospec=True,
             side_effect=PermissionError("Permission denied"),
         ):
             result = await read_source_file(exec_context, "pyproject.toml")
@@ -382,23 +428,24 @@ class TestCreateGithubIssue:
     async def test_successful_issue_creation(
         self, exec_context: ToolExecutionContext
     ) -> None:
-        mock_response = Mock()
-        mock_response.json.return_value = {
-            "number": 42,
-            "html_url": "https://github.com/test/repo/issues/42",
-        }
-        mock_response.raise_for_status = Mock()
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        github = FakeGitHubApi(
+            httpx.Response(
+                201,
+                json={
+                    "number": 42,
+                    "html_url": "https://github.com/test/repo/issues/42",
+                },
+            )
+        )
 
         with (
-            patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}),
+            patch.dict(
+                "os.environ",
+                {"GITHUB_TOKEN": "test-token", "GITHUB_REPOSITORY": "test/repo"},
+            ),
             patch(
                 "family_assistant.tools.engineering.httpx.AsyncClient",
-                return_value=mock_client,
+                new=github.client,
             ),
         ):
             result = await create_github_issue(exec_context, "Bug title", "Bug body")
@@ -408,29 +455,24 @@ class TestCreateGithubIssue:
         assert data["issue_number"] == 42
         assert "github.com" in data["url"]
         assert data["title"] == "Bug title"
+        assert len(github.requests) == 1
+        request = github.requests[0]
+        assert request.method == "POST"
+        assert str(request.url) == "https://api.github.com/repos/test/repo/issues"
+        assert request.headers["Authorization"] == "Bearer test-token"
+        assert json.loads(request.content) == {"title": "Bug title", "body": "Bug body"}
 
     @pytest.mark.anyio
     async def test_github_api_error_handled(
         self, exec_context: ToolExecutionContext
     ) -> None:
-        mock_response = Mock()
-        mock_response.status_code = 403
-        mock_response.text = "Forbidden"
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(
-            side_effect=httpx.HTTPStatusError(
-                "Forbidden", request=Mock(), response=mock_response
-            )
-        )
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        github = FakeGitHubApi(httpx.Response(403, text="Forbidden"))
 
         with (
             patch.dict("os.environ", {"GITHUB_TOKEN": "test-token"}),
             patch(
                 "family_assistant.tools.engineering.httpx.AsyncClient",
-                return_value=mock_client,
+                new=github.client,
             ),
         ):
             result = await create_github_issue(exec_context, "Bug title", "Bug body")
@@ -439,6 +481,7 @@ class TestCreateGithubIssue:
         assert isinstance(data, dict)
         assert "error" in data
         assert "403" in data["error"]
+        assert "Forbidden" in data["error"]
 
 
 # --- get_llm_request_history tests ---

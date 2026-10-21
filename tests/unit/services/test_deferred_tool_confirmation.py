@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal, cast
-from unittest.mock import Mock
+from typing import TYPE_CHECKING, Literal
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -11,15 +11,38 @@ from family_assistant.security.taint import TurnTaintState
 from family_assistant.services.deferred_tool_confirmation import (
     DeferredConfirmationCallbackAdapter,
 )
-from family_assistant.tools.types import ConfirmationOutcome
+from family_assistant.storage.database import Database
+from family_assistant.tools.types import ConfirmationOutcome, ToolExecutionContext
 
 if TYPE_CHECKING:
-    from family_assistant.tools.types import ToolArguments, ToolExecutionContext
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    from family_assistant.tools.types import ToolArguments
+
+
+@pytest.fixture
+def execution_context(db_engine: AsyncEngine) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        interface_type="api",
+        conversation_id="conversation",
+        user_name="tester",
+        turn_id="turn",
+        db_context=Database(engine=db_engine),
+        processing_service=None,
+        clock=None,
+        plugins=None,
+        event_sources=None,
+        attachment_registry=None,
+        timezone=ZoneInfo("UTC"),
+        credential_resolvers=None,
+        api_backend=None,
+    )
 
 
 class _OutcomeCallback:
     def __init__(self, outcome: ConfirmationOutcome) -> None:
         self.outcome = outcome
+        self.received_contexts: list[ToolExecutionContext] = []
 
     async def __call__(
         self,
@@ -40,15 +63,17 @@ class _OutcomeCallback:
             call_id,
             tool_args,
             timeout_seconds,
-            context,
         )
+        self.received_contexts.append(context)
         return self.outcome
 
 
-async def _invoke_adapter(outcome: ConfirmationOutcome) -> ConfirmationOutcome:
+async def _invoke_adapter(
+    outcome: ConfirmationOutcome, context: ToolExecutionContext
+) -> ConfirmationOutcome:
     callback = _OutcomeCallback(outcome)
     adapter = DeferredConfirmationCallbackAdapter(callback)
-    return await adapter(
+    result = await adapter(
         "api",
         "conversation",
         "turn",
@@ -56,19 +81,24 @@ async def _invoke_adapter(outcome: ConfirmationOutcome) -> ConfirmationOutcome:
         "call",
         {},
         60,
-        cast("ToolExecutionContext", Mock()),
+        context,
     )
+    assert len(callback.received_contexts) == 1
+    assert callback.received_contexts[0] is context
+    return result
 
 
-@pytest.mark.no_db
-async def test_deferred_adapter_marks_completed_placeholder_not_attempted() -> None:
+async def test_deferred_adapter_marks_completed_placeholder_not_attempted(
+    execution_context: ToolExecutionContext,
+) -> None:
     taint_metadata = TurnTaintState.empty().to_metadata()
     result = await _invoke_adapter(
         ConfirmationOutcome(
             kind="completed",
             result="Approval request queued; the tool has not run.",
             taint_metadata=taint_metadata,
-        )
+        ),
+        execution_context,
     )
 
     assert result == ConfirmationOutcome(
@@ -79,16 +109,16 @@ async def test_deferred_adapter_marks_completed_placeholder_not_attempted() -> N
     )
 
 
-@pytest.mark.no_db
 @pytest.mark.parametrize(
     "kind",
     ["approved", "rejected", "timed_out", "cancelled", "failed"],
 )
 async def test_deferred_adapter_preserves_noncompleted_outcomes(
     kind: Literal["approved", "rejected", "timed_out", "cancelled", "failed"],
+    execution_context: ToolExecutionContext,
 ) -> None:
     outcome = ConfirmationOutcome(kind=kind, result=f"{kind} result")
 
-    result = await _invoke_adapter(outcome)
+    result = await _invoke_adapter(outcome, execution_context)
 
     assert result is outcome

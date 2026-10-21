@@ -1,64 +1,80 @@
-from typing import Any
-from unittest.mock import MagicMock, patch
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import patch
 
 import pytest
-from fastapi import HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 
 from family_assistant.web.auth import AuthService
 
+if TYPE_CHECKING:
+    from authlib.integrations.starlette_client import OAuth
+
+
+class FakeOidcProvider:
+    """Stands in for authlib's registered OIDC client, answering the token exchange."""
+
+    def __init__(self) -> None:
+        # ast-grep-ignore: no-dict-any - matches the external OAuth token response
+        self.token: dict[str, Any] = {}
+
+    # ast-grep-ignore: no-dict-any - matches the external OAuth token response
+    async def authorize_access_token(self, request: Request) -> dict[str, Any]:
+        return self.token
+
+
+class FakeOAuth:
+    """Stands in for authlib's ``OAuth`` registry with one OIDC provider."""
+
+    def __init__(self) -> None:
+        self.oidc_provider = FakeOidcProvider()
+
 
 @pytest.fixture
-def mock_oauth() -> MagicMock:
-    return MagicMock()
+def fake_oauth() -> FakeOAuth:
+    return FakeOAuth()
 
 
 @pytest.fixture
-def auth_service(mock_oauth: MagicMock) -> AuthService:
+def auth_service(fake_oauth: FakeOAuth) -> AuthService:
     service = AuthService()
-    service.oauth = mock_oauth
+    service.oauth = cast("OAuth", fake_oauth)
     return service
 
 
-@pytest.fixture
-def mock_request() -> MagicMock:
-    request = MagicMock(spec=Request)
-    request.session = {}
-    return request
+def _request(session: dict[str, object] | None = None) -> Request:
+    return Request({
+        "type": "http",
+        "app": FastAPI(),
+        "session": session if session is not None else {},
+    })
 
 
 @pytest.mark.asyncio
 async def test_handle_auth_callback_no_allowlist(
-    auth_service: AuthService, mock_request: MagicMock, mock_oauth: MagicMock
+    auth_service: AuthService, fake_oauth: FakeOAuth
 ) -> None:
     """Test that any email is allowed when ALLOWED_OIDC_EMAILS is not set."""
     with patch("family_assistant.web.auth.ALLOWED_OIDC_EMAILS", None):
         user_info = {"email": "test@example.com", "sub": "123"}
-
-        # authlib authorize_access_token is async
-        # ast-grep-ignore: no-dict-any - mock OIDC callback matches external OAuth token response
-        async def mock_authorize(*args: object, **kwargs: object) -> dict[str, Any]:
-            return {"userinfo": user_info}
-
-        mock_oauth.oidc_provider.authorize_access_token = mock_authorize
-
-        mock_request.session = {
+        fake_oauth.oidc_provider.token = {"userinfo": user_info}
+        request = _request({
             "redirect_after_login": "/",
             "api_token_id": 17,
             "session_jwt_exp": 1,
-        }
+        })
 
-        response = await auth_service.handle_auth_callback(mock_request)
+        response = await auth_service.handle_auth_callback(request)
 
         # Starlette's RedirectResponse defaults to 307
         assert response.status_code in {302, 307}
-        assert mock_request.session["user"] == user_info
-        assert "api_token_id" not in mock_request.session
-        assert "session_jwt_exp" not in mock_request.session
+        assert request.session["user"] == user_info
+        assert "api_token_id" not in request.session
+        assert "session_jwt_exp" not in request.session
 
 
 @pytest.mark.asyncio
 async def test_handle_auth_callback_with_allowlist_success(
-    auth_service: AuthService, mock_request: MagicMock, mock_oauth: MagicMock
+    auth_service: AuthService, fake_oauth: FakeOAuth
 ) -> None:
     """Test that email in allowlist is allowed."""
     with patch(
@@ -69,37 +85,27 @@ async def test_handle_auth_callback_with_allowlist_success(
             "email": "ALLOWED@example.com",
             "sub": "123",
         }  # Case insensitive check
+        fake_oauth.oidc_provider.token = {"userinfo": user_info}
+        request = _request({"redirect_after_login": "/"})
 
-        # ast-grep-ignore: no-dict-any - mock OIDC callback matches external OAuth token response
-        async def mock_authorize(*args: object, **kwargs: object) -> dict[str, Any]:
-            return {"userinfo": user_info}
-
-        mock_oauth.oidc_provider.authorize_access_token = mock_authorize
-
-        mock_request.session = {"redirect_after_login": "/"}
-
-        response = await auth_service.handle_auth_callback(mock_request)
+        response = await auth_service.handle_auth_callback(request)
 
         assert response.status_code in {302, 307}
-        assert mock_request.session["user"] == user_info
+        assert request.session["user"] == user_info
 
 
 @pytest.mark.asyncio
 async def test_handle_auth_callback_with_allowlist_denied(
-    auth_service: AuthService, mock_request: MagicMock, mock_oauth: MagicMock
+    auth_service: AuthService, fake_oauth: FakeOAuth
 ) -> None:
     """Test that email NOT in allowlist is denied."""
     with patch("family_assistant.web.auth.ALLOWED_OIDC_EMAILS", "allowed@example.com"):
-        user_info = {"email": "hacker@example.com", "sub": "123"}
-
-        # ast-grep-ignore: no-dict-any - mock OIDC callback matches external OAuth token response
-        async def mock_authorize(*args: object, **kwargs: object) -> dict[str, Any]:
-            return {"userinfo": user_info}
-
-        mock_oauth.oidc_provider.authorize_access_token = mock_authorize
+        fake_oauth.oidc_provider.token = {
+            "userinfo": {"email": "hacker@example.com", "sub": "123"}
+        }
 
         with pytest.raises(HTTPException) as excinfo:
-            await auth_service.handle_auth_callback(mock_request)
+            await auth_service.handle_auth_callback(_request())
 
         assert excinfo.value.status_code == status.HTTP_403_FORBIDDEN
         assert "not in the allowlist" in excinfo.value.detail
@@ -107,39 +113,31 @@ async def test_handle_auth_callback_with_allowlist_denied(
 
 @pytest.mark.asyncio
 async def test_handle_auth_callback_with_allowlist_no_email(
-    auth_service: AuthService, mock_request: MagicMock, mock_oauth: MagicMock
+    auth_service: AuthService, fake_oauth: FakeOAuth
 ) -> None:
     """Test that missing email is denied when allowlist is active."""
     with patch("family_assistant.web.auth.ALLOWED_OIDC_EMAILS", "allowed@example.com"):
-        user_info = {"sub": "123"}  # No email
-
-        # ast-grep-ignore: no-dict-any - mock OIDC callback matches external OAuth token response
-        async def mock_authorize(*args: object, **kwargs: object) -> dict[str, Any]:
-            return {"userinfo": user_info}
-
-        mock_oauth.oidc_provider.authorize_access_token = mock_authorize
+        fake_oauth.oidc_provider.token = {"userinfo": {"sub": "123"}}  # No email
 
         with pytest.raises(HTTPException) as excinfo:
-            await auth_service.handle_auth_callback(mock_request)
+            await auth_service.handle_auth_callback(_request())
 
         assert excinfo.value.status_code == status.HTTP_403_FORBIDDEN
         assert "No email provided" in excinfo.value.detail
 
 
 @pytest.mark.asyncio
-async def test_logout_clears_token_session_binding(
-    auth_service: AuthService, mock_request: MagicMock
-) -> None:
-    mock_request.session = {
+async def test_logout_clears_token_session_binding(auth_service: AuthService) -> None:
+    request = _request({
         "user": {"sub": "app-user", "source": "app_token_session"},
         "api_token_id": 17,
         "session_jwt_exp": 1,
-    }
+    })
 
-    response = await auth_service.handle_logout(mock_request)
+    response = await auth_service.handle_logout(request)
 
     assert response.status_code in {302, 307}
-    assert mock_request.session == {}
+    assert request.session == {}
     cookies = response.headers.getlist("set-cookie")
     assert len(cookies) == 2
     for cookie, path in zip(cookies, ("/api", "/app"), strict=True):

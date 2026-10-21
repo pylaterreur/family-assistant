@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -37,6 +36,7 @@ from family_assistant.tools.browser_backend import (
     bind_authenticated_session,
     release_authenticated_session,
 )
+from tests.mocks.recording_async_call import RecordingAsyncCall
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -427,7 +427,7 @@ async def test_successful_retry_clears_only_its_operation_failure(
     monkeypatch.setattr(
         binding.backend,
         "report_autofill_outcome",
-        AsyncMock(side_effect=[BrowserBackendError("offline"), {}]),
+        RecordingAsyncCall(BrowserBackendError("offline"), {}),
     )
     binding.operation_failures.add("browser_click")
     with pytest.raises(BrowserBackendError):

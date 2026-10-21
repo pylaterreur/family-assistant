@@ -1,14 +1,18 @@
 """Tests for media download tools."""
 
 from collections.abc import Generator
+from dataclasses import dataclass
 from inspect import signature
 from pathlib import Path
-from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from types import TracebackType
+from typing import Any, Self, cast
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from yt_dlp.utils import DownloadError
 
+from family_assistant.config_models import AppConfig, AttachmentConfig
 from family_assistant.tools.media_download import (
     MEDIA_DOWNLOAD_TOOLS_DEFINITION,
     _sanitize_title,  # noqa: PLC2701 - unit tests need direct access to internal helpers
@@ -19,53 +23,100 @@ from family_assistant.tools.types import (
     ToolExecutionContext,
     ToolResult,
 )
+from tests.mocks.idle_processing_service import make_idle_processing_service
+from tests.mocks.unconnected_database import unconnected_database
+
+
+@dataclass
+class _Download:
+    """A file the fake downloader writes into its requested destination."""
+
+    filename: str
+    content: bytes
+    info: dict[str, object]
+    include_filepath: bool = True
+
+
+class FakeYoutubeDL:
+    """Stands in for ``yt_dlp.YoutubeDL`` for one extraction."""
+
+    def __init__(self, fake: "FakeYtDlp", options: dict[str, object]) -> None:
+        self._fake = fake
+        self._options = options
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        return None
+
+    def extract_info(self, url: str, *, download: bool) -> dict[str, object] | None:
+        self._fake.extract_calls.append((url, download))
+        if self._fake.error is not None:
+            raise self._fake.error
+        spec = self._fake.download
+        if not download:
+            assert spec is None, "a download was configured but not requested"
+            return self._fake.metadata
+        assert spec is not None, "test did not configure a download"
+        output_dir = Path(cast("str", self._options["outtmpl"])).parent
+        file_path = output_dir / spec.filename
+        file_path.write_bytes(spec.content)
+        if spec.include_filepath:
+            return {**spec.info, "requested_downloads": [{"filepath": str(file_path)}]}
+        return spec.info
+
+
+class FakeYtDlp:
+    """Stands in for the ``yt_dlp`` module, recording every extraction."""
+
+    def __init__(self) -> None:
+        self.metadata: dict[str, object] | None = None
+        self.download: _Download | None = None
+        self.error: Exception | None = None
+        self.extract_calls: list[tuple[str, bool]] = []
+
+    def YoutubeDL(self, options: dict[str, object]) -> FakeYoutubeDL:
+        return FakeYoutubeDL(self, options)
 
 
 @pytest.fixture
-def mock_exec_context() -> MagicMock:
-    """Create a mock execution context."""
-    context = MagicMock(spec=ToolExecutionContext)
-    context.processing_service = None
-    return context
+def fake_yt_dlp() -> Generator[FakeYtDlp]:
+    fake = FakeYtDlp()
+    with patch("family_assistant.tools.media_download.yt_dlp", new=fake):
+        yield fake
+
+
+def _exec_context(app_config: AppConfig | None = None) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        conversation_id="test-conv",
+        user_name="test-user",
+        interface_type="test",
+        timezone=ZoneInfo("UTC"),
+        turn_id=None,
+        db_context=unconnected_database(),
+        processing_service=(
+            make_idle_processing_service(app_config=app_config)
+            if app_config is not None
+            else None
+        ),
+        clock=None,
+        plugins=None,
+        event_sources=None,
+        attachment_registry=None,
+        credential_resolvers=None,
+        api_backend=None,
+    )
 
 
 @pytest.fixture
-def mock_yt_dlp() -> Generator[MagicMock]:
-    """Mock yt_dlp for testing without actual downloads."""
-    with patch("family_assistant.tools.media_download.yt_dlp") as mock_yt_dlp_module:
-        mock_ydl = MagicMock()
-        mock_yt_dlp_module.YoutubeDL.return_value.__enter__.return_value = mock_ydl
-
-        yield mock_ydl
-
-
-def _fake_download(
-    mock_yt_dlp_module: MagicMock,
-    filename: str,
-    content: bytes,
-    info: dict[str, object],
-    *,
-    include_filepath: bool = True,
-) -> None:
-    """Make the external downloader produce a file in its requested destination."""
-
-    def youtube_dl(options: dict[str, object]) -> MagicMock:
-        output_dir = Path(cast("str", options["outtmpl"])).parent
-        mock_ydl = MagicMock()
-
-        def extract_info(_url: str, *, download: bool) -> dict[str, object]:
-            assert download
-            file_path = output_dir / filename
-            file_path.write_bytes(content)
-            if include_filepath:
-                return {**info, "requested_downloads": [{"filepath": str(file_path)}]}
-            return info
-
-        mock_ydl.extract_info.side_effect = extract_info
-        mock_ydl.__enter__.return_value = mock_ydl
-        return mock_ydl
-
-    mock_yt_dlp_module.YoutubeDL.side_effect = youtube_dl
+def exec_context() -> ToolExecutionContext:
+    return _exec_context()
 
 
 def test_tool_definition_structure() -> None:
@@ -95,10 +146,10 @@ def test_tool_definition_structure() -> None:
 
 @pytest.mark.asyncio
 async def test_download_media_metadata_only(
-    mock_exec_context: MagicMock, mock_yt_dlp: MagicMock
+    exec_context: ToolExecutionContext, fake_yt_dlp: FakeYtDlp
 ) -> None:
     """Test metadata extraction without downloading."""
-    mock_yt_dlp.extract_info.return_value = {
+    fake_yt_dlp.metadata = {
         "title": "Test Video",
         "duration": 125,
         "uploader": "Test Uploader",
@@ -111,7 +162,7 @@ async def test_download_media_metadata_only(
     }
 
     result = await download_media_tool(
-        mock_exec_context,
+        exec_context,
         url="https://example.com/video",
         metadata_only=True,
     )
@@ -128,18 +179,16 @@ async def test_download_media_metadata_only(
     assert metadata["uploader"] == "Test Uploader"
 
     # Verify extract_info was called without download
-    mock_yt_dlp.extract_info.assert_called_once_with(
-        "https://example.com/video", download=False
-    )
+    assert fake_yt_dlp.extract_calls == [("https://example.com/video", False)]
 
 
 @pytest.mark.asyncio
 async def test_download_media_metadata_format_duration(
-    mock_exec_context: MagicMock, mock_yt_dlp: MagicMock
+    exec_context: ToolExecutionContext, fake_yt_dlp: FakeYtDlp
 ) -> None:
     """Test that duration is formatted correctly in text output."""
     # Test hours
-    mock_yt_dlp.extract_info.return_value = {
+    fake_yt_dlp.metadata = {
         "title": "Long Video",
         "duration": 3725,  # 1h 2m 5s
         "uploader": "Test",
@@ -147,7 +196,7 @@ async def test_download_media_metadata_format_duration(
     }
 
     result = await download_media_tool(
-        mock_exec_context,
+        exec_context,
         url="https://example.com/video",
         metadata_only=True,
     )
@@ -158,13 +207,13 @@ async def test_download_media_metadata_format_duration(
 
 @pytest.mark.asyncio
 async def test_download_media_metadata_no_info(
-    mock_exec_context: MagicMock, mock_yt_dlp: MagicMock
+    exec_context: ToolExecutionContext, fake_yt_dlp: FakeYtDlp
 ) -> None:
     """Test handling when extract_info returns None."""
-    mock_yt_dlp.extract_info.return_value = None
+    fake_yt_dlp.metadata = None
 
     result = await download_media_tool(
-        mock_exec_context,
+        exec_context,
         url="https://example.com/video",
         metadata_only=True,
     )
@@ -179,15 +228,13 @@ async def test_download_media_metadata_no_info(
 
 @pytest.mark.asyncio
 async def test_download_media_metadata_extraction_error(
-    mock_exec_context: MagicMock, mock_yt_dlp: MagicMock
+    exec_context: ToolExecutionContext, fake_yt_dlp: FakeYtDlp
 ) -> None:
     """An extractor ValueError is reported as a metadata failure."""
-    mock_yt_dlp.extract_info.side_effect = ValueError(
-        "Could not extract metadata from URL"
-    )
+    fake_yt_dlp.error = ValueError("Could not extract metadata from URL")
 
     result = await download_media_tool(
-        mock_exec_context,
+        exec_context,
         url="https://example.com/video",
         metadata_only=True,
     )
@@ -195,37 +242,33 @@ async def test_download_media_metadata_extraction_error(
     assert isinstance(result.data, dict)
     assert result.data["error_type"] == "metadata_extraction_failed"
     assert "Could not extract metadata from URL" in result.get_text()
-    mock_yt_dlp.extract_info.assert_called_once_with(
-        "https://example.com/video", download=False
-    )
+    assert fake_yt_dlp.extract_calls == [("https://example.com/video", False)]
 
 
 @pytest.mark.asyncio
 async def test_download_media_video_success(
-    mock_exec_context: MagicMock,
+    exec_context: ToolExecutionContext,
+    fake_yt_dlp: FakeYtDlp,
 ) -> None:
     """Test successful video download."""
     test_content = b"fake video content"
+    fake_yt_dlp.download = _Download(
+        "Test Video.mp4",
+        test_content,
+        {
+            "title": "Test Video",
+            "duration": 60,
+            "uploader": "Test Uploader",
+            "upload_date": "20240101",
+            "webpage_url": "https://example.com/video",
+            "extractor": "youtube",
+        },
+    )
 
-    with patch("family_assistant.tools.media_download.yt_dlp") as mock_yt_dlp_module:
-        _fake_download(
-            mock_yt_dlp_module,
-            "Test Video.mp4",
-            test_content,
-            {
-                "title": "Test Video",
-                "duration": 60,
-                "uploader": "Test Uploader",
-                "upload_date": "20240101",
-                "webpage_url": "https://example.com/video",
-                "extractor": "youtube",
-            },
-        )
-
-        result = await download_media_tool(
-            mock_exec_context,
-            url="https://example.com/video",
-        )
+    result = await download_media_tool(
+        exec_context,
+        url="https://example.com/video",
+    )
 
     assert isinstance(result, ToolResult)
     assert result.data is not None
@@ -245,31 +288,28 @@ async def test_download_media_video_success(
 
 @pytest.mark.asyncio
 async def test_download_media_audio_only(
-    mock_exec_context: MagicMock,
+    exec_context: ToolExecutionContext,
+    fake_yt_dlp: FakeYtDlp,
 ) -> None:
     """Test audio-only download."""
-    test_content = b"fake audio content"
+    fake_yt_dlp.download = _Download(
+        "Test Audio.m4a",
+        b"fake audio content",
+        {
+            "title": "Test Audio",
+            "duration": 180,
+            "uploader": "Test Uploader",
+            "upload_date": "20240101",
+            "webpage_url": "https://example.com/video",
+            "extractor": "youtube",
+        },
+    )
 
-    with patch("family_assistant.tools.media_download.yt_dlp") as mock_yt_dlp_module:
-        _fake_download(
-            mock_yt_dlp_module,
-            "Test Audio.m4a",
-            test_content,
-            {
-                "title": "Test Audio",
-                "duration": 180,
-                "uploader": "Test Uploader",
-                "upload_date": "20240101",
-                "webpage_url": "https://example.com/video",
-                "extractor": "youtube",
-            },
-        )
-
-        result = await download_media_tool(
-            mock_exec_context,
-            url="https://example.com/video",
-            audio_only=True,
-        )
+    result = await download_media_tool(
+        exec_context,
+        url="https://example.com/video",
+        audio_only=True,
+    )
 
     assert isinstance(result, ToolResult)
     assert result.data is not None
@@ -286,52 +326,46 @@ async def test_download_media_audio_only(
 
 
 @pytest.mark.asyncio
-async def test_download_media_file_too_large(
-    mock_exec_context: MagicMock,
-) -> None:
+async def test_download_media_file_too_large(fake_yt_dlp: FakeYtDlp) -> None:
     """Test handling of files exceeding size limit."""
-    with (
-        patch("family_assistant.tools.media_download.yt_dlp") as mock_yt_dlp_module,
-        patch(
-            "family_assistant.tools.media_download.get_attachment_limits",
-            return_value=(50, 20),  # 50 bytes max
-        ),
-    ):
-        _fake_download(
-            mock_yt_dlp_module,
-            "Large Video.mp4",
-            b"x" * 100,
-            {
-                "title": "Large Video",
-                "duration": 3600,
-            },
+    exec_context = _exec_context(
+        AppConfig(
+            attachment_config=AttachmentConfig(max_file_size=50, max_multimodal_size=20)
         )
+    )
+    fake_yt_dlp.download = _Download(
+        "Large Video.mp4",
+        b"x" * 100,
+        {
+            "title": "Large Video",
+            "duration": 3600,
+        },
+    )
 
-        result = await download_media_tool(
-            mock_exec_context,
-            url="https://example.com/large-video",
-        )
+    result = await download_media_tool(
+        exec_context,
+        url="https://example.com/large-video",
+    )
 
     assert isinstance(result, ToolResult)
     assert result.data is not None
     assert isinstance(result.data, dict)
     assert result.data.get("error") == "file_too_large"
+    assert result.data.get("max_size") == 50
 
 
 @pytest.mark.asyncio
 async def test_download_media_download_error(
-    mock_exec_context: MagicMock,
+    exec_context: ToolExecutionContext,
+    fake_yt_dlp: FakeYtDlp,
 ) -> None:
     """Test handling of yt-dlp download errors."""
-    with patch("family_assistant.tools.media_download.yt_dlp") as mock_yt_dlp_module:
-        mock_yt_dlp_module.YoutubeDL.return_value.__enter__.return_value.extract_info.side_effect = DownloadError(
-            "Video unavailable"
-        )
+    fake_yt_dlp.error = DownloadError("Video unavailable")
 
-        result = await download_media_tool(
-            mock_exec_context,
-            url="https://example.com/unavailable",
-        )
+    result = await download_media_tool(
+        exec_context,
+        url="https://example.com/unavailable",
+    )
 
     assert isinstance(result, ToolResult)
     assert result.data is not None
@@ -342,28 +376,26 @@ async def test_download_media_download_error(
 
 @pytest.mark.asyncio
 async def test_download_media_fallback_file_search(
-    mock_exec_context: MagicMock,
+    exec_context: ToolExecutionContext,
+    fake_yt_dlp: FakeYtDlp,
 ) -> None:
     """Test fallback file search when filepath is not in requested_downloads."""
     test_content = b"video content"
+    fake_yt_dlp.download = _Download(
+        "actual_video.mp4",
+        test_content,
+        {
+            "title": "Test Video",
+            "duration": 60,
+            "ext": "mp4",
+        },
+        include_filepath=False,
+    )
 
-    with patch("family_assistant.tools.media_download.yt_dlp") as mock_yt_dlp_module:
-        _fake_download(
-            mock_yt_dlp_module,
-            "actual_video.mp4",
-            test_content,
-            {
-                "title": "Test Video",
-                "duration": 60,
-                "ext": "mp4",
-            },
-            include_filepath=False,
-        )
-
-        result = await download_media_tool(
-            mock_exec_context,
-            url="https://example.com/video",
-        )
+    result = await download_media_tool(
+        exec_context,
+        url="https://example.com/video",
+    )
 
     # Should find the mp4 file via glob fallback
     assert isinstance(result, ToolResult)
@@ -375,41 +407,40 @@ async def test_download_media_fallback_file_search(
 
 
 @pytest.mark.asyncio
-async def test_download_media_various_formats(
-    mock_exec_context: MagicMock,
-) -> None:
-    """Test MIME type detection for various formats."""
-    format_tests: list[tuple[str, str]] = [
+@pytest.mark.parametrize(
+    ("ext", "expected_mime"),
+    [
         (".mp4", "video/mp4"),
         (".m4a", "audio/mp4"),
         (".webm", "video/webm"),
         (".mkv", "video/x-matroska"),
         (".mp3", "audio/mpeg"),
         (".opus", "audio/opus"),
-    ]
+    ],
+)
+async def test_download_media_various_formats(
+    exec_context: ToolExecutionContext,
+    fake_yt_dlp: FakeYtDlp,
+    ext: str,
+    expected_mime: str,
+) -> None:
+    """Test MIME type detection for various formats."""
+    fake_yt_dlp.download = _Download(
+        f"test{ext}",
+        b"content",
+        {
+            "title": "Test",
+            "duration": 60,
+        },
+    )
 
-    for ext, expected_mime in format_tests:
-        with patch(
-            "family_assistant.tools.media_download.yt_dlp"
-        ) as mock_yt_dlp_module:
-            _fake_download(
-                mock_yt_dlp_module,
-                f"test{ext}",
-                b"content",
-                {
-                    "title": "Test",
-                    "duration": 60,
-                },
-            )
+    result = await download_media_tool(
+        exec_context,
+        url="https://example.com/video",
+    )
 
-            result = await download_media_tool(
-                mock_exec_context,
-                url="https://example.com/video",
-            )
-
-        # ast-grep-ignore: no-dict-any - ToolResult.data can be dict, list, str, etc.
-        result_data: dict[str, Any] = result.data  # type: ignore[assignment] - data is validated above
-        assert result_data["mime_type"] == expected_mime, f"Failed for {ext}"
+    assert isinstance(result.data, dict)
+    assert result.data["mime_type"] == expected_mime
 
 
 @pytest.mark.asyncio
@@ -423,15 +454,15 @@ async def test_download_media_various_formats(
     ],
 )
 async def test_download_media_rejects_invalid_url(
-    mock_exec_context: MagicMock, mock_yt_dlp: MagicMock, url: str
+    exec_context: ToolExecutionContext, fake_yt_dlp: FakeYtDlp, url: str
 ) -> None:
     """Invalid URLs are rejected before reaching the downloader."""
-    result = await download_media_tool(mock_exec_context, url=url)
+    result = await download_media_tool(exec_context, url=url)
 
     assert isinstance(result.data, dict)
     assert result.data["error"] == "invalid_url"
     assert result.data["error_type"] == "validation_failed"
-    mock_yt_dlp.extract_info.assert_not_called()
+    assert fake_yt_dlp.extract_calls == []
 
 
 @pytest.mark.asyncio
@@ -439,15 +470,15 @@ async def test_download_media_rejects_invalid_url(
     "url", ["https://example.com/video", "http://example.com/video"]
 )
 async def test_download_media_accepts_http_urls(
-    mock_exec_context: MagicMock, mock_yt_dlp: MagicMock, url: str
+    exec_context: ToolExecutionContext, fake_yt_dlp: FakeYtDlp, url: str
 ) -> None:
     """HTTP and HTTPS URLs reach the downloader."""
-    mock_yt_dlp.extract_info.return_value = {"title": "Video"}
-    result = await download_media_tool(mock_exec_context, url=url, metadata_only=True)
+    fake_yt_dlp.metadata = {"title": "Video"}
+    result = await download_media_tool(exec_context, url=url, metadata_only=True)
 
     assert isinstance(result.data, dict)
     assert result.data["status"] == "success"
-    mock_yt_dlp.extract_info.assert_called_once_with(url, download=False)
+    assert fake_yt_dlp.extract_calls == [(url, False)]
 
 
 # Filename sanitization tests

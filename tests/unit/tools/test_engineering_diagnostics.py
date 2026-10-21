@@ -1,18 +1,24 @@
 """Tests for engineer-profile diagnostic tools.
 
 Covers the MCP status / reconnect tools, resolved config / profile config
-inspection, and system info. Heavy mocking is used because these tools wrap
-runtime infrastructure (MCPToolsProvider, ProcessingService, AppConfig) which
-isn't trivially constructable in a unit test.
+inspection, and system info. The tools run against real AppConfig models, real
+ProcessingService instances and a real MCPToolsProvider; only the connection
+state an MCP server reached is scripted, since reaching it needs live servers.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, Mock
+from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from family_assistant.config_models import (
+    AppConfig,
+    DefaultProfileSettings,
+    RemoteA2AConfig,
+    ServiceProfile,
+)
 from family_assistant.tools.catalog import LOCAL_TOOL_REGISTRATIONS
 from family_assistant.tools.engineering import (
     get_mcp_server_status,
@@ -27,7 +33,7 @@ from family_assistant.tools.infrastructure import (
     LocalToolsProvider,
     PolicyEnforcingToolsProvider,
 )
-from family_assistant.tools.mcp import MCPToolsProvider
+from family_assistant.tools.mcp import MCPServerStatus, MCPToolsProvider
 from family_assistant.tools.metadata import ToolTag
 from family_assistant.tools.on_demand import OnDemandToolsView
 from family_assistant.tools.policy import (
@@ -37,16 +43,54 @@ from family_assistant.tools.policy import (
     ToolPolicyConfig,
     ToolPolicyDecision,
 )
-from family_assistant.tools.types import ToolExecutionContext
+from family_assistant.tools.types import MCPServerConfig, ToolExecutionContext
+from tests.mocks.idle_processing_service import make_idle_processing_service
+from tests.mocks.unconnected_database import unconnected_database
+
+if TYPE_CHECKING:
+    from family_assistant.processing import ProcessingService
+    from family_assistant.storage.database import Database
+
+
+class ScriptedStateMCPToolsProvider(MCPToolsProvider):
+    """A real provider whose servers report scripted connection states.
+
+    Reaching ``connected`` or ``failed`` needs live MCP servers; the diagnostic
+    tools only read the status snapshot, so the state each server reached is
+    laid over the provider's real snapshot. A reconnect succeeds and leaves the
+    server connected.
+    """
+
+    def __init__(
+        self,
+        mcp_server_configs: dict[str, MCPServerConfig],
+        states: dict[str, str],
+    ) -> None:
+        super().__init__(mcp_server_configs)
+        self._states = dict(states)
+        self.reconnected: list[str] = []
+
+    def get_server_statuses(self) -> dict[str, MCPServerStatus]:
+        snapshot = super().get_server_statuses()
+        for server_id, state in self._states.items():
+            snapshot[server_id]["status"] = state
+        return snapshot
+
+    async def reconnect_server(self, server_id: str) -> bool:
+        self.reconnected.append(server_id)
+        self._states[server_id] = "connected"
+        return True
 
 
 @pytest.fixture
-def exec_context_with_db() -> ToolExecutionContext:
-    """Minimal execution context with a fake db dialect."""
-    db = Mock()
-    db.engine = Mock()
-    db.engine.dialect = Mock()
-    db.dialect_name = "sqlite"
+def db() -> Database:
+    """A real handle; none of these tools query the database."""
+    return unconnected_database()
+
+
+@pytest.fixture
+def exec_context_with_db(db: Database) -> ToolExecutionContext:
+    """Minimal execution context with a SQLite database handle."""
     return ToolExecutionContext(
         interface_type="test",
         conversation_id="conv-1",
@@ -118,14 +162,13 @@ async def test_get_system_info_build_falls_back_when_unstamped(
 
 @pytest.mark.anyio
 async def test_get_system_info_handles_missing_engine() -> None:
-    """If the db_context lacks an engine, dialect falls back to 'unknown'."""
-    db = Mock(spec=[])  # no `engine` attribute
+    """If the db_context exposes no dialect, it falls back to 'unknown'."""
     ctx = ToolExecutionContext(
         interface_type="test",
         conversation_id="c",
         user_name="u",
         turn_id=None,
-        db_context=db,
+        db_context=cast("Database", object()),
         processing_service=None,
         clock=None,
         plugins=None,
@@ -145,14 +188,14 @@ async def test_get_system_info_handles_missing_engine() -> None:
 
 
 def _make_ctx_with_tools_provider(
-    tools_provider: Mock,
+    tools_provider: MCPToolsProvider, db: Database
 ) -> ToolExecutionContext:
     return ToolExecutionContext(
         interface_type="test",
         conversation_id="c",
         user_name="u",
         turn_id=None,
-        db_context=Mock(),
+        db_context=db,
         processing_service=None,
         clock=None,
         plugins=None,
@@ -179,59 +222,45 @@ async def test_get_mcp_server_status_with_no_provider(
 
 
 @pytest.mark.anyio
-async def test_get_mcp_server_status_aggregates_statuses() -> None:
+async def test_get_mcp_server_status_aggregates_statuses(db: Database) -> None:
     """When an MCPToolsProvider is reachable, the tool dumps its statuses
     and computes a summary count."""
-    fake_provider = Mock(spec=MCPToolsProvider)
-    fake_provider.get_server_statuses.return_value = {
-        "code-execution": {
-            "status": "connected",
-            "transport": "stdio",
-            "tool_count": 3,
-            "tools": ["create_workspace", "execute_shell", "write_file"],
-            "session_active": True,
-            "command": "code-execution-mcp",
-            "args": [],
-            "url": None,
+    provider = ScriptedStateMCPToolsProvider(
+        {
+            "code-execution": {
+                "transport": "stdio",
+                "command": "code-execution-mcp",
+                "args": [],
+            },
+            "broken": {"transport": "sse", "url": "http://broken.invalid"},
+            "starting": {"transport": "stdio", "command": "slow-mcp", "args": []},
         },
-        "broken": {
-            "status": "failed",
-            "transport": "sse",
-            "tool_count": 0,
-            "tools": [],
-            "session_active": False,
-            "command": None,
-            "args": [],
-            "url": "http://broken.invalid",
-        },
-    }
-
-    # Patch find_provider_by_type to return our fake provider regardless of
-    # the wrapped tools_provider passed in.
-    ctx = _make_ctx_with_tools_provider(fake_provider)
+        states={"code-execution": "connected", "broken": "failed"},
+    )
+    ctx = _make_ctx_with_tools_provider(provider, db)
 
     result = await get_mcp_server_status(ctx)
     data = result.get_data()
     assert isinstance(data, dict)
     assert data["summary"] == {
-        "total": 2,
+        "total": 3,
         "connected": 1,
         "failed": 1,
         "cancelled": 0,
-        "pending": 0,
+        "pending": 1,
     }
-    assert "code-execution" in data["servers"]
-    assert "broken" in data["servers"]
+    assert data["servers"]["code-execution"]["command"] == "code-execution-mcp"
+    assert data["servers"]["broken"]["url"] == "http://broken.invalid"
 
 
 @pytest.mark.anyio
-async def test_reconnect_mcp_server_unknown_id_returns_error() -> None:
-    fake_provider = Mock(spec=MCPToolsProvider)
-    fake_provider.reconnect_server = AsyncMock(side_effect=KeyError("nope"))
-    fake_provider.server_configs = {"a": {}, "b": {}}
-    fake_provider.get_server_statuses.return_value = {}
+async def test_reconnect_mcp_server_unknown_id_returns_error(db: Database) -> None:
+    provider = MCPToolsProvider({
+        "a": {"transport": "stdio", "command": "a-mcp", "args": []},
+        "b": {"transport": "stdio", "command": "b-mcp", "args": []},
+    })
 
-    ctx = _make_ctx_with_tools_provider(fake_provider)
+    ctx = _make_ctx_with_tools_provider(provider, db)
     result = await reconnect_mcp_server(ctx, server_id="nope")
     data = result.get_data()
     assert isinstance(data, dict)
@@ -240,18 +269,23 @@ async def test_reconnect_mcp_server_unknown_id_returns_error() -> None:
 
 
 @pytest.mark.anyio
-async def test_reconnect_mcp_server_success() -> None:
-    fake_provider = Mock(spec=MCPToolsProvider)
-    fake_provider.reconnect_server = AsyncMock(return_value=True)
-    fake_provider.server_configs = {"code-execution": {}}
-    fake_provider.get_server_statuses.return_value = {
-        "code-execution": {"status": "connected", "tool_count": 3},
-    }
+async def test_reconnect_mcp_server_success(db: Database) -> None:
+    provider = ScriptedStateMCPToolsProvider(
+        {
+            "code-execution": {
+                "transport": "stdio",
+                "command": "code-execution-mcp",
+                "args": [],
+            }
+        },
+        states={"code-execution": "failed"},
+    )
 
-    ctx = _make_ctx_with_tools_provider(fake_provider)
+    ctx = _make_ctx_with_tools_provider(provider, db)
     result = await reconnect_mcp_server(ctx, server_id="code-execution")
     data = result.get_data()
     assert isinstance(data, dict)
+    assert provider.reconnected == ["code-execution"]
     assert data["success"] is True
     assert data["server_id"] == "code-execution"
     assert data["status"]["status"] == "connected"
@@ -260,16 +294,15 @@ async def test_reconnect_mcp_server_success() -> None:
 # --- get_resolved_config / get_profile_config ---
 
 
-def _ctx_with_app_config(app_config: Mock) -> ToolExecutionContext:
-    """Build a context whose processing_service.app_config is the given object."""
-    processing_service = Mock()
-    processing_service.app_config = app_config
+def _ctx_with_service(
+    processing_service: ProcessingService, db: Database
+) -> ToolExecutionContext:
     return ToolExecutionContext(
         interface_type="test",
         conversation_id="c",
         user_name="u",
         turn_id=None,
-        db_context=Mock(),
+        db_context=db,
         processing_service=processing_service,
         clock=None,
         plugins=None,
@@ -281,27 +314,31 @@ def _ctx_with_app_config(app_config: Mock) -> ToolExecutionContext:
     )
 
 
+def _ctx_with_app_config(app_config: AppConfig, db: Database) -> ToolExecutionContext:
+    """Build a context whose processing_service.app_config is the given config."""
+    return _ctx_with_service(make_idle_processing_service(app_config=app_config), db)
+
+
 @pytest.mark.anyio
-async def test_get_resolved_config_omits_profile_bodies_and_redacts_embedded() -> None:
-    """Declared credentials are masked by SecretStr before reaching this tool.
+async def test_get_resolved_config_omits_profile_bodies_and_redacts_embedded(
+    db: Database,
+) -> None:
+    """The tool drops profile bodies, lists profile ids, and redacts a
+    credential embedded in a value.
 
-    A hand-built dump cannot exercise that (see
-    ``tests/unit/test_config_inspection.py`` for the real-AppConfig case), so
-    what is checked here is what the tool itself owns: dropping profile bodies,
-    listing profile ids, and redacting a credential embedded in a value.
+    Declared ``SecretStr`` credentials are covered by
+    ``tests/unit/test_config_inspection.py``.
     """
-    fake_app_config = Mock()
-    fake_app_config.model_dump.return_value = {
-        "default_service_profile_id": "default_assistant",
-        "database_url": "postgresql://fa:hunter2@db.internal/family",
-        "service_profiles": [
-            {"id": "default_assistant", "description": "Default"},
-            {"id": "engineer", "description": "Engineer"},
+    app_config = AppConfig(
+        default_service_profile_id="default_assistant",
+        database_url="postgresql://fa:hunter2@db.internal/family",
+        service_profiles=[
+            ServiceProfile(id="engineer", description="Engineer"),
+            ServiceProfile(id="default_assistant", description="Default"),
         ],
-        "default_profile_settings": {"some": "data"},
-    }
+    )
 
-    ctx = _ctx_with_app_config(fake_app_config)
+    ctx = _ctx_with_app_config(app_config, db)
     result = await get_resolved_config(ctx)
     data = result.get_data()
     assert isinstance(data, dict)
@@ -312,6 +349,7 @@ async def test_get_resolved_config_omits_profile_bodies_and_redacts_embedded() -
     assert "default_profile_settings" not in cfg
     assert data["profile_ids"] == ["default_assistant", "engineer"]
     assert data["profile_count"] == 2
+    assert data["default_service_profile_id"] == "default_assistant"
 
 
 @pytest.mark.anyio
@@ -325,50 +363,43 @@ async def test_get_resolved_config_without_processing_service(
 
 
 @pytest.mark.anyio
-async def test_get_profile_config_lists_when_id_omitted() -> None:
-    fake_default_settings = Mock()
-    fake_default_settings.model_dump.return_value = {"description": "default"}
-    fake_default_settings.operator_tools_policy = None
+async def test_get_profile_config_lists_when_id_omitted(db: Database) -> None:
+    app_config = AppConfig(
+        service_profiles=[
+            ServiceProfile(id="engineer", description="Engineer"),
+            ServiceProfile(id="default_assistant", description="Default"),
+        ],
+        default_profile_settings=DefaultProfileSettings(slash_commands=["/default"]),
+        default_service_profile_id="default_assistant",
+    )
 
-    p1 = Mock()
-    p1.id = "default_assistant"
-    p1.description = "Default"
-    p2 = Mock()
-    p2.id = "engineer"
-    p2.description = "Engineer"
-
-    fake_app_config = Mock()
-    fake_app_config.service_profiles = [p1, p2]
-    fake_app_config.default_profile_settings = fake_default_settings
-    fake_app_config.default_service_profile_id = "default_assistant"
-
-    ctx = _ctx_with_app_config(fake_app_config)
+    ctx = _ctx_with_app_config(app_config, db)
     result = await get_profile_config(ctx)
     data = result.get_data()
     assert isinstance(data, dict)
     assert data["profile_ids"] == ["default_assistant", "engineer"]
     assert data["default_service_profile_id"] == "default_assistant"
-    assert "default_profile_settings" in data
+    settings = data["default_profile_settings"]
+    assert settings["slash_commands"] == ["/default"]
+    assert settings["operator_tools_policy"] is None
 
 
 @pytest.mark.anyio
-async def test_get_profile_config_returns_specific_profile() -> None:
-    matched = Mock()
-    matched.id = "engineer"
-    matched.description = "Engineer profile"
-    matched.model_dump.return_value = {
-        "id": "engineer",
-        "description": "Engineer profile",
-        "processing_config": {
-            "home_assistant_api_url": "https://ha.internal/api?token=leak-me"
-        },
-    }
-    matched.operator_tools_policy = None
+async def test_get_profile_config_returns_specific_profile(db: Database) -> None:
+    app_config = AppConfig(
+        service_profiles=[
+            ServiceProfile(id="default_assistant", description="Default"),
+            ServiceProfile(
+                id="engineer",
+                description="Engineer profile",
+                remote_a2a=RemoteA2AConfig(
+                    agent_url="https://agent.internal/a2a?token=leak-me"
+                ),
+            ),
+        ]
+    )
 
-    fake_app_config = Mock()
-    fake_app_config.service_profiles = [matched]
-
-    ctx = _ctx_with_app_config(fake_app_config)
+    ctx = _ctx_with_app_config(app_config, db)
     result = await get_profile_config(ctx, profile_id="engineer")
     data = result.get_data()
     assert isinstance(data, dict)
@@ -377,19 +408,15 @@ async def test_get_profile_config_returns_specific_profile() -> None:
     cfg = data["config"]
     assert isinstance(cfg, dict)
     assert (
-        cfg["processing_config"]["home_assistant_api_url"]
-        == "https://ha.internal/api?token=[REDACTED]"
+        cfg["remote_a2a"]["agent_url"] == "https://agent.internal/a2a?token=[REDACTED]"
     )
 
 
 @pytest.mark.anyio
-async def test_get_profile_config_unknown_id_returns_error() -> None:
-    p1 = Mock()
-    p1.id = "default_assistant"
-    fake_app_config = Mock()
-    fake_app_config.service_profiles = [p1]
+async def test_get_profile_config_unknown_id_returns_error(db: Database) -> None:
+    app_config = AppConfig(service_profiles=[ServiceProfile(id="default_assistant")])
 
-    ctx = _ctx_with_app_config(fake_app_config)
+    ctx = _ctx_with_app_config(app_config, db)
     result = await get_profile_config(ctx, profile_id="does_not_exist")
     data = result.get_data()
     assert isinstance(data, dict)
@@ -418,28 +445,25 @@ def _notes_policy_provider() -> PolicyEnforcingToolsProvider:
     )
 
 
-def _ctx_with_registry(registry: object) -> ToolExecutionContext:
-    processing_service = Mock()
-    processing_service.processing_services_registry = registry
-    return ToolExecutionContext(
-        interface_type="test",
-        conversation_id="c",
-        user_name="u",
-        turn_id=None,
-        db_context=Mock(),
-        processing_service=processing_service,
-        clock=None,
-        plugins=None,
-        event_sources=None,
-        attachment_registry=None,
-        timezone=ZoneInfo("UTC"),
-        credential_resolvers=None,
-        api_backend=None,
-    )
+def _profile_service(
+    tools_provider: PolicyEnforcingToolsProvider,
+    on_demand_view: OnDemandToolsView | None = None,
+) -> ProcessingService:
+    service = make_idle_processing_service(tools_provider=tools_provider)
+    service.on_demand_view = on_demand_view
+    return service
+
+
+def _ctx_with_registry(
+    registry: dict[str, ProcessingService], db: Database
+) -> ToolExecutionContext:
+    engineer = make_idle_processing_service(profile_id="engineer")
+    engineer.processing_services_registry = registry
+    return _ctx_with_service(engineer, db)
 
 
 @pytest.mark.anyio
-async def test_get_profile_tool_inventory_summary_across_profiles() -> None:
+async def test_get_profile_tool_inventory_summary_across_profiles(db: Database) -> None:
     provider = _notes_policy_provider()
     all_names = [
         defn["function"]["name"]
@@ -449,10 +473,9 @@ async def test_get_profile_tool_inventory_summary_across_profiles() -> None:
     on_demand_view = OnDemandToolsView(
         wrapped_provider=provider, on_demand_tool_names={hidden}
     )
-    service = Mock()
-    service.tools_provider = provider
-    service.on_demand_view = on_demand_view
-    ctx = _ctx_with_registry({"notes_profile": service})
+    ctx = _ctx_with_registry(
+        {"notes_profile": _profile_service(provider, on_demand_view)}, db
+    )
 
     result = await get_profile_tool_inventory(ctx)
     data = result.get_data()
@@ -467,12 +490,11 @@ async def test_get_profile_tool_inventory_summary_across_profiles() -> None:
 
 
 @pytest.mark.anyio
-async def test_get_profile_tool_inventory_specific_profile_has_tool_lists() -> None:
+async def test_get_profile_tool_inventory_specific_profile_has_tool_lists(
+    db: Database,
+) -> None:
     provider = _notes_policy_provider()
-    service = Mock()
-    service.tools_provider = provider
-    service.on_demand_view = None
-    ctx = _ctx_with_registry({"notes_profile": service})
+    ctx = _ctx_with_registry({"notes_profile": _profile_service(provider)}, db)
 
     result = await get_profile_tool_inventory(ctx, profile_id="notes_profile")
     data = result.get_data()
@@ -484,11 +506,12 @@ async def test_get_profile_tool_inventory_specific_profile_has_tool_lists() -> N
 
 
 @pytest.mark.anyio
-async def test_get_profile_tool_inventory_unknown_profile_returns_error() -> None:
-    service = Mock()
-    service.tools_provider = _notes_policy_provider()
-    service.on_demand_view = None
-    ctx = _ctx_with_registry({"notes_profile": service})
+async def test_get_profile_tool_inventory_unknown_profile_returns_error(
+    db: Database,
+) -> None:
+    ctx = _ctx_with_registry(
+        {"notes_profile": _profile_service(_notes_policy_provider())}, db
+    )
 
     result = await get_profile_tool_inventory(ctx, profile_id="missing")
     data = result.get_data()
@@ -545,18 +568,15 @@ def _diagnostic_policy_provider() -> PolicyEnforcingToolsProvider:
     )
 
 
-def _diagnostic_service(
-    on_demand_view: OnDemandToolsView | None = None,
-) -> Mock:
-    service = Mock()
-    service.tools_provider = _diagnostic_policy_provider()
-    service.on_demand_view = on_demand_view
-    return service
+def _diagnostic_service() -> ProcessingService:
+    return _profile_service(_diagnostic_policy_provider())
 
 
 @pytest.mark.anyio
-async def test_resolve_tool_policy_allowed_tool_reports_matched_rule() -> None:
-    ctx = _ctx_with_registry({"diag": _diagnostic_service()})
+async def test_resolve_tool_policy_allowed_tool_reports_matched_rule(
+    db: Database,
+) -> None:
+    ctx = _ctx_with_registry({"diag": _diagnostic_service()}, db)
 
     result = await resolve_tool_policy(ctx, tool_name="add_or_update_note")
     data = result.get_data()
@@ -587,8 +607,10 @@ async def test_resolve_tool_policy_allowed_tool_reports_matched_rule() -> None:
 
 
 @pytest.mark.anyio
-async def test_resolve_tool_policy_default_deny_has_no_matched_rule() -> None:
-    ctx = _ctx_with_registry({"diag": _diagnostic_service()})
+async def test_resolve_tool_policy_default_deny_has_no_matched_rule(
+    db: Database,
+) -> None:
+    ctx = _ctx_with_registry({"diag": _diagnostic_service()}, db)
 
     result = await resolve_tool_policy(ctx, tool_name="search_documents")
     data = result.get_data()
@@ -603,8 +625,10 @@ async def test_resolve_tool_policy_default_deny_has_no_matched_rule() -> None:
 
 
 @pytest.mark.anyio
-async def test_resolve_tool_policy_confirm_gated_tool_depends_on_can_confirm() -> None:
-    ctx = _ctx_with_registry({"diag": _diagnostic_service()})
+async def test_resolve_tool_policy_confirm_gated_tool_depends_on_can_confirm(
+    db: Database,
+) -> None:
+    ctx = _ctx_with_registry({"diag": _diagnostic_service()}, db)
 
     confirmable = await resolve_tool_policy(
         ctx, tool_name="read_error_logs", can_confirm=True
@@ -629,8 +653,10 @@ async def test_resolve_tool_policy_confirm_gated_tool_depends_on_can_confirm() -
 
 
 @pytest.mark.anyio
-async def test_resolve_tool_policy_argument_conditional_rule_needs_arguments() -> None:
-    ctx = _ctx_with_registry({"diag": _diagnostic_service()})
+async def test_resolve_tool_policy_argument_conditional_rule_needs_arguments(
+    db: Database,
+) -> None:
+    ctx = _ctx_with_registry({"diag": _diagnostic_service()}, db)
 
     without_args = await resolve_tool_policy(ctx, tool_name="add_or_update_note")
     data = without_args.get_data()
@@ -654,8 +680,10 @@ async def test_resolve_tool_policy_argument_conditional_rule_needs_arguments() -
 
 
 @pytest.mark.anyio
-async def test_resolve_tool_policy_unknown_tool_suggests_similar_names() -> None:
-    ctx = _ctx_with_registry({"diag": _diagnostic_service()})
+async def test_resolve_tool_policy_unknown_tool_suggests_similar_names(
+    db: Database,
+) -> None:
+    ctx = _ctx_with_registry({"diag": _diagnostic_service()}, db)
 
     result = await resolve_tool_policy(ctx, tool_name="add_or_update_notes")
     data = result.get_data()
@@ -668,8 +696,8 @@ async def test_resolve_tool_policy_unknown_tool_suggests_similar_names() -> None
 
 
 @pytest.mark.anyio
-async def test_resolve_tool_policy_unknown_profile_returns_error() -> None:
-    ctx = _ctx_with_registry({"diag": _diagnostic_service()})
+async def test_resolve_tool_policy_unknown_profile_returns_error(db: Database) -> None:
+    ctx = _ctx_with_registry({"diag": _diagnostic_service()}, db)
 
     result = await resolve_tool_policy(
         ctx, tool_name="add_or_update_note", profile_id="missing"
@@ -693,15 +721,16 @@ async def test_resolve_tool_policy_without_registry_returns_error(
 
 
 @pytest.mark.anyio
-async def test_resolve_tool_policy_reports_on_demand_tools() -> None:
+async def test_resolve_tool_policy_reports_on_demand_tools(db: Database) -> None:
     provider = _diagnostic_policy_provider()
-    service = Mock()
-    service.tools_provider = provider
-    service.on_demand_view = OnDemandToolsView(
-        wrapped_provider=provider,
-        on_demand_tool_names={"add_or_update_note"},
+    service = _profile_service(
+        provider,
+        OnDemandToolsView(
+            wrapped_provider=provider,
+            on_demand_tool_names={"add_or_update_note"},
+        ),
     )
-    ctx = _ctx_with_registry({"diag": service})
+    ctx = _ctx_with_registry({"diag": service}, db)
 
     result = await resolve_tool_policy(ctx, tool_name="add_or_update_note")
     data = result.get_data()
@@ -710,8 +739,8 @@ async def test_resolve_tool_policy_reports_on_demand_tools() -> None:
 
 
 @pytest.mark.anyio
-async def test_resolve_tool_policy_rejects_non_bool_can_confirm() -> None:
-    ctx = _ctx_with_registry({"diag": _diagnostic_service()})
+async def test_resolve_tool_policy_rejects_non_bool_can_confirm(db: Database) -> None:
+    ctx = _ctx_with_registry({"diag": _diagnostic_service()}, db)
 
     result = await resolve_tool_policy(
         ctx,
@@ -724,8 +753,8 @@ async def test_resolve_tool_policy_rejects_non_bool_can_confirm() -> None:
 
 
 @pytest.mark.anyio
-async def test_resolve_tool_policy_rejects_non_dict_arguments() -> None:
-    ctx = _ctx_with_registry({"diag": _diagnostic_service()})
+async def test_resolve_tool_policy_rejects_non_dict_arguments(db: Database) -> None:
+    ctx = _ctx_with_registry({"diag": _diagnostic_service()}, db)
 
     result = await resolve_tool_policy(
         ctx,
