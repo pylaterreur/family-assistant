@@ -56,6 +56,10 @@ is still a draft.
 - **Who may watch what is decided by credentials.** Any profile that can create automations may
   watch any server its user has a credential for; there is no per-profile server allowlist for
   events.
+- **Strict where data could be lost, tolerant elsewhere.** A malformed poll page is refused so its
+  cursor never moves past events FA did not deliver. A malformed `events/list` entry (or schema) is
+  skipped or defaulted instead, because nothing is lost: the server's bug shows up as an event that
+  cannot be watched, which validation reports by name.
 - **Errors surface in logs.** A subscription whose poll fails (revoked token, server down) backs off
   and retries, and the failure is logged; the automation is not disabled.
 
