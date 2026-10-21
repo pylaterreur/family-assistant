@@ -297,34 +297,21 @@ class TestThoughtSignatureConversion:
         and attached to all tool calls with wrong part indices.
 
         Response structure that causes the bug:
-        - Part 0: text "I'll check the weather"
-        - Part 1: thought (reasoning, has signature but not a function call)
+        - Part 0: thought (reasoning, has signature but not a function call)
+        - Part 1: text "I'll check the weather"
         - Part 2: function_call with signature
 
-        When we emit this, ALL thought signatures (1 and 2) get attached to the tool call.
-        When we reconstruct, we try to apply signatures at indices 1 and 2 to a
+        When we emit this, ALL thought signatures (0 and 2) get attached to the tool call.
+        When we reconstruct, we try to apply signatures at indices 0 and 2 to a
         2-part structure [text, function_call], causing index mismatch.
         """
 
         test_reasoning_sig = b"signature_for_reasoning"
         test_function_sig = b"signature_for_weather_call"
 
-        text_chunk = genai_types.GenerateContentResponse(
-            candidates=[
-                genai_types.Candidate(
-                    content=genai_types.Content(
-                        role="model",
-                        parts=[
-                            genai_types.Part(text="I'll check the weather for you.")
-                        ],
-                    )
-                )
-            ]
-        )
-        # The reasoning part's signature arrives in the same chunk as the
-        # function call's, so a signature collected per chunk rather than per
-        # part would land on the tool call.
-        thought_and_call_chunk = genai_types.GenerateContentResponse(
+        # One chunk carrying all three parts: its ``text`` is truthy, so a
+        # client that reads ``chunk.text`` instead of the parts drops the call.
+        chunk = genai_types.GenerateContentResponse(
             candidates=[
                 genai_types.Candidate(
                     content=genai_types.Content(
@@ -335,6 +322,7 @@ class TestThoughtSignatureConversion:
                                 thought=True,
                                 thought_signature=test_reasoning_sig,
                             ),
+                            genai_types.Part(text="I'll check the weather for you."),
                             genai_types.Part(
                                 function_call=genai_types.FunctionCall(
                                     name="get_weather", args={"location": "Paris"}
@@ -348,8 +336,7 @@ class TestThoughtSignatureConversion:
         )
 
         async def stream() -> "AsyncIterator[genai_types.GenerateContentResponse]":
-            yield text_chunk
-            yield thought_and_call_chunk
+            yield chunk
 
         async def generate_content_stream(
             *,
