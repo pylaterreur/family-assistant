@@ -54,6 +54,11 @@ finishes. If instead the assistant decides on its own to hand a question to the 
 it gives you a `delegation_...` reference, keeps the conversation free, and posts the result back
 automatically when it's ready; you can ask a follow-up that continues that same research session.
 
+Work handed off like this can be called off while it's still going: ask the assistant to cancel it
+("stop that research", "cancel the duplicate coder job"). Work that hasn't started yet, and research
+or coding running on a remote agent, stop and report nothing further. A task the assistant is
+already working through itself can't be interrupted and finishes on its own.
+
 ## Saving what you find
 
 Ask the assistant to index a page so you can search it later — see

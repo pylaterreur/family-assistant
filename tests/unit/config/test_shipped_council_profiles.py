@@ -175,6 +175,7 @@ def test_the_council_is_reached_only_by_delegation(shipped_config: AppConfig) ->
                 "get_attachment_info",
                 "get_delegation_status",
                 "list_delegations",
+                "cancel_delegation",
                 "delegate_to_service",
             },
         ),

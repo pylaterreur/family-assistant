@@ -38,6 +38,7 @@ from family_assistant.services.tool_call_review import (
     build_delegation_review_trigger,
 )
 from family_assistant.storage.delegation_runs import (
+    CANCELLABLE_DELEGATION_STATUSES,
     TERMINAL_DELEGATION_STATUSES,
     delegated_subconversation_id,
 )
@@ -1583,6 +1584,32 @@ SERVICE_TOOLS_DEFINITION: list[ToolDefinition] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_delegation",
+            "description": (
+                "Stops an asynchronous profile delegation that is no longer wanted -- a duplicate, "
+                "or one the user has called off -- so its result is never delivered. Works on a "
+                "delegation that has not started yet, or that is running on a remote agent (such as "
+                "coder or research), whose run is also asked to stop; a remote agent may finish its "
+                "current step first. A delegation whose turn is already running inside Family "
+                "Assistant cannot be stopped and finishes on its own. Use list_delegations to find "
+                "the reference. This is distinct from "
+                "cancel_worker_task, which stops spawn_worker jobs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "delegation_id": {
+                        "type": "string",
+                        "description": "The delegation reference ID to cancel, e.g. delegation_abc123.",
+                    },
+                },
+                "required": ["delegation_id"],
+            },
+        },
+    },
 ]
 
 
@@ -1917,3 +1944,149 @@ async def list_delegations_tool(
         text=text,
         data=summaries,
     )
+
+
+async def cancel_delegation_tool(
+    exec_context: ToolExecutionContext,
+    delegation_id: str,
+) -> ToolResult:
+    """Stop a queued or remote delegation and drop its result.
+
+    The run is failed first, as a compare-and-set on a cancellable status, so a
+    poll that finishes it at the same moment wins or loses cleanly rather than
+    both landing. Only then is the provider asked to stop, and only that it was
+    asked is recorded. The run is marked delivered on the spot: the caller
+    learns the outcome from this result, so no failure notification follows.
+    """
+    if not delegation_tools_config(exec_context).async_delegation_enabled:
+        return ToolResult(
+            text=(
+                "Async profile delegation is disabled; delegations run synchronously "
+                "and there is nothing running in the background to cancel."
+            ),
+            attachments=None,
+        )
+    db = exec_context.db_context
+    run = await db.delegation_runs.get_by_delegation_id(delegation_id)
+    if run is None or (
+        run["conversation_id"] != exec_context.conversation_id
+        or run["interface_type"] != delegation_interface_type(exec_context)
+        or run["user_id"] != exec_context.user_id
+    ):
+        return ToolResult(
+            text=f"Error: Delegation '{delegation_id}' not found in this conversation.",
+            attachments=None,
+        )
+    if run["status"] in TERMINAL_DELEGATION_STATUSES:
+        return ToolResult(
+            text=(
+                f"Delegation '{delegation_id}' has already {run['status']}; "
+                "there is nothing to cancel."
+            ),
+            attachments=None,
+        )
+    if run["authenticated_site_json"] is not None:
+        return ToolResult(
+            text=(
+                f"Error: Delegation '{delegation_id}' is an authenticated-website task, "
+                "which holds a signed-in browser session and cannot be cancelled this way."
+            ),
+            attachments=None,
+        )
+    if run["status"] not in CANCELLABLE_DELEGATION_STATUSES:
+        return ToolResult(
+            text=(
+                f"Error: Delegation '{delegation_id}' is running a turn inside Family "
+                "Assistant, which cannot be stopped partway. It will finish on its own "
+                "and report back as usual."
+            ),
+            attachments=None,
+        )
+
+    now = _now(exec_context)
+    cancelled = await db.delegation_runs.mark_failed(
+        delegation_id=delegation_id,
+        error="Cancelled at the assistant's request.",
+        completed_at=now,
+        local_failure_kind="cancelled",
+    )
+    if cancelled is None:
+        current = await db.delegation_runs.get_by_delegation_id(delegation_id)
+        current_status = current["status"] if current is not None else "gone"
+        return ToolResult(
+            text=(
+                f"Delegation '{delegation_id}' could not be cancelled: it moved on to "
+                f"'{current_status}' while the request was being made. Check it with "
+                "get_delegation_status."
+            ),
+            attachments=None,
+        )
+    await db.delegation_runs.mark_notified(
+        delegation_id=delegation_id,
+        result_message_internal_id=None,
+        notified_at=now,
+    )
+
+    remote_note = ""
+    if remote_task_id := cancelled["remote_task_id"]:
+        remote_note = await _request_remote_cancel(
+            exec_context, cancelled, remote_task_id, now
+        )
+    elif run["status"] == "awaiting_remote":
+        remote_note = (
+            " Its submission to the remote agent was still in flight, so if that "
+            "agent starts the work it will run to the end unobserved."
+        )
+    return ToolResult(
+        text=(
+            f"Cancelled delegation '{delegation_id}' to "
+            f"'{run['target_service_id']}'. Its result will not be delivered.{remote_note}"
+        ),
+        data={"delegation_id": delegation_id, "cancelled": True},
+    )
+
+
+async def _request_remote_cancel(
+    exec_context: ToolExecutionContext,
+    run: DelegationRunDict,
+    remote_task_id: str,
+    now: datetime,
+) -> str:
+    """Ask the provider holding a cancelled run to stop it; say how that went.
+
+    Best-effort on every provider, and the run is already cancelled here
+    whatever it answers, so a failure is reported to the caller rather than
+    raised: the user wants to know the agent may carry on, not to see the
+    cancellation itself fail.
+    """
+    # Local import: the processing package imports the tools package.
+    from family_assistant.processing.protocol import (  # noqa: PLC0415
+        PollableDelegationService,
+    )
+
+    processing_service = exec_context.processing_service
+    registry = (
+        processing_service.processing_services_registry
+        if processing_service is not None
+        else None
+    )
+    target = registry.get(run["target_service_id"]) if registry else None
+    if not isinstance(target, PollableDelegationService):
+        return (
+            " The remote agent could not be reached to stop it, so it may run to "
+            "the end; its result will be ignored."
+        )
+    try:
+        await target.cancel_async(remote_task_id)
+    except Exception:
+        logger.warning(
+            "Remote cancel of delegation %s failed", run["delegation_id"], exc_info=True
+        )
+        return (
+            " Asking the remote agent to stop failed, so it may run to the end; "
+            "its result will be ignored."
+        )
+    await exec_context.db_context.delegation_runs.mark_cancel_requested(
+        run["delegation_id"], now=now
+    )
+    return " The remote agent was asked to stop."
