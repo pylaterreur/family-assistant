@@ -131,6 +131,14 @@ _OUTPUTS_INSTRUCTION = (
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
 
+def _first_failure(failures: BaseExceptionGroup) -> BaseException:
+    """The first leaf failure of a task group, to raise as itself."""
+    first = failures.exceptions[0]
+    while isinstance(first, BaseExceptionGroup):
+        first = first.exceptions[0]
+    return first
+
+
 class _OutputDownloadCache:
     """Output files fetched for a collection that has not finished yet.
 
@@ -783,7 +791,15 @@ class InteractionsAgentProcessingService(ProcessingService):
             async with gate:
                 return await self._download_output(client, environment_id, entry)
 
-        contents = await asyncio.gather(*(fetch(entry) for entry in candidates))
+        # A task group, not gather: when one download fails, the rest are
+        # cancelled and awaited before the failure propagates, so none keeps
+        # running past the collection's budget beside the next attempt's.
+        try:
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(fetch(entry)) for entry in candidates]
+        except BaseExceptionGroup as failures:
+            raise _first_failure(failures) from failures
+        contents = [task.result() for task in tasks]
 
         staged: list[tuple[str, bytes, str]] = []
         total_bytes = 0

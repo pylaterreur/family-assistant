@@ -2037,3 +2037,33 @@ async def test_outputs_download_several_at_a_time(
 
     assert peak == interactions_agent_service.OUTPUT_DOWNLOAD_CONCURRENCY
     assert len(collected.attachment_ids) == len(names)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_collection_leaves_no_download_running(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    """Siblings are cancelled, or they run on past the budget beside the retry."""
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, download = _client_with_outputs({"a.stl": b"a", "b.stl": b"b"})
+    cancelled: list[str] = []
+
+    async def fetch(_environment_id: str, path: str) -> bytes:
+        if path.endswith("a.stl"):
+            raise DelegationPermanentError("403 permission denied")
+        try:
+            return await _never_answers()
+        except asyncio.CancelledError:
+            cancelled.append(path)
+            raise
+
+    download.side_effect = fetch
+    service = _make_service(client, attachment_registry=registry)
+
+    with pytest.raises(DelegationPermanentError, match="403"):
+        await _collect(service, db_engine)
+
+    assert cancelled == ["workspace/outputs/b.stl"]
