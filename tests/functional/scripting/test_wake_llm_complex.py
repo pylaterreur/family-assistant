@@ -161,9 +161,10 @@ if motion_detected:
 
     chat_interface = RecordingChatInterface()
 
+    # An event script's wake_llm() runs under event_handler.
     mock_processing_service = ProcessingService(
         service_config=ProcessingServiceConfig(
-            id="security_assistant",
+            id="event_handler",
             prompts={"system_prompt": "You are a security monitoring assistant."},
             timezone=ZoneInfo("UTC"),
             history_budget_chars=0,
@@ -376,9 +377,10 @@ wake_llm({
         ]
     )
 
+    # An event script's wake_llm() runs under event_handler.
     mock_processing_service = ProcessingService(
         service_config=ProcessingServiceConfig(
-            id="camera_assistant",
+            id="event_handler",
             prompts={"system_prompt": "You are a security camera assistant."},
             timezone=ZoneInfo("UTC"),
             history_budget_chars=0,

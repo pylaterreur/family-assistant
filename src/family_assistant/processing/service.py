@@ -105,6 +105,7 @@ if TYPE_CHECKING:
     from family_assistant.llm.typesafe import JevClient
     from family_assistant.memory.review_context import MemoryReviewContext
     from family_assistant.plugins.runtime import ProfilePlugins
+    from family_assistant.processing.delegation_turns import RunningDelegationTurns
     from family_assistant.processing.history_relevance import TurnRelevance
     from family_assistant.processing.protocol import DelegatableService
     from family_assistant.processing.types import (
@@ -335,6 +336,7 @@ class ProcessingService:
         turn_relevance: TurnRelevance | None = None,
         jev_client: JevClient | None = None,
         home_activity_publisher: HomeActivityPublisher | None = None,
+        delegation_turns: RunningDelegationTurns | None = None,
     ) -> None:
         """Build a profile's service.
 
@@ -357,9 +359,15 @@ class ProcessingService:
 
         ``home_activity_publisher`` is the live stream open clients follow,
         told when a turn here echoes a finished thread into its Home.
+
+        ``delegation_turns`` is the deployment's one registry of running
+        delegated turns, shared by every profile so a turn running under one
+        can be stopped from another; with none, a running turn cannot be
+        stopped mid-turn.
         """
         self.jev_client = jev_client
         self.home_activity_publisher = home_activity_publisher
+        self.delegation_turns = delegation_turns
         self._llm_client = llm_client
         self._tier_llm_clients: dict[str, LLMInterface] = dict(tier_llm_clients or {})
         self._model_router = model_router
