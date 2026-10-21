@@ -25,6 +25,14 @@ the app and tap the Chat connection indicator to reconnect. If the web address d
 check your connection. If it opens but the message keeps returning, contact the person who manages
 Family Assistant so they can check the server and access gateway.
 
+## Voice won't connect on iPhone or Apple Watch
+
+Tell the assistant roughly when you tried and on which device. The app sends connection-stage
+reports automatically (never audio, transcripts or credentials), so the failure can be looked into
+without plugging your device into a computer. A report that failed to upload is retried the next
+time you open voice mode or relaunch the app, so a report may arrive late — and a missing one
+doesn't mean that stage of the connection worked.
+
 ## It misunderstood you
 
 - **Rephrase.** Slightly different wording often makes a large difference.

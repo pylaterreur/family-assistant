@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING
-from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -35,8 +34,15 @@ from family_assistant.tools.types import (
 from family_assistant.utils.clock import SystemClock
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
     from family_assistant.skills.registry import NoteRegistry
     from family_assistant.tools.types import ToolExecutionContext
+
+
+@pytest.fixture
+def db_context(db_engine: AsyncEngine) -> Database:
+    return Database(engine=db_engine)
 
 
 class MinimalToolsProvider:
@@ -148,7 +154,7 @@ class StubConfirmationCallback:
 
 
 @pytest.mark.asyncio
-async def test_safety_decision_stripped_before_execution() -> None:
+async def test_safety_decision_stripped_before_execution(db_context: Database) -> None:
     """Test that safety_decision is always popped from arguments."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -171,7 +177,7 @@ async def test_safety_decision_stripped_before_execution() -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=None,
     )
@@ -182,7 +188,9 @@ async def test_safety_decision_stripped_before_execution() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_decision_require_confirmation_approved() -> None:
+async def test_safety_decision_require_confirmation_approved(
+    db_context: Database,
+) -> None:
     """Test tool execution when safety confirmation is approved."""
     provider = MinimalToolsProvider(result=ToolResult(data={"status": "done"}))
     executor = make_tool_executor(provider)
@@ -212,7 +220,7 @@ async def test_safety_decision_require_confirmation_approved() -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=callback,
     )
@@ -233,7 +241,9 @@ async def test_safety_decision_require_confirmation_approved() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_decision_require_confirmation_rejected() -> None:
+async def test_safety_decision_require_confirmation_rejected(
+    db_context: Database,
+) -> None:
     """Test tool NOT executed when safety confirmation is rejected."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -262,7 +272,7 @@ async def test_safety_decision_require_confirmation_rejected() -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=callback,
     )
@@ -273,7 +283,9 @@ async def test_safety_decision_require_confirmation_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_decision_require_confirmation_timed_out() -> None:
+async def test_safety_decision_require_confirmation_timed_out(
+    db_context: Database,
+) -> None:
     """Test tool NOT executed when confirmation times out."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -301,7 +313,7 @@ async def test_safety_decision_require_confirmation_timed_out() -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=callback,
     )
@@ -312,7 +324,7 @@ async def test_safety_decision_require_confirmation_timed_out() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_decision_no_callback_available() -> None:
+async def test_safety_decision_no_callback_available(db_context: Database) -> None:
     """Test error when safety confirmation needed but no callback."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -338,7 +350,7 @@ async def test_safety_decision_no_callback_available() -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=None,
     )
@@ -350,7 +362,9 @@ async def test_safety_decision_no_callback_available() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["allowed", "allow", "regular"])
-async def test_safety_decision_allowed_no_confirmation(decision: str) -> None:
+async def test_safety_decision_allowed_no_confirmation(
+    decision: str, db_context: Database
+) -> None:
     """Test tool execution for safety decisions that permit execution."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -377,7 +391,7 @@ async def test_safety_decision_allowed_no_confirmation(decision: str) -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=None,
     )
@@ -388,7 +402,7 @@ async def test_safety_decision_allowed_no_confirmation(decision: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_decision_approved_but_tool_fails() -> None:
+async def test_safety_decision_approved_but_tool_fails(db_context: Database) -> None:
     """Test that no acknowledgement is added when tool execution fails."""
     provider = MinimalToolsProvider(error=RuntimeError("Tool failed"))
     executor = make_tool_executor(provider)
@@ -417,7 +431,7 @@ async def test_safety_decision_approved_but_tool_fails() -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=callback,
     )
@@ -434,6 +448,7 @@ async def test_safety_decision_approved_but_tool_fails() -> None:
 @pytest.mark.parametrize("decision", ["blocked", "some_future_value", None])
 async def test_safety_decision_blocked_or_unknown_refused(
     decision: str | None,
+    db_context: Database,
 ) -> None:
     """Decisions that neither allow nor request confirmation refuse execution.
 
@@ -465,7 +480,7 @@ async def test_safety_decision_blocked_or_unknown_refused(
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=None,
     )
@@ -497,7 +512,9 @@ class RaisingConfirmationCallback:
 
 
 @pytest.mark.asyncio
-async def test_safety_confirmation_timeout_error_yields_declined_result() -> None:
+async def test_safety_confirmation_timeout_error_yields_declined_result(
+    db_context: Database,
+) -> None:
     """A TimeoutError from the callback is an expected not-taken outcome."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -523,7 +540,7 @@ async def test_safety_confirmation_timeout_error_yields_declined_result() -> Non
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=RaisingConfirmationCallback(TimeoutError()),
     )
@@ -534,7 +551,9 @@ async def test_safety_confirmation_timeout_error_yields_declined_result() -> Non
 
 
 @pytest.mark.asyncio
-async def test_safety_confirmation_unexpected_error_propagates() -> None:
+async def test_safety_confirmation_unexpected_error_propagates(
+    db_context: Database,
+) -> None:
     """Unexpected callback failures propagate instead of masking the bug."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -561,7 +580,7 @@ async def test_safety_confirmation_unexpected_error_propagates() -> None:
             conversation_id="conv_123",
             user_name="testuser",
             turn_id="turn_1",
-            db_context=Mock(spec=Database),
+            db_context=db_context,
             chat_interface=None,
             request_confirmation_callback=RaisingConfirmationCallback(
                 RuntimeError("confirmation infrastructure broke")
@@ -570,7 +589,9 @@ async def test_safety_confirmation_unexpected_error_propagates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_decision_not_interpreted_outside_action_space() -> None:
+async def test_safety_decision_not_interpreted_outside_action_space(
+    db_context: Database,
+) -> None:
     """Non-computer-use tools keep a legitimately named safety_decision arg."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -593,7 +614,7 @@ async def test_safety_decision_not_interpreted_outside_action_space() -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=None,
     )
@@ -607,7 +628,9 @@ async def test_safety_decision_not_interpreted_outside_action_space() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_confirmation_uses_configured_timeout() -> None:
+async def test_safety_confirmation_uses_configured_timeout(
+    db_context: Database,
+) -> None:
     """The profile's confirmation timeout flows into the safety callback."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider, confirmation_timeout_seconds=120.0)
@@ -636,7 +659,7 @@ async def test_safety_confirmation_uses_configured_timeout() -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=callback,
     )
@@ -645,7 +668,9 @@ async def test_safety_confirmation_uses_configured_timeout() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_confirmation_completed_result_preserved_with_ack() -> None:
+async def test_safety_confirmation_completed_result_preserved_with_ack(
+    db_context: Database,
+) -> None:
     """A durable confirmation's completed ToolResult flows through with ack."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -700,7 +725,7 @@ async def test_safety_confirmation_completed_result_preserved_with_ack() -> None
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=callback,
         taint_tracker=turn_taint_tracker,
@@ -722,7 +747,9 @@ async def test_safety_confirmation_completed_result_preserved_with_ack() -> None
 
 
 @pytest.mark.asyncio
-async def test_safety_confirmation_prompts_for_a_long_type_text() -> None:
+async def test_safety_confirmation_prompts_for_a_long_type_text(
+    db_context: Database,
+) -> None:
     """A long safety-gated payload is put to the approver, not refused first.
 
     Whether the text can be displayed is settled by the interface rendering the
@@ -755,7 +782,7 @@ async def test_safety_confirmation_prompts_for_a_long_type_text() -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=callback,
     )
@@ -766,7 +793,9 @@ async def test_safety_confirmation_prompts_for_a_long_type_text() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_confirmation_deferred_pending_not_acknowledged() -> None:
+async def test_safety_confirmation_deferred_pending_not_acknowledged(
+    db_context: Database,
+) -> None:
     """A deferred 'completed' placeholder (tool hasn't run) must not claim consent."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -805,7 +834,7 @@ async def test_safety_confirmation_deferred_pending_not_acknowledged() -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=callback,
     )
@@ -818,7 +847,9 @@ async def test_safety_confirmation_deferred_pending_not_acknowledged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_confirmation_completed_string_result_acknowledged() -> None:
+async def test_safety_confirmation_completed_string_result_acknowledged(
+    db_context: Database,
+) -> None:
     """A completed durable string result represents an attempted action."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -852,7 +883,7 @@ async def test_safety_confirmation_completed_string_result_acknowledged() -> Non
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=callback,
     )
@@ -865,7 +896,9 @@ async def test_safety_confirmation_completed_string_result_acknowledged() -> Non
 
 
 @pytest.mark.asyncio
-async def test_safety_confirmation_failed_durable_execution_acknowledged() -> None:
+async def test_safety_confirmation_failed_durable_execution_acknowledged(
+    db_context: Database,
+) -> None:
     """An approved-but-failed durable execution carries the acknowledgement."""
     provider = MinimalToolsProvider()
     executor = make_tool_executor(provider)
@@ -910,7 +943,7 @@ async def test_safety_confirmation_failed_durable_execution_acknowledged() -> No
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=callback,
         taint_tracker=turn_taint_tracker,
@@ -930,7 +963,7 @@ async def test_safety_confirmation_failed_durable_execution_acknowledged() -> No
 
 
 @pytest.mark.asyncio
-async def test_original_tool_call_arguments_not_mutated() -> None:
+async def test_original_tool_call_arguments_not_mutated(db_context: Database) -> None:
     """Popping safety_decision must not rewrite the ToolCallItem's arguments.
 
     The provider hands arguments over as a dict that is the same object stored
@@ -962,7 +995,7 @@ async def test_original_tool_call_arguments_not_mutated() -> None:
         conversation_id="conv_123",
         user_name="testuser",
         turn_id="turn_1",
-        db_context=Mock(spec=Database),
+        db_context=db_context,
         chat_interface=None,
         request_confirmation_callback=callback,
     )

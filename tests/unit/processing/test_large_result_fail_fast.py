@@ -1,13 +1,12 @@
 """Unit tests for large tool-result handling in AttachmentProcessor."""
 
+from __future__ import annotations
+
 import json
-from pathlib import Path
-from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, Mock
+from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncEngine
 
 from family_assistant.config_models import AppConfig, ToolsConfig
 from family_assistant.delegation_security import DelegationSecurityLevel
@@ -16,7 +15,10 @@ from family_assistant.processing.attachments import AttachmentProcessor
 from family_assistant.processing.tool_execution import ToolExecutor
 from family_assistant.processing.types import ProcessingServiceConfig
 from family_assistant.security.taint import TurnTaintState
-from family_assistant.services.attachment_registry import AttachmentRegistry
+from family_assistant.services.attachment_registry import (
+    AttachmentMetadata,
+    AttachmentRegistry,
+)
 from family_assistant.storage.database import Database
 from family_assistant.tools.types import (
     ToolAttachment,
@@ -25,8 +27,76 @@ from family_assistant.tools.types import (
 )
 from family_assistant.utils.clock import SystemClock
 
+from .test_tool_execution_safety_confirmation import MinimalToolsProvider
+
 if TYPE_CHECKING:
+    from pathlib import Path
+
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
     from family_assistant.security.taint import TaintMetadata
+    from family_assistant.storage.database import DatabaseExecutor
+    from family_assistant.tools.infrastructure import ToolsProvider
+
+
+class _FailingStorageAttachmentRegistry(AttachmentRegistry):
+    """Registry whose tool-attachment storage fails, recording each attempt."""
+
+    def __init__(self, storage_path: str, db_engine: AsyncEngine) -> None:
+        super().__init__(storage_path=storage_path, db_engine=db_engine, config=None)
+        self.store_attempts: list[str] = []
+
+    async def store_and_register_tool_attachment(
+        self,
+        file_content: bytes,
+        filename: str,
+        content_type: str,
+        tool_name: str,
+        description: str | None = None,
+        conversation_id: str | None = None,
+        message_id: int | None = None,
+        owner_user_id: str | None = None,
+        # ast-grep-ignore: no-dict-any - mirrors AttachmentRegistry's free-form metadata
+        metadata: dict[str, Any] | None = None,
+        db_context: DatabaseExecutor | None = None,
+        *,
+        taint_state: TurnTaintState,
+    ) -> AttachmentMetadata:
+        self.store_attempts.append(tool_name)
+        raise RuntimeError("disk full")
+
+
+class _TaintingToolsProvider:
+    """Tools provider whose tool records result taint and returns an attachment."""
+
+    def __init__(self, taint_metadata: TaintMetadata) -> None:
+        self.taint_metadata = taint_metadata
+
+    async def get_tool_definitions(self) -> list:
+        return []
+
+    async def execute_tool(
+        self,
+        name: str,
+        arguments: dict,
+        context: ToolExecutionContext,
+        call_id: str | None = None,
+    ) -> ToolResult:
+        assert call_id is not None
+        context.tool_result_taint_metadata[call_id] = self.taint_metadata
+        return ToolResult(
+            text="small result",
+            attachments=[
+                ToolAttachment(
+                    content=b"tainted attachment",
+                    mime_type="text/plain",
+                    description="external text",
+                )
+            ],
+        )
+
+    async def close(self) -> None:
+        pass
 
 
 def _create_processor(
@@ -43,7 +113,9 @@ def _create_processor(
 
 
 @pytest.mark.asyncio
-async def test_handle_large_result_without_registry_raises() -> None:
+async def test_handle_large_result_without_registry_raises(
+    db_engine: AsyncEngine,
+) -> None:
     """Large content should fail fast when storage is unavailable."""
     processor = _create_processor(attachment_registry=None)
     oversized_content = "A" * 4096
@@ -53,7 +125,7 @@ async def test_handle_large_result_without_registry_raises() -> None:
         match="Tool result exceeded large-result threshold but attachment storage is unavailable",
     ):
         await processor.handle_large_result(
-            db_context=Mock(),
+            db_context=Database(engine=db_engine),
             content=oversized_content,
             tool_name="test_tool",
             conversation_id="conv_1",
@@ -62,38 +134,37 @@ async def test_handle_large_result_without_registry_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_large_result_storage_failure_raises() -> None:
+async def test_handle_large_result_storage_failure_raises(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
     """Attachment storage failures should propagate."""
-    mock_registry = Mock()
-    mock_registry.store_and_register_tool_attachment = AsyncMock(
-        side_effect=RuntimeError("disk full")
+    registry = _FailingStorageAttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine
     )
-    processor = _create_processor(
-        attachment_registry=cast("AttachmentRegistry", mock_registry)
-    )
+    processor = _create_processor(attachment_registry=registry)
     oversized_content = "B" * 4096
 
     with pytest.raises(RuntimeError, match="disk full"):
         await processor.handle_large_result(
-            db_context=Mock(),
+            db_context=Database(engine=db_engine),
             content=oversized_content,
             tool_name="test_tool",
             conversation_id="conv_2",
             call_id="call_2",
         )
 
-    mock_registry.store_and_register_tool_attachment.assert_awaited_once()
+    assert registry.store_attempts == ["test_tool"]
 
 
-@pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_tool_executor_propagates_large_result_registry_unavailable() -> None:
+async def test_tool_executor_propagates_large_result_registry_unavailable(
+    db_engine: AsyncEngine,
+) -> None:
     """ToolExecutor should fail fast when large-result conversion cannot persist."""
-    mock_tools_provider = AsyncMock()
-    mock_tools_provider.execute_tool.return_value = "X" * 4096
+    tools_provider = MinimalToolsProvider(result="X" * 4096)
     processor = _create_processor(attachment_registry=None, threshold_kb=1)
     executor = ToolExecutor(
-        tools_provider=mock_tools_provider,
+        tools_provider=tools_provider,
         config=ProcessingServiceConfig(
             id="test",
             prompts={},
@@ -124,12 +195,12 @@ async def test_tool_executor_propagates_large_result_registry_unavailable() -> N
             conversation_id="conv",
             user_name="tester",
             turn_id="turn",
-            db_context=Mock(),
+            db_context=Database(engine=db_engine),
             chat_interface=None,
             request_confirmation_callback=None,
         )
 
-    mock_tools_provider.execute_tool.assert_awaited_once()
+    assert tools_provider.executed_tool_names == ["test_tool"]
 
 
 @pytest.mark.asyncio
@@ -224,7 +295,7 @@ async def test_handle_large_result_persists_taint_metadata(
 
 def _make_executor(
     *,
-    tools_provider: AsyncMock,
+    tools_provider: ToolsProvider,
     processor: AttachmentProcessor,
     attachment_registry: AttachmentRegistry | None,
 ) -> ToolExecutor:
@@ -265,28 +336,8 @@ async def test_tool_result_attachment_registration_persists_taint_metadata(
         },
     )
 
-    async def _execute_tool(
-        function_name: str,
-        arguments: dict[str, object],
-        tool_execution_context: ToolExecutionContext,
-        call_id: str,
-    ) -> ToolResult:
-        tool_execution_context.tool_result_taint_metadata[call_id] = taint_metadata
-        return ToolResult(
-            text="small result",
-            attachments=[
-                ToolAttachment(
-                    content=b"tainted attachment",
-                    mime_type="text/plain",
-                    description="external text",
-                )
-            ],
-        )
-
-    mock_tools_provider = AsyncMock()
-    mock_tools_provider.execute_tool.side_effect = _execute_tool
     executor = _make_executor(
-        tools_provider=mock_tools_provider,
+        tools_provider=_TaintingToolsProvider(taint_metadata),
         processor=processor,
         attachment_registry=registry,
     )
@@ -355,10 +406,8 @@ async def test_large_result_inherits_ownership_from_owned_argument_attachment(
         taint_state=TurnTaintState.empty(),
     )
 
-    mock_tools_provider = AsyncMock()
-    mock_tools_provider.execute_tool.return_value = "D" * 4096
     executor = _make_executor(
-        tools_provider=mock_tools_provider,
+        tools_provider=MinimalToolsProvider(result="D" * 4096),
         processor=processor,
         attachment_registry=registry,
     )
@@ -406,10 +455,8 @@ async def test_large_result_stays_ownerless_without_owned_argument_attachment(
     processor = _create_processor(attachment_registry=registry, threshold_kb=1)
     db = Database(engine=db_engine)
 
-    mock_tools_provider = AsyncMock()
-    mock_tools_provider.execute_tool.return_value = "E" * 4096
     executor = _make_executor(
-        tools_provider=mock_tools_provider,
+        tools_provider=MinimalToolsProvider(result="E" * 4096),
         processor=processor,
         attachment_registry=registry,
     )

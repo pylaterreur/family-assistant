@@ -2,24 +2,72 @@
 
 import io
 import json
-from unittest.mock import AsyncMock, Mock
+from typing import cast
+from zoneinfo import ZoneInfo
 
 import pytest
 from PIL import Image
 
+from family_assistant.scripting.apis.attachments import ScriptAttachment
 from family_assistant.tools.data_visualization import create_vega_chart_tool
-from family_assistant.tools.types import ToolResult
+from family_assistant.tools.types import ToolExecutionContext, ToolResult
+from tests.mocks.unconnected_database import unconnected_database
+
+
+class FakeDataAttachment:
+    """The attachment surface the chart tool reads, with in-memory content.
+
+    ``content`` of ``None`` stands for an attachment whose content could not
+    be retrieved.
+    """
+
+    def __init__(
+        self, attachment_id: str, filename: str, mime_type: str, content: bytes | None
+    ) -> None:
+        self._attachment_id = attachment_id
+        self._filename = filename
+        self._mime_type = mime_type
+        self._content = content
+        self.content_reads = 0
+
+    def get_id(self) -> str:
+        return self._attachment_id
+
+    def get_filename(self) -> str | None:
+        return self._filename
+
+    def get_mime_type(self) -> str:
+        return self._mime_type
+
+    async def get_content_async(self) -> bytes | None:
+        self.content_reads += 1
+        return self._content
+
+    def as_script_attachment(self) -> ScriptAttachment:
+        return cast("ScriptAttachment", self)
 
 
 class TestCreateVegaChartTool:
     """Test the create_vega_chart tool."""
 
     @pytest.fixture
-    def mock_exec_context(self) -> Mock:
-        """Create a mock execution context."""
-        context = Mock()
-        context.processing_service = None
-        return context
+    def mock_exec_context(self) -> ToolExecutionContext:
+        """An execution context with no processing service."""
+        return ToolExecutionContext(
+            interface_type="test",
+            conversation_id="conv-1",
+            user_name="tester",
+            turn_id=None,
+            db_context=unconnected_database(),
+            processing_service=None,
+            clock=None,
+            plugins=None,
+            event_sources=None,
+            attachment_registry=None,
+            timezone=ZoneInfo("UTC"),
+            credential_resolvers=None,
+            api_backend=None,
+        )
 
     @pytest.fixture
     def simple_vega_lite_spec(self) -> str:
@@ -58,47 +106,34 @@ class TestCreateVegaChartTool:
         return json.dumps(spec)
 
     @pytest.fixture
-    def mock_csv_attachment(self) -> Mock:
-        """Create a mock CSV attachment."""
-        attachment = Mock()
-        attachment.get_id.return_value = "csv-attachment-id"
-        attachment.get_filename.return_value = "data.csv"
-        attachment.get_mime_type.return_value = "text/csv"
-        attachment.get_description.return_value = "Sales data CSV"
-
+    def mock_csv_attachment(self) -> FakeDataAttachment:
+        """Create a CSV data attachment."""
         csv_content = """month,sales
 January,100
 February,150
 March,200"""
-        attachment.get_content_async = AsyncMock(
-            return_value=csv_content.encode("utf-8")
+        return FakeDataAttachment(
+            "csv-attachment-id", "data.csv", "text/csv", csv_content.encode("utf-8")
         )
 
-        return attachment
-
     @pytest.fixture
-    def mock_json_attachment(self) -> Mock:
-        """Create a mock JSON attachment."""
-        attachment = Mock()
-        attachment.get_id.return_value = "json-attachment-id"
-        attachment.get_filename.return_value = "data.json"
-        attachment.get_mime_type.return_value = "application/json"
-        attachment.get_description.return_value = "Sales data JSON"
-
+    def mock_json_attachment(self) -> FakeDataAttachment:
+        """Create a JSON data attachment."""
         json_data = [
             {"month": "January", "sales": 100},
             {"month": "February", "sales": 150},
             {"month": "March", "sales": 200},
         ]
-        attachment.get_content_async = AsyncMock(
-            return_value=json.dumps(json_data).encode("utf-8")
+        return FakeDataAttachment(
+            "json-attachment-id",
+            "data.json",
+            "application/json",
+            json.dumps(json_data).encode("utf-8"),
         )
-
-        return attachment
 
     @pytest.mark.asyncio
     async def test_create_simple_chart(
-        self, mock_exec_context: Mock, simple_vega_lite_spec: str
+        self, mock_exec_context: ToolExecutionContext, simple_vega_lite_spec: str
     ) -> None:
         """Test creating a simple chart with inline data."""
         result = await create_vega_chart_tool(
@@ -122,15 +157,15 @@ March,200"""
     @pytest.mark.asyncio
     async def test_create_chart_with_csv_data(
         self,
-        mock_exec_context: Mock,
+        mock_exec_context: ToolExecutionContext,
         vega_lite_spec_with_named_data: str,
-        mock_csv_attachment: Mock,
+        mock_csv_attachment: FakeDataAttachment,
     ) -> None:
         """Test creating a chart with CSV data from attachment."""
         result = await create_vega_chart_tool(
             mock_exec_context,
             spec=vega_lite_spec_with_named_data,
-            data_attachments=[mock_csv_attachment],
+            data_attachments=[mock_csv_attachment.as_script_attachment()],
             title="Sales Chart",
         )
 
@@ -140,7 +175,7 @@ March,200"""
         assert result.attachments[0].mime_type == "image/png"
 
         # Verify attachment was accessed
-        mock_csv_attachment.get_content_async.assert_called_once()
+        assert mock_csv_attachment.content_reads == 1
 
         # Verify it's a valid PNG
         content = result.attachments[0].content
@@ -151,8 +186,8 @@ March,200"""
     @pytest.mark.asyncio
     async def test_create_chart_with_json_data(
         self,
-        mock_exec_context: Mock,
-        mock_json_attachment: Mock,
+        mock_exec_context: ToolExecutionContext,
+        mock_json_attachment: FakeDataAttachment,
     ) -> None:
         """Test creating a chart with JSON data from attachment."""
         spec = json.dumps({
@@ -169,7 +204,7 @@ March,200"""
         result = await create_vega_chart_tool(
             mock_exec_context,
             spec=spec,
-            data_attachments=[mock_json_attachment],
+            data_attachments=[mock_json_attachment.as_script_attachment()],
             title="Revenue Chart",
         )
 
@@ -187,7 +222,7 @@ March,200"""
         debug_result = await create_vega_chart_tool(
             mock_exec_context,
             spec=spec,
-            data_attachments=[mock_json_attachment],
+            data_attachments=[mock_json_attachment.as_script_attachment()],
             title="Revenue Chart",
             debug=True,
         )
@@ -201,7 +236,7 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_create_chart_with_custom_scale(
-        self, mock_exec_context: Mock, simple_vega_lite_spec: str
+        self, mock_exec_context: ToolExecutionContext, simple_vega_lite_spec: str
     ) -> None:
         """Test creating a chart with custom scale factor."""
         result = await create_vega_chart_tool(
@@ -221,7 +256,9 @@ March,200"""
         assert img.width > 300  # Rough check
 
     @pytest.mark.asyncio
-    async def test_invalid_json_spec(self, mock_exec_context: Mock) -> None:
+    async def test_invalid_json_spec(
+        self, mock_exec_context: ToolExecutionContext
+    ) -> None:
         """Test handling of invalid JSON in spec."""
         invalid_spec = "{ invalid json }"
 
@@ -234,7 +271,9 @@ March,200"""
         assert not result.attachments or len(result.attachments) == 0
 
     @pytest.mark.asyncio
-    async def test_invalid_vega_spec(self, mock_exec_context: Mock) -> None:
+    async def test_invalid_vega_spec(
+        self, mock_exec_context: ToolExecutionContext
+    ) -> None:
         """Test handling of invalid Vega spec (valid JSON but invalid Vega)."""
         invalid_spec = json.dumps({"invalid": "spec"})
 
@@ -248,19 +287,19 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_attachment_content_error(
-        self, mock_exec_context: Mock, vega_lite_spec_with_named_data: str
+        self,
+        mock_exec_context: ToolExecutionContext,
+        vega_lite_spec_with_named_data: str,
     ) -> None:
         """Test handling when attachment content cannot be retrieved."""
-        attachment = Mock()
-        attachment.get_id.return_value = "error-attachment"
-        attachment.get_filename.return_value = "data.csv"
-        attachment.get_mime_type.return_value = "text/csv"
-        attachment.get_content_async = AsyncMock(return_value=None)  # No content
+        attachment = FakeDataAttachment(
+            "error-attachment", "data.csv", "text/csv", None
+        )  # No content
 
         result = await create_vega_chart_tool(
             mock_exec_context,
             spec=vega_lite_spec_with_named_data,
-            data_attachments=[attachment],
+            data_attachments=[attachment.as_script_attachment()],
             debug=True,
         )
 
@@ -273,19 +312,19 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_unsupported_attachment_type(
-        self, mock_exec_context: Mock, vega_lite_spec_with_named_data: str
+        self,
+        mock_exec_context: ToolExecutionContext,
+        vega_lite_spec_with_named_data: str,
     ) -> None:
         """Test handling of unsupported attachment types."""
-        attachment = Mock()
-        attachment.get_id.return_value = "binary-attachment"
-        attachment.get_filename.return_value = "data.bin"
-        attachment.get_mime_type.return_value = "application/octet-stream"
-        attachment.get_content_async = AsyncMock(return_value=b"binary data")
+        attachment = FakeDataAttachment(
+            "binary-attachment", "data.bin", "application/octet-stream", b"binary data"
+        )
 
         result = await create_vega_chart_tool(
             mock_exec_context,
             spec=vega_lite_spec_with_named_data,
-            data_attachments=[attachment],
+            data_attachments=[attachment.as_script_attachment()],
             debug=True,
         )
 
@@ -298,7 +337,7 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_default_title(
-        self, mock_exec_context: Mock, simple_vega_lite_spec: str
+        self, mock_exec_context: ToolExecutionContext, simple_vega_lite_spec: str
     ) -> None:
         """Test that default title is used when not specified."""
         result = await create_vega_chart_tool(
@@ -312,19 +351,19 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_malformed_csv_data(
-        self, mock_exec_context: Mock, vega_lite_spec_with_named_data: str
+        self,
+        mock_exec_context: ToolExecutionContext,
+        vega_lite_spec_with_named_data: str,
     ) -> None:
         """Test handling of malformed CSV data."""
-        attachment = Mock()
-        attachment.get_id.return_value = "bad-csv"
-        attachment.get_filename.return_value = "data.csv"
-        attachment.get_mime_type.return_value = "text/csv"
-        attachment.get_content_async = AsyncMock(return_value=b"not,proper,csv\ndata")
+        attachment = FakeDataAttachment(
+            "bad-csv", "data.csv", "text/csv", b"not,proper,csv\ndata"
+        )
 
         result = await create_vega_chart_tool(
             mock_exec_context,
             spec=vega_lite_spec_with_named_data,
-            data_attachments=[attachment],
+            data_attachments=[attachment.as_script_attachment()],
             debug=True,
         )
 
@@ -339,19 +378,19 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_malformed_json_data(
-        self, mock_exec_context: Mock, vega_lite_spec_with_named_data: str
+        self,
+        mock_exec_context: ToolExecutionContext,
+        vega_lite_spec_with_named_data: str,
     ) -> None:
         """Test handling of malformed JSON data."""
-        attachment = Mock()
-        attachment.get_id.return_value = "bad-json"
-        attachment.get_filename.return_value = "data.json"
-        attachment.get_mime_type.return_value = "application/json"
-        attachment.get_content_async = AsyncMock(return_value=b"{ invalid json }")
+        attachment = FakeDataAttachment(
+            "bad-json", "data.json", "application/json", b"{ invalid json }"
+        )
 
         result = await create_vega_chart_tool(
             mock_exec_context,
             spec=vega_lite_spec_with_named_data,
-            data_attachments=[attachment],
+            data_attachments=[attachment.as_script_attachment()],
             debug=True,
         )
 
@@ -364,21 +403,19 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_non_utf8_attachment(
-        self, mock_exec_context: Mock, vega_lite_spec_with_named_data: str
+        self,
+        mock_exec_context: ToolExecutionContext,
+        vega_lite_spec_with_named_data: str,
     ) -> None:
         """Test handling of non-UTF-8 attachment content."""
-        attachment = Mock()
-        attachment.get_id.return_value = "binary"
-        attachment.get_filename.return_value = "data.csv"
-        attachment.get_mime_type.return_value = "text/csv"
-        attachment.get_content_async = AsyncMock(
-            return_value=b"\x80\x81\x82"
+        attachment = FakeDataAttachment(
+            "binary", "data.csv", "text/csv", b"\x80\x81\x82"
         )  # Invalid UTF-8
 
         result = await create_vega_chart_tool(
             mock_exec_context,
             spec=vega_lite_spec_with_named_data,
-            data_attachments=[attachment],
+            data_attachments=[attachment.as_script_attachment()],
             debug=True,
         )
 
@@ -390,7 +427,9 @@ March,200"""
         assert "Error creating chart" not in result.get_text()
 
     @pytest.mark.asyncio
-    async def test_create_chart_with_data_dict(self, mock_exec_context: Mock) -> None:
+    async def test_create_chart_with_data_dict(
+        self, mock_exec_context: ToolExecutionContext
+    ) -> None:
         """Test creating a chart with direct data as named datasets (dict)."""
         # Create spec that references a named dataset
         spec = {
@@ -432,7 +471,9 @@ March,200"""
         assert img.format == "PNG"
 
     @pytest.mark.asyncio
-    async def test_create_chart_with_data_list(self, mock_exec_context: Mock) -> None:
+    async def test_create_chart_with_data_list(
+        self, mock_exec_context: ToolExecutionContext
+    ) -> None:
         """Test creating a chart with direct data as a list (default 'data' name)."""
         # Create spec that uses default "data" name
         spec = {
@@ -485,7 +526,9 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_create_chart_with_data_and_attachments(
-        self, mock_exec_context: Mock, mock_json_attachment: Mock
+        self,
+        mock_exec_context: ToolExecutionContext,
+        mock_json_attachment: FakeDataAttachment,
     ) -> None:
         """Test creating a chart with both data parameter and attachments."""
         spec = {
@@ -518,7 +561,7 @@ March,200"""
             mock_exec_context,
             spec=json.dumps(spec),
             data=computed_data,
-            data_attachments=[mock_json_attachment],
+            data_attachments=[mock_json_attachment.as_script_attachment()],
             title="Mixed Data Chart",
         )
 
@@ -527,11 +570,11 @@ March,200"""
         assert result.attachments and len(result.attachments) > 0
 
         # Verify attachment was accessed
-        mock_json_attachment.get_content_async.assert_called_once()
+        assert mock_json_attachment.content_reads == 1
 
     @pytest.mark.asyncio
     async def test_create_chart_simulating_jq_query_composition(
-        self, mock_exec_context: Mock
+        self, mock_exec_context: ToolExecutionContext
     ) -> None:
         """Test composition pattern: jq_query result -> create_vega_chart."""
         # Simulate what jq_query would return (list of data points)
@@ -585,7 +628,7 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_create_chart_with_multiple_named_datasets(
-        self, mock_exec_context: Mock
+        self, mock_exec_context: ToolExecutionContext
     ) -> None:
         """Test creating a chart with multiple named datasets from data parameter."""
         spec = {
@@ -652,7 +695,7 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_debug_mode_simple_spec(
-        self, mock_exec_context: Mock, simple_vega_lite_spec: str
+        self, mock_exec_context: ToolExecutionContext, simple_vega_lite_spec: str
     ) -> None:
         """Test debug mode returns spec as structured data instead of rendering."""
         result = await create_vega_chart_tool(
@@ -682,15 +725,15 @@ March,200"""
     @pytest.mark.asyncio
     async def test_debug_mode_with_data_attachments(
         self,
-        mock_exec_context: Mock,
+        mock_exec_context: ToolExecutionContext,
         vega_lite_spec_with_named_data: str,
-        mock_csv_attachment: Mock,
+        mock_csv_attachment: FakeDataAttachment,
     ) -> None:
         """Test debug mode includes merged data from attachments."""
         result = await create_vega_chart_tool(
             mock_exec_context,
             spec=vega_lite_spec_with_named_data,
-            data_attachments=[mock_csv_attachment],
+            data_attachments=[mock_csv_attachment.as_script_attachment()],
             title="Debug with CSV",
             debug=True,
         )
@@ -719,7 +762,9 @@ March,200"""
         assert parsed == returned_spec  # Should match the data
 
     @pytest.mark.asyncio
-    async def test_debug_mode_with_direct_data(self, mock_exec_context: Mock) -> None:
+    async def test_debug_mode_with_direct_data(
+        self, mock_exec_context: ToolExecutionContext
+    ) -> None:
         """Test debug mode includes merged data from direct data parameter."""
         spec = {
             "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
@@ -763,7 +808,7 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_layered_spec_resolves_named_data_in_layers(
-        self, mock_exec_context: Mock
+        self, mock_exec_context: ToolExecutionContext
     ) -> None:
         """Named datasets referenced from layer[i].data are populated."""
         spec = {
@@ -813,7 +858,9 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_layered_spec_renders_attachment_data(
-        self, mock_exec_context: Mock, mock_csv_attachment: Mock
+        self,
+        mock_exec_context: ToolExecutionContext,
+        mock_csv_attachment: FakeDataAttachment,
     ) -> None:
         """A layer whose data comes from an attachment actually draws marks."""
         spec = {
@@ -835,7 +882,7 @@ March,200"""
         result = await create_vega_chart_tool(
             mock_exec_context,
             spec=json.dumps(spec),
-            data_attachments=[mock_csv_attachment],
+            data_attachments=[mock_csv_attachment.as_script_attachment()],
             title="Layered attachment",
         )
 
@@ -850,7 +897,7 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_concat_and_facet_specs_resolve_named_data(
-        self, mock_exec_context: Mock
+        self, mock_exec_context: ToolExecutionContext
     ) -> None:
         """Named data inside concat views and facet inner specs is populated."""
         spec = {
@@ -904,7 +951,7 @@ March,200"""
 
     @pytest.mark.asyncio
     async def test_vega_group_mark_data_is_resolved(
-        self, mock_exec_context: Mock
+        self, mock_exec_context: ToolExecutionContext
     ) -> None:
         """Named data declared inside a Vega group mark is populated."""
         spec = {

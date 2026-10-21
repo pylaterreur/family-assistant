@@ -6,14 +6,12 @@ import json
 import logging
 import sys
 import types
-from typing import Any
-from unittest.mock import MagicMock
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from family_assistant.security.taint import InMemoryTurnTaintTracker, TurnTaintState
-from family_assistant.storage.database import Database
 from family_assistant.tools.infrastructure import (
     CompositeToolsProvider,
     LocalToolsProvider,
@@ -36,6 +34,10 @@ from family_assistant.tools.types import (
     ToolDefinition,
     ToolExecutionContext,
 )
+from tests.mocks.unconnected_database import unconnected_database
+
+if TYPE_CHECKING:
+    from family_assistant.storage.database import Database
 
 
 class TestLocalToolsProvider:
@@ -49,7 +51,7 @@ class TestLocalToolsProvider:
             interface_type="test",
             timezone=ZoneInfo("UTC"),
             turn_id=None,
-            db_context=MagicMock(spec=Database),
+            db_context=unconnected_database(),
             processing_service=None,
             clock=None,
             plugins=None,
@@ -159,14 +161,14 @@ class TestLocalToolsProvider:
             implementations={"tool_returns_none": tool_returns_none},
         )
 
-        mock_db_context = MagicMock(spec=Database)
+        db_context = unconnected_database()
         context = ToolExecutionContext(
             conversation_id="test-conv-4",
             user_name="test-user",
             interface_type="test",
             timezone=ZoneInfo("UTC"),
             turn_id=None,
-            db_context=mock_db_context,
+            db_context=db_context,
             processing_service=None,
             clock=None,
             plugins=None,
@@ -205,14 +207,14 @@ class TestLocalToolsProvider:
             implementations={"tool_returns_string": tool_returns_string},
         )
 
-        mock_db_context = MagicMock(spec=Database)
+        db_context = unconnected_database()
         context = ToolExecutionContext(
             conversation_id="test-conv-5",
             user_name="test-user",
             interface_type="test",
             timezone=ZoneInfo("UTC"),
             turn_id=None,
-            db_context=mock_db_context,
+            db_context=db_context,
             processing_service=None,
             clock=None,
             plugins=None,
@@ -249,14 +251,14 @@ class TestLocalToolsProvider:
             implementations={"tool_returns_number": tool_returns_number},
         )
 
-        mock_db_context = MagicMock(spec=Database)
+        db_context = unconnected_database()
         context = ToolExecutionContext(
             conversation_id="test-conv-6",
             user_name="test-user",
             interface_type="test",
             timezone=ZoneInfo("UTC"),
             turn_id=None,
-            db_context=mock_db_context,
+            db_context=db_context,
             processing_service=None,
             clock=None,
             plugins=None,
@@ -307,14 +309,14 @@ class TestLocalToolsProvider:
             implementations={"tool_with_attachment": tool_with_attachment},
         )
 
-        mock_db_context = MagicMock(spec=Database)
+        db_context = unconnected_database()
         context = ToolExecutionContext(
             conversation_id="test-conv-attachment",
             user_name="test-user",
             interface_type="test",
             timezone=ZoneInfo("UTC"),
             turn_id=None,
-            db_context=mock_db_context,
+            db_context=db_context,
             processing_service=None,
             clock=None,
             plugins=None,
@@ -369,14 +371,14 @@ class TestLocalToolsProvider:
             implementations={"tool_needs_exec_context": tool_needs_exec_context},
         )
 
-        mock_db_context = MagicMock(spec=Database)
+        db_context = unconnected_database()
         context = ToolExecutionContext(
             conversation_id="test-conv-inject",
             user_name="test-user",
             interface_type="test",
             timezone=ZoneInfo("UTC"),
             turn_id=None,
-            db_context=mock_db_context,
+            db_context=db_context,
             processing_service=None,
             clock=None,
             plugins=None,
@@ -393,7 +395,7 @@ class TestLocalToolsProvider:
         assert result == "Got query: test"
         assert received_context[0] is context
         assert received_context[0] is not None
-        assert received_context[0].db_context is mock_db_context
+        assert received_context[0].db_context is db_context
 
     @pytest.mark.asyncio
     async def test_execute_tool_injects_db_context(self) -> None:
@@ -427,14 +429,14 @@ class TestLocalToolsProvider:
             implementations={"tool_needs_db_context": tool_needs_db_context},
         )
 
-        mock_db_context = MagicMock(spec=Database)
+        db_context = unconnected_database()
         context = ToolExecutionContext(
             conversation_id="test-conv-db",
             user_name="test-user",
             interface_type="test",
             timezone=ZoneInfo("UTC"),
             turn_id=None,
-            db_context=mock_db_context,
+            db_context=db_context,
             processing_service=None,
             clock=None,
             plugins=None,
@@ -449,7 +451,7 @@ class TestLocalToolsProvider:
         )
 
         assert result == "Got query: test"
-        assert received_db[0] is mock_db_context
+        assert received_db[0] is db_context
 
     @pytest.mark.asyncio
     async def test_execute_tool_injects_db_context_with_string_annotation(
@@ -501,14 +503,14 @@ class TestLocalToolsProvider:
                 },
             )
 
-            mock_db_context = MagicMock(spec=Database)
+            db_context = unconnected_database()
             context = ToolExecutionContext(
                 conversation_id="test-conv-str-db",
                 user_name="test-user",
                 interface_type="test",
                 timezone=ZoneInfo("UTC"),
                 turn_id=None,
-                db_context=mock_db_context,
+                db_context=db_context,
                 processing_service=None,
                 clock=None,
                 plugins=None,
@@ -523,7 +525,7 @@ class TestLocalToolsProvider:
             )
 
             assert result == "Got query: test"
-            assert received_db[0] is mock_db_context
+            assert received_db[0] is db_context
         finally:
             del sys.modules["fake_tool_module"]
 
@@ -617,14 +619,14 @@ class TestPolicyConfirmationFlow:
             captured["context"] = context
             return ConfirmationOutcome(kind="approved")
 
-        mock_db_context = MagicMock(spec=Database)
+        db_context = unconnected_database()
         exec_context = ToolExecutionContext(
             conversation_id="conv-1",
             user_name="test-user",
             interface_type="telegram",
             timezone=ZoneInfo("UTC"),
             turn_id="turn-1",
-            db_context=mock_db_context,
+            db_context=db_context,
             processing_service=None,
             clock=None,
             plugins=None,
@@ -698,14 +700,14 @@ class TestPolicyEnforcingToolsProvider:
 
     @staticmethod
     def _make_context_without_confirmation() -> ToolExecutionContext:
-        mock_db_context = MagicMock(spec=Database)
+        db_context = unconnected_database()
         return ToolExecutionContext(
             conversation_id="policy-conv",
             user_name="test-user",
             interface_type="test",
             timezone=ZoneInfo("UTC"),
             turn_id="turn-1",
-            db_context=mock_db_context,
+            db_context=db_context,
             processing_service=None,
             clock=None,
             plugins=None,

@@ -1,5 +1,3 @@
-from unittest.mock import MagicMock
-
 import pytest
 from telegram import Update
 
@@ -11,7 +9,7 @@ from family_assistant.telegram.types import AttachmentData
 @pytest.mark.asyncio
 async def test_drained_text_only_mid_turn_update_is_not_replayed() -> None:
     controller = TelegramMidTurnController()
-    update = MagicMock(spec=Update)
+    update = Update(update_id=1)
     user_input = MidTurnUserInput(content="use this instead")
 
     await controller.add_update(update, None, user_input)
@@ -25,7 +23,7 @@ async def test_drained_attachment_mid_turn_update_is_replayed_for_registration()
     None
 ):
     controller = TelegramMidTurnController()
-    update = MagicMock(spec=Update)
+    update = Update(update_id=2)
     attachment = AttachmentData(
         content=b"image-bytes",
         filename="photo.jpg",
@@ -42,7 +40,7 @@ async def test_drained_attachment_mid_turn_update_is_replayed_for_registration()
 @pytest.mark.asyncio
 async def test_undrained_mid_turn_update_is_replayed_after_turn_finishes() -> None:
     controller = TelegramMidTurnController()
-    update = MagicMock(spec=Update)
+    update = Update(update_id=3)
     user_input = MidTurnUserInput(content="one more thing")
 
     await controller.add_update(update, None, user_input)

@@ -3,15 +3,28 @@
 from __future__ import annotations
 
 import shlex
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import cloudcoil.models.kubernetes.core.v1 as k8s
 import pytest
+from kubernetes_asyncio.client import (
+    V1Job,
+    V1JobCondition,
+    V1JobStatus,
+    V1ObjectMeta,
+    V1Pod,
+    V1PodList,
+    V1Status,
+)
 
 from family_assistant.plugins.ai_workers.backend import WorkerStatus
 from family_assistant.plugins.ai_workers.backends.kubernetes import KubernetesBackend
 from family_assistant.plugins.ai_workers.config import KubernetesBackendConfig
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 @pytest.fixture
@@ -51,12 +64,76 @@ def backend(kubernetes_config: KubernetesBackendConfig) -> KubernetesBackend:
     return backend
 
 
-def _mock_api_client() -> MagicMock:
-    """Create a mock ApiClient that supports async context manager."""
-    mock_client = MagicMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=None)
-    return mock_client
+K8S_MODULE = "family_assistant.plugins.ai_workers.backends.kubernetes"
+
+
+class FakeBatchV1Api:
+    """An in-memory BatchV1Api: records submitted and deleted Jobs."""
+
+    def __init__(
+        self,
+        *,
+        job_status: V1JobStatus | None = None,
+        create_error: Exception | None = None,
+    ) -> None:
+        self._job_status = job_status
+        self._create_error = create_error
+        self.created: list[tuple[str, V1Job]] = []
+        self.deleted: list[tuple[str, str, str | None]] = []
+
+    async def create_namespaced_job(self, namespace: str, body: V1Job) -> V1Job:
+        if self._create_error is not None:
+            raise self._create_error
+        self.created.append((namespace, body))
+        return body
+
+    async def read_namespaced_job(self, name: str, namespace: str) -> V1Job:
+        return V1Job(
+            metadata=V1ObjectMeta(name=name, namespace=namespace),
+            status=self._job_status,
+        )
+
+    async def delete_namespaced_job(
+        self, name: str, namespace: str, propagation_policy: str | None = None
+    ) -> V1Status:
+        self.deleted.append((name, namespace, propagation_policy))
+        return V1Status(status="Success")
+
+
+class FakeCoreV1Api:
+    """An in-memory CoreV1Api serving a fixed set of pods and their logs."""
+
+    def __init__(self, pods: list[V1Pod] | None = None, logs: str = "") -> None:
+        self._pods = pods or []
+        self._logs = logs
+        self.pod_queries: list[tuple[str, str]] = []
+        self.log_requests: list[tuple[str, str, int | None]] = []
+
+    async def list_namespaced_pod(
+        self, namespace: str, label_selector: str
+    ) -> V1PodList:
+        self.pod_queries.append((namespace, label_selector))
+        return V1PodList(items=self._pods)
+
+    async def read_namespaced_pod_log(
+        self, name: str, namespace: str, tail_lines: int | None = None
+    ) -> str:
+        self.log_requests.append((name, namespace, tail_lines))
+        return self._logs
+
+
+@contextmanager
+def fake_kubernetes_apis(
+    batch: FakeBatchV1Api | None = None, core: FakeCoreV1Api | None = None
+) -> Iterator[None]:
+    """Route the backend's API objects to fakes; the ApiClient itself is real."""
+    batch_api = batch or FakeBatchV1Api()
+    core_api = core or FakeCoreV1Api()
+    with (
+        patch(f"{K8S_MODULE}.BatchV1Api", new=lambda _api_client: batch_api),
+        patch(f"{K8S_MODULE}.CoreV1Api", new=lambda _api_client: core_api),
+    ):
+        yield
 
 
 async def _spawn_backend_task(
@@ -67,23 +144,10 @@ async def _spawn_backend_task(
 ) -> str:
     """Register a task on the backend via the public spawn_task API.
 
-    Patches out the Kubernetes client so tests can seed backend state without
+    Routes the Kubernetes API to a fake so tests can seed backend state without
     reaching into the private `_tasks` registry.
     """
-    mock_client = _mock_api_client()
-    mock_batch_api = AsyncMock()
-    mock_batch_api.create_namespaced_job = AsyncMock()
-
-    with (
-        patch(
-            "family_assistant.plugins.ai_workers.backends.kubernetes.ApiClient",
-            return_value=mock_client,
-        ),
-        patch(
-            "family_assistant.plugins.ai_workers.backends.kubernetes.BatchV1Api",
-            return_value=mock_batch_api,
-        ),
-    ):
+    with fake_kubernetes_apis():
         return await backend.spawn_task(
             task_id=task_id,
             prompt_path=f"tasks/{task_id}/prompt.md",
@@ -100,20 +164,9 @@ class TestKubernetesBackendSpawnTask:
     @pytest.mark.asyncio
     async def test_spawn_task_success(self, backend: KubernetesBackend) -> None:
         """Test successful task spawn."""
-        mock_client = _mock_api_client()
-        mock_batch_api = AsyncMock()
-        mock_batch_api.create_namespaced_job = AsyncMock()
+        batch_api = FakeBatchV1Api()
 
-        with (
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.ApiClient",
-                return_value=mock_client,
-            ),
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.BatchV1Api",
-                return_value=mock_batch_api,
-            ),
-        ):
+        with fake_kubernetes_apis(batch=batch_api):
             job_id = await backend.spawn_task(
                 task_id="task-123",
                 prompt_path="tasks/task-123/prompt.md",
@@ -123,38 +176,26 @@ class TestKubernetesBackendSpawnTask:
                 timeout_minutes=30,
             )
 
-            assert job_id == "ai-worker-task-123"
-            task = backend.get_task(job_id)
-            assert task is not None
-            assert task.task_id == "task-123"
-            assert task.status == WorkerStatus.SUBMITTED
-            assert task.model == "claude"
+        assert job_id == "ai-worker-task-123"
+        task = backend.get_task(job_id)
+        assert task is not None
+        assert task.task_id == "task-123"
+        assert task.status == WorkerStatus.SUBMITTED
+        assert task.model == "claude"
 
-            mock_batch_api.create_namespaced_job.assert_awaited_once()
-            await_kwargs = mock_batch_api.create_namespaced_job.await_args.kwargs
-            assert await_kwargs["namespace"] == "test-namespace"
-            submitted_job = await_kwargs["body"]
-            assert submitted_job.metadata.name == "ai-worker-task-123"
-            assert submitted_job.metadata.labels["task-id"] == "task-123"
+        assert len(batch_api.created) == 1
+        namespace, submitted_job = batch_api.created[0]
+        assert namespace == "test-namespace"
+        assert submitted_job.metadata.name == "ai-worker-task-123"
+        assert submitted_job.metadata.labels["task-id"] == "task-123"
 
     @pytest.mark.asyncio
     async def test_spawn_task_failure(self, backend: KubernetesBackend) -> None:
         """Test spawn task handles API failure."""
-        mock_client = _mock_api_client()
-        mock_batch_api = AsyncMock()
-        mock_batch_api.create_namespaced_job = AsyncMock(
-            side_effect=Exception("forbidden")
-        )
+        batch_api = FakeBatchV1Api(create_error=Exception("forbidden"))
 
         with (
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.ApiClient",
-                return_value=mock_client,
-            ),
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.BatchV1Api",
-                return_value=mock_batch_api,
-            ),
+            fake_kubernetes_apis(batch=batch_api),
             pytest.raises(RuntimeError, match="Failed to create Kubernetes Job"),
         ):
             await backend.spawn_task(
@@ -719,28 +760,11 @@ class TestKubernetesBackendGetTaskStatus:
     async def test_get_status_running(self, backend: KubernetesBackend) -> None:
         """Test getting status of running job."""
         job_id = await _spawn_backend_task(backend)
+        batch_api = FakeBatchV1Api(job_status=V1JobStatus(active=1))
 
-        mock_client = _mock_api_client()
-        mock_job = SimpleNamespace(
-            status=SimpleNamespace(
-                active=1, succeeded=None, failed=None, conditions=None
-            )
-        )
-        mock_batch_api = AsyncMock()
-        mock_batch_api.read_namespaced_job = AsyncMock(return_value=mock_job)
-
-        with (
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.ApiClient",
-                return_value=mock_client,
-            ),
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.BatchV1Api",
-                return_value=mock_batch_api,
-            ),
-        ):
+        with fake_kubernetes_apis(batch=batch_api):
             result = await backend.get_task_status(job_id)
-            assert result.status == WorkerStatus.RUNNING
+        assert result.status == WorkerStatus.RUNNING
 
         task = backend.get_task(job_id)
         assert task is not None
@@ -750,29 +774,12 @@ class TestKubernetesBackendGetTaskStatus:
     async def test_get_status_success(self, backend: KubernetesBackend) -> None:
         """Test getting status of successful job."""
         job_id = await _spawn_backend_task(backend)
+        batch_api = FakeBatchV1Api(job_status=V1JobStatus(succeeded=1))
 
-        mock_client = _mock_api_client()
-        mock_job = SimpleNamespace(
-            status=SimpleNamespace(
-                succeeded=1, active=None, failed=None, conditions=None
-            )
-        )
-        mock_batch_api = AsyncMock()
-        mock_batch_api.read_namespaced_job = AsyncMock(return_value=mock_job)
-
-        with (
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.ApiClient",
-                return_value=mock_client,
-            ),
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.BatchV1Api",
-                return_value=mock_batch_api,
-            ),
-        ):
+        with fake_kubernetes_apis(batch=batch_api):
             result = await backend.get_task_status(job_id)
-            assert result.status == WorkerStatus.SUCCESS
-            assert result.exit_code == 0
+        assert result.status == WorkerStatus.SUCCESS
+        assert result.exit_code == 0
 
         task = backend.get_task(job_id)
         assert task is not None
@@ -782,31 +789,14 @@ class TestKubernetesBackendGetTaskStatus:
     async def test_get_status_failed(self, backend: KubernetesBackend) -> None:
         """Test getting status of failed job."""
         job_id = await _spawn_backend_task(backend)
+        batch_api = FakeBatchV1Api(job_status=V1JobStatus(failed=1))
 
-        mock_client = _mock_api_client()
-        mock_job = SimpleNamespace(
-            status=SimpleNamespace(
-                succeeded=None, active=None, failed=1, conditions=None
-            )
-        )
-        mock_batch_api = AsyncMock()
-        mock_batch_api.read_namespaced_job = AsyncMock(return_value=mock_job)
-
-        with (
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.ApiClient",
-                return_value=mock_client,
-            ),
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.BatchV1Api",
-                return_value=mock_batch_api,
-            ),
-        ):
+        with fake_kubernetes_apis(batch=batch_api):
             result = await backend.get_task_status(job_id)
-            assert result.status == WorkerStatus.FAILED
-            # exit_code not set here - webhook provides actual value
-            assert result.exit_code is None
-            assert result.error_message is not None
+        assert result.status == WorkerStatus.FAILED
+        # exit_code not set here - webhook provides actual value
+        assert result.exit_code is None
+        assert result.error_message is not None
 
         task = backend.get_task(job_id)
         assert task is not None
@@ -816,32 +806,17 @@ class TestKubernetesBackendGetTaskStatus:
     async def test_get_status_timeout(self, backend: KubernetesBackend) -> None:
         """Test getting status of timed out job."""
         job_id = await _spawn_backend_task(backend)
-
-        mock_client = _mock_api_client()
-        deadline_condition = SimpleNamespace(
-            type="Failed", reason="DeadlineExceeded", message=""
+        deadline_condition = V1JobCondition(
+            type="Failed", status="True", reason="DeadlineExceeded", message=""
         )
-        mock_job = SimpleNamespace(
-            status=SimpleNamespace(
-                succeeded=None, active=None, failed=1, conditions=[deadline_condition]
-            )
+        batch_api = FakeBatchV1Api(
+            job_status=V1JobStatus(failed=1, conditions=[deadline_condition])
         )
-        mock_batch_api = AsyncMock()
-        mock_batch_api.read_namespaced_job = AsyncMock(return_value=mock_job)
 
-        with (
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.ApiClient",
-                return_value=mock_client,
-            ),
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.BatchV1Api",
-                return_value=mock_batch_api,
-            ),
-        ):
+        with fake_kubernetes_apis(batch=batch_api):
             result = await backend.get_task_status(job_id)
-            assert result.status == WorkerStatus.TIMEOUT
-            assert result.error_message == "Job exceeded deadline"
+        assert result.status == WorkerStatus.TIMEOUT
+        assert result.error_message == "Job exceeded deadline"
 
         task = backend.get_task(job_id)
         assert task is not None
@@ -855,28 +830,16 @@ class TestKubernetesBackendCancelTask:
     async def test_cancel_running_task(self, backend: KubernetesBackend) -> None:
         """Test cancelling a running task."""
         job_id = await _spawn_backend_task(backend)
+        batch_api = FakeBatchV1Api()
 
-        mock_client = _mock_api_client()
-        mock_batch_api = AsyncMock()
-        mock_batch_api.delete_namespaced_job = AsyncMock()
-
-        with (
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.ApiClient",
-                return_value=mock_client,
-            ),
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.BatchV1Api",
-                return_value=mock_batch_api,
-            ),
-        ):
+        with fake_kubernetes_apis(batch=batch_api):
             result = await backend.cancel_task(job_id)
-            assert result is True
+        assert result is True
 
-            task = backend.get_task(job_id)
-            assert task is not None
-            assert task.status == WorkerStatus.CANCELLED
-            mock_batch_api.delete_namespaced_job.assert_awaited_once()
+        task = backend.get_task(job_id)
+        assert task is not None
+        assert task.status == WorkerStatus.CANCELLED
+        assert batch_api.deleted == [(job_id, "test-namespace", "Foreground")]
 
     @pytest.mark.asyncio
     async def test_cancel_unknown_task(self, backend: KubernetesBackend) -> None:
@@ -888,34 +851,19 @@ class TestKubernetesBackendCancelTask:
     async def test_cancel_already_completed(self, backend: KubernetesBackend) -> None:
         """Test cancelling already completed task returns False."""
         job_id = await _spawn_backend_task(backend)
+        batch_api = FakeBatchV1Api(job_status=V1JobStatus(succeeded=1))
 
-        mock_client = _mock_api_client()
-        mock_job = SimpleNamespace(
-            status=SimpleNamespace(
-                succeeded=1, active=None, failed=None, conditions=None
-            )
-        )
-        mock_batch_api = AsyncMock()
-        mock_batch_api.read_namespaced_job = AsyncMock(return_value=mock_job)
-
-        with (
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.ApiClient",
-                return_value=mock_client,
-            ),
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.BatchV1Api",
-                return_value=mock_batch_api,
-            ),
-        ):
+        with fake_kubernetes_apis(batch=batch_api):
             await backend.get_task_status(job_id)
 
         task = backend.get_task(job_id)
         assert task is not None
         assert task.status == WorkerStatus.SUCCESS
 
-        result = await backend.cancel_task(job_id)
+        with fake_kubernetes_apis(batch=batch_api):
+            result = await backend.cancel_task(job_id)
         assert result is False
+        assert batch_api.deleted == []
 
 
 class TestKubernetesBackendHelperMethods:
@@ -960,58 +908,28 @@ class TestKubernetesBackendGetJobLogs:
     @pytest.mark.asyncio
     async def test_get_job_logs_success(self, backend: KubernetesBackend) -> None:
         """Test getting logs from a job."""
-        mock_client = _mock_api_client()
-
-        mock_pod = SimpleNamespace(
-            metadata=SimpleNamespace(name="ai-worker-task-123-abc123")
-        )
-        mock_pod_list = SimpleNamespace(items=[mock_pod])
-
-        mock_core_api = AsyncMock()
-        mock_core_api.list_namespaced_pod = AsyncMock(return_value=mock_pod_list)
-        mock_core_api.read_namespaced_pod_log = AsyncMock(
-            return_value="Log line 1\nLog line 2"
+        core_api = FakeCoreV1Api(
+            pods=[V1Pod(metadata=V1ObjectMeta(name="ai-worker-task-123-abc123"))],
+            logs="Log line 1\nLog line 2",
         )
 
-        with (
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.ApiClient",
-                return_value=mock_client,
-            ),
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.CoreV1Api",
-                return_value=mock_core_api,
-            ),
-        ):
+        with fake_kubernetes_apis(core=core_api):
             logs = await backend.get_job_logs("ai-worker-task-123")
-            assert logs == "Log line 1\nLog line 2"
+        assert logs == "Log line 1\nLog line 2"
 
-            list_kwargs = mock_core_api.list_namespaced_pod.await_args.kwargs
-            assert list_kwargs["namespace"] == "test-namespace"
-            assert list_kwargs["label_selector"] == "job-name=ai-worker-task-123"
-
-            log_kwargs = mock_core_api.read_namespaced_pod_log.await_args.kwargs
-            assert log_kwargs["name"] == "ai-worker-task-123-abc123"
-            assert log_kwargs["namespace"] == "test-namespace"
+        assert core_api.pod_queries == [
+            ("test-namespace", "job-name=ai-worker-task-123")
+        ]
+        assert core_api.log_requests == [
+            ("ai-worker-task-123-abc123", "test-namespace", 100)
+        ]
 
     @pytest.mark.asyncio
     async def test_get_job_logs_no_pod(self, backend: KubernetesBackend) -> None:
         """Test getting logs when pod not found."""
-        mock_client = _mock_api_client()
+        core_api = FakeCoreV1Api(pods=[])
 
-        mock_pod_list = SimpleNamespace(items=[])
-        mock_core_api = AsyncMock()
-        mock_core_api.list_namespaced_pod = AsyncMock(return_value=mock_pod_list)
-
-        with (
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.ApiClient",
-                return_value=mock_client,
-            ),
-            patch(
-                "family_assistant.plugins.ai_workers.backends.kubernetes.CoreV1Api",
-                return_value=mock_core_api,
-            ),
-        ):
+        with fake_kubernetes_apis(core=core_api):
             logs = await backend.get_job_logs("ai-worker-task-123")
-            assert logs is None
+        assert logs is None
+        assert core_api.log_requests == []

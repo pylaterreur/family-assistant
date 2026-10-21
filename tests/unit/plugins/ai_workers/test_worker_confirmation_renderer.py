@@ -10,24 +10,26 @@ Cancelling a task must show what is being stopped, not just an opaque id.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
-from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from family_assistant.plugins.ai_workers.config import AIWorkersConfig
+from family_assistant.plugins.ai_workers.instance import AIWorkersInstance
 from family_assistant.plugins.ai_workers.tools import (
     render_cancel_worker_task_confirmation,
     render_spawn_worker_confirmation,
 )
+from family_assistant.plugins.runtime import ProfilePlugins
 from family_assistant.storage.database import Database
 from family_assistant.tools.confirmation import (
     TOOL_CONFIRMATION_RENDERERS,
     confirmation_arguments_block_reason,
 )
+from family_assistant.tools.types import ToolExecutionContext
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
-
-    from family_assistant.tools.types import ToolExecutionContext
 
 
 def _no_context() -> ToolExecutionContext:
@@ -38,10 +40,23 @@ def _no_context() -> ToolExecutionContext:
 def _context_for_conversation(
     db_engine: AsyncEngine, conversation_id: str
 ) -> ToolExecutionContext:
-    context = MagicMock()
-    context.conversation_id = conversation_id
-    context.db_context = Database(db_engine)
-    return cast("ToolExecutionContext", context)
+    return ToolExecutionContext(
+        interface_type="test",
+        conversation_id=conversation_id,
+        user_name="tester",
+        turn_id=None,
+        db_context=Database(db_engine),
+        processing_service=None,
+        clock=None,
+        plugins=ProfilePlugins((
+            AIWorkersInstance(AIWorkersConfig(backend_type="mock")),
+        )),
+        event_sources=None,
+        attachment_registry=None,
+        credential_resolvers=None,
+        api_backend=None,
+        timezone=ZoneInfo("UTC"),
+    )
 
 
 def test_worker_tools_have_confirmation_renderers() -> None:

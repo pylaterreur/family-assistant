@@ -4,6 +4,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from pywebpush import WebPushException
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -131,7 +132,7 @@ async def test_handle_stale_subscription_410_gone(
     mock_webpush: MagicMock, db_engine: AsyncEngine
 ) -> None:
     """Test that a 410 Gone response deletes the subscription."""
-    mock_response = MagicMock()
+    mock_response = requests.Response()
     mock_response.status_code = 410
     mock_webpush.side_effect = WebPushException("Gone", response=mock_response)
 
@@ -160,7 +161,7 @@ async def test_handle_other_web_push_exception(
     mock_webpush: MagicMock, db_engine: AsyncEngine
 ) -> None:
     """Test that other WebPushExceptions are logged but do not delete the subscription."""
-    mock_response = MagicMock()
+    mock_response = requests.Response()
     mock_response.status_code = 404
     mock_webpush.side_effect = WebPushException("Not Found", response=mock_response)
 

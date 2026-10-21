@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -30,6 +29,7 @@ from family_assistant.llm import LLMOutput
 from family_assistant.llm.messages import UserMessage
 from family_assistant.llm.model_selection import ResolvedModelSelection
 from family_assistant.llm.providers.google_genai_client import (
+    AgentStep,
     GoogleGenAIClient,
     SandboxFile,
     SandboxFileEntry,
@@ -80,6 +80,7 @@ from family_assistant.utils.clock import Clock, MockClock
 from tests.mocks.mock_llm import (  # pylint: disable=no-name-in-module
     RuleBasedMockLLMClient,
 )
+from tests.mocks.recording_async_call import RecordingAsyncCall
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -220,20 +221,99 @@ def _state_from(sources: list[TaintSource]) -> TurnTaintState:
     return state
 
 
-def _google_client() -> GoogleGenAIClient:
-    return GoogleGenAIClient(api_key="test", model="deep-research-preview-04-2026")
+@dataclass(frozen=True)
+class _StartedInteraction:
+    """The arguments of one ``start_agent_interaction`` call."""
+
+    messages: list[LLMMessage]
+    previous_interaction_id: str | None
+    sandbox_files: list[SandboxFile]
 
 
-def _antigravity_client(reasoning_model: str) -> GoogleGenAIClient:
-    client = GoogleGenAIClient(
-        api_key="test",
+class _ScriptedAgentClient(GoogleGenAIClient):
+    """A real GoogleGenAIClient whose Interactions API calls are scripted.
+
+    Starting records the request and returns an interaction with
+    ``started_id``; polling answers with ``respond_to_poll``; cancelling
+    records the id and raises ``cancel_error`` when one is set. The sandbox
+    lists ``sandbox_entries``, and downloading answers with
+    ``respond_to_download`` and records the path in ``downloaded``.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str = "deep-research-preview-04-2026",
+        antigravity_model: str | None = None,
+        started_id: str = "inter_started",
+    ) -> None:
+        super().__init__(
+            api_key="test", model=model, antigravity_model=antigravity_model
+        )
+        self.started_id = started_id
+        self.started: list[_StartedInteraction] = []
+        self.respond_to_poll: Callable[[str], Interaction] | None = None
+        self.cancel_error: Exception | None = None
+        self.cancelled: list[str] = []
+        self.sandbox_entries: list[SandboxFileEntry] = []
+        self.respond_to_download: Callable[[str], bytes] | None = None
+        self.downloaded: list[str] = []
+
+    def only_start(self) -> _StartedInteraction:
+        assert len(self.started) == 1, f"Expected one start, got {len(self.started)}"
+        return self.started[0]
+
+    def poll_returns(self, interaction: Interaction) -> None:
+        self.respond_to_poll = lambda _interaction_id: interaction
+
+    async def start_agent_interaction(
+        self,
+        messages: Sequence[LLMMessage],
+        *,
+        previous_interaction_id: str | None = None,
+        sandbox_files: Sequence[SandboxFile] = (),
+    ) -> Interaction:
+        self.started.append(
+            _StartedInteraction(
+                messages=list(messages),
+                previous_interaction_id=previous_interaction_id,
+                sandbox_files=list(sandbox_files),
+            )
+        )
+        return Interaction(id=self.started_id, status="in_progress")
+
+    async def get_agent_interaction(self, interaction_id: str) -> Interaction:
+        assert self.respond_to_poll is not None, "No poll response was scripted"
+        return self.respond_to_poll(interaction_id)
+
+    async def cancel_agent_interaction(self, interaction_id: str) -> None:
+        self.cancelled.append(interaction_id)
+        if self.cancel_error is not None:
+            raise self.cancel_error
+
+    async def list_sandbox_files(
+        self, environment_id: str, directory: str
+    ) -> list[SandboxFileEntry]:
+        _ = environment_id, directory
+        return list(self.sandbox_entries)
+
+    async def download_sandbox_file(self, environment_id: str, path: str) -> bytes:
+        _ = environment_id
+        self.downloaded.append(path)
+        assert self.respond_to_download is not None, "No download was scripted"
+        return self.respond_to_download(path)
+
+
+def _google_client(started_id: str = "inter_started") -> _ScriptedAgentClient:
+    return _ScriptedAgentClient(started_id=started_id)
+
+
+def _antigravity_client(reasoning_model: str) -> _ScriptedAgentClient:
+    return _ScriptedAgentClient(
         model="antigravity-preview-09-2026",
         antigravity_model=reasoning_model,
+        started_id=f"inter_{reasoning_model}",
     )
-    interaction = AsyncMock()
-    interaction.id = f"inter_{reasoning_model}"
-    client.start_agent_interaction = AsyncMock(return_value=interaction)
-    return client
 
 
 @pytest.mark.asyncio
@@ -281,10 +361,7 @@ async def test_submit_async_mounts_attachments_into_the_sandbox(
         user_id="user-1",
     )
 
-    llm_client = _google_client()
-    mock_interaction = AsyncMock()
-    mock_interaction.id = "inter_att"
-    llm_client.start_agent_interaction = AsyncMock(return_value=mock_interaction)
+    llm_client = _google_client("inter_att")
     service = _make_service(llm_client, attachment_registry=registry)
 
     await service.submit_async(
@@ -299,7 +376,8 @@ async def test_submit_async_mounts_attachments_into_the_sandbox(
         acting_user_id="user-1",
     )
 
-    files = llm_client.start_agent_interaction.call_args.kwargs["sandbox_files"]
+    started = llm_client.only_start()
+    files = started.sandbox_files
     assert files == [
         SandboxFile(
             path="/workspace/figures.txt",
@@ -338,10 +416,7 @@ async def test_attachments_sharing_a_filename_get_distinct_mount_targets(
         user_id="user-1",
     )
 
-    llm_client = _google_client()
-    mock_interaction = AsyncMock()
-    mock_interaction.id = "inter_two"
-    llm_client.start_agent_interaction = AsyncMock(return_value=mock_interaction)
+    llm_client = _google_client("inter_two")
     service = _make_service(llm_client, attachment_registry=registry)
 
     await service.submit_async(
@@ -356,7 +431,8 @@ async def test_attachments_sharing_a_filename_get_distinct_mount_targets(
         acting_user_id="user-1",
     )
 
-    files = llm_client.start_agent_interaction.call_args.kwargs["sandbox_files"]
+    started = llm_client.only_start()
+    files = started.sandbox_files
     targets = [file.path for file in files]
     assert targets == ["/workspace/data.txt", "/workspace/data-2.txt"]
 
@@ -395,7 +471,6 @@ async def test_submit_async_refuses_an_attachment_owned_by_another_user(
     )
 
     llm_client = _google_client()
-    llm_client.start_agent_interaction = AsyncMock()
     service = _make_service(llm_client, attachment_registry=registry)
 
     with pytest.raises(DelegationPermanentError, match="belongs to"):
@@ -408,7 +483,7 @@ async def test_submit_async_refuses_an_attachment_owned_by_another_user(
             acting_user_id="someone-else",
         )
 
-    llm_client.start_agent_interaction.assert_not_awaited()
+    assert not llm_client.started
 
 
 @pytest.mark.asyncio
@@ -421,10 +496,7 @@ async def test_submit_async_honours_an_approval_persisted_with_the_run(
     submit path reads the answer a user actually gave instead of assuming one
     from the fact that a delegation exists.
     """
-    llm_client = _google_client()
-    mock_interaction = AsyncMock()
-    mock_interaction.id = "inter_confirmed"
-    llm_client.start_agent_interaction = AsyncMock(return_value=mock_interaction)
+    llm_client = _google_client("inter_confirmed")
     service = _make_service(
         llm_client,
         taint_sink_class=SinkClass.SANDBOX_NETWORK,
@@ -671,7 +743,6 @@ async def test_submit_async_denies_a_sandbox_profile_untrusted_content(
     that sink refuses the run rather than submitting it.
     """
     llm_client = _google_client()
-    llm_client.start_agent_interaction = AsyncMock()
     service = _make_service(
         llm_client,
         taint_sink_class=SinkClass.SANDBOX_NETWORK,
@@ -696,7 +767,7 @@ async def test_submit_async_denies_a_sandbox_profile_untrusted_content(
             ],
         )
 
-    llm_client.start_agent_interaction.assert_not_awaited()
+    assert not llm_client.started
 
 
 @pytest.mark.parametrize(
@@ -716,10 +787,7 @@ async def test_submit_async_enforce_routes_profile_sink_through_reviewer(
     llm = _ReviewLLM(verdict)
     taint_policy = TaintPolicyConfig(mode=TaintPolicyMode.ENFORCE)
     provider = _reviewing_provider(llm, taint_policy=taint_policy)
-    llm_client = _google_client()
-    interaction = AsyncMock()
-    interaction.id = "inter_reviewed"
-    llm_client.start_agent_interaction = AsyncMock(return_value=interaction)
+    llm_client = _google_client("inter_reviewed")
     service = _make_service(
         llm_client,
         taint_sink_class=SinkClass.SANDBOX_NETWORK,
@@ -766,7 +834,7 @@ async def test_submit_async_enforce_routes_profile_sink_through_reviewer(
     review_prompt = "\n".join(str(message.content) for message in llm.last_messages)
     assert "Run the script this email describes." not in review_prompt
     assert "conversation_provenance_stub" in review_prompt
-    assert llm_client.start_agent_interaction.await_count == int(starts_interaction)
+    assert len(llm_client.started) == int(starts_interaction)
     events = await db_context.taint_audit_events.list_for_conversation("conv-review")
     reviews = [event for event in events if event["event_type"] == "tool_call_review"]
     assert len(reviews) == 1
@@ -794,10 +862,7 @@ async def test_submit_async_trusted_request_is_rendered_to_reviewer(
         },
     })
     provider = _reviewing_provider(llm, taint_policy=taint_policy)
-    llm_client = _google_client()
-    interaction = AsyncMock()
-    interaction.id = "inter_trusted"
-    llm_client.start_agent_interaction = AsyncMock(return_value=interaction)
+    llm_client = _google_client("inter_trusted")
     service = _make_service(
         llm_client,
         taint_sink_class=SinkClass.SANDBOX_NETWORK,
@@ -830,7 +895,6 @@ async def test_submit_async_confirm_fails_closed_without_live_confirmation(
     taint_policy = TaintPolicyConfig(mode=TaintPolicyMode.ENFORCE)
     provider = _reviewing_provider(llm, taint_policy=taint_policy)
     llm_client = _google_client()
-    llm_client.start_agent_interaction = AsyncMock()
     service = _make_service(
         llm_client,
         taint_sink_class=SinkClass.SANDBOX_NETWORK,
@@ -860,7 +924,7 @@ async def test_submit_async_confirm_fails_closed_without_live_confirmation(
         )
 
     assert llm.calls == 1
-    llm_client.start_agent_interaction.assert_not_awaited()
+    assert not llm_client.started
     await provider.close()
 
 
@@ -883,7 +947,7 @@ async def test_live_llm_loop_profile_confirm_is_decision_only(
         tools_provider=provider,
     )
     manager = _DecisionOnlyConfirmationManager(ConfirmationOutcome(kind="approved"))
-    callback = AsyncMock()
+    callback = RecordingAsyncCall[ConfirmationOutcome]()
 
     result = await service.handle_chat_interaction(
         db_context=Database(db_engine),
@@ -914,7 +978,7 @@ async def test_live_llm_loop_profile_confirm_is_decision_only(
     assert len(manager.calls) == 1
     assert manager.calls[0]["tool_name"] == "profile:research"
     assert manager.calls[0]["wait_for_durable_execution"] is False
-    callback.assert_not_awaited()
+    assert not callback.calls
     await provider.close()
 
 
@@ -932,10 +996,7 @@ async def test_submit_async_observe_review_is_detached_and_drained_on_close(
     )
     taint_policy = TaintPolicyConfig(mode=TaintPolicyMode.OBSERVE)
     provider = _reviewing_provider(llm, taint_policy=taint_policy)
-    llm_client = _google_client()
-    interaction = AsyncMock()
-    interaction.id = "inter_shadow"
-    llm_client.start_agent_interaction = AsyncMock(return_value=interaction)
+    llm_client = _google_client("inter_shadow")
     service = _make_service(
         llm_client,
         taint_sink_class=SinkClass.SANDBOX_NETWORK,
@@ -985,10 +1046,7 @@ async def test_submit_async_allows_a_sandbox_profile_trusted_content(
     db_engine: AsyncEngine,
 ) -> None:
     """The user's own request reaches the agent untouched."""
-    llm_client = _google_client()
-    mock_interaction = AsyncMock()
-    mock_interaction.id = "inter_ok"
-    llm_client.start_agent_interaction = AsyncMock(return_value=mock_interaction)
+    llm_client = _google_client("inter_ok")
     service = _make_service(
         llm_client,
         taint_sink_class=SinkClass.SANDBOX_NETWORK,
@@ -1052,7 +1110,6 @@ async def test_an_untrusted_attachment_denies_the_run_it_was_routed_into(
     )
 
     llm_client = _google_client()
-    llm_client.start_agent_interaction = AsyncMock()
     service = _make_service(
         llm_client,
         attachment_registry=registry,
@@ -1073,7 +1130,7 @@ async def test_an_untrusted_attachment_denies_the_run_it_was_routed_into(
             acting_user_id="user-1",
         )
 
-    llm_client.start_agent_interaction.assert_not_awaited()
+    assert not llm_client.started
 
 
 @pytest.mark.asyncio
@@ -1081,10 +1138,7 @@ async def test_submit_async_renders_prompt_and_starts_interaction(
     db_engine: AsyncEngine,
 ) -> None:
     """submit_async renders the system prompt and forwards content as input."""
-    llm_client = _google_client()
-    mock_interaction = AsyncMock()
-    mock_interaction.id = "inter_new"
-    llm_client.start_agent_interaction = AsyncMock(return_value=mock_interaction)
+    llm_client = _google_client("inter_new")
     service = _make_service(llm_client)
 
     db_context = Database(db_engine)
@@ -1100,8 +1154,8 @@ async def test_submit_async_renders_prompt_and_starts_interaction(
     assert submission.remote_context_id is None
     assert submission.terminal_result is None
 
-    call_args = llm_client.start_agent_interaction.call_args
-    messages = call_args.args[0]
+    started = llm_client.only_start()
+    messages = started.messages
     assert any(
         m.role == "system" and "for Andrew" in (m.content or "") for m in messages
     )
@@ -1109,7 +1163,7 @@ async def test_submit_async_renders_prompt_and_starts_interaction(
         m.role == "user" and "Research quantum computing." in (m.content or "")
         for m in messages
     )
-    assert call_args.kwargs["previous_interaction_id"] is None
+    assert started.previous_interaction_id is None
 
 
 @pytest.mark.asyncio
@@ -1117,10 +1171,7 @@ async def test_submit_async_chains_onto_prior_completed_run(
     db_engine: AsyncEngine,
 ) -> None:
     """A resumed delegation (same subconversation) chains previous_interaction_id."""
-    llm_client = _google_client()
-    mock_interaction = AsyncMock()
-    mock_interaction.id = "inter_followup"
-    llm_client.start_agent_interaction = AsyncMock(return_value=mock_interaction)
+    llm_client = _google_client("inter_followup")
     service = _make_service(llm_client)
 
     db_context = Database(db_engine)
@@ -1154,8 +1205,8 @@ async def test_submit_async_chains_onto_prior_completed_run(
         db_context=db_context,
     )
 
-    call_args = llm_client.start_agent_interaction.call_args
-    assert call_args.kwargs["previous_interaction_id"] == "inter_original"
+    started = llm_client.only_start()
+    assert started.previous_interaction_id == "inter_original"
 
 
 @pytest.mark.asyncio
@@ -1165,8 +1216,7 @@ async def test_poll_async_pending_states() -> None:
     service = _make_service(llm_client)
 
     for status in ("in_progress", "requires_action"):
-        interaction = Interaction(status=status)
-        llm_client.get_agent_interaction = AsyncMock(return_value=interaction)
+        llm_client.poll_returns(Interaction(status=status))
         result = await service.poll_async("inter_x", None)
         assert result is PENDING
 
@@ -1181,7 +1231,7 @@ async def test_poll_async_unrecognized_status_stays_pending() -> None:
     """
     llm_client = _google_client()
     interaction = Interaction(status="queued")
-    llm_client.get_agent_interaction = AsyncMock(return_value=interaction)
+    llm_client.poll_returns(interaction)
     service = _make_service(llm_client)
 
     result = await service.poll_async("inter_x", None)
@@ -1200,7 +1250,7 @@ async def test_poll_async_completed_returns_success() -> None:
             ModelOutputStep(content=[TextContent(text="The final research report.")]),
         ],
     )
-    llm_client.get_agent_interaction = AsyncMock(return_value=interaction)
+    llm_client.poll_returns(interaction)
     service = _make_service(llm_client)
 
     result = await service.poll_async("inter_x", None)
@@ -1220,7 +1270,7 @@ async def test_poll_async_terminal_error_states_return_error_result(
     """Terminal non-success statuses become an error ChatInteractionResult."""
     llm_client = _google_client()
     interaction = Interaction(status=cast("InteractionStatus", status))
-    llm_client.get_agent_interaction = AsyncMock(return_value=interaction)
+    llm_client.poll_returns(interaction)
     service = _make_service(llm_client)
 
     result = await service.poll_async("inter_x", None)
@@ -1249,7 +1299,7 @@ async def test_poll_async_terminal_error_captures_interaction_errors(
             Error(message="retry after the running agent completes"),
         ],
     )
-    llm_client.get_agent_interaction = AsyncMock(return_value=interaction)
+    llm_client.poll_returns(interaction)
     service = _make_service(llm_client)
 
     with caplog.at_level(logging.WARNING):
@@ -1273,7 +1323,7 @@ async def test_poll_async_terminal_error_without_errors_leaves_traceback_bare() 
     """No errors payload means no fabricated detail in the traceback."""
     llm_client = _google_client()
     interaction = Interaction(status="cancelled")
-    llm_client.get_agent_interaction = AsyncMock(return_value=interaction)
+    llm_client.poll_returns(interaction)
     service = _make_service(llm_client)
 
     result = await service.poll_async("inter_x", None)
@@ -1289,22 +1339,23 @@ async def test_poll_async_terminal_error_without_errors_leaves_traceback_bare() 
 async def test_cancel_async_calls_through() -> None:
     """cancel_async delegates to the client's cancel primitive."""
     llm_client = _google_client()
-    llm_client.cancel_agent_interaction = AsyncMock(return_value=None)
     service = _make_service(llm_client)
 
     await service.cancel_async("inter_x")
 
-    llm_client.cancel_agent_interaction.assert_called_once_with("inter_x")
+    assert llm_client.cancelled == ["inter_x"]
 
 
 @pytest.mark.asyncio
 async def test_cancel_async_swallows_errors() -> None:
     """A failed cancel is logged, not raised (must never abort the caller)."""
     llm_client = _google_client()
-    llm_client.cancel_agent_interaction = AsyncMock(side_effect=RuntimeError("boom"))
+    llm_client.cancel_error = RuntimeError("boom")
     service = _make_service(llm_client)
 
     await service.cancel_async("inter_x")  # must not raise
+
+    assert llm_client.cancelled == ["inter_x"]
 
 
 @pytest.mark.asyncio
@@ -1314,8 +1365,9 @@ async def test_google_client_type_guard_rejects_non_google_llm_client() -> None:
     Exercised via poll_async (not cancel_async, which deliberately swallows
     every exception as best-effort).
     """
-    fake_client = cast("Any", AsyncMock())
-    service = _make_service(fake_client)
+    service = _make_service(
+        RuleBasedMockLLMClient(rules=[], default_response=LLMOutput(content="ok"))
+    )
 
     with pytest.raises(TypeError, match="GoogleGenAIClient"):
         await service.poll_async("inter_x", None)
@@ -1395,9 +1447,7 @@ async def test_observe_async_classifies_each_status(
     cancellation nobody had confirmed.
     """
     llm_client = _google_client()
-    llm_client.get_agent_interaction = AsyncMock(
-        return_value=Interaction(status=cast("InteractionStatus", status))
-    )
+    llm_client.poll_returns(Interaction(status=cast("InteractionStatus", status)))
     service = _make_service(llm_client)
 
     observation = await service.observe_async("inter_x")
@@ -1419,7 +1469,7 @@ async def test_polling_derives_its_answer_from_the_same_classification() -> None
         status="completed",
         steps=[ModelOutputStep(content=[TextContent(text="The report.")])],
     )
-    llm_client.get_agent_interaction = AsyncMock(return_value=interaction)
+    llm_client.poll_returns(interaction)
     service = _make_service(llm_client)
 
     observation = await service.observe_async("inter_x")
@@ -1441,9 +1491,7 @@ async def test_a_completion_with_nothing_in_it_is_not_a_success() -> None:
     have finished, so it is classified as an empty completion instead.
     """
     llm_client = _google_client()
-    llm_client.get_agent_interaction = AsyncMock(
-        return_value=Interaction(status="completed", steps=[], usage=None)
-    )
+    llm_client.poll_returns(Interaction(status="completed", steps=[], usage=None))
     service = _make_service(llm_client)
 
     observation = await service.observe_async("inter_x")
@@ -1465,8 +1513,8 @@ async def test_a_completion_that_executed_is_a_success_even_without_text() -> No
     runs into failures.
     """
     llm_client = _google_client()
-    llm_client.get_agent_interaction = AsyncMock(
-        return_value=Interaction(
+    llm_client.poll_returns(
+        Interaction(
             status="completed",
             steps=[UserInputStep(content=[TextContent(text="do the thing")])],
         )
@@ -1488,8 +1536,8 @@ async def test_an_observation_persists_no_provider_output() -> None:
     """
     secret = "SENSITIVE-SANDBOX-CONTENT"
     llm_client = _google_client()
-    llm_client.get_agent_interaction = AsyncMock(
-        return_value=Interaction(
+    llm_client.poll_returns(
+        Interaction(
             status="completed",
             steps=[ModelOutputStep(content=[TextContent(text=secret)])],
         )
@@ -1507,8 +1555,8 @@ async def test_an_observation_persists_no_provider_output() -> None:
 async def test_an_observations_error_summary_is_truncated() -> None:
     """A provider error is a diagnostic, and is bounded like one."""
     llm_client = _google_client()
-    llm_client.get_agent_interaction = AsyncMock(
-        return_value=Interaction(
+    llm_client.poll_returns(
+        Interaction(
             status="failed",
             errors=[Error(code="boom", message="x" * 10_000)],
         )
@@ -1535,13 +1583,13 @@ async def test_an_observation_is_stamped_when_the_read_was_issued() -> None:
     clock = MockClock(datetime(2026, 1, 1, tzinfo=UTC))
     llm_client = _google_client()
 
-    async def slow_read(_interaction_id: str) -> Interaction:
+    def slow_read(_interaction_id: str) -> Interaction:
         # Time passes while the provider is answering, as it does for a real
         # read that overlaps another.
         clock.advance(timedelta(seconds=30))
         return Interaction(status="in_progress")
 
-    llm_client.get_agent_interaction = AsyncMock(side_effect=slow_read)
+    llm_client.respond_to_poll = slow_read
     service = _make_service(llm_client, clock=clock)
 
     observation = await service.observe_async("inter_x")
@@ -1564,35 +1612,32 @@ def _client_with_outputs(
     files: dict[str, bytes | BaseException],
     *,
     sizes_listed: bool = True,
-) -> tuple[GoogleGenAIClient, AsyncMock]:
+) -> _ScriptedAgentClient:
     """A client whose finished run left ``files`` under workspace/outputs.
 
-    A file given as an exception fails to download with it. Returned with its
-    download stub, so a test can see what was fetched.
+    A file given as an exception fails to download with it; the client's
+    ``downloaded`` shows what was fetched.
     """
     client = _antigravity_client("gemini-3.8-flash")
-    client.list_sandbox_files = AsyncMock(
-        return_value=[
-            SandboxFileEntry(
-                path=f"workspace/outputs/{name}",
-                size_bytes=len(content)
-                if sizes_listed and isinstance(content, bytes)
-                else None,
-                mime_type="application/octet-stream",
-            )
-            for name, content in files.items()
-        ]
-    )
+    client.sandbox_entries = [
+        SandboxFileEntry(
+            path=f"workspace/outputs/{name}",
+            size_bytes=len(content)
+            if sizes_listed and isinstance(content, bytes)
+            else None,
+            mime_type="application/octet-stream",
+        )
+        for name, content in files.items()
+    ]
 
-    async def fetch(_environment_id: str, path: str) -> bytes:
+    def fetch(path: str) -> bytes:
         content = files[path.removeprefix("workspace/outputs/")]
         if isinstance(content, BaseException):
             raise content
         return content
 
-    download = AsyncMock(side_effect=fetch)
-    client.download_sandbox_file = download
-    return client, download
+    client.respond_to_download = fetch
+    return client
 
 
 @pytest.mark.asyncio
@@ -1607,7 +1652,7 @@ async def test_outputs_past_the_caps_are_named_rather_than_returned(
     registry = AttachmentRegistry(
         storage_path=str(tmp_path), db_engine=db_engine, config=None
     )
-    client, download = _client_with_outputs({
+    client = _client_with_outputs({
         "a.txt": b"aaaa",
         "b.bin": b"b" * 20,
         "c.txt": b"cc",
@@ -1625,8 +1670,7 @@ async def test_outputs_past_the_caps_are_named_rather_than_returned(
 
     assert len(collected.attachment_ids) == 2
     assert [note.split(" ", 1)[0] for note in collected.omitted] == ["b.bin", "d.txt"]
-    downloaded = [call.args[1] for call in download.await_args_list]
-    assert downloaded == ["workspace/outputs/a.txt", "workspace/outputs/c.txt"]
+    assert client.downloaded == ["workspace/outputs/a.txt", "workspace/outputs/c.txt"]
 
 
 @pytest.mark.asyncio
@@ -1637,7 +1681,7 @@ async def test_a_run_with_no_outputs_returns_nothing(
     registry = AttachmentRegistry(
         storage_path=str(tmp_path), db_engine=db_engine, config=None
     )
-    client, _ = _client_with_outputs({})
+    client = _client_with_outputs({})
     service = _make_service(client, attachment_registry=registry)
 
     collected = await service.collect_outputs(
@@ -1663,7 +1707,7 @@ async def test_a_run_with_no_outputs_returns_nothing(
 )
 async def test_only_a_sandboxed_submission_is_told_where_to_leave_files(
     db_engine: AsyncEngine,
-    agent_client: Callable[[], GoogleGenAIClient],
+    agent_client: Callable[[], _ScriptedAgentClient],
     told: bool,
 ) -> None:
     """The submit path collects outputs, so only it promises them.
@@ -1672,9 +1716,6 @@ async def test_only_a_sandboxed_submission_is_told_where_to_leave_files(
     into a chat collects nothing, so neither is told files come back.
     """
     client = agent_client()
-    interaction = AsyncMock()
-    interaction.id = "inter_told"
-    client.start_agent_interaction = AsyncMock(return_value=interaction)
     service = _make_service(client)
 
     await service.submit_async(
@@ -1685,8 +1726,7 @@ async def test_only_a_sandboxed_submission_is_told_where_to_leave_files(
         db_context=Database(db_engine),
     )
 
-    messages = client.start_agent_interaction.call_args.args[0]
-    system_prompt = str(messages[0].content)
+    system_prompt = str(client.only_start().messages[0].content)
     assert ("/workspace/outputs" in system_prompt) is told
     assert "You are a research assistant for Andrew." in system_prompt
 
@@ -1702,7 +1742,7 @@ async def test_an_output_over_the_attachment_limit_is_named_and_not_fetched(
         db_engine=db_engine,
         config={"max_file_size": 8},
     )
-    client, download = _client_with_outputs({
+    client = _client_with_outputs({
         "big.glb": b"g" * 20,
         "small.txt": b"ok",
     })
@@ -1718,8 +1758,7 @@ async def test_an_output_over_the_attachment_limit_is_named_and_not_fetched(
 
     assert len(collected.attachment_ids) == 1
     assert collected.omitted == ["big.glb (20 bytes, over the attachment size limit)"]
-    downloaded = [call.args[1] for call in download.await_args_list]
-    assert downloaded == ["workspace/outputs/small.txt"]
+    assert client.downloaded == ["workspace/outputs/small.txt"]
 
 
 @pytest.mark.asyncio
@@ -1735,7 +1774,7 @@ async def test_unlisted_sizes_are_capped_by_what_was_downloaded(
         db_engine=db_engine,
         config={"max_file_size": 8},
     )
-    client, _ = _client_with_outputs(
+    client = _client_with_outputs(
         {"a.txt": b"aaaaaa", "b.txt": b"bbbbbb", "huge.glb": b"g" * 9},
         sizes_listed=False,
     )
@@ -1766,7 +1805,7 @@ async def test_a_retryable_download_failure_registers_nothing(
     registry = AttachmentRegistry(
         storage_path=str(tmp_path), db_engine=db_engine, config=None
     )
-    client, _ = _client_with_outputs({
+    client = _client_with_outputs({
         "a.txt": b"first",
         "b.txt": DelegationTransientError("connection reset"),
     })
@@ -1796,7 +1835,7 @@ async def test_a_retryable_download_failure_registers_nothing(
 )
 async def test_a_resume_after_a_failed_run_chains_only_a_sandboxed_agent(
     db_engine: AsyncEngine,
-    agent_client: Callable[[], GoogleGenAIClient],
+    agent_client: Callable[[], _ScriptedAgentClient],
     chained_onto: str | None,
 ) -> None:
     """A sandboxed agent's failed run holds its work; Deep Research's does not."""
@@ -1824,9 +1863,6 @@ async def test_a_resume_after_a_failed_run_chains_only_a_sandboxed_agent(
         completed_at=datetime(2026, 10, 21, tzinfo=UTC),
     )
     client = agent_client()
-    interaction = AsyncMock()
-    interaction.id = "inter_resumed"
-    client.start_agent_interaction = AsyncMock(return_value=interaction)
     service = _make_service(client)
 
     await service.submit_async(
@@ -1837,8 +1873,7 @@ async def test_a_resume_after_a_failed_run_chains_only_a_sandboxed_agent(
         db_context=db_context,
     )
 
-    kwargs = client.start_agent_interaction.call_args.kwargs
-    assert kwargs["previous_interaction_id"] == chained_onto
+    assert client.only_start().previous_interaction_id == chained_onto
 
 
 @pytest.mark.asyncio
@@ -1850,26 +1885,24 @@ async def test_a_resumed_run_returns_only_what_it_wrote(
     registry = AttachmentRegistry(
         storage_path=str(tmp_path), db_engine=db_engine, config=None
     )
-    client, download = _client_with_outputs({})
+    client = _client_with_outputs({})
     started = datetime(2026, 10, 21, 5, 41, 8, 600_000, tzinfo=UTC)
-    client.list_sandbox_files = AsyncMock(
-        return_value=[
-            SandboxFileEntry(
-                path=f"workspace/outputs/{name}",
-                size_bytes=1,
-                mime_type="text/plain",
-                modified=modified,
-            )
-            for name, modified in (
-                ("earlier.txt", started - timedelta(minutes=30)),
-                # Whole-second listing time, written in the run's first second.
-                ("first-second.txt", started.replace(microsecond=0)),
-                ("later.txt", started + timedelta(minutes=2)),
-                ("untimed.txt", None),
-            )
-        ]
-    )
-    download.side_effect = lambda _env, _path: b"x"
+    client.sandbox_entries = [
+        SandboxFileEntry(
+            path=f"workspace/outputs/{name}",
+            size_bytes=1,
+            mime_type="text/plain",
+            modified=modified,
+        )
+        for name, modified in (
+            ("earlier.txt", started - timedelta(minutes=30)),
+            # Whole-second listing time, written in the run's first second.
+            ("first-second.txt", started.replace(microsecond=0)),
+            ("later.txt", started + timedelta(minutes=2)),
+            ("untimed.txt", None),
+        )
+    ]
+    client.respond_to_download = lambda _path: b"x"
     service = _make_service(client, attachment_registry=registry)
     observation = replace(
         _finished_with_environment("env_prev"), remote_created_at=started
@@ -1883,8 +1916,7 @@ async def test_a_resumed_run_returns_only_what_it_wrote(
         db_context=Database(db_engine),
     )
 
-    fetched = [call.args[1] for call in download.await_args_list]
-    assert fetched == [
+    assert client.downloaded == [
         "workspace/outputs/first-second.txt",
         "workspace/outputs/later.txt",
         "workspace/outputs/untimed.txt",
@@ -2092,4 +2124,59 @@ async def test_an_unlisted_file_over_a_limit_frees_its_slot(
     assert collected.omitted == [
         "a-huge.bin (9 bytes, over the attachment size limit)",
         "d.txt (beyond the first 2 files)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_peek_shows_the_latest_steps_and_newest_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A glance, not a transcript: recent steps, newest files, both capped."""
+    monkeypatch.setattr(interactions_agent_service, "PEEK_RECENT_STEPS", 2)
+    monkeypatch.setattr(interactions_agent_service, "PEEK_FILES", 2)
+    client = _antigravity_client("gemini-3.8-flash")
+    client.get_agent_interaction = AsyncMock(
+        return_value=Interaction(
+            id="inter_peek", status="in_progress", environment_id="env_peek"
+        )
+    )
+    client.peek_agent_interaction = AsyncMock(
+        return_value=[
+            AgentStep(kind="thought", text="planning"),
+            AgentStep(kind="code_execution_call", text="python build.py"),
+            AgentStep(
+                kind="code_execution_result",
+                text="[STDOUT]\nbuilt 2 parts\n[STDERR]\nwarning: thin wall\n",
+            ),
+        ]
+    )
+    at = datetime(2026, 10, 21, 8, 0, tzinfo=UTC)
+    client.list_sandbox_files = AsyncMock(
+        return_value=[
+            SandboxFileEntry(
+                path=f"workspace/{name}",
+                size_bytes=size,
+                mime_type=None,
+                modified=at + timedelta(minutes=minutes),
+            )
+            for name, size, minutes in (
+                ("old.stl", 10, 0),
+                ("plate.3mf", 2048, 9),
+                ("hat.stl", 1024, 5),
+            )
+        ]
+    )
+    service = _make_service(client)
+
+    account = await service.peek_async("inter_peek")
+
+    assert account.splitlines() == [
+        "Remote status: in_progress. Steps so far: 3.",
+        "Latest 2 step(s), oldest first:",
+        "- ran: python build.py",
+        "- output: built 2 parts (stderr: warning: thin wall)",
+        "Files in its workspace (3), most recently changed first:",
+        "- /workspace/plate.3mf (2,048 bytes, changed 08:09:00 UTC)",
+        "- /workspace/hat.stl (1,024 bytes, changed 08:05:00 UTC)",
+        "- … and 1 more",
     ]

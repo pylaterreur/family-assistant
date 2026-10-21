@@ -9,12 +9,12 @@ wraps the backend's result.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import cast
-from unittest.mock import AsyncMock, MagicMock
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from family_assistant.scripting.apis.attachments import ScriptAttachment
+from family_assistant.services.attachment_registry import AttachmentMetadata
 from family_assistant.tools.types import (
     ToolAttachment,
     ToolExecutionContext,
@@ -26,6 +26,10 @@ from family_assistant.tools.video_backends import (
     VideoGenerationResult,
 )
 from family_assistant.tools.video_generation import generate_video_tool
+
+if TYPE_CHECKING:
+    from family_assistant.services.attachment_registry import AttachmentRegistry
+    from family_assistant.storage.database import Database
 
 
 class _RecordingBackend:
@@ -59,14 +63,40 @@ def _exec_context(backend: _RecordingBackend) -> ToolExecutionContext:
     )
 
 
+class _InMemoryAttachmentRegistry:
+    """Serves attachment content from memory, by attachment id."""
+
+    def __init__(self) -> None:
+        self.contents: dict[str, bytes | None] = {}
+
+    async def get_attachment_content(
+        self,
+        db_context: object,
+        attachment_id: str,
+        *,
+        acting_user_id: str | None,
+    ) -> bytes | None:
+        return self.contents[attachment_id]
+
+
 def _attachment(
     content: bytes | None, mime: str = "image/png", att_id: str = "a1"
 ) -> ScriptAttachment:
-    attachment = MagicMock(spec=ScriptAttachment)
-    attachment.get_content_async = AsyncMock(return_value=content)
-    attachment.get_mime_type.return_value = mime
-    attachment.get_id.return_value = att_id
-    return cast("ScriptAttachment", attachment)
+    registry = _InMemoryAttachmentRegistry()
+    registry.contents[att_id] = content
+    return ScriptAttachment(
+        metadata=AttachmentMetadata(
+            attachment_id=att_id,
+            source_type="user",
+            source_id="user-1",
+            mime_type=mime,
+            description="Test image",
+            size=len(content) if content is not None else 0,
+        ),
+        registry=cast("AttachmentRegistry", registry),
+        db_context_getter=lambda: cast("Database", None),
+        user_id="user-1",
+    )
 
 
 @pytest.mark.asyncio
@@ -140,13 +170,14 @@ async def test_generate_video_truncates_reference_images_to_three() -> None:
 @pytest.mark.asyncio
 async def test_generate_video_skips_invalid_and_empty_attachments() -> None:
     backend = _RecordingBackend()
-    invalid = cast("ScriptAttachment", MagicMock())  # not a ScriptAttachment
-    empty = _attachment(None, att_id="empty")
+    invalid = cast("ScriptAttachment", object())  # not a ScriptAttachment
+    missing = _attachment(None, att_id="missing")
+    empty = _attachment(b"", att_id="empty")
 
     await generate_video_tool(
         _exec_context(backend),
         prompt="invalid inputs",
-        images=[invalid, empty],
+        images=[invalid, missing, empty],
         first_frame_image=empty,
     )
 

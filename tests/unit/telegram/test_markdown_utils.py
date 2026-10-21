@@ -126,6 +126,7 @@ class TestConvertToTelegramMarkdown:
         """Test fallback to plain text on conversion error."""
         with patch(
             "family_assistant.telegram.markdown_utils.telegramify_markdown.markdownify",
+            autospec=True,
             side_effect=Exception("Test error"),
         ):
             text = "Test text"

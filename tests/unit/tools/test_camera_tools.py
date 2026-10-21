@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
-from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -36,13 +35,15 @@ from family_assistant.plugins.reolink.tools import (
 from family_assistant.plugins.runtime import ProfilePlugins
 from family_assistant.tools.types import ToolExecutionContext, ToolResult
 from tests.mocks.fake_jev import FakeJevClient
+from tests.mocks.mock_llm import RuleBasedMockLLMClient
+from tests.mocks.unconnected_database import unconnected_database
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from pydantic import BaseModel
 
-    from family_assistant.llm import LLMInterface
+    from family_assistant.llm import LLMInterface, LLMMessage
     from family_assistant.processing.service import ProcessingService
 
 
@@ -127,7 +128,7 @@ def exec_context(fake_camera_backend: FakeCameraBackend) -> ToolExecutionContext
         conversation_id="test_conv",
         user_name="test_user",
         turn_id=None,
-        db_context=Mock(),
+        db_context=unconnected_database(),
         processing_service=None,
         clock=None,
         plugins=ProfilePlugins((ReolinkInstance(fake_camera_backend),)),
@@ -171,7 +172,7 @@ async def test_list_cameras_no_backend() -> None:
         conversation_id="test_conv",
         user_name="test_user",
         turn_id=None,
-        db_context=Mock(),
+        db_context=unconnected_database(),
         processing_service=None,
         clock=None,
         plugins=None,
@@ -264,7 +265,7 @@ async def test_search_camera_events_no_backend() -> None:
         conversation_id="test_conv",
         user_name="test_user",
         turn_id=None,
-        db_context=Mock(),
+        db_context=unconnected_database(),
         processing_service=None,
         clock=None,
         plugins=None,
@@ -342,7 +343,7 @@ async def test_get_camera_frame_no_backend() -> None:
         conversation_id="test_conv",
         user_name="test_user",
         turn_id=None,
-        db_context=Mock(),
+        db_context=unconnected_database(),
         processing_service=None,
         clock=None,
         plugins=None,
@@ -434,7 +435,7 @@ async def test_get_camera_frames_batch_no_backend() -> None:
         conversation_id="test_conv",
         user_name="test_user",
         turn_id=None,
-        db_context=Mock(),
+        db_context=unconnected_database(),
         processing_service=None,
         clock=None,
         plugins=None,
@@ -500,7 +501,7 @@ async def test_get_camera_recordings_no_backend() -> None:
         conversation_id="test_conv",
         user_name="test_user",
         turn_id=None,
-        db_context=Mock(),
+        db_context=unconnected_database(),
         processing_service=None,
         clock=None,
         plugins=None,
@@ -546,6 +547,18 @@ def _jev_by_bytes(scores: Mapping[bytes, float]) -> FakeJevClient:
     return FakeJevClient(respond_to_images=answer)
 
 
+class _RateLimitedLLMClient(RuleBasedMockLLMClient):
+    """A model whose every structured request is rate limited."""
+
+    async def generate_structured[T: BaseModel](
+        self,
+        messages: Sequence[LLMMessage],
+        response_model: type[T],
+        max_retries: int = 2,
+    ) -> T:
+        raise RateLimitError("slow down", provider="test", model="test")
+
+
 def _judging_context(
     backend: FakeCameraBackend,
     *,
@@ -569,7 +582,7 @@ def _judging_context(
         conversation_id="test_conv",
         user_name="test_user",
         turn_id=None,
-        db_context=Mock(),
+        db_context=unconnected_database(),
         processing_service=service,
         llm_client=cast("LLMInterface | None", llm_client),
         clock=None,
@@ -728,11 +741,18 @@ async def test_scan_reports_a_range_with_nothing_recorded() -> None:
 async def test_scan_asks_the_turn_model_when_jev_is_off_for_camera_frames() -> None:
     backend = _continuous_camera({0: b"frame"})
 
-    async def judge(messages: object, response_model: type[BaseModel]) -> BaseModel:
-        return response_model.model_validate({"satisfied": False, "confidence": 0.8})
-
-    llm = Mock()
-    llm.generate_structured = judge
+    llm = RuleBasedMockLLMClient(
+        rules=[],
+        structured_rules=[
+            (
+                lambda _kwargs: True,
+                lambda kwargs: kwargs["response_model"].model_validate({
+                    "satisfied": False,
+                    "confidence": 0.8,
+                }),
+            )
+        ],
+    )
 
     result = await scan_camera_frames_tool(
         _judging_context(
@@ -906,11 +926,7 @@ async def test_a_rate_limited_model_leaves_frames_unjudged_rather_than_failing()
 ):
     backend = _continuous_camera({0: b"frame"})
 
-    async def judge(messages: object, response_model: type[BaseModel]) -> BaseModel:
-        raise RateLimitError("slow down", provider="test", model="test")
-
-    llm = Mock()
-    llm.generate_structured = judge
+    llm = _RateLimitedLLMClient(rules=[])
 
     result = await scan_camera_frames_tool(
         _judging_context(backend, llm_client=llm),

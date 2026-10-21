@@ -11,13 +11,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from family_assistant.tools.browser_session import BROWSER_TOOL_NAMES, BrowserSession
 from family_assistant.tools.catalog import AVAILABLE_FUNCTIONS
 from family_assistant.tools.types import ToolCallBatch, ToolExecutionContext
+from tests.mocks.unconnected_database import unconnected_database
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -34,10 +35,20 @@ def _batch() -> ToolCallBatch:
 
 
 def _context(batch: ToolCallBatch | None, call_id: str | None) -> ToolExecutionContext:
-    return MagicMock(
-        spec=ToolExecutionContext,
+    return ToolExecutionContext(
+        interface_type="test",
         conversation_id="ordering-test",
-        subconversation_id=None,
+        user_name="test-user",
+        turn_id=None,
+        db_context=unconnected_database(),
+        processing_service=None,
+        clock=None,
+        plugins=None,
+        event_sources=None,
+        attachment_registry=None,
+        credential_resolvers=None,
+        api_backend=None,
+        timezone=ZoneInfo("UTC"),
         tool_call_batch=batch,
         tool_call_id=call_id,
     )
