@@ -78,6 +78,9 @@ class FakeEventsServer:
         body = json.loads(request.content)
         assert request.headers["MCP-Protocol-Version"] == PROTOCOL_VERSION
         assert request.headers["Mcp-Method"] == body["method"]
+        meta = body["params"]["_meta"]
+        assert meta["io.modelcontextprotocol/protocolVersion"] == PROTOCOL_VERSION
+        assert isinstance(meta["io.modelcontextprotocol/clientCapabilities"], dict)
         principal = TOKENS.get(
             request.headers.get("Authorization", "").removeprefix("Bearer ")
         )
@@ -366,6 +369,13 @@ async def test_validate_listener_checks_the_live_server(
 
     stdio = await source.validate_listener({**base, "server_id": "local"}, ANDREW)
     assert not stdio.valid
+
+    structured = await source.validate_listener(
+        {**base, "arguments.actor": ["me"]},  # pyright: ignore[reportArgumentType]
+        ANDREW,
+    )
+    assert not structured.valid
+    assert "string, number or boolean" in structured.errors[0].error
 
     assert source.event_servers(ANDREW) == ["tasks"]
 

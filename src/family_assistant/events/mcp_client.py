@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 PROTOCOL_VERSION = "2026-07-28"
 EVENTS_EXTENSION = "io.modelcontextprotocol/events"
 _META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
+_META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
+_META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
+_CLIENT_INFO = {"name": "family-assistant", "version": "1.0"}
 _MAX_EVENTS_PER_POLL = 50
 
 
@@ -110,7 +113,11 @@ class MCPEventsClient:
             "method": method,
             "params": {
                 **params,
-                "_meta": {_META_PROTOCOL_VERSION: PROTOCOL_VERSION},
+                "_meta": {
+                    _META_PROTOCOL_VERSION: PROTOCOL_VERSION,
+                    _META_CLIENT_CAPABILITIES: {},
+                    _META_CLIENT_INFO: _CLIENT_INFO,
+                },
             },
         }
         headers = {

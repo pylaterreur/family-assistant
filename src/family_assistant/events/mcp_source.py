@@ -92,6 +92,12 @@ def parse_subscription(
             if key.startswith(ARGUMENT_PREFIX)
         )
     )
+    for name, value in arguments:
+        # Match conditions are typed as scalars, but stored JSON is not checked.
+        if not isinstance(value, str | int | float | bool):
+            raise ValueError(
+                f"'{ARGUMENT_PREFIX}{name}' must be a string, number or boolean"
+            )
     return MCPSubscription(server_id, event_name, arguments, user_id)
 
 
