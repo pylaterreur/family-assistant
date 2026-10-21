@@ -114,6 +114,12 @@ system prompt with markdown headers separating each document. This is useful for
 context-specific documentation to profiles without having to manually copy content or use the
 `get_user_documentation_content` tool.
 
+The loaded text goes into `prompts.system_prompt_docs`, which is also where `prompts.yaml` keeps the
+base prompt's notes on the web and iOS apps. Those docs belong to the `system_prompt` they are
+written for: a profile that sets its own `system_prompt` (in `prompts.yaml` or in its profile
+definition) inherits no `system_prompt_docs`, and gets docs only by setting them itself or listing
+`include_system_docs`.
+
 **Security**: The same path validation and security checks from
 `get_user_documentation_content_tool` are applied. Files must be in `docs/user/` (or `DOCS_USER_DIR`
 env var), have `.md` or `.txt` extensions, and cannot use directory traversal (`..`).
