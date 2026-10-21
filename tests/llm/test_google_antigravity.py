@@ -4,7 +4,7 @@ import asyncio
 import importlib
 from collections.abc import AsyncGenerator, Generator
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import httpx
 import pytest
@@ -997,12 +997,12 @@ _RUNNING_AGENT_EVENTS: list[dict[str, object]] = [
 
 @pytest.mark.asyncio
 async def test_a_peek_reads_a_running_agents_steps_then_lets_go(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """The stream of a run in progress never ends, so the read is time-boxed."""
     client = _egress_client("disabled")
     stream = _HangingEventStream(_RUNNING_AGENT_EVENTS)
-    mock_genai_client.aio.interactions.get = AsyncMock(return_value=stream)
+    sdk.get.return_value = stream
 
     steps = await client.peek_agent_interaction("inter_running", read_seconds=0.2)
 
@@ -1011,7 +1011,31 @@ async def test_a_peek_reads_a_running_agents_steps_then_lets_go(
         ("code_execution_call", "python build.py", False),
         ("code_execution_result", "Traceback: boom", True),
     ]
-    mock_genai_client.aio.interactions.get.assert_awaited_once_with(
-        "inter_running", stream=True
-    )
+    sdk.get.assert_awaited_once_with(ANY, "inter_running", stream=True)
+    assert stream.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("unavailable", DelegationTransientError),
+        ("permission_denied", DelegationPermanentError),
+    ],
+)
+async def test_an_error_frame_fails_the_peek_rather_than_reading_as_progress(
+    sdk: _SdkCalls,
+    code: str,
+    expected: type[Exception],
+) -> None:
+    """The steps before a provider failure are not a successful look."""
+    client = _egress_client("disabled")
+    stream = _HangingEventStream([
+        *_RUNNING_AGENT_EVENTS[:6],
+        {"event_type": "error", "error": {"code": code, "message": "backend gone"}},
+    ])
+    sdk.get.return_value = stream
+
+    with pytest.raises(expected, match="backend gone"):
+        await client.peek_agent_interaction("inter_running", read_seconds=5.0)
     assert stream.closed

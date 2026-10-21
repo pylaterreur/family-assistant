@@ -233,8 +233,15 @@ def _apply_step_event(
     steps: list[AgentStep],
     event: Mapping[str, Any],  # ast-grep-ignore: no-dict-any
 ) -> None:
-    """Fold one stream event into the steps seen so far."""
+    """Fold one stream event into the steps seen so far.
+
+    An ``error`` frame is the provider failing after the stream opened. It is
+    raised, classified, rather than folded away: the steps before it would read
+    as a successful look at a run that has in fact gone wrong.
+    """
     event_type = event.get("event_type")
+    if event_type == "error":
+        raise _peek_stream_error(event.get("error") or {})
     if event_type == "step.start":
         step = event.get("step") or {}
         steps.append(
@@ -252,6 +259,33 @@ def _apply_step_event(
         )
         if isinstance(text, str):
             steps[-1].text += text
+
+
+# Error-frame codes a peek may simply try again later; the rest say the look
+# cannot succeed. An unrecognised code is treated as passing, since a peek is
+# only a look and the next one will say more.
+_PEEK_PERMANENT_ERROR_CODES = frozenset({
+    "unauthenticated",
+    "permission_denied",
+    "invalid_argument",
+    "invalid_request",
+})
+
+
+def _peek_stream_error(
+    error: Mapping[str, Any],  # ast-grep-ignore: no-dict-any
+) -> Exception:
+    """The delegation error an event stream's ``error`` frame amounts to."""
+    code = str(error.get("code") or "")
+    message = (
+        f"The run's event stream reported an error ({code or 'no code'}): "
+        f"{error.get('message') or 'no message'}"
+    )
+    if code == "not_found":
+        return DelegationTaskNotFoundError(message)
+    if code in _PEEK_PERMANENT_ERROR_CODES:
+        return DelegationPermanentError(message)
+    return DelegationTransientError(message)
 
 
 @dataclass(frozen=True)
@@ -2477,6 +2511,12 @@ class GoogleGenAIClient(BaseLLMClient):
                     _apply_step_event(steps, _event_dict(event))
         except TimeoutError:
             pass
+        except (
+            DelegationTransientError,
+            DelegationPermanentError,
+            DelegationTaskNotFoundError,
+        ):
+            raise
         except Exception as e:
             raise self._classify_agent_delegation_error(e) from e
         finally:
