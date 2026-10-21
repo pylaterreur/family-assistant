@@ -75,6 +75,7 @@ from family_assistant.task_worker import (
 from family_assistant.tools.confirmation import render_generic_tool_confirmation
 from family_assistant.tools.metadata import ToolDescriptor
 from family_assistant.tools.services import (
+    DELEGATED_PROFILE_RUN_TASK_TYPE,
     delegate_to_service_tool,
     get_delegation_status_tool,
     list_delegations_tool,
@@ -94,6 +95,7 @@ if TYPE_CHECKING:
     from google import genai
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+    from family_assistant.processing.delegation_turns import RunningDelegationTurns
     from family_assistant.storage.repositories.delegation_runs import (
         DelegationRunCreate,
         DelegationRunDict,
@@ -194,6 +196,7 @@ class FakeDelegatableService:
     """Minimal delegatable target service for async delegation tests."""
 
     kind = "local"
+    delegation_turns: RunningDelegationTurns | None = None
 
     def __init__(
         self,
@@ -483,8 +486,10 @@ def _source_processing_service(
     target_service: FakeDelegatableService,
     *,
     async_delegation_enabled: bool = True,
+    delegation_turns: RunningDelegationTurns | None = None,
 ) -> ProcessingService:
     source_service = SimpleNamespace(
+        delegation_turns=delegation_turns,
         service_config=SimpleNamespace(
             id="source_profile",
             tools_config=ToolsConfig(
@@ -818,6 +823,7 @@ def _build_worker(
     processing_service: ProcessingService,
     chat_interface: ChatInterface,
     confirmation_ui_managers: dict[str, ConfirmationUIManager] | None = None,
+    handler_timeout_overrides: dict[str, float] | None = None,
 ) -> TaskWorker:
     return TaskWorker(
         processing_service=processing_service,
@@ -827,6 +833,7 @@ def _build_worker(
         embedding_generator=MockEmbeddingGenerator(),
         engine=db_engine,
         confirmation_ui_managers=confirmation_ui_managers,
+        handler_timeout_overrides=handler_timeout_overrides,
     )
 
 
@@ -1922,6 +1929,56 @@ async def test_running_run_is_failed_not_reexecuted(db_engine: AsyncEngine) -> N
     assert run is not None
     assert run["status"] == "failed"
     assert run["error"] is not None
+
+
+class _NeverFinishingService(FakeDelegatableService):
+    """A target whose turn runs until it is cancelled."""
+
+    async def handle_chat_interaction(self, **kwargs: Any) -> ChatInteractionResult:  # noqa: ANN401 - test fake accepts the ProcessingService keyword surface
+        self.calls.append(cast("FakeDelegationCall", kwargs))
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_outlasts_its_budget_is_failed_as_timed_out(
+    db_engine: AsyncEngine,
+) -> None:
+    """The run's own deadline fails it as timed out, before the worker cancels it.
+
+    Left to the worker's handler timeout, the run would stay ``running`` and the
+    retry would fail it as interrupted, which says nothing about why.
+    """
+    target_service = _NeverFinishingService()
+    processing_service = _source_processing_service(target_service)
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
+
+    clock = SystemClock()
+    db_context = Database(engine=db_engine)
+    await _create_run(db_context, delegation_id="delegation_slow")
+    await db_context.delegation_runs.mark_handed_off("delegation_slow", clock.now())
+
+    worker = _build_worker(
+        db_engine,
+        processing_service,
+        chat_interface,
+        handler_timeout_overrides={DELEGATED_PROFILE_RUN_TASK_TYPE: 0.4},
+    )
+    await worker.handle_delegated_profile_run(
+        _tool_context(db_context, processing_service, chat_interface),
+        _payload("delegation_slow"),
+    )
+
+    assert len(target_service.calls) == 1
+    assert len(chat_interface.sent) == 1
+    run = await Database(engine=db_engine).delegation_runs.get_by_delegation_id(
+        "delegation_slow"
+    )
+    assert run is not None
+    assert run["status"] == "failed"
+    assert run["local_failure_kind"] == "timeout"
+    assert run["error"] is not None
+    assert "timed out" in run["error"]
 
 
 @pytest.mark.asyncio
@@ -3525,11 +3582,32 @@ class FakeGenAIInteractions:
         raise AssertionError(f"unexpected cancel of {interaction_id}")
 
 
-def fake_genai_client(interactions: FakeGenAIInteractions) -> genai.Client:
-    """A google-genai client whose only reachable surface is ``interactions``."""
+class FakeGenAIEnvironments:
+    """The ``client.aio.environments`` surface of the google-genai SDK.
+
+    Each ``create_environment`` answers with an environment named
+    ``environment_id``; file transfers are a test failure.
+    """
+
+    def __init__(self, *, environment_id: str) -> None:
+        self._environment_id = environment_id
+        self.create_calls: list[dict[str, object]] = []
+
+    async def create_environment(self, **kwargs: object) -> SimpleNamespace:
+        self.create_calls.append(kwargs)
+        return SimpleNamespace(id=self._environment_id)
+
+
+def fake_genai_client(
+    interactions: FakeGenAIInteractions,
+    environments: FakeGenAIEnvironments | None = None,
+) -> genai.Client:
+    """A google-genai client reaching only ``interactions`` and ``environments``."""
     return cast(
         "genai.Client",
-        SimpleNamespace(aio=SimpleNamespace(interactions=interactions)),
+        SimpleNamespace(
+            aio=SimpleNamespace(interactions=interactions, environments=environments)
+        ),
     )
 
 
@@ -3734,7 +3812,8 @@ async def test_coder_list_environment_delivers_result(
             completed_response,
         ],
     )
-    llm_client.client = fake_genai_client(interactions)
+    environments = FakeGenAIEnvironments(environment_id="env_coder")
+    llm_client.client = fake_genai_client(interactions, environments)
 
     target = _deep_research_target_service(llm_client)
     processing_service = _source_processing_service(
@@ -3788,6 +3867,7 @@ async def test_coder_list_environment_delivers_result(
     assert run["remote_task_id"] == interaction_id
     assert len(interactions.create_calls) == 1
     assert interactions.get_calls == [interaction_id] * 3
+    assert len(environments.create_calls) == 1
 
 
 @pytest.mark.asyncio

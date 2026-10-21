@@ -40,6 +40,14 @@ _INTERACTION_SSE_EVENT_ADAPTER = TypeAdapter(
     _SDK_INTERACTIONS_MODULE.InteractionSSEEvent
 )
 _SDK_ASYNC_INTERACTIONS = type(genai.Client(api_key="test").aio.interactions)
+# The client-facing environments resource forwards to this base, which
+# declares the real keywords.
+_SDK_ASYNC_ENVIRONMENTS_BASE = importlib.import_module(
+    "google.genai._gaos.environments"
+).AsyncEnvironments
+_SDK_ENVIRONMENT_TYPES = importlib.import_module(
+    "google.genai._gaos.types.environments.environment"
+)
 
 
 def _sdk_interaction_event(payload: dict[str, object]) -> object:
@@ -591,10 +599,17 @@ async def test_agent_response_ignores_unused_environment(
     sdk.get.return_value = response
     sdk.create.return_value = response
 
-    for result in (
-        await client.get_agent_interaction("inter_env"),
-        await client.start_agent_interaction([UserMessage(content="Print 1.")]),
-    ):
+    # A submitted sandbox run is given an environment of its own first.
+    with patch.object(
+        _SDK_ASYNC_ENVIRONMENTS_BASE, "create_environment", autospec=True
+    ) as create_environment:
+        create_environment.return_value = _SDK_ENVIRONMENT_TYPES.Environment(id="env_1")
+        results = (
+            await client.get_agent_interaction("inter_env"),
+            await client.start_agent_interaction([UserMessage(content="Print 1.")]),
+        )
+
+    for result in results:
         assert result.id == "inter_env"
         assert result.status == "completed"
         assert result.output_text == "The remote report."
