@@ -1676,3 +1676,34 @@ async def test_only_a_sandboxed_submission_is_told_where_to_leave_files(
     system_prompt = str(messages[0].content)
     assert ("/workspace/outputs" in system_prompt) is told
     assert "You are a research assistant for Andrew." in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_an_output_over_the_attachment_limit_is_named_and_not_fetched(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    """An operator's lower per-file limit leaves the file behind, not the run."""
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path),
+        db_engine=db_engine,
+        config={"max_file_size": 8},
+    )
+    client, download = _client_with_outputs({
+        "big.glb": b"g" * 20,
+        "small.txt": b"ok",
+    })
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await service.collect_outputs(
+        _finished_with_environment("env_out"),
+        owner_user_id="user-1",
+        conversation_id="conv-1",
+        taint_state=TurnTaintState.empty(),
+        db_context=Database(db_engine),
+    )
+
+    assert len(collected.attachment_ids) == 1
+    assert collected.omitted == ["big.glb (20 bytes, over the attachment size limit)"]
+    downloaded = [call.args[1] for call in download.await_args_list]
+    assert downloaded == ["workspace/outputs/small.txt"]

@@ -54,6 +54,7 @@ from family_assistant.security.taint import (
     TaintSourceType,
     TurnTaintState,
 )
+from family_assistant.services.attachment_registry import AttachmentTooLargeError
 from family_assistant.tools.infrastructure import (
     TaintTrackingToolsProvider,
     ToolPolicyDeniedError,
@@ -632,19 +633,30 @@ class InteractionsAgentProcessingService(ProcessingService):
                     f"{relative} ({size:,} bytes, over the {limit_mb} MB a run returns)"
                 )
                 continue
+            too_large = f"{relative} ({size:,} bytes, over the attachment size limit)"
+            if size > registry.max_file_size:
+                omitted.append(too_large)
+                continue
             content = await client.download_sandbox_file(environment_id, entry.path)
             total_bytes += len(content)
-            metadata = await registry.store_and_register_tool_attachment(
-                file_content=content,
-                filename=relative.replace("/", "_"),
-                content_type=_output_mime_type(entry.mime_type, relative),
-                tool_name=self.service_config.id,
-                description=f"{relative}, produced by the {self.service_config.id} run",
-                conversation_id=conversation_id,
-                owner_user_id=owner_user_id,
-                db_context=db_context,
-                taint_state=taint_state,
-            )
+            try:
+                metadata = await registry.store_and_register_tool_attachment(
+                    file_content=content,
+                    filename=relative.replace("/", "_"),
+                    content_type=_output_mime_type(entry.mime_type, relative),
+                    tool_name=self.service_config.id,
+                    description=(
+                        f"{relative}, produced by the {self.service_config.id} run"
+                    ),
+                    conversation_id=conversation_id,
+                    owner_user_id=owner_user_id,
+                    db_context=db_context,
+                    taint_state=taint_state,
+                )
+            except AttachmentTooLargeError:
+                # Reached when the listing reported no size to check up front.
+                omitted.append(too_large)
+                continue
             attachment_ids.append(metadata.attachment_id)
         return CollectedOutputs(attachment_ids=attachment_ids, omitted=omitted)
 
