@@ -43,6 +43,7 @@ from family_assistant.services.delegation_delivery import (
 from family_assistant.services.turn_resumption import (
     TURN_RESUME_TASK_TYPE,
     TurnLeaseRegistry,
+    TurnResumePayload,
 )
 from family_assistant.storage import message_history_table
 from family_assistant.storage.database import Database
@@ -593,4 +594,49 @@ async def test_a_delivery_finishing_while_it_is_queued_again_is_replaced(
     rows = await db.tasks.get_all(task_type=DELEGATION_DELIVERY_TASK_TYPE)
     assert [(row["status"], row["payload"]) for row in rows] == [
         ("pending", {"delegation_id": delegation_id, "force": True})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_out_of_attempts_still_gets_its_final_reply_delivered(
+    db_engine: AsyncEngine,
+) -> None:
+    """Releasing the last attempt fails the delivery; the reply still goes out.
+
+    A turn that has used up its resumes is closed with an interrupted marker,
+    and sending that marker is a delivery of its own.
+    """
+    db = Database(engine=db_engine)
+    delegation_id = await _finished_run(db_engine)
+    task_id = delegation_delivery_task_id(delegation_id)
+    await queue_delegation_delivery(db.tasks, delegation_id, force=False)
+    assert await db.tasks.dequeue(
+        worker_id="dead-worker",
+        task_types=[DELEGATION_DELIVERY_TASK_TYPE],
+        current_time=SystemClock().now(),
+    )
+    await db.execute(
+        tasks_table
+        .update()
+        .where(tasks_table.c.task_id == task_id)
+        .values(retry_count=tasks_table.c.max_retries)
+    )
+
+    await DelegationWakeResumer(db).deliver_pending_reply(
+        TurnResumePayload(
+            resumer=DELEGATION_WAKE_RESUMER,
+            interface_type=INTERFACE,
+            conversation_id=CONVERSATION,
+            turn_id="wake_turn",
+            user_id=USER_ID,
+            user_name=USER_NAME,
+            processing_profile_id=SOURCE_PROFILE,
+            delegation_id=delegation_id,
+            claimed_by="dead-worker",
+        )
+    )
+
+    rows = await db.tasks.get_all(task_type=DELEGATION_DELIVERY_TASK_TYPE)
+    assert [(row["status"], row["retry_count"], row["payload"]) for row in rows] == [
+        ("pending", 0, {"delegation_id": delegation_id, "force": True})
     ]

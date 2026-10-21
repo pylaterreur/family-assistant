@@ -126,21 +126,32 @@ class DelegationWakeResumer:
         self, payload: TurnResumePayload, registry: TurnLeaseRegistry
     ) -> bool:
         del registry  # The delivery task arms the resumed turn's lease itself.
-        await self._redeliver(payload)
+        delegation_id, claimed_by = self._claim(payload)
+        await redeliver_now(
+            self._database.tasks,
+            delegation_id,
+            now=self._clock.now(),
+            claimed_by=claimed_by,
+        )
         return True
 
     async def deliver_pending_reply(self, payload: TurnResumePayload) -> None:
-        await self._redeliver(payload)
+        delegation_id, claimed_by = self._claim(payload)
+        tasks = self._database.tasks
+        await tasks.release_claim(
+            delegation_delivery_task_id(delegation_id),
+            self._clock.now(),
+            locked_by=claimed_by,
+        )
+        # Releasing the last attempt fails the row, but the turn has its final
+        # reply and only sending it is left, so a fresh delivery takes over.
+        await queue_delegation_delivery(tasks, delegation_id, force=True)
 
-    async def _redeliver(self, payload: TurnResumePayload) -> None:
+    @staticmethod
+    def _claim(payload: TurnResumePayload) -> tuple[str, str]:
         if payload.delegation_id is None or payload.claimed_by is None:
             raise ValueError(
                 f"Delegation wake turn {payload.turn_id} has no delegation id "
                 "or claiming worker"
             )
-        await redeliver_now(
-            self._database.tasks,
-            payload.delegation_id,
-            now=self._clock.now(),
-            claimed_by=payload.claimed_by,
-        )
+        return payload.delegation_id, payload.claimed_by
