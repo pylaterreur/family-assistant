@@ -662,3 +662,21 @@ async def test_a_malformed_page_is_not_skipped(event: object) -> None:
         )
         with pytest.raises(MCPEventsError, match="malformed"):
             await client.poll("a.b", {}, "1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor", [None, 9])
+async def test_a_page_without_a_string_cursor_is_not_accepted(cursor: object) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        result = {"events": [], "cursor": cursor}
+        return httpx.Response(
+            200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        client = MCPEventsClient(
+            url="https://x.example/mcp", token=None, http_client=http
+        )
+        with pytest.raises(MCPEventsError, match="no cursor"):
+            await client.poll("a.b", {}, "1")
