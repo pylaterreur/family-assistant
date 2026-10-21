@@ -11,12 +11,10 @@ import asyncio
 import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import create_autospec
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from family_assistant.interfaces import ChatInterface
 from family_assistant.llm.messages import UserMessage
 from family_assistant.processing import RemoteDisposition
 from family_assistant.processing.delegation_turns import RunningDelegationTurns
@@ -47,6 +45,7 @@ from tests.functional.automations.test_delegation_reconciliation import (
     _observation,
     _reconcile_payload,
 )
+from tests.mocks.recording_chat_interface import RecordingChatInterface
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -207,7 +206,7 @@ async def test_cancelling_a_remote_run_stops_it_and_drops_its_result(
         _observation(RemoteDisposition.COMPLETED, output_text="unwanted work")
     ])
     processing_service = _processing_service(target)
-    chat_interface = create_autospec(ChatInterface, instance=True, spec_set=True)
+    chat_interface = RecordingChatInterface()
     db_context = Database(engine=db_engine)
     await _remote_run(db_context, "delegation_duplicate")
     context = _tool_context(db_context, processing_service, chat_interface)
@@ -237,7 +236,7 @@ async def test_cancelling_a_remote_run_stops_it_and_drops_its_result(
     assert run["status"] == "failed"
     assert run["late_recovered_at"] is None
     assert target.observe_calls == []
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
 
 @pytest.mark.asyncio
@@ -272,7 +271,7 @@ async def test_a_queued_run_is_never_started_once_cancelled(
 ) -> None:
     target = FakeDelegatableService()
     processing_service = _source_processing_service(target)
-    chat_interface = create_autospec(ChatInterface, instance=True, spec_set=True)
+    chat_interface = RecordingChatInterface()
     db_context = Database(engine=db_engine)
     await _create_run(db_context, delegation_id="delegation_queued")
     await db_context.delegation_runs.mark_handed_off(
@@ -287,7 +286,7 @@ async def test_a_queued_run_is_never_started_once_cancelled(
     worker = _build_worker(db_engine, processing_service, chat_interface)
     await worker.handle_delegated_profile_run(context, _payload("delegation_queued"))
     assert target.calls == []
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
 
 @pytest.mark.asyncio
@@ -300,7 +299,7 @@ async def test_cancelling_a_running_turn_stops_it_partway(
     processing_service = _source_processing_service(
         target, delegation_turns=delegation_turns
     )
-    chat_interface = create_autospec(ChatInterface, instance=True, spec_set=True)
+    chat_interface = RecordingChatInterface()
     db_context = Database(engine=db_engine)
     await _create_run(db_context, delegation_id="delegation_running")
     await db_context.delegation_runs.mark_handed_off(
@@ -324,7 +323,7 @@ async def test_cancelling_a_running_turn_stops_it_partway(
     assert run is not None
     assert run["status"] == "failed"
     assert run["local_failure_kind"] == "cancelled"
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
 
 @pytest.mark.asyncio
@@ -350,13 +349,13 @@ async def test_a_stopped_turn_withdraws_the_confirmation_it_was_waiting_on(
     context = _tool_context(
         db_context,
         processing_service,
-        create_autospec(ChatInterface, instance=True, spec_set=True),
+        RecordingChatInterface(),
         confirmation_ui_managers,
     )
     worker = _build_worker(
         db_engine,
         processing_service,
-        create_autospec(ChatInterface, instance=True, spec_set=True),
+        RecordingChatInterface(),
         confirmation_ui_managers,
     )
     handler = asyncio.create_task(
@@ -395,11 +394,7 @@ async def test_a_turn_whose_run_was_cancelled_before_it_registered_never_runs(
     await cancel_delegation_tool(
         _tool_context(db_context, processing_service), "delegation_raced"
     )
-    worker = _build_worker(
-        db_engine,
-        processing_service,
-        create_autospec(ChatInterface, instance=True, spec_set=True),
-    )
+    worker = _build_worker(db_engine, processing_service, RecordingChatInterface())
 
     async def turn() -> ChatInteractionResult:
         return await target.handle_chat_interaction()
