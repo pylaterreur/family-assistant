@@ -270,6 +270,21 @@ def _model_selection_from_delegation_run(
     return ResolvedModelSelection.from_json(persisted)
 
 
+def _delegated_run_timeout_error(budget_seconds: float) -> str:
+    """The failure recorded for a delegated run that outlasted its turn budget."""
+    elapsed = (
+        f"{round(budget_seconds / 60)} minutes"
+        if budget_seconds >= 120
+        else f"{round(budget_seconds)} seconds"
+    )
+    return (
+        f"The delegated run timed out after {elapsed} without finishing. "
+        "It was not retried, because re-running it could repeat actions it had "
+        "already taken. Break the work into smaller requests, or ask for the "
+        "part that is still needed."
+    )
+
+
 def _frozen_model_selection(
     run: DelegationRunDict, target: ProcessingService
 ) -> ResolvedModelSelection:
@@ -1262,14 +1277,23 @@ class TaskHandlerBudget:
 # on every deployment yet. Listing it here is forward-compatible and harmless: the
 # entry only applies when a task of that type is actually processed.
 #
+# A delegated run's turn gets ``DELEGATED_RUN_TURN_BUDGET_SECONDS``: deep-tier
+# work such as an engineer investigation routinely runs well past ten minutes.
+# The handler budget adds ``DELEGATED_RUN_SETTLE_SECONDS`` on top, so the run's
+# own deadline expires first and the run is failed as timed out, rather than the
+# worker cancelling it mid-turn and leaving it ``running`` for a retry to fail as
+# interrupted.
+#
 # A memory review runs up to two curator turns -- the review and one re-run
 # against a store somebody changed under it -- each of which may take several
 # tool-calling iterations. It parks on nothing, so the budget is model latency
 # rather than waiting, but two turns can outlast the 300s default on a slow
 # provider, and a review cut off midway leaves its conversation due for ever.
+DELEGATED_RUN_TURN_BUDGET_SECONDS = 1800.0
+DELEGATED_RUN_SETTLE_SECONDS = 120.0
 DEFAULT_TASK_HANDLER_BUDGETS: dict[str, TaskHandlerBudget] = {
     "delegated_profile_run": TaskHandlerBudget(
-        timeout=600,  # 10 minutes for confirmation-gated delegated runs
+        timeout=DELEGATED_RUN_TURN_BUDGET_SECONDS + DELEGATED_RUN_SETTLE_SECONDS,
         parks_on_queued_work=True,
     ),
     MEMORY_REVIEW_TASK_TYPE: TaskHandlerBudget(timeout=600),
@@ -2062,6 +2086,35 @@ class TaskWorker:
         """
         return self.handler_timeout_overrides.get(task_type, self.handler_timeout)
 
+    def _delegated_turn_budget(self) -> float:
+        """How long a delegated run's turn may take before it is failed as timed out.
+
+        The handler timeout less a margin for recording the failure, so a
+        worker given a shorter handler timeout gets a shorter turn budget too.
+        """
+        handler_timeout = self._timeout_for_task_type(DELEGATED_PROFILE_RUN_TASK_TYPE)
+        return handler_timeout - min(DELEGATED_RUN_SETTLE_SECONDS, handler_timeout / 4)
+
+    async def _fail_timed_out_delegation_run(
+        self,
+        exec_context: ToolExecutionContext,
+        *,
+        delegation_id: str,
+        budget_seconds: float,
+    ) -> None:
+        """Fail a run whose turn outlasted its budget, saying that it timed out."""
+        logger.warning(
+            "Delegated profile run %s timed out after %.0f seconds.",
+            delegation_id,
+            budget_seconds,
+        )
+        await self._fail_delegation_run(
+            exec_context,
+            delegation_id=delegation_id,
+            error=_delegated_run_timeout_error(budget_seconds),
+            local_failure_kind="timeout",
+        )
+
     def register_task_handler(
         self,
         task_type: str,
@@ -2242,20 +2295,31 @@ class TaskWorker:
             return
 
         local_target = cast("ProcessingService", target_service)
+        turn_budget = self._delegated_turn_budget()
+        deadline = asyncio.timeout(turn_budget)
         try:
-            if payload.get("continuation"):
-                result = await self._run_delegation_continuation(
-                    exec_context, started, local_target
-                )
-            else:
-                result = await self._run_delegated_request(
-                    exec_context, run, local_target
-                )
+            async with deadline:
+                if payload.get("continuation"):
+                    result = await self._run_delegation_continuation(
+                        exec_context, started, local_target
+                    )
+                else:
+                    result = await self._run_delegated_request(
+                        exec_context, run, local_target
+                    )
         except Exception:
-            # A timeout cancellation (CancelledError) is intentionally NOT caught
-            # here: it propagates so the task is retried, and the retry's
-            # "running" entry guard fails the run without re-executing. The
-            # stale-run reaper is the backstop if no retry occurs.
+            if deadline.expired():
+                await self._fail_timed_out_delegation_run(
+                    exec_context,
+                    delegation_id=delegation_id,
+                    budget_seconds=turn_budget,
+                )
+                return
+            # A cancellation from outside (shutdown, or the worker's handler
+            # timeout) is a CancelledError and is intentionally NOT caught here:
+            # it propagates so the task is retried, and the retry's "running"
+            # entry guard fails the run without re-executing. The stale-run
+            # reaper is the backstop if no retry occurs.
             error = traceback.format_exc()
             logger.exception(
                 "Delegated profile run %s raised during execution.", delegation_id
@@ -2343,23 +2407,34 @@ class TaskWorker:
                 claimed.append(started)
             return started is not None
 
+        review_trigger = await _delegation_run_review_trigger(
+            exec_context,
+            run,
+            trigger_type="delegation_request",
+            active_request_role="user",
+            payload_present=False,
+        )
+        turn_budget = self._delegated_turn_budget()
+        deadline = asyncio.timeout(turn_budget)
         try:
-            outcome = await self.thread_turn_runner.run_first_turn(
-                run,
-                target=target,
-                model_selection=_frozen_model_selection(run, target),
-                tool_call_review_trigger=await _delegation_run_review_trigger(
-                    exec_context,
+            async with deadline:
+                outcome = await self.thread_turn_runner.run_first_turn(
                     run,
-                    trigger_type="delegation_request",
-                    active_request_role="user",
-                    payload_present=False,
-                ),
-                claim=claim,
-            )
+                    target=target,
+                    model_selection=_frozen_model_selection(run, target),
+                    tool_call_review_trigger=review_trigger,
+                    claim=claim,
+                )
         except Exception:
             if not claimed:
                 raise
+            if deadline.expired():
+                await self._fail_timed_out_delegation_run(
+                    exec_context,
+                    delegation_id=delegation_id,
+                    budget_seconds=turn_budget,
+                )
+                return
             logger.exception("Thread run %s raised during its turn.", delegation_id)
             await self._fail_delegation_run(
                 exec_context, delegation_id=delegation_id, error=traceback.format_exc()
