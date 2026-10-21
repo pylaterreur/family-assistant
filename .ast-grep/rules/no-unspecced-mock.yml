@@ -46,7 +46,11 @@ rule:
             matches: mock-function
         - has:
             field: function
-            regex: '^(\w+\.)*mocker\.(stub|async_stub)$'
+            regex: '^(\w+\.)*mocker\.(stub|async_stub|patch\.context_manager)$'
+        # patch.multiple's DEFAULT entries create bare mocks; nothing here needs it.
+        - has:
+            field: function
+            regex: '^(((unittest\.)?mock|(\w+\.)*mocker)\.)?patch\.multiple$'
         - all:
             - has:
                 field: function

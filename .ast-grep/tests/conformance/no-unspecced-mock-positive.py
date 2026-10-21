@@ -20,6 +20,11 @@ class Client:
         return "real"
 
 
+class FakeClient:
+    def fetch(self) -> str:
+        return "fake"
+
+
 def bare_constructions() -> None:
     MagicMock()
     Mock(return_value=1)
@@ -49,6 +54,8 @@ def patches_without_spec() -> None:
         pass
     with mock.patch("module.Client", autospec=False):
         pass
+    with patch.multiple("module", Client=FakeClient):
+        pass
 
 
 class UsesMocker:
@@ -67,6 +74,8 @@ def pytest_mock_fixture(mocker: MockerFixture) -> None:
     mocker.AsyncMock()
     mocker.create_autospec(Client)
     mocker.async_stub()
+    mocker.patch.multiple("module", Client=1)
+    mocker.patch.context_manager(Client, "fetch")
 
 
 @patch("module.Client")

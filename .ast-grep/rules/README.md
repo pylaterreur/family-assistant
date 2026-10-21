@@ -75,8 +75,11 @@ and `patch(...)` / `patch.object(...)` with neither `autospec=True` nor an expli
 (`new=` or the positional `new` argument), since those substitute a bare `MagicMock`. Aliasing
 `unittest.mock` or any name imported from it is banned too, because an alias would hide the call
 from every other pattern. pytest-mock's `mocker` spellings of the same calls (`mocker.patch`,
-`mocker.MagicMock`, `mocker.stub`, ...) are covered. Applies to all Python files; `patch.dict` is
-not affected.
+`mocker.MagicMock`, `mocker.stub`, ...) are covered, and `patch.multiple` is banned outright.
+Applies to all Python files; `patch.dict` is not affected.
+
+The rule targets the ordinary ways of writing a bare mock. It is not built to catch deliberate
+evasion (a helper that wraps `MagicMock`, `getattr(mock, "MagicMock")`); review covers those.
 
 **Why it's banned**: a bare mock accepts any attribute and any call signature, so the test keeps
 passing after the interface it stands in for changes, and heavily mocked tests tend to assert the
