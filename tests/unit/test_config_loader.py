@@ -929,6 +929,52 @@ class TestResolveServiceProfile:
         assert result["processing_config"]["timezone"] == "UTC"
 
     @pytest.mark.parametrize(
+        ("override", "via_prompts_yaml", "expected_docs"),
+        [
+            pytest.param({}, False, "App help", id="inherits-both"),
+            pytest.param({"note_item_format": "- {title}"}, False, "App help"),
+            pytest.param({"system_prompt": "Own prompt"}, False, None),
+            pytest.param({"system_prompt": "Own prompt"}, True, None),
+            pytest.param(
+                {"system_prompt": "Own prompt", "system_prompt_docs": "Own docs"},
+                False,
+                "Own docs",
+            ),
+        ],
+    )
+    def test_system_prompt_docs_follow_the_system_prompt(
+        self,
+        override: dict[str, str],
+        via_prompts_yaml: bool,
+        expected_docs: str | None,
+    ) -> None:
+        """A profile replacing the system prompt does not inherit its docs."""
+        default_settings: dict[str, Any] = {
+            "processing_config": {
+                "prompts": {
+                    "system_prompt": "Base prompt",
+                    "system_prompt_docs": "App help",
+                },
+            },
+            "tools_config": {},
+        }
+        profile_def: dict[str, Any] = {"id": "test_profile"}
+        prompts_yaml_profiles: dict[str, dict[str, Any]] = {}
+        if via_prompts_yaml:
+            prompts_yaml_profiles["test_profile"] = override
+        else:
+            profile_def["processing_config"] = {"prompts": override}
+
+        result = resolve_service_profile(
+            profile_def, default_settings, prompts_yaml_profiles
+        )
+
+        assert (
+            result["processing_config"]["prompts"].get("system_prompt_docs")
+            == expected_docs
+        )
+
+    @pytest.mark.parametrize(
         ("key", "default_value", "override"),
         [
             ("history_budget_chars", 100_000, 0),

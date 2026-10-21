@@ -896,6 +896,23 @@ def _apply_model_selection_precedence(
         resolved["model_tier"] = None
 
 
+def _merge_profile_prompts(
+    inherited: dict[str, Any], override: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge a profile's prompt overrides over the prompts it inherits.
+
+    ``system_prompt_docs`` is help text written for the ``system_prompt`` it is
+    appended to -- the base prompt's notes on the web and iOS apps, say. A
+    profile that replaces the system prompt is a different agent with a
+    different audience, so it does not inherit the old prompt's docs unless it
+    supplies its own (directly or via ``include_system_docs``).
+    """
+    merged = deep_merge_dicts(inherited, override)
+    if "system_prompt" in override and SYSTEM_PROMPT_DOCS_KEY not in override:
+        merged.pop(SYSTEM_PROMPT_DOCS_KEY, None)
+    return merged
+
+
 def resolve_service_profile(
     profile_def: dict[str, Any],
     default_settings: dict[str, Any],
@@ -927,7 +944,7 @@ def resolve_service_profile(
     if profile_id in prompts_yaml_service_profiles:
         prompts_override = prompts_yaml_service_profiles[profile_id]
         if isinstance(prompts_override, dict):
-            resolved["processing_config"]["prompts"] = deep_merge_dicts(
+            resolved["processing_config"]["prompts"] = _merge_profile_prompts(
                 resolved["processing_config"].get("prompts", {}),
                 prompts_override,
             )
@@ -939,7 +956,7 @@ def resolve_service_profile(
     ):
         # Deep merge for 'prompts'
         if "prompts" in profile_def["processing_config"]:
-            resolved["processing_config"]["prompts"] = deep_merge_dicts(
+            resolved["processing_config"]["prompts"] = _merge_profile_prompts(
                 resolved["processing_config"].get("prompts", {}),
                 profile_def["processing_config"]["prompts"],
             )

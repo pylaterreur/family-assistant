@@ -63,79 +63,15 @@ interactions:
       have no access to Tester''s notes, calendar, documents or devices, so work only
       from what is in the request. Write the code, run it, and check the output before
       you answer \u2014 carry the task through to a finished result rather than describing
-      how it could be done. The sandbox is discarded when you finish, so include any
-      code, data or files that matter in your reply. Report what you did along with
-      the result; your final text response will be sent directly to Tester.\nWeb chat
-      copy: hover over an assistant reply or Tab to its Copy response button to copy
-      the response text. A checkmark confirms success; if clipboard access fails,
-      an error below the reply suggests selecting and copying the text manually.\nApple
-      Watch note: Family Assistant includes a watchOS voice app. Users sign in on
-      their paired iPhone, then tap Set up with iPhone in the watch app; no watch-side
-      URL entry or browser login is needed. After setup, tap Start Voice or the Family
-      Assistant Voice watch-face complication. Voice works over whatever connection
-      the watch has, with or without the iPhone nearby. Expired sign-in is renewed
-      through the iPhone setup flow. Phone sign-out/account changes clear watch sign-in
-      when connectivity delivers the update, not immediately while disconnected. The
-      watch shows microphone activity, live captions, and mute/end controls, and ends
-      a session when leaving the app. Watch voice conversations are not saved to chat
-      history. See docs/user/interfaces.md for setup.\nWeb conversation sharing: the
-      header Share button opens a dialog. Create and copy link makes a read-only link
-      for signed-in authorized users; Copy link or Retry copy reuses the displayed
-      selectable URL without replacing it. Replace and copy link invalidates the previous
-      link even if copying fails, and Stop sharing revokes access. The URL is kept
-      only while that conversation stays open in the web app and cannot be retrieved
-      after leaving or reloading.\nNative iOS app note: if a user asks about the app,
-      explain that Chat, Voice, and Notes open in native iOS screens. Shared-conversation
-      links on assistant.andrewgarrett.dev also open in a native authenticated read-only
-      transcript that supports pull-to-refresh and attachments without adding the
-      conversation to the recipient''s history. Native Chat shares browser conversation
-      history, streams replies, can stop or steer a running reply, supports profile
-      switching, Markdown, tool calls, approvals, attachments of any file type, sharing
-      files from the iOS share sheet or Files \"Open In\" flow into a new Chat draft,
-      pasting a copied image (e.g. a screenshot, or a photo copied in the Photos app)
-      as a draft attachment via the composer''s paste button, notification deep links,
-      direct launch into a fresh composer when there is no recent chat to restore,
-      and a long-press app-icon \"New Chat\" quick action. The Chat toolbar shows
-      a connection indicator that rides out a momentary blip without flashing a warning,
-      shows a spinner while it is actively reconnecting, and otherwise distinguishes
-      degraded (updates lagging, tap to reconnect), offline (no connection, tap to
-      reconnect), and sign-in-required (tap to sign in) states rather than one generic
-      \"no connection\" icon; background sync failures surface quietly through it
-      instead of popping error dialogs \u2014 and, when the conversation list itself
-      can''t refresh, through a small \"Couldn''t refresh \u2014 last updated ...\"
-      note at the top of the list rather than a dialog \u2014 so there are far fewer
-      interrupting popups. A failed send shows inline on the message with a Retry
-      button that safely resends without ever double-sending (reconnecting to an already-running
-      reply instead of re-posting it), rather than a modal. The conversation list
-      refreshes automatically when the app returns to the foreground, so chats that
-      changed while it was backgrounded stay up to date without a manual pull-to-refresh.
-      Native Voice is a top-level tab, asks for microphone permission when starting,
-      shows a microphone level meter while audio frames are captured, reports an error
-      instead of staying connected silently if microphone capture fails, and can be
-      opened from the long-press app-icon \"Voice\" quick action. The search field
-      above the chat list, in the iOS app and the web chat sidebar, finds chats by
-      words said anywhere in them (not just the last message): every typed word must
-      start a word somewhere in the chat, and each result shows a snippet of where
-      it matched. Notes can search, read, create, edit, delete, and change whether
-      notes are loaded into the assistant''s context automatically. Other app pages
-      still open through the embedded web interface. The gear menu can enable APNs
-      notifications, and confirmation notifications can include approve/deny actions
-      when the server is configured.\nNative voice diagnostics: iPhone and Apple Watch
-      send connection-stage metadata automatically, without audio, transcripts or
-      credentials. For a failed connection, ask for the approximate attempt time and
-      device and consult remote diagnostics; no USB connection is required. Failed
-      report uploads are retried on voice entry or app relaunch, so missing reports
-      do not prove that a startup stage succeeded. See docs/user/interfaces.md.\nIf
-      a user reports the iOS message \"authentication wall detected\", explain that
-      the app received a sign-in or network access page instead of its API. Tell them
-      to open their Family Assistant web address in Safari, complete any sign-in,
-      return to the app, and tap the Chat connection indicator; if the page is unreachable
-      or the message persists, advise them to contact the person who manages the server
-      and access gateway.\n\nEach user message begins with a [Sent ...] line giving
-      the time it was sent. The line is added by the system, not written by the user;
-      the newest one is the current time. Never include such a line in your reply.
-      A user message that arrives after your tool results, before you have answered,
-      was sent while you were already working: treat it as the latest instruction
+      how it could be done. If Tester follows up on this request, you continue in
+      this same sandbox with your files where you left them, but Tester never sees
+      the sandbox itself, so put any code, data or results that matter in your reply.
+      Report what you did along with the result; your final text response will be
+      sent directly to Tester.\n\nEach user message begins with a [Sent ...] line
+      giving the time it was sent. The line is added by the system, not written by
+      the user; the newest one is the current time. Never include such a line in your
+      reply. A user message that arrives after your tool results, before you have
+      answered, was sent while you were already working: treat it as the latest instruction
       for the turn, re-evaluate your plan, and make the smallest necessary adjustment
       before continuing.\n\nCurrent time: <pinned>\n\nFiles you are sent are in /workspace.
       Save every file meant for Tester (a model, image, document or data file) under
@@ -149,7 +85,7 @@ interactions:
       connection:
       - keep-alive
       content-length:
-      - '6909'
+      - '1842'
       content-type:
       - application/json
       host:
