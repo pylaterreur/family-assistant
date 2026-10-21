@@ -63,7 +63,10 @@ from family_assistant.services.tool_call_review import (
     ToolCallReviewVerdict,
 )
 from family_assistant.storage.database import Database
-from family_assistant.tools import LocalToolsProvider, TaintTrackingToolsProvider
+from family_assistant.tools.infrastructure import (
+    LocalToolsProvider,
+    TaintTrackingToolsProvider,
+)
 from family_assistant.tools.types import ConfirmationOutcome
 from family_assistant.utils.clock import Clock, MockClock
 from tests.mocks.mock_llm import (  # pylint: disable=no-name-in-module
@@ -83,7 +86,7 @@ if TYPE_CHECKING:
         DelegationRunCreate,
     )
     from family_assistant.telegram.protocols import ConfirmationUIManager
-    from family_assistant.tools import ToolsProvider
+    from family_assistant.tools.infrastructure import ToolsProvider
     from family_assistant.tools.types import ToolExecutionContext, ToolResult
 
 

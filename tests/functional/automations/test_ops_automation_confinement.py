@@ -36,11 +36,11 @@ from family_assistant.task_worker import (
     handle_llm_callback,
     handle_script_execution,
 )
-from family_assistant.tools import CompositeToolsProvider
 from family_assistant.tools.automations import (
     create_automation_tool,
     update_automation_tool,
 )
+from family_assistant.tools.infrastructure import CompositeToolsProvider
 from family_assistant.tools.tasks import schedule_future_callback_tool
 from family_assistant.tools.types import ToolExecutionContext
 from tests.helpers import wait_for_tasks_to_complete

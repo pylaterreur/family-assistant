@@ -13,18 +13,20 @@ from mcp.types import ErrorData, ListToolsResult, Tool
 from pydantic import ValidationError
 
 from family_assistant.config_models import ToolsConfig
-from family_assistant.tools import MCPServerConfig, MCPToolsProvider
 from family_assistant.tools.mcp import (
     DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS,
     DEFAULT_TOOL_REFRESH_INTERVAL_SECONDS,
     MCP_SERVER_STATUS_CONNECTED,
     MCP_SERVER_STATUS_FAILED,
+    MCPToolsProvider,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mcp import ClientSession
+
+    from family_assistant.tools.types import MCPServerConfig
 
 SERVER_ID = "test-server"
 

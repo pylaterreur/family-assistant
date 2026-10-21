@@ -6,8 +6,8 @@ organized into thematic submodules under `src/family_assistant/tools/`.
 ## Adding a New Tool
 
 A tool needs a JSON schema definition, an async implementation, a registration entry, and a policy
-rule. Registration lives in `src/family_assistant/tools/__init__.py`; runtime access is denied
-unless `tools_policy` also allows it, so both are required.
+rule. Registration lives in `src/family_assistant/tools/catalog.py`; runtime access is denied unless
+`tools_policy` also allows it, so both are required.
 
 A tool that belongs to an integration packaged as a plugin (`src/family_assistant/plugins/`, e.g.
 Home Assistant, Reolink cameras, AI workers) is declared on the plugin as a `ToolRegistration`
@@ -58,11 +58,12 @@ async def tool_name_tool(exec_context: ToolExecutionContext, param1: str) -> Too
     return ToolResult(data={"status": "success", "param1": param1})
 ```
 
-### Step 2: Register the Tool in `__init__.py`
+### Step 2: Register the Tool in `catalog.py`
 
-In `src/family_assistant/tools/__init__.py`:
+In `src/family_assistant/tools/catalog.py` (not the package `__init__.py`, which stays empty so that
+importing one tool module does not import every other one):
 
-- Import `SOMETHING_TOOLS_DEFINITION` and `tool_name_tool`, and add both to `__all__`.
+- Import `SOMETHING_TOOLS_DEFINITION` and `tool_name_tool`.
 - Add `SOMETHING_TOOLS_DEFINITION` to the `_LOCAL_TOOL_DEFINITIONS` concatenation.
 - Add `"tool_name": tool_name_tool` to `_LOCAL_TOOL_IMPLEMENTATIONS`.
 - Add `"tool_name": _metadata(ToolTag.…, …)` to `LOCAL_TOOL_METADATA_BY_NAME`. Tags drive policy

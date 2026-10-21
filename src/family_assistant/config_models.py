@@ -2600,12 +2600,12 @@ class AppConfig(BaseSettings):
 
         # Deferred: the tool table lives in `family_assistant.tools`, which
         # imports far more than a configuration model should at import time.
-        from family_assistant.tools import (  # noqa: PLC0415
-            LOCAL_TOOL_METADATA_BY_NAME,
-        )
         from family_assistant.tools.authenticated_site_surface import (  # noqa: PLC0415
             admissible_tools,
             surface_violations,
+        )
+        from family_assistant.tools.catalog import (  # noqa: PLC0415
+            LOCAL_TOOL_METADATA_BY_NAME,
         )
 
         unanalysable = self._unanalysable_global_grants()

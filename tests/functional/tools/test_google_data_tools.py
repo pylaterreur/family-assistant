@@ -39,8 +39,8 @@ from family_assistant.services.oauth_credentials import (
     OAuthScopeNotGrantedError,
 )
 from family_assistant.storage.database import Database
-from family_assistant.tools import LOCAL_TOOL_REGISTRATIONS
 from family_assistant.tools.attachment_utils import fetch_attachment_object
+from family_assistant.tools.catalog import LOCAL_TOOL_REGISTRATIONS
 from family_assistant.tools.google_data import (
     GOOGLE_TOOL_REQUIRED_SCOPES,
     drive_get_file_tool,

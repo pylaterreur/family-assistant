@@ -16,7 +16,7 @@ from family_assistant.actions import ActionType, execute_action
 from family_assistant.events.condition_evaluator import EventConditionEvaluator
 from family_assistant.events.sources import EventSource
 from family_assistant.events.storage import EventStorage
-from family_assistant.scripting import ScriptExecutionError
+from family_assistant.scripting.errors import ScriptExecutionError
 from family_assistant.storage.database import (
     Database,
     DatabaseTransaction,
