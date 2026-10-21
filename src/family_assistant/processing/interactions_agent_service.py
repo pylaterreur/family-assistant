@@ -17,6 +17,7 @@ unchanged) still streams the interaction live for that interactive path.
 from __future__ import annotations
 
 import logging
+import mimetypes
 import re
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -35,6 +36,7 @@ from family_assistant.llm.providers.google_genai_client import (
 from family_assistant.observability.metrics import record_llm_call
 from family_assistant.processing.protocol import (
     PENDING,
+    CollectedOutputs,
     DelegationPermanentError,
     DelegationTransientError,
     PendingPoll,
@@ -82,10 +84,49 @@ MAX_ROUTED_ATTACHMENT_BYTES = 20 * 1024 * 1024
 # Where mounted attachments appear inside the sandbox.
 _SANDBOX_MOUNT_DIR = "/workspace"
 
+# Where the agent is told to leave files for the user, as the environments API
+# addresses it (relative to the environment root), and how much of it one run
+# may return. The prompt in defaults.yaml states the same limits to the agent.
+_SANDBOX_OUTPUT_DIR = "workspace/outputs"
+MAX_RETURNED_OUTPUT_FILES = 20
+MAX_RETURNED_OUTPUT_BYTES = 50 * 1024 * 1024
+
+# Added to a sandboxed agent's prompt on the submit path only: that is the path
+# whose completion collects outputs. A run streamed directly into a chat does
+# not, so its prompt must not promise the files.
+_OUTPUTS_INSTRUCTION = (
+    "Files you are sent are in /workspace. Save every file meant for "
+    "{user_name} (a model, image, document or data file) under "
+    "/workspace/outputs: the files there are sent to {user_name} as "
+    "attachments with your reply, up to "
+    f"{MAX_RETURNED_OUTPUT_FILES} files and "
+    f"{MAX_RETURNED_OUTPUT_BYTES // (1024 * 1024)} MB in all. Nothing else in "
+    "the sandbox is returned."
+)
+
 # Filenames come from user-supplied metadata, so they are reduced to a safe
 # basename: no directory traversal, no separators, nothing that could land the
 # file outside the mount directory.
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _output_over_limit(size: int, total_so_far: int, max_file_size: int) -> str | None:
+    """Why a returned file of ``size`` bytes does not fit, or ``None`` if it does."""
+    if size > max_file_size:
+        return f"{size:,} bytes, over the attachment size limit"
+    if total_so_far + size > MAX_RETURNED_OUTPUT_BYTES:
+        limit_mb = MAX_RETURNED_OUTPUT_BYTES // (1024 * 1024)
+        return f"{size:,} bytes, over the {limit_mb} MB a run returns"
+    return None
+
+
+def _output_mime_type(reported: str | None, filename: str) -> str:
+    """A bare MIME type for a returned file, without the API's charset suffix."""
+    bare = (reported or "").split(";", 1)[0].strip()
+    if bare and bare != "application/octet-stream":
+        return bare
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or bare or "application/octet-stream"
 
 
 def _sandbox_target_path(
@@ -486,6 +527,15 @@ class InteractionsAgentProcessingService(ProcessingService):
             state = state.add_source(source)
 
         system_prompt = self.format_system_prompt(user_name=user_name)
+        if self._google_client(llm_client).runs_in_sandbox:
+            system_prompt = "\n\n".join(
+                part
+                for part in (
+                    system_prompt,
+                    _OUTPUTS_INSTRUCTION.format(user_name=user_name),
+                )
+                if part
+            )
         user_text = self._extract_user_content_for_history(content_parts)
         messages: list[LLMMessage] = []
         if system_prompt:
@@ -539,6 +589,94 @@ class InteractionsAgentProcessingService(ProcessingService):
             remote_context_id=None,
             terminal_result=None,
         )
+
+    async def collect_outputs(
+        self,
+        observation: RemoteObservation,
+        *,
+        owner_user_id: str | None,
+        conversation_id: str,
+        taint_state: TurnTaintState,
+        db_context: Database,
+    ) -> CollectedOutputs:
+        """Return what the agent left under ``/workspace/outputs`` as attachments.
+
+        The run's environment outlives it, so its files can be read back after
+        it finishes -- whether on the terminal poll or when a late completion
+        is recovered. Files over the caps are named in ``omitted`` rather than
+        dropped silently. Each file carries ``taint_state``, the provenance of
+        the run's own reply, since the agent produced both from the same
+        inputs.
+        """
+        environment_id = observation.environment_id
+        if not environment_id:
+            return CollectedOutputs(attachment_ids=[], omitted=[])
+        client = self._google_client()
+        entries = await client.list_sandbox_files(environment_id, _SANDBOX_OUTPUT_DIR)
+        if not entries:
+            return CollectedOutputs(attachment_ids=[], omitted=[])
+        registry = self.attachment_registry
+        if registry is None:
+            return CollectedOutputs(
+                attachment_ids=[],
+                omitted=[
+                    f"{len(entries)} output file(s): no attachment registry is "
+                    "configured to return them."
+                ],
+            )
+
+        # Everything is downloaded before anything is registered. A transient
+        # failure partway through is retried from the start, and registering
+        # as we went would store another copy of every earlier file on each
+        # retry, with nothing holding the ids of the last attempt's.
+        staged: list[tuple[str, bytes, str]] = []
+        omitted: list[str] = []
+        total_bytes = 0
+        for entry in sorted(entries, key=lambda e: e.path):
+            relative = entry.path.removeprefix(f"{_SANDBOX_OUTPUT_DIR}/")
+            if len(staged) >= MAX_RETURNED_OUTPUT_FILES:
+                omitted.append(
+                    f"{relative} (beyond the first {MAX_RETURNED_OUTPUT_FILES} files)"
+                )
+                continue
+            # The listed size, when given, spares downloading a file that
+            # cannot be returned; the downloaded size is what decides.
+            listed = entry.size_bytes
+            reason = (
+                _output_over_limit(listed, total_bytes, registry.max_file_size)
+                if listed is not None
+                else None
+            )
+            if reason is None:
+                content = await client.download_sandbox_file(environment_id, entry.path)
+                reason = _output_over_limit(
+                    len(content), total_bytes, registry.max_file_size
+                )
+            if reason is not None:
+                omitted.append(f"{relative} ({reason})")
+                continue
+            total_bytes += len(content)
+            staged.append((
+                relative,
+                content,
+                _output_mime_type(entry.mime_type, relative),
+            ))
+
+        attachment_ids: list[str] = []
+        for relative, content, mime_type in staged:
+            metadata = await registry.store_and_register_tool_attachment(
+                file_content=content,
+                filename=relative.replace("/", "_"),
+                content_type=mime_type,
+                tool_name=self.service_config.id,
+                description=f"{relative}, produced by the {self.service_config.id} run",
+                conversation_id=conversation_id,
+                owner_user_id=owner_user_id,
+                db_context=db_context,
+                taint_state=taint_state,
+            )
+            attachment_ids.append(metadata.attachment_id)
+        return CollectedOutputs(attachment_ids=attachment_ids, omitted=omitted)
 
     async def observe_async(self, remote_task_id: str) -> RemoteObservation:
         """Read the interaction once and classify it. The only classifier.
@@ -602,6 +740,7 @@ class InteractionsAgentProcessingService(ProcessingService):
             resolved_model=interaction.model,
             error_summary=error_summary,
             event_cursor=interaction.previous_interaction_id,
+            environment_id=interaction.environment_id,
         )
 
     def _completion_is_useful(

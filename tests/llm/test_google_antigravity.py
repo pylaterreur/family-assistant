@@ -710,3 +710,52 @@ async def test_a_misconfigured_egress_credential_still_fails_fast(
 
     with pytest.raises(AntigravityEgressError):
         await client.start_agent_interaction([UserMessage(content="Fix the bug.")])
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_wrote_no_outputs_lists_none(
+    mock_genai_client: MagicMock,
+) -> None:
+    """The API answers a missing directory with a 404, which must not read as
+    the run itself having vanished."""
+    client = _egress_client("disabled")
+    environments = _accept_environments(mock_genai_client)
+    request = httpx.Request("GET", "https://generativelanguage.googleapis.com/")
+    environments.files.list.side_effect = _SDK_COMPAT_ERRORS.NotFoundError(
+        "Path 'workspace/outputs' not found",
+        response=httpx.Response(404, request=request),
+        body=None,
+    )
+
+    assert await client.list_sandbox_files("env_1", "workspace/outputs") == []
+    environments.files.list.assert_awaited_once_with(
+        environment="env_1", path="workspace/outputs", recursive=True, page_token=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_every_page_of_an_output_listing_is_read(
+    mock_genai_client: MagicMock,
+) -> None:
+    """The SDK hands back one page; files past it would be lost unseen."""
+    client = _egress_client("disabled")
+    environments = _accept_environments(mock_genai_client)
+
+    def page(path: str, token: str | None) -> SimpleNamespace:
+        entry = SimpleNamespace(
+            path=path, type="FILE", size_bytes=1, mime_type="text/plain"
+        )
+        return SimpleNamespace(files=[entry], next_page_token=token)
+
+    environments.files.list.side_effect = [
+        page("workspace/outputs/a.txt", "page-2"),
+        page("workspace/outputs/b.txt", None),
+    ]
+
+    entries = await client.list_sandbox_files("env_1", "workspace/outputs")
+
+    assert [entry.path for entry in entries] == [
+        "workspace/outputs/a.txt",
+        "workspace/outputs/b.txt",
+    ]
+    assert environments.files.list.await_args_list[1].kwargs["page_token"] == "page-2"

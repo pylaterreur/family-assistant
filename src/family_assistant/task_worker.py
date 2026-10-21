@@ -49,6 +49,7 @@ from family_assistant.processing import (
     DelegationTaskNotFoundError,
     DelegationTransientError,
     ObservableDelegationService,
+    OutputCollectingDelegationService,
     PendingPoll,
     PollableDelegationService,
     ProcessingService,
@@ -3303,7 +3304,67 @@ class TaskWorker:
             # about the run -- acting on it would finalize and notify from
             # state the provider has since left.
             return PENDING, None, True
-        return target_service.result_for_observation(observation), observation, False
+        result = target_service.result_for_observation(observation)
+        if (
+            isinstance(result, ChatInteractionResult)
+            and observation.disposition is RemoteDisposition.COMPLETED
+        ):
+            result = await self._with_collected_outputs(
+                exec_context, run, target_service, observation, result
+            )
+        return result, observation, False
+
+    async def _with_collected_outputs(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        target_service: PollableDelegationService | ObservableDelegationService,
+        observation: RemoteObservation,
+        result: ChatInteractionResult,
+    ) -> ChatInteractionResult:
+        """Attach the files a completed run left behind to its result.
+
+        The one place both terminal paths -- the poll that sees a run finish
+        and the recovery of one that finished after we gave up -- pick up a
+        run's output files, so neither can deliver the text without them. A
+        transient failure propagates so the run is read again; a permanent one
+        still delivers the text, saying the files could not be fetched.
+        """
+        if not isinstance(target_service, OutputCollectingDelegationService):
+            return result
+        taint_state = TurnTaintState.from_metadata(
+            await delegation_run_result_taint_metadata(exec_context.db_context, run),
+            preserve_origin=True,
+        )
+        try:
+            collected = await target_service.collect_outputs(
+                observation,
+                owner_user_id=run["user_id"],
+                conversation_id=run["conversation_id"],
+                taint_state=taint_state,
+                db_context=exec_context.db_context,
+            )
+        except DelegationPermanentError as exc:
+            logger.exception(
+                "Could not fetch the output files of delegation %s.",
+                run["delegation_id"],
+            )
+            return replace(
+                result,
+                text_reply=f"{result.text_reply}\n\nThe run's output files could "
+                f"not be fetched: {exc}",
+            )
+        text_reply = result.text_reply
+        if collected.omitted:
+            text_reply += "\n\nSome output files were not returned: " + "; ".join(
+                collected.omitted
+            )
+        return replace(
+            result,
+            text_reply=text_reply,
+            attachment_ids=[*(result.attachment_ids or []), *collected.attachment_ids]
+            or None,
+        )
 
     async def _request_remote_cancellation(
         self,
@@ -3970,7 +4031,7 @@ class TaskWorker:
         # most. Nothing is lost by declining: recovery is not a one-shot
         # opportunity, and the run stays eligible for the next read.
         if accepted is not None and await self._recover_late_completion(
-            exec_context, run, observation
+            exec_context, run, target_service, observation
         ):
             return
 
@@ -3980,6 +4041,7 @@ class TaskWorker:
         self,
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
+        target_service: ObservableDelegationService,
         observation: RemoteObservation,
     ) -> bool:
         """Deliver a result the provider produced after we failed the run.
@@ -3995,7 +4057,18 @@ class TaskWorker:
         ):
             return False
         clock = exec_context.clock or self.clock
-        result = observation.result
+        try:
+            result = await self._with_collected_outputs(
+                exec_context, run, target_service, observation, observation.result
+            )
+        except DelegationTransientError:
+            # The run stays eligible, so the next reading tries again.
+            logger.info(
+                "Output files of delegation %s were not fetched; retrying later.",
+                run["delegation_id"],
+                exc_info=True,
+            )
+            return False
         recovered = (
             await exec_context.db_context.delegation_runs.recover_late_completion(
                 delegation_id=run["delegation_id"],
