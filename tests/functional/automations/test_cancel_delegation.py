@@ -564,3 +564,35 @@ async def test_a_turn_with_delegations_still_out_is_not_cancelled(
     parent = await db_context.delegation_runs.get_by_delegation_id("delegation_parent")
     assert parent is not None
     assert parent["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_child_cancelled_by_its_own_parents_turn_is_not_handed_back_to_it(
+    db_engine: AsyncEngine,
+) -> None:
+    """The parent read the cancellation from the tool; a second report would repeat it."""
+    target = FakePollableService()
+    db_context = Database(engine=db_engine)
+    await _create_run(db_context, delegation_id="delegation_parent")
+    await db_context.delegation_runs.mark_running(
+        "delegation_parent", SystemClock().now()
+    )
+    await _create_run(
+        db_context,
+        delegation_id="delegation_child",
+        source_subconversation_id="sub_delegation_parent",
+    )
+    await db_context.delegation_runs.mark_handed_off(
+        "delegation_child", SystemClock().now()
+    )
+    parents_turn = _tool_context(db_context, _processing_service(target))
+    parents_turn.subconversation_id = "sub_delegation_parent"
+
+    await cancel_delegation_tool(parents_turn, "delegation_child")
+
+    child = await db_context.delegation_runs.get_by_delegation_id("delegation_child")
+    assert child is not None
+    assert child["notified_at"] is not None
+    parent = await db_context.delegation_runs.get_by_delegation_id("delegation_parent")
+    assert parent is not None
+    assert await db_context.delegation_runs.list_undelivered_children(parent) == []

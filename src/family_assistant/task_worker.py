@@ -2312,11 +2312,15 @@ class TaskWorker:
             if registry is not None
             else contextlib.nullcontext()
         ):
-            current = (
-                await exec_context.db_context.delegation_runs.get_by_delegation_id(
-                    delegation_id
+            try:
+                current = (
+                    await exec_context.db_context.delegation_runs.get_by_delegation_id(
+                        delegation_id
+                    )
                 )
-            )
+            except BaseException:
+                turn.cancel()
+                raise
             if current is None or current["status"] != "running":
                 turn.cancel()
             admitted.set()

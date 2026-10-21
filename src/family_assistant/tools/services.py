@@ -2111,8 +2111,13 @@ async def cancel_delegation_tool(
     # A run started by another delegation answers to that run, whose next turn
     # must learn the branch was cancelled rather than find it gone -- and must
     # be queued, since no completion of this run is coming to do it. Any other
-    # run's outcome is this result, so it is marked delivered.
-    if not await continue_waiting_parent(
+    # run's outcome is this result, so it is marked delivered; so is a child
+    # cancelled by its own parent's turn, which is reading this result now.
+    cancelled_by_parent = (
+        cancelled["source_subconversation_id"] is not None
+        and cancelled["source_subconversation_id"] == exec_context.subconversation_id
+    )
+    if cancelled_by_parent or not await continue_waiting_parent(
         db, cancelled, now, exec_context.inherited_task_priority()
     ):
         await db.delegation_runs.mark_notified(
