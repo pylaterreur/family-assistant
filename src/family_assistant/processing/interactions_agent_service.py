@@ -16,11 +16,10 @@ unchanged) still streams the interaction live for that interactive path.
 
 from __future__ import annotations
 
-import base64
 import logging
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING
 
 from family_assistant.llm.call_context import (
     CallAttribution,
@@ -30,6 +29,7 @@ from family_assistant.llm.call_context import (
 from family_assistant.llm.messages import UserMessage
 from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
+    SandboxFile,
     is_interaction_terminal_error_status,
 )
 from family_assistant.observability.metrics import record_llm_call
@@ -74,9 +74,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Ceiling on the total attachment bytes one run may carry into the sandbox.
-# The API takes them base64-encoded inside the create request body, so this
-# bounds the request rather than any sandbox limit. A constant until there is
-# evidence about what real files look like.
+# Files are uploaded to the run's environment ahead of the create request, so
+# this bounds what one delegation uploads rather than any API limit. A constant
+# until there is evidence about what real files look like.
 MAX_ROUTED_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 # Where mounted attachments appear inside the sandbox.
@@ -86,15 +86,6 @@ _SANDBOX_MOUNT_DIR = "/workspace"
 # basename: no directory traversal, no separators, nothing that could land the
 # file outside the mount directory.
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
-
-
-class EnvironmentSourceDict(TypedDict):
-    """An ``environment.sources`` entry mounting one file into the sandbox."""
-
-    type: str
-    content: str
-    encoding: str
-    target: str
 
 
 def _sandbox_target_path(
@@ -363,19 +354,19 @@ class InteractionsAgentProcessingService(ProcessingService):
         except ToolPolicyDeniedError as exc:
             raise TaintedSinkRefusedError(str(exc)) from exc
 
-    async def _build_environment_sources(
+    async def _build_sandbox_files(
         self,
         content_parts: list[ContentPartDict],
         *,
         db_context: Database,
         acting_user_id: str | None,
-    ) -> tuple[list[EnvironmentSourceDict], tuple[TaintSource, ...]]:
+    ) -> tuple[list[SandboxFile], tuple[TaintSource, ...]]:
         """Mount delegated attachments into the sandbox, with their taint.
 
         ``delegate_to_service`` turns ``attachment_ids`` into ``attachment``
         content parts. An interaction takes a single ``input`` string, so the
         attachment cannot ride in the request text -- but the agent runs in a
-        filesystem, and the API mounts inline sources into it. Handing the
+        filesystem, and the client uploads files into it. Handing the
         agent a real file is also what a coding agent actually wants: it can
         open, parse and rewrite it rather than parse a blob out of its prompt.
 
@@ -385,7 +376,7 @@ class InteractionsAgentProcessingService(ProcessingService):
         turn's tier and the matrix denies the run, while the user's own file
         does not.
         """
-        sources: list[EnvironmentSourceDict] = []
+        files: list[SandboxFile] = []
         taint_sources: list[TaintSource] = []
         taken_names: set[str] = set()
         total_bytes = 0
@@ -433,17 +424,18 @@ class InteractionsAgentProcessingService(ProcessingService):
                     "may carry. Send fewer or smaller files."
                 )
 
-            sources.append({
-                "type": "inline",
-                "content": base64.b64encode(content).decode("ascii"),
-                "encoding": "base64",
-                "target": _sandbox_target_path(attachment_id, metadata, taken_names),
-            })
+            files.append(
+                SandboxFile(
+                    path=_sandbox_target_path(attachment_id, metadata, taken_names),
+                    content=content,
+                    mime_type=metadata.mime_type,
+                )
+            )
             taint_sources.extend(
                 _attachment_taint_sources(attachment_id, metadata.metadata)
             )
 
-        return sources, tuple(taint_sources)
+        return files, tuple(taint_sources)
 
     async def submit_async(
         self,
@@ -479,7 +471,7 @@ class InteractionsAgentProcessingService(ProcessingService):
         profile the tier is the model the agent reasons with.
         """
         _, llm_client = self._run_binding(model_selection)
-        environment_sources, attachment_taint = await self._build_environment_sources(
+        sandbox_files, attachment_taint = await self._build_sandbox_files(
             content_parts, db_context=db_context, acting_user_id=acting_user_id
         )
         # The state carries the parent's sources *and* any approval recorded on
@@ -531,7 +523,7 @@ class InteractionsAgentProcessingService(ProcessingService):
             interaction = await self._google_client(llm_client).start_agent_interaction(
                 messages,
                 previous_interaction_id=previous_interaction_id,
-                environment_sources=environment_sources or None,
+                sandbox_files=sandbox_files,
             )
         finally:
             reset_processing_profile(token)
