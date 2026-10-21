@@ -17,6 +17,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    if op.get_bind().dialect.name == "postgresql":
+        with op.get_context().autocommit_block():
+            op.execute("ALTER TYPE eventsourcetype ADD VALUE IF NOT EXISTS 'mcp'")
     op.create_table(
         "mcp_event_cursors",
         sa.Column("subscription_key", sa.String(length=64), primary_key=True),
@@ -33,4 +36,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # PostgreSQL cannot drop an enum value; 'mcp' stays in eventsourcetype.
     op.drop_table("mcp_event_cursors")

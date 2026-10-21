@@ -2162,6 +2162,11 @@ class Assistant:
                 logger.info(
                     f"Event processor initialized with {len(event_sources)} sources"
                 )
+                # Processing services are built before the event system, so they
+                # get the sources here rather than at construction.
+                for service in self.processing_services_registry.values():
+                    if isinstance(service, ProcessingService):
+                        service.event_sources = self.event_processor.sources
             else:
                 logger.info("Event system enabled but no event sources configured")
 
