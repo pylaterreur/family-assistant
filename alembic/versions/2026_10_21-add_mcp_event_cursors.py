@@ -18,8 +18,10 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     if op.get_bind().dialect.name == "postgresql":
-        with op.get_context().autocommit_block():
-            op.execute("ALTER TYPE eventsourcetype ADD VALUE IF NOT EXISTS 'mcp'")
+        # PostgreSQL 12+ allows this inside the migration's transaction; the new
+        # value is only unusable until that transaction commits, and nothing
+        # here uses it.
+        op.execute("ALTER TYPE eventsourcetype ADD VALUE IF NOT EXISTS 'mcp'")
     op.create_table(
         "mcp_event_cursors",
         sa.Column("subscription_key", sa.String(length=64), primary_key=True),
