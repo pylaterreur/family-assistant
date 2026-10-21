@@ -239,7 +239,10 @@ counts are your own: someone else in the household reading a thread doesn't clea
 The sidebar lists **Home** first, with a count of the threads waiting on you, then your threads
 grouped by where they stand, with whatever needs you at the top. Each thread shows its unread count,
 and one you closed yourself says so. Conversations from before threads, and any you start with the
-new-chat button, are listed under **Earlier**. Searching looks through all of them.
+new-chat button, are listed under **Earlier**. Searching looks through all of them, and matches
+words said anywhere in a conversation, not just its latest message: every word you type must start a
+word somewhere in the chat, and each result shows a snippet of where it matched. The iOS chat list
+searches the same way.
 
 ### Voice
 
@@ -440,11 +443,12 @@ included in the assistant's context automatically.
 offers the right fix in one tap — *degraded* (updates lagging, tap to reconnect), *offline* (tap to
 reconnect), or *sign-in required* (tap to sign in). Background sync problems surface there rather
 than as pop-up dialogs; if the conversation list itself can't refresh, a small "Couldn't refresh —
-last updated …" note appears at the top of the list. A failed send shows a **Retry** button on the
-message itself; retrying is safe and never sends twice. If Chat says **"authentication wall
-detected"**, open your Family Assistant web address in Safari and complete any sign-in page, then
-return to the app and tap the connection indicator to reconnect. If Safari cannot reach the sign-in
-page either, check your connection and contact the person who manages Family Assistant.
+last updated …" note appears at the top of the list. The list also refreshes by itself when the app
+comes back to the foreground. A failed send shows a **Retry** button on the message itself; retrying
+is safe and never sends twice. If Chat says **"authentication wall detected"**, open your Family
+Assistant web address in Safari and complete any sign-in page, then return to the app and tap the
+connection indicator to reconnect. If Safari cannot reach the sign-in page either, check your
+connection and contact the person who manages Family Assistant.
 
 **More** gathers Events, History, Automations, Tools, and a **Settings** screen with notification
 controls and sign-out.
