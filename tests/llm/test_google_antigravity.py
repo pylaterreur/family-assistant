@@ -3,10 +3,11 @@
 import importlib
 from collections.abc import AsyncGenerator, Generator
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 
 import httpx
 import pytest
+from google import genai
 from google.genai.interactions import Interaction
 from pydantic import TypeAdapter
 
@@ -41,6 +42,10 @@ ANTIGRAVITY_AGENT_ID = "antigravity-preview-05-2026"
 
 _SDK_INTERACTIONS_MODULE = importlib.import_module("google.genai._gaos.models")
 _SDK_COMPAT_ERRORS = importlib.import_module("google.genai._gaos.lib.compat_errors")
+# The real async environments resources, resolved before any test patches
+# ``genai.Client``.
+_SDK_ASYNC_ENVIRONMENTS = type(genai.Client(api_key="test").aio.environments)
+_SDK_ASYNC_ENVIRONMENT_FILES = type(genai.Client(api_key="test").aio.environments.files)
 _CREATE_INTERACTION_ADAPTER = TypeAdapter(
     _SDK_INTERACTIONS_MODULE.CreateInteractionRequestBody
 )
@@ -394,12 +399,16 @@ async def test_egress_policy_reaches_the_interactive_path(
 
 
 def _accept_environments(mock_genai_client: MagicMock) -> MagicMock:
-    """Stub the environments API: creation returns ``env_1``, uploads succeed."""
-    environments = mock_genai_client.aio.environments
-    environments.create_environment = AsyncMock(
-        return_value=SimpleNamespace(id="env_1")
-    )
-    environments.files.upload = AsyncMock()
+    """Stub the environments API: creation returns ``env_1``, uploads succeed.
+
+    Specced from the installed SDK's async classes, so a method this SDK
+    version lacks, a sync one awaited, or a keyword it does not take fails here
+    rather than in production.
+    """
+    environments = create_autospec(_SDK_ASYNC_ENVIRONMENTS, instance=True)
+    environments.files = create_autospec(_SDK_ASYNC_ENVIRONMENT_FILES, instance=True)
+    environments.create_environment.return_value = SimpleNamespace(id="env_1")
+    mock_genai_client.aio.environments = environments
     return environments
 
 
@@ -471,7 +480,7 @@ async def test_a_rejected_upload_fails_the_delegation_permanently(
     environments = _accept_environments(mock_genai_client)
     rejection = Exception("Request contains an invalid argument.")
     rejection.status_code = 400  # pyright: ignore[reportAttributeAccessIssue]
-    environments.files.upload = AsyncMock(side_effect=rejection)
+    environments.files.upload.side_effect = rejection
     create = _accept_submissions(mock_genai_client)
 
     with pytest.raises(DelegationPermanentError):
