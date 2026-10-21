@@ -107,13 +107,15 @@ from family_assistant.storage.delegation_runs import (
 )
 from family_assistant.tools.services import (
     DELEGATED_PROFILE_RUN_TASK_TYPE,
+    continue_waiting_parent,
     delegation_run_result_taint_metadata,
+    queue_continuation_if_ready,
     short_error_summary,
 )
 from family_assistant.tools.types import CalendarConfig, EventSourcesById
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping
     from zoneinfo import ZoneInfo
 
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -159,6 +161,7 @@ from family_assistant.interfaces import ChatDeliveryError, HistoryBackedChatInte
 from family_assistant.processing.quiet_turn import QUIET_END_TRIGGER_HINT
 from family_assistant.processing.types import ChatInteractionStatus
 from family_assistant.processing.utils import get_file_extension_from_mime_type
+from family_assistant.services.confirmation_service import ConfirmationService
 from family_assistant.services.deferred_tool_confirmation import (
     build_deferred_confirmation_callback,
 )
@@ -2245,15 +2248,19 @@ class TaskWorker:
             return
 
         local_target = cast("ProcessingService", target_service)
+        confirmation_sources: set[int] = set()
         try:
             if payload.get("continuation"):
-                result = await self._run_delegation_continuation(
-                    exec_context, started, local_target
+                turn = self._run_delegation_continuation(
+                    exec_context, started, local_target, confirmation_sources
                 )
             else:
-                result = await self._run_delegated_request(
-                    exec_context, run, local_target
+                turn = self._run_delegated_request(
+                    exec_context, run, local_target, confirmation_sources
                 )
+            result = await self._run_stoppable_delegated_turn(
+                exec_context, delegation_id, local_target, turn
+            )
         except Exception:
             # A timeout cancellation (CancelledError) is intentionally NOT caught
             # here: it propagates so the task is retried, and the retry's
@@ -2270,13 +2277,103 @@ class TaskWorker:
             )
             return
 
+        if result is None:
+            await self._withdraw_stopped_turn_confirmations(
+                exec_context, started, confirmation_sources
+            )
+            return
         await self._settle_delegated_turn(exec_context, started, result)
+
+    async def _run_stoppable_delegated_turn(
+        self,
+        exec_context: ToolExecutionContext,
+        delegation_id: str,
+        local_target: ProcessingService,
+        turn_coro: Coroutine[object, object, ChatInteractionResult],
+    ) -> ChatInteractionResult | None:
+        """Run a delegated turn where ``cancel_delegation`` can stop it.
+
+        Returns ``None`` when the turn was stopped. The turn is registered,
+        held at a gate, before the run is read back, so a cancellation lands
+        either way: one committed before the read stops the turn before it
+        starts, and one after it finds the registered turn to cancel.
+        """
+        admitted = asyncio.Event()
+
+        async def run_when_admitted() -> ChatInteractionResult:
+            try:
+                await admitted.wait()
+            except asyncio.CancelledError:
+                turn_coro.close()
+                raise
+            return await turn_coro
+
+        turn = asyncio.create_task(run_when_admitted())
+        registry = local_target.delegation_turns
+        with (
+            registry.running(delegation_id, turn)
+            if registry is not None
+            else contextlib.nullcontext()
+        ):
+            try:
+                current = (
+                    await exec_context.db_context.delegation_runs.get_by_delegation_id(
+                        delegation_id
+                    )
+                )
+            except BaseException:
+                turn.cancel()
+                raise
+            if current is None or current["status"] != "running":
+                turn.cancel()
+            admitted.set()
+            try:
+                return await turn
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+                logger.info(
+                    "Delegated turn of run %s was stopped by a cancellation.",
+                    delegation_id,
+                )
+                return None
+
+    async def _withdraw_stopped_turn_confirmations(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        confirmation_sources: set[int],
+    ) -> None:
+        """Reject what a stopped turn left waiting for approval.
+
+        Approving one would run nothing -- delegated confirmations are
+        decision-only -- but the prompt would sit in the user's list asking
+        about a turn that no longer exists.
+        """
+        user_id = run["user_id"]
+        if user_id is None or not confirmation_sources:
+            return
+        unrejected = await ConfirmationService(
+            db=exec_context.db_context
+        ).withdraw_pending_for_messages(
+            user_id=user_id,
+            source_message_internal_ids=confirmation_sources,
+            interface=run["interface_type"],
+        )
+        if unrejected:
+            logger.warning(
+                "%d confirmation(s) of stopped delegation %s could not be withdrawn.",
+                unrejected,
+                run["delegation_id"],
+            )
 
     async def _run_delegated_request(
         self,
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
         local_target: ProcessingService,
+        confirmation_sources: set[int],
     ) -> ChatInteractionResult:
         """Run a delegation's first turn, on the request it was created with."""
         content_parts = cast(
@@ -2288,7 +2385,7 @@ class TaskWorker:
             run["interface_type"],
         )
         request_confirmation_callback = self._build_delegation_confirmation_callback(
-            exec_context, run
+            exec_context, run, confirmation_sources
         )
         return await local_target.handle_chat_interaction(
             db_context=exec_context.db_context,
@@ -2420,6 +2517,7 @@ class TaskWorker:
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
         local_target: ProcessingService,
+        confirmation_sources: set[int],
     ) -> ChatInteractionResult:
         """Run the turn that follows a run's own delegations finishing.
 
@@ -2499,7 +2597,7 @@ class TaskWorker:
             chat_interfaces=exec_context.chat_interfaces,
             confirmation_ui_managers=exec_context.confirmation_ui_managers,
             request_confirmation_callback=self._build_delegation_confirmation_callback(
-                exec_context, run
+                exec_context, run, confirmation_sources
             ),
             trigger_attachments=trigger_attachments or None,
             subconversation_id=run["subconversation_id"],
@@ -2568,65 +2666,10 @@ class TaskWorker:
             parked = await txn.delegation_runs.mark_awaiting_children(delegation_id)
             if parked is None:
                 return False
-            await self._queue_continuation_if_ready(txn, parked, clock, priority)
+            await queue_continuation_if_ready(txn, parked, clock.now(), priority)
             return True
 
         return await exec_context.db_context.atomic(_park)
-
-    async def _continue_when_children_finish(
-        self,
-        exec_context: ToolExecutionContext,
-        parent: DelegationRunDict,
-    ) -> bool:
-        """Queue a waiting run's next turn if none of its children is running.
-
-        Called when the run starts waiting and whenever one of its children
-        finishes, so whichever of those sees the last child finished queues the
-        turn. The conditional requeue is what makes that happen once.
-        """
-        clock = exec_context.clock or self.clock
-        priority = exec_context.inherited_task_priority()
-
-        async def _requeue(txn: DatabaseTransaction) -> bool:
-            return await self._queue_continuation_if_ready(txn, parent, clock, priority)
-
-        return await exec_context.db_context.atomic(_requeue)
-
-    @staticmethod
-    async def _queue_continuation_if_ready(
-        txn: DatabaseTransaction,
-        parent: DelegationRunDict,
-        clock: Clock,
-        priority: TaskPriority,
-    ) -> bool:
-        """Requeue a waiting run and enqueue its next turn, once its children are done."""
-        children = await txn.delegation_runs.list_undelivered_children(parent)
-        if any(
-            child["status"] not in TERMINAL_DELEGATION_STATUSES for child in children
-        ):
-            return False
-        if not await txn.delegation_runs.requeue_for_continuation(
-            parent["delegation_id"], clock.now()
-        ):
-            return False
-        await txn.tasks.enqueue(
-            task_id=f"{parent['task_id']}_continue_{uuid.uuid4().hex}",
-            task_type=DELEGATED_PROFILE_RUN_TASK_TYPE,
-            payload={
-                "delegation_id": parent["delegation_id"],
-                "interface_type": parent["interface_type"],
-                "conversation_id": parent["conversation_id"],
-                "user_name": parent["user_name"] or "",
-                "continuation": True,
-            },
-            max_retries_override=1,
-            priority=priority,
-        )
-        logger.info(
-            "Delegations started by run %s have finished; queued its next turn.",
-            parent["delegation_id"],
-        )
-        return True
 
     async def _deliver_to_waiting_parent(
         self,
@@ -2641,23 +2684,13 @@ class TaskWorker:
         -- a top-level turn started it, or the parent has already finished --
         and the result is delivered the ordinary way.
         """
-        parent_subconversation_id = run["source_subconversation_id"]
-        if parent_subconversation_id is None:
-            return False
-        parent = await exec_context.db_context.delegation_runs.get_active_for_subconversation(
-            conversation_id=run["conversation_id"],
-            subconversation_id=parent_subconversation_id,
+        clock = exec_context.clock or self.clock
+        return await continue_waiting_parent(
+            exec_context.db_context,
+            run,
+            clock.now(),
+            exec_context.inherited_task_priority,
         )
-        # A resumed run reuses its history, so a child the earlier run started
-        # is not this run's: it predates it, and is delivered the ordinary way.
-        if parent is None or run["created_at"] < parent["created_at"]:
-            return False
-        # Attempted whatever status was read: the requeue is conditioned on
-        # the parent waiting, and it waits on a parent parking in the same
-        # instant, so one of the two always sees this child finished. A parent
-        # still in its turn picks the result up when the turn ends.
-        await self._continue_when_children_finish(exec_context, parent)
-        return True
 
     @staticmethod
     async def _prepare_authenticated_run(
@@ -3756,8 +3789,13 @@ class TaskWorker:
         self,
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
+        confirmation_sources: set[int],
     ) -> RequestConfirmationCallback | None:
-        """Build a confirmation callback for a delegated profile background run."""
+        """Build a confirmation callback for a delegated profile background run.
+
+        Each confirmation's source message is added to ``confirmation_sources``,
+        which is how a stopped turn finds the requests it left pending.
+        """
         confirmation_ui_managers = (
             exec_context.confirmation_ui_managers or self.confirmation_ui_managers
         )
@@ -3799,6 +3837,7 @@ class TaskWorker:
                 )
                 if source_row is not None:
                     source_message_internal_id = source_row["internal_id"]
+                    confirmation_sources.add(source_message_internal_id)
 
             taint_state_json = (
                 context.taint_tracker.snapshot().to_metadata()

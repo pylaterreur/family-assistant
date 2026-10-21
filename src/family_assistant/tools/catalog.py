@@ -193,6 +193,7 @@ from family_assistant.tools.script_testing import (
 )
 from family_assistant.tools.services import (
     SERVICE_TOOLS_DEFINITION,
+    cancel_delegation_tool,
     delegate_to_service_tool,
     get_delegation_status_tool,
     list_delegations_tool,
@@ -357,6 +358,7 @@ _LOCAL_TOOL_IMPLEMENTATIONS: dict[str, ToolImplementation] = {
     "list_threads": list_threads_tool,
     "get_delegation_status": get_delegation_status_tool,
     "list_delegations": list_delegations_tool,
+    "cancel_delegation": cancel_delegation_tool,
     "list_pending_callbacks": list_pending_callbacks_tool,
     "modify_pending_callback": modify_pending_callback_tool,
     "cancel_pending_callback": cancel_pending_callback_tool,
@@ -553,6 +555,12 @@ _CORE_TOOL_METADATA_BY_NAME: dict[str, LocalToolMetadata] = {
         ToolTag.DELEGATION,
         ToolTag.READ_ONLY,
         ToolTag.SENSITIVE_DATA,
+        ToolTag.OUTPUT_TRUSTED,
+    ),
+    "cancel_delegation": _metadata(
+        ToolTag.DELEGATION,
+        ToolTag.DESTRUCTIVE,
+        ToolTag.STATE_CHANGING,
         ToolTag.OUTPUT_TRUSTED,
     ),
     "schedule_reminder": _metadata(
