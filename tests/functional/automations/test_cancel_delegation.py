@@ -529,3 +529,38 @@ async def test_cancelling_a_waiting_parents_last_child_hands_it_to_the_parents_n
         if task["task_id"].startswith("task_delegation_parent_continue_")
     ]
     assert len(continuations) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_turn_with_delegations_still_out_is_not_cancelled(
+    db_engine: AsyncEngine,
+) -> None:
+    """It is still running, but stopping it would orphan what it handed off."""
+    delegation_turns = RunningDelegationTurns()
+    target = BlockingTurnService(delegation_turns)
+    processing_service = _source_processing_service(
+        target, delegation_turns=delegation_turns
+    )
+    db_context = Database(engine=db_engine)
+    await _create_run(db_context, delegation_id="delegation_parent")
+    await db_context.delegation_runs.mark_running(
+        "delegation_parent", SystemClock().now()
+    )
+    await _create_run(
+        db_context,
+        delegation_id="delegation_child",
+        source_subconversation_id="sub_delegation_parent",
+    )
+    await db_context.delegation_runs.mark_handed_off(
+        "delegation_child", SystemClock().now()
+    )
+
+    result = await cancel_delegation_tool(
+        _tool_context(db_context, processing_service), "delegation_parent"
+    )
+
+    assert result.text is not None
+    assert "waiting on delegations of its own" in result.text
+    parent = await db_context.delegation_runs.get_by_delegation_id("delegation_parent")
+    assert parent is not None
+    assert parent["status"] == "running"

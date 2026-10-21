@@ -2075,7 +2075,12 @@ async def cancel_delegation_tool(
             ),
             attachments=None,
         )
-    if run["status"] not in CANCELLABLE_DELEGATION_STATUSES:
+    # A turn that has handed work off is still ``running`` until it ends, and
+    # stopping it then would leave those delegations to report to nobody.
+    if run["status"] not in CANCELLABLE_DELEGATION_STATUSES or any(
+        child["status"] not in TERMINAL_DELEGATION_STATUSES
+        for child in await db.delegation_runs.list_undelivered_children(run)
+    ):
         return ToolResult(
             text=(
                 f"Error: Delegation '{delegation_id}' is waiting on delegations of its "
