@@ -54,7 +54,6 @@ from family_assistant.security.taint import (
     TaintSourceType,
     TurnTaintState,
 )
-from family_assistant.services.attachment_registry import AttachmentTooLargeError
 from family_assistant.tools.infrastructure import (
     TaintTrackingToolsProvider,
     ToolPolicyDeniedError,
@@ -109,6 +108,16 @@ _OUTPUTS_INSTRUCTION = (
 # basename: no directory traversal, no separators, nothing that could land the
 # file outside the mount directory.
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _output_over_limit(size: int, total_so_far: int, max_file_size: int) -> str | None:
+    """Why a returned file of ``size`` bytes does not fit, or ``None`` if it does."""
+    if size > max_file_size:
+        return f"{size:,} bytes, over the attachment size limit"
+    if total_so_far + size > MAX_RETURNED_OUTPUT_BYTES:
+        limit_mb = MAX_RETURNED_OUTPUT_BYTES // (1024 * 1024)
+        return f"{size:,} bytes, over the {limit_mb} MB a run returns"
+    return None
 
 
 def _output_mime_type(reported: str | None, filename: str) -> str:
@@ -616,47 +625,56 @@ class InteractionsAgentProcessingService(ProcessingService):
                 ],
             )
 
-        attachment_ids: list[str] = []
+        # Everything is downloaded before anything is registered. A transient
+        # failure partway through is retried from the start, and registering
+        # as we went would store another copy of every earlier file on each
+        # retry, with nothing holding the ids of the last attempt's.
+        staged: list[tuple[str, bytes, str]] = []
         omitted: list[str] = []
         total_bytes = 0
         for entry in sorted(entries, key=lambda e: e.path):
             relative = entry.path.removeprefix(f"{_SANDBOX_OUTPUT_DIR}/")
-            size = entry.size_bytes or 0
-            if len(attachment_ids) >= MAX_RETURNED_OUTPUT_FILES:
+            if len(staged) >= MAX_RETURNED_OUTPUT_FILES:
                 omitted.append(
                     f"{relative} (beyond the first {MAX_RETURNED_OUTPUT_FILES} files)"
                 )
                 continue
-            if total_bytes + size > MAX_RETURNED_OUTPUT_BYTES:
-                limit_mb = MAX_RETURNED_OUTPUT_BYTES // (1024 * 1024)
-                omitted.append(
-                    f"{relative} ({size:,} bytes, over the {limit_mb} MB a run returns)"
+            # The listed size, when given, spares downloading a file that
+            # cannot be returned; the downloaded size is what decides.
+            listed = entry.size_bytes
+            reason = (
+                _output_over_limit(listed, total_bytes, registry.max_file_size)
+                if listed is not None
+                else None
+            )
+            if reason is None:
+                content = await client.download_sandbox_file(environment_id, entry.path)
+                reason = _output_over_limit(
+                    len(content), total_bytes, registry.max_file_size
                 )
+            if reason is not None:
+                omitted.append(f"{relative} ({reason})")
                 continue
-            too_large = f"{relative} ({size:,} bytes, over the attachment size limit)"
-            if size > registry.max_file_size:
-                omitted.append(too_large)
-                continue
-            content = await client.download_sandbox_file(environment_id, entry.path)
             total_bytes += len(content)
-            try:
-                metadata = await registry.store_and_register_tool_attachment(
-                    file_content=content,
-                    filename=relative.replace("/", "_"),
-                    content_type=_output_mime_type(entry.mime_type, relative),
-                    tool_name=self.service_config.id,
-                    description=(
-                        f"{relative}, produced by the {self.service_config.id} run"
-                    ),
-                    conversation_id=conversation_id,
-                    owner_user_id=owner_user_id,
-                    db_context=db_context,
-                    taint_state=taint_state,
-                )
-            except AttachmentTooLargeError:
-                # Reached when the listing reported no size to check up front.
-                omitted.append(too_large)
-                continue
+            staged.append((
+                relative,
+                content,
+                _output_mime_type(entry.mime_type, relative),
+            ))
+
+        attachment_ids: list[str] = []
+        for relative, content, mime_type in staged:
+            metadata = await registry.store_and_register_tool_attachment(
+                file_content=content,
+                filename=relative.replace("/", "_"),
+                content_type=mime_type,
+                tool_name=self.service_config.id,
+                description=f"{relative}, produced by the {self.service_config.id} run",
+                conversation_id=conversation_id,
+                owner_user_id=owner_user_id,
+                db_context=db_context,
+                taint_state=taint_state,
+            )
             attachment_ids.append(metadata.attachment_id)
         return CollectedOutputs(attachment_ids=attachment_ids, omitted=omitted)
 

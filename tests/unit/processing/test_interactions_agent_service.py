@@ -41,6 +41,7 @@ from family_assistant.processing.protocol import (
     MAX_OBSERVATION_ERROR_CHARS,
     PENDING,
     DelegationPermanentError,
+    DelegationTransientError,
     RemoteDisposition,
     RemoteObservation,
     TaintedSinkRefusedError,
@@ -1558,26 +1559,36 @@ def _finished_with_environment(environment_id: str) -> RemoteObservation:
 
 
 def _client_with_outputs(
-    files: dict[str, bytes],
+    files: dict[str, bytes | BaseException],
+    *,
+    sizes_listed: bool = True,
 ) -> tuple[GoogleGenAIClient, AsyncMock]:
     """A client whose finished run left ``files`` under workspace/outputs.
 
-    Returned with its download stub, so a test can see what was fetched.
+    A file given as an exception fails to download with it. Returned with its
+    download stub, so a test can see what was fetched.
     """
     client = _antigravity_client("gemini-3.8-flash")
     client.list_sandbox_files = AsyncMock(
         return_value=[
             SandboxFileEntry(
                 path=f"workspace/outputs/{name}",
-                size_bytes=len(content),
+                size_bytes=len(content)
+                if sizes_listed and isinstance(content, bytes)
+                else None,
                 mime_type="application/octet-stream",
             )
             for name, content in files.items()
         ]
     )
-    download = AsyncMock(
-        side_effect=lambda _env, path: files[path.removeprefix("workspace/outputs/")]
-    )
+
+    async def fetch(_environment_id: str, path: str) -> bytes:
+        content = files[path.removeprefix("workspace/outputs/")]
+        if isinstance(content, BaseException):
+            raise content
+        return content
+
+    download = AsyncMock(side_effect=fetch)
     client.download_sandbox_file = download
     return client, download
 
@@ -1707,3 +1718,66 @@ async def test_an_output_over_the_attachment_limit_is_named_and_not_fetched(
     assert collected.omitted == ["big.glb (20 bytes, over the attachment size limit)"]
     downloaded = [call.args[1] for call in download.await_args_list]
     assert downloaded == ["workspace/outputs/small.txt"]
+
+
+@pytest.mark.asyncio
+async def test_unlisted_sizes_are_capped_by_what_was_downloaded(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listing without sizes cannot dodge the caps, nor misreport a size."""
+    monkeypatch.setattr(interactions_agent_service, "MAX_RETURNED_OUTPUT_BYTES", 10)
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path),
+        db_engine=db_engine,
+        config={"max_file_size": 8},
+    )
+    client, _ = _client_with_outputs(
+        {"a.txt": b"aaaaaa", "b.txt": b"bbbbbb", "huge.glb": b"g" * 9},
+        sizes_listed=False,
+    )
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await service.collect_outputs(
+        _finished_with_environment("env_out"),
+        owner_user_id="user-1",
+        conversation_id="conv-1",
+        taint_state=TurnTaintState.empty(),
+        db_context=Database(db_engine),
+    )
+
+    assert len(collected.attachment_ids) == 1
+    assert collected.omitted == [
+        "b.txt (6 bytes, over the 0 MB a run returns)",
+        "huge.glb (9 bytes, over the attachment size limit)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_retryable_download_failure_registers_nothing(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    """The run is collected again from the start, so a partial batch would
+    leave a stored copy of every earlier file per attempt."""
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client, _ = _client_with_outputs({
+        "a.txt": b"first",
+        "b.txt": DelegationTransientError("connection reset"),
+    })
+    service = _make_service(client, attachment_registry=registry)
+    db_context = Database(db_engine)
+
+    with pytest.raises(DelegationTransientError):
+        await service.collect_outputs(
+            _finished_with_environment("env_out"),
+            owner_user_id="user-1",
+            conversation_id="conv-1",
+            taint_state=TurnTaintState.empty(),
+            db_context=db_context,
+        )
+
+    assert await registry.list_attachments(db_context, acting_user_id="user-1") == []
