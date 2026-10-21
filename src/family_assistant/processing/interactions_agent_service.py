@@ -21,7 +21,7 @@ import logging
 import mimetypes
 import re
 from collections import OrderedDict, deque
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -32,6 +32,7 @@ from family_assistant.llm.call_context import (
 )
 from family_assistant.llm.messages import UserMessage
 from family_assistant.llm.providers.google_genai_client import (
+    AgentStep,
     GoogleGenAIClient,
     SandboxFile,
     SandboxFileEntry,
@@ -112,6 +113,13 @@ OUTPUT_DOWNLOAD_MIN_BYTES_PER_SECOND = 256 * 1024
 # up to this much, so a retry continues rather than starting over.
 OUTPUT_DOWNLOAD_CACHE_BYTES = 200 * 1024 * 1024
 
+# How a peek at a running agent reads and reports. The event stream replays the
+# run from its start and then waits, so it is read for a few seconds and let go.
+PEEK_READ_SECONDS = 6.0
+PEEK_RECENT_STEPS = 8
+PEEK_STEP_CHARS = 300
+PEEK_FILES = 15
+
 # Added to a sandboxed agent's prompt on the submit path only: that is the path
 # whose completion collects outputs. A run streamed directly into a chat does
 # not, so its prompt must not promise the files.
@@ -185,6 +193,63 @@ class _OutputDownloadCache:
         """Drop an environment's files once its outputs have been delivered."""
         for key in [key for key in self._entries if key[0] == environment_id]:
             self._bytes -= len(self._entries.pop(key))
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def _execution_output(raw: str) -> str:
+    """A command's output without the sandbox's ``[STDOUT]``/``[STDERR]`` frame."""
+    if not raw.startswith("[STDOUT]"):
+        return _clip(raw, PEEK_STEP_CHARS)
+    stdout, _, stderr = raw.removeprefix("[STDOUT]").partition("[STDERR]")
+    stdout, stderr = stdout.strip(), stderr.strip()
+    if stderr:
+        return _clip(
+            f"{stdout} (stderr: {stderr})" if stdout else f"stderr: {stderr}",
+            PEEK_STEP_CHARS,
+        )
+    return _clip(stdout, PEEK_STEP_CHARS)
+
+
+def _describe_step(step: AgentStep) -> str:
+    """One line for one step of a running agent."""
+    text = _clip(step.text, PEEK_STEP_CHARS)
+    if step.kind == "code_execution_call":
+        return f"ran: {text}"
+    if step.kind == "code_execution_result":
+        label = "error output" if step.is_error else "output"
+        return f"{label}: {_execution_output(step.text) or '(none)'}"
+    if step.kind == "thought":
+        return f"thinking: {text}"
+    if step.kind == "model_output":
+        return f"wrote: {text}"
+    return f"{step.kind}: {text}" if text else step.kind
+
+
+def _describe_files(entries: Sequence[SandboxFileEntry]) -> str:
+    """The sandbox's files, most recently changed first."""
+    if not entries:
+        return "No files in its workspace yet."
+    newest = sorted(
+        entries,
+        key=lambda e: e.modified or datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )
+    lines = [f"Files in its workspace ({len(entries)}), most recently changed first:"]
+    for entry in newest[:PEEK_FILES]:
+        size = (
+            f"{entry.size_bytes:,} bytes"
+            if entry.size_bytes is not None
+            else "size unknown"
+        )
+        changed = f", changed {entry.modified:%H:%M:%S} UTC" if entry.modified else ""
+        lines.append(f"- /{entry.path} ({size}{changed})")
+    if len(entries) > PEEK_FILES:
+        lines.append(f"- … and {len(entries) - PEEK_FILES} more")
+    return "\n".join(lines)
 
 
 def _output_over_limit(size: int, total_so_far: int, max_file_size: int) -> str | None:
@@ -869,6 +934,30 @@ class InteractionsAgentProcessingService(ProcessingService):
             f"Downloading {entry.path} stalled {OUTPUT_DOWNLOAD_ATTEMPTS} times; "
             "the run will be read again."
         )
+
+    async def peek_async(self, remote_task_id: str) -> str:
+        """The run's latest steps and the files in its sandbox, as of now.
+
+        The steps come from its event stream, the only place a run in progress
+        shows them; the files from its environment, which is live. Both are
+        trimmed: this is a glance for whoever is waiting, not a transcript.
+        """
+        client = self._google_client()
+        interaction = await client.get_agent_interaction(remote_task_id)
+        steps = await client.peek_agent_interaction(
+            remote_task_id, read_seconds=PEEK_READ_SECONDS
+        )
+        lines = [f"Remote status: {interaction.status}. Steps so far: {len(steps)}."]
+        if steps:
+            recent = steps[-PEEK_RECENT_STEPS:]
+            lines.append(f"Latest {len(recent)} step(s), oldest first:")
+            lines.extend(f"- {_describe_step(step)}" for step in recent)
+        if interaction.environment_id:
+            entries = await client.list_sandbox_files(
+                interaction.environment_id, "workspace"
+            )
+            lines.append(_describe_files(entries))
+        return "\n".join(lines)
 
     async def observe_async(self, remote_task_id: str) -> RemoteObservation:
         """Read the interaction once and classify it. The only classifier.

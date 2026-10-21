@@ -242,6 +242,15 @@ failed on our side after a connection blip did real work, and its sandbox still 
 outputs are the files under `/workspace/outputs` modified since it started: the predecessor's are in
 the same directory and were returned with that run.
 
+### 6. A run in progress can be looked into
+
+`get_delegation_status` with `peek` reports what a running sandboxed agent has done so far: its
+latest steps and the files in its sandbox. A plain read of a run in progress carries no steps; its
+event stream does, replaying the run from the start and then waiting, so a peek reads the stream for
+a few seconds and lets go, which leaves the run untouched. The environment's file listing is live.
+What a peek returns is the delegate's output, so it raises the turn's taint by what the run's result
+would carry. Nothing is persisted, and it cannot steer the run.
+
 ## Deliberate simplifications
 
 - **Output files registered for a losing reader are left in place.** Two readers racing to finish

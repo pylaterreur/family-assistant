@@ -194,6 +194,100 @@ class SandboxFile:
     mime_type: str
 
 
+@dataclass
+class AgentStep:
+    """One step of a running agent, as its event stream describes it."""
+
+    # The step's type, e.g. ``code_execution_call`` or ``thought``.
+    kind: str
+    text: str = ""
+    is_error: bool = False
+
+
+def _event_dict(event: object) -> dict[str, Any]:  # ast-grep-ignore: no-dict-any
+    """An SSE event as plain JSON, whatever the SDK handed back."""
+    if isinstance(event, BaseModel):
+        return event.model_dump(mode="json", exclude_none=True)
+    if isinstance(event, dict):
+        return cast("dict[str, Any]", event)  # ast-grep-ignore: no-dict-any
+    return {}
+
+
+def _step_text(step: Mapping[str, Any]) -> str:  # ast-grep-ignore: no-dict-any
+    """The readable part of a step as it starts: the code run, or its output."""
+    arguments = step.get("arguments")
+    if isinstance(arguments, Mapping) and isinstance(arguments.get("code"), str):
+        return arguments["code"]
+    for key in ("result", "text"):
+        if isinstance(step.get(key), str):
+            return step[key]
+    pieces = [
+        part.get("text", "")
+        for part in step.get("content") or step.get("summary") or []
+        if isinstance(part, Mapping)
+    ]
+    return "".join(pieces)
+
+
+def _apply_step_event(
+    steps: list[AgentStep],
+    event: Mapping[str, Any],  # ast-grep-ignore: no-dict-any
+) -> None:
+    """Fold one stream event into the steps seen so far.
+
+    An ``error`` frame is the provider failing after the stream opened. It is
+    raised, classified, rather than folded away: the steps before it would read
+    as a successful look at a run that has in fact gone wrong.
+    """
+    event_type = event.get("event_type")
+    if event_type == "error":
+        raise _peek_stream_error(event.get("error") or {})
+    if event_type == "step.start":
+        step = event.get("step") or {}
+        steps.append(
+            AgentStep(
+                kind=str(step.get("type") or "step"),
+                text=_step_text(step),
+                is_error=bool(step.get("is_error")),
+            )
+        )
+    elif event_type in {"step.delta", "content.delta"} and steps:
+        delta = event.get("delta") or {}
+        content = delta.get("content")
+        text = (
+            content.get("text") if isinstance(content, Mapping) else delta.get("text")
+        )
+        if isinstance(text, str):
+            steps[-1].text += text
+
+
+# Error-frame codes a peek may simply try again later; the rest say the look
+# cannot succeed. An unrecognised code is treated as passing, since a peek is
+# only a look and the next one will say more.
+_PEEK_PERMANENT_ERROR_CODES = frozenset({
+    "unauthenticated",
+    "permission_denied",
+    "invalid_argument",
+    "invalid_request",
+})
+
+
+def _peek_stream_error(
+    error: Mapping[str, Any],  # ast-grep-ignore: no-dict-any
+) -> Exception:
+    """The delegation error an event stream's ``error`` frame amounts to."""
+    code = str(error.get("code") or "")
+    message = (
+        f"The run's event stream reported an error ({code or 'no code'}): "
+        f"{error.get('message') or 'no message'}"
+    )
+    if code == "not_found":
+        return DelegationTaskNotFoundError(message)
+    if code in _PEEK_PERMANENT_ERROR_CODES:
+        return DelegationPermanentError(message)
+    return DelegationTransientError(message)
+
+
 @dataclass(frozen=True)
 class SandboxFileEntry:
     """One file an agent run left in its environment."""
@@ -2394,6 +2488,42 @@ class GoogleGenAIClient(BaseLLMClient):
                     f"{path} could not be read back from the sandbox: {e}"
                 ) from e
             raise self._classify_agent_delegation_error(e) from e
+
+    async def peek_agent_interaction(
+        self, interaction_id: str, *, read_seconds: float
+    ) -> list[AgentStep]:
+        """The steps a run has taken so far, read from its event stream.
+
+        A plain read of a run in progress carries no steps until it finishes;
+        its event stream does, replaying every step from the start before
+        waiting for the next. The stream never closes while the run is going --
+        the agent may be in a minute-long command -- so it is read for
+        ``read_seconds`` and then let go, which leaves the run untouched.
+        """
+        steps: list[AgentStep] = []
+        try:
+            stream = await self.client.aio.interactions.get(interaction_id, stream=True)
+        except Exception as e:
+            raise self._classify_agent_delegation_error(e) from e
+        try:
+            async with asyncio.timeout(read_seconds):
+                async for event in cast("AsyncIterator[object]", stream):
+                    _apply_step_event(steps, _event_dict(event))
+        except TimeoutError:
+            pass
+        except (
+            DelegationTransientError,
+            DelegationPermanentError,
+            DelegationTaskNotFoundError,
+        ):
+            raise
+        except Exception as e:
+            raise self._classify_agent_delegation_error(e) from e
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                await close()
+        return steps
 
     async def cancel_agent_interaction(self, interaction_id: str) -> None:
         """Best-effort cancellation of any Interactions API agent run.

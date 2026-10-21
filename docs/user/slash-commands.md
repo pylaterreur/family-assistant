@@ -94,6 +94,9 @@ Five things to know:
   script) arrives as attachments on its reply, up to 20 files and 50 MB per run; the reply names any
   that didn't fit. Talking to `/coder` directly returns only its reply text, so ask it to include
   anything you want to keep.
+- **You can ask what it's up to.** While a coder job the assistant handed off is still running, ask
+  "what is the coder doing?" and the assistant looks in on it: the commands it ran most recently,
+  what they printed, and the files it has made so far. It can only look, not steer or stop the job.
 - **Picking a job back up keeps its files.** Ask the assistant to continue an earlier coder job,
   even one that stopped with an error, and the agent carries on in the same sandbox, with its
   earlier work and any new files you send.

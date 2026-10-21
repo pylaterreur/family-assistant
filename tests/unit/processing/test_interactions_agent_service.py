@@ -29,6 +29,7 @@ from family_assistant.llm import LLMOutput
 from family_assistant.llm.messages import UserMessage
 from family_assistant.llm.model_selection import ResolvedModelSelection
 from family_assistant.llm.providers.google_genai_client import (
+    AgentStep,
     GoogleGenAIClient,
     SandboxFile,
     SandboxFileEntry,
@@ -2123,4 +2124,59 @@ async def test_an_unlisted_file_over_a_limit_frees_its_slot(
     assert collected.omitted == [
         "a-huge.bin (9 bytes, over the attachment size limit)",
         "d.txt (beyond the first 2 files)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_peek_shows_the_latest_steps_and_newest_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A glance, not a transcript: recent steps, newest files, both capped."""
+    monkeypatch.setattr(interactions_agent_service, "PEEK_RECENT_STEPS", 2)
+    monkeypatch.setattr(interactions_agent_service, "PEEK_FILES", 2)
+    client = _antigravity_client("gemini-3.8-flash")
+    client.get_agent_interaction = AsyncMock(
+        return_value=Interaction(
+            id="inter_peek", status="in_progress", environment_id="env_peek"
+        )
+    )
+    client.peek_agent_interaction = AsyncMock(
+        return_value=[
+            AgentStep(kind="thought", text="planning"),
+            AgentStep(kind="code_execution_call", text="python build.py"),
+            AgentStep(
+                kind="code_execution_result",
+                text="[STDOUT]\nbuilt 2 parts\n[STDERR]\nwarning: thin wall\n",
+            ),
+        ]
+    )
+    at = datetime(2026, 10, 21, 8, 0, tzinfo=UTC)
+    client.list_sandbox_files = AsyncMock(
+        return_value=[
+            SandboxFileEntry(
+                path=f"workspace/{name}",
+                size_bytes=size,
+                mime_type=None,
+                modified=at + timedelta(minutes=minutes),
+            )
+            for name, size, minutes in (
+                ("old.stl", 10, 0),
+                ("plate.3mf", 2048, 9),
+                ("hat.stl", 1024, 5),
+            )
+        ]
+    )
+    service = _make_service(client)
+
+    account = await service.peek_async("inter_peek")
+
+    assert account.splitlines() == [
+        "Remote status: in_progress. Steps so far: 3.",
+        "Latest 2 step(s), oldest first:",
+        "- ran: python build.py",
+        "- output: built 2 parts (stderr: warning: thin wall)",
+        "Files in its workspace (3), most recently changed first:",
+        "- /workspace/plate.3mf (2,048 bytes, changed 08:09:00 UTC)",
+        "- /workspace/hat.stl (1,024 bytes, changed 08:05:00 UTC)",
+        "- … and 1 more",
     ]
