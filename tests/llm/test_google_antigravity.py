@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai.interactions import (
     Interaction,
     InteractionCompletedEvent,
@@ -34,6 +35,7 @@ from family_assistant.llm.messages import (
     TextContentPart,
     UserMessage,
 )
+from family_assistant.llm.providers import google_genai_client
 from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
     SandboxFile,
@@ -61,6 +63,13 @@ _SDK_ASYNC_ENVIRONMENTS_BASE = importlib.import_module(
     "google.genai._gaos.environments"
 ).AsyncEnvironments
 _SDK_ASYNC_ENVIRONMENT_FILES = type(genai.Client(api_key="test").aio.environments.files)
+# Likewise, the client-facing listing forwards to this base.
+_SDK_ASYNC_ENVIRONMENT_FILES_BASE = importlib.import_module(
+    "google.genai._gaos.files"
+).AsyncFiles
+_SDK_ENVIRONMENT_FILES_TYPES = importlib.import_module(
+    "google.genai._gaos.types.environments.getenvironmentfilesresponse"
+)
 _CREATE_INTERACTION_ADAPTER = TypeAdapter(
     _SDK_INTERACTIONS_MODULE.CreateInteractionRequestBody
 )
@@ -79,6 +88,8 @@ class _SdkCalls:
     get: AsyncMock
     create_environment: AsyncMock
     upload: AsyncMock
+    list_files: AsyncMock
+    download: AsyncMock
 
 
 @pytest.fixture
@@ -90,6 +101,12 @@ def sdk() -> Generator[_SdkCalls]:
             _SDK_ASYNC_ENVIRONMENTS_BASE, "create_environment", autospec=True
         ) as create_environment,
         patch.object(_SDK_ASYNC_ENVIRONMENT_FILES, "upload", autospec=True) as upload,
+        patch.object(
+            _SDK_ASYNC_ENVIRONMENT_FILES_BASE, "list", autospec=True
+        ) as list_files,
+        patch.object(
+            _SDK_ASYNC_ENVIRONMENT_FILES, "download", autospec=True
+        ) as download,
     ):
         create_environment.return_value = _SDK_ENVIRONMENT_TYPES.Environment(id="env_1")
         yield _SdkCalls(
@@ -97,6 +114,8 @@ def sdk() -> Generator[_SdkCalls]:
             get=get,
             create_environment=create_environment,
             upload=upload,
+            list_files=list_files,
+            download=download,
         )
 
 
@@ -287,6 +306,7 @@ async def test_start_agent_interaction_submits_antigravity_without_streaming(
     )
     interaction = Interaction(id="inter_ag_submit", status="in_progress")
     sdk.create.return_value = interaction
+    _previous_run_in(sdk, "env_prev")
 
     result = await client.start_agent_interaction(
         [UserMessage(content="Do the thing.")],
@@ -453,6 +473,7 @@ async def test_submit_path_uploads_files_into_an_environment(
     assert create.call_args.kwargs["environment"] == {
         "type": "remote",
         "environment_id": "env_1",
+        "network": "disabled",
     }
     body = _CREATE_INTERACTION_ADAPTER.validate_python(create.call_args.kwargs)
     assert body.environment.environment_id == "env_1"
@@ -526,8 +547,10 @@ async def test_default_sandbox_is_stated_rather_than_omitted(
 
     await client.start_agent_interaction([UserMessage(content="Do the thing.")])
 
+    # A submitted run names the environment created for it, so that a resume
+    # can bring files into the same sandbox.
     call_kwargs = sdk.create.call_args.kwargs
-    assert call_kwargs["environment"] == {"type": "remote"}
+    assert call_kwargs["environment"] == {"type": "remote", "environment_id": "env_1"}
 
 
 @pytest.mark.asyncio
@@ -589,16 +612,21 @@ _STORED_GITHUB = EgressResolution(
 async def test_a_stored_git_credential_is_bound_to_the_sandbox_variable(
     sdk: _SdkCalls,
 ) -> None:
-    """The request the installed SDK accepts carries the credential binding."""
+    """The binding is made when the sandbox is created.
+
+    A run in an existing environment ignores an ``env`` sent with the run, so
+    the variable has to be on the environment itself.
+    """
     client = _egress_client(_STORED_GITHUB)
     create = _accept_submissions(sdk)
 
     await client.start_agent_interaction([UserMessage(content="Fix the bug.")])
 
-    body = _CREATE_INTERACTION_ADAPTER.validate_python(create.call_args.kwargs)
-    assert body.environment.model_dump(exclude_none=True)["env"] == {
-        GITHUB_GIT_AUTH_ENV: {"credential": "fa-egress-github-app-1-git"}
+    assert sdk.create_environment.await_args.kwargs["extra_body"] == {
+        "env": {GITHUB_GIT_AUTH_ENV: {"credential": "fa-egress-github-app-1-git"}}
     }
+    body = _CREATE_INTERACTION_ADAPTER.validate_python(create.call_args.kwargs)
+    assert body.environment.environment_id == "env_1"
 
 
 @pytest.mark.asyncio
@@ -719,3 +747,195 @@ async def test_a_misconfigured_egress_credential_still_fails_fast(
 
     with pytest.raises(AntigravityEgressError):
         await client.start_agent_interaction([UserMessage(content="Fix the bug.")])
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_wrote_no_outputs_lists_none(
+    sdk: _SdkCalls,
+) -> None:
+    """The API answers a missing directory with a 404, which must not read as
+    the run itself having vanished."""
+    client = _egress_client("disabled")
+    request = httpx.Request("GET", "https://generativelanguage.googleapis.com/")
+    sdk.list_files.side_effect = _SDK_COMPAT_ERRORS.NotFoundError(
+        "Path 'workspace/outputs' not found",
+        response=httpx.Response(404, request=request),
+        body=None,
+    )
+
+    assert await client.list_sandbox_files("env_1", "workspace/outputs") == []
+    sdk.list_files.assert_awaited_once_with(
+        client.client.aio.environments.files,
+        environment="env_1",
+        path="workspace/outputs",
+        recursive=True,
+        page_token=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_every_page_of_an_output_listing_is_read(
+    sdk: _SdkCalls,
+) -> None:
+    """The SDK hands back one page; files past it would be lost unseen."""
+    client = _egress_client("disabled")
+
+    def page(path: str, token: str | None) -> object:
+        entry = _SDK_ENVIRONMENT_FILES_TYPES.EnvironmentFile(
+            path=path, type="FILE", size_bytes=1, mime_type="text/plain"
+        )
+        return _SDK_ENVIRONMENT_FILES_TYPES.GetEnvironmentFilesResponse(
+            files=[entry], next_page_token=token
+        )
+
+    sdk.list_files.side_effect = [
+        page("workspace/outputs/a.txt", "page-2"),
+        page("workspace/outputs/b.txt", None),
+    ]
+
+    entries = await client.list_sandbox_files("env_1", "workspace/outputs")
+
+    assert [entry.path for entry in entries] == [
+        "workspace/outputs/a.txt",
+        "workspace/outputs/b.txt",
+    ]
+    assert sdk.list_files.await_args_list[1].kwargs["page_token"] == "page-2"
+
+
+def _previous_run_in(sdk: _SdkCalls, environment_id: str) -> None:
+    """The interaction a resume chains onto ran in ``environment_id``."""
+    sdk.get.return_value = Interaction(
+        id="inter_prev", status="completed", environment_id=environment_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_run_continues_in_its_predecessors_sandbox(
+    sdk: _SdkCalls,
+) -> None:
+    """The conversation and the disk come back together.
+
+    Chained without it, the API forks the earlier disk into a sandbox of its
+    own and leaves out files uploaded for the resume; given a fresh one, the
+    agent would find its conversation but not its work.
+    """
+    client = _egress_client("disabled")
+    create = _accept_submissions(sdk)
+    _previous_run_in(sdk, "env_prev")
+
+    await client.start_agent_interaction(
+        [UserMessage(content="Now render the second bookmark.")],
+        previous_interaction_id="inter_prev",
+        sandbox_files=[
+            SandboxFile(
+                path="/workspace/ref.png", content=b"png", mime_type="image/png"
+            )
+        ],
+    )
+
+    sdk.create_environment.assert_not_awaited()
+    assert sdk.upload.await_args.kwargs["environment"] == "env_prev"
+    assert create.call_args.kwargs["previous_interaction_id"] == "inter_prev"
+    assert create.call_args.kwargs["environment"] == {
+        "type": "remote",
+        "environment_id": "env_prev",
+        "network": "disabled",
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_upload_into_a_sandbox_not_yet_visible_is_retried(
+    sdk: _SdkCalls,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A just-created environment can 404 an upload for about a second."""
+    monkeypatch.setattr(
+        google_genai_client, "_UPLOAD_NOT_FOUND_RETRY_DELAYS", (0.0, 0.0)
+    )
+    client = _egress_client("disabled")
+    create = _accept_submissions(sdk)
+    sdk.upload.side_effect = [_not_found(), None]
+
+    await client.start_agent_interaction(
+        [UserMessage(content="Analyse the file.")],
+        sandbox_files=[
+            SandboxFile(path="/workspace/a.csv", content=b"a,b", mime_type="text/csv")
+        ],
+    )
+
+    assert sdk.upload.await_count == 2
+    create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_that_never_takes_uploads_fails_the_resume_plainly(
+    sdk: _SdkCalls,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run the API gave an implicit sandbox left one that refuses uploads."""
+    monkeypatch.setattr(
+        google_genai_client, "_UPLOAD_NOT_FOUND_RETRY_DELAYS", (0.0, 0.0)
+    )
+    client = _egress_client("disabled")
+    create = _accept_submissions(sdk)
+    _previous_run_in(sdk, "env_implicit")
+    sdk.upload.side_effect = _not_found()
+
+    with pytest.raises(DelegationPermanentError, match="does not accept new files"):
+        await client.start_agent_interaction(
+            [UserMessage(content="Use this too.")],
+            previous_interaction_id="inter_prev",
+            sandbox_files=[
+                SandboxFile(path="/workspace/b.csv", content=b"b", mime_type="text/csv")
+            ],
+        )
+    create.assert_not_called()
+
+
+def _not_found() -> Exception:
+    request = httpx.Request("POST", "https://generativelanguage.googleapis.com/")
+    return _SDK_COMPAT_ERRORS.NotFoundError(
+        "Environment not found or not accessible.",
+        response=httpx.Response(404, request=request),
+        body=None,
+    )
+
+
+def _download_not_found() -> genai_errors.ClientError:
+    """What the file transfer helpers raise for a missing environment."""
+    return genai_errors.ClientError(
+        404,
+        {"error": {"message": "Environment not found or not accessible."}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_download_from_a_sandbox_not_yet_visible_is_retried(
+    sdk: _SdkCalls,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        google_genai_client, "_UPLOAD_NOT_FOUND_RETRY_DELAYS", (0.0, 0.0)
+    )
+    client = _egress_client("disabled")
+    sdk.download.side_effect = [_download_not_found(), b"model bytes"]
+
+    content = await client.download_sandbox_file("env_1", "workspace/outputs/a.stl")
+
+    assert content == b"model bytes"
+
+
+@pytest.mark.asyncio
+async def test_a_file_that_stays_missing_is_lost_not_the_run(
+    sdk: _SdkCalls,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 would otherwise read as the run gone, and the run be resubmitted."""
+    monkeypatch.setattr(
+        google_genai_client, "_UPLOAD_NOT_FOUND_RETRY_DELAYS", (0.0, 0.0)
+    )
+    client = _egress_client("disabled")
+    sdk.download.side_effect = _download_not_found()
+
+    with pytest.raises(DelegationPermanentError, match="could not be read back"):
+        await client.download_sandbox_file("env_1", "workspace/outputs/a.stl")

@@ -117,6 +117,7 @@ from family_assistant.processing import (
     ProcessingService,
     ProcessingServiceConfig,
 )
+from family_assistant.processing.delegation_turns import RunningDelegationTurns
 from family_assistant.processing.history_relevance import (
     JevTurnRelevance,
     TurnRelevance,
@@ -624,6 +625,7 @@ class Assistant:
         self.weather_service: WeatherService | None = None
         self.embedding_generator: EmbeddingGenerator | None = None
         self.processing_services_registry: dict[str, DelegatableService] = {}
+        self.delegation_turns = RunningDelegationTurns()
         # One client per tier, shared by every profile that may run on it: a
         # tier's client is configured from the tier alone, so per-profile copies
         # would be identical objects multiplied by the profile count.
@@ -1652,6 +1654,7 @@ class Assistant:
                 if self.fastapi_app is not None
                 else None
             ),
+            delegation_turns=self.delegation_turns,
         )
 
         # Render once now so a template referencing a placeholder that no

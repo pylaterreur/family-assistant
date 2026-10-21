@@ -571,7 +571,8 @@ class ProcessingConfig(BaseModel):
     web_history_max_age_hours: float | None = None
     # The first message after this much quiet is a compaction event. Provider
     # caches have expired by then, so re-deciding the window costs nothing
-    # extra. None disables idle events.
+    # extra. None or 0 disables idle events; the `web_` variant falls back to
+    # the plain one when unset, so 0 is how the web interface opts out alone.
     history_idle_gap_minutes: float | None = None
     web_history_idle_gap_minutes: float | None = None
     llm_model: str | None = None

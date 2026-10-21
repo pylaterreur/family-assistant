@@ -212,8 +212,36 @@ routing the user's own file is allowed without one.
 - **Attachment size.** Capped so one delegation cannot upload an arbitrarily large payload. The cap
   is a constant rather than config until there is evidence about what real files look like.
 
+### 4. Output files come back the same way
+
+What the agent saves under `/workspace/outputs` is returned as attachments on a delegated run's
+result. The prompt states the directory and the caps (20 files, 50 MB a run) on the submit path
+only, since a run streamed straight into a chat collects nothing and must not promise files; a file
+past the caps is named in the reply rather than dropped. The run's environment outlives it, so the
+files are read back after it finishes -- through one worker step that both terminal paths, the
+completing poll and late-completion recovery, go through. Each file is owned by the run's user and
+carries the taint of the run's own reply, since the agent produced both from the same inputs. A
+transient failure fetching them leaves the run to be read again; a permanent one delivers the text
+and says the files could not be fetched.
+
+### 5. A resumed run continues in the same sandbox
+
+Resuming a delegation chains onto the earlier run's interaction, and the resumed run executes in
+that run's environment, so the agent finds its earlier work where it left it, along with any file
+sent with the resume. Every delegated sandbox run is therefore given an environment created through
+the API, even with nothing to upload, because only such an environment accepts uploads later. For a
+sandboxed agent, a resume chains onto the latest run that reached the provider, failed or not: a run
+failed on our side after a connection blip did real work, and its sandbox still holds it. Its
+outputs are the files under `/workspace/outputs` modified since it started: the predecessor's are in
+the same directory and were returned with that run.
+
 ## Deliberate simplifications
 
+- **Output files registered for a losing reader are left in place.** Two readers racing to finish
+  one run can both fetch its outputs before one wins the terminal transition. The loser's copies are
+  referenced by nothing, and the unreferenced-attachment sweep does not collect tool attachments, so
+  they stay as stored files. Racing reconcilers are rare and the cost is storage, not a wrong
+  delivery; registering after the transition instead would split the result write in two.
 - **Uploaded environments are not deleted.** Deleting an environment deletes the interactions run on
   it, so it cannot be removed while the result is still to be read, and a run on an implicit sandbox
   leaves a stored environment behind just the same. Retention is the provider's, as it already was
