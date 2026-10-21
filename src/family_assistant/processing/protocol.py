@@ -315,6 +315,9 @@ class RemoteObservation:
     resolved_model: str | None = None
     error_summary: str | None = None
     event_cursor: str | None = None
+    # The sandbox the run executed in, for a target whose runs leave files
+    # behind (see OutputCollectingDelegationService). Not persisted.
+    environment_id: str | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -427,7 +430,7 @@ class OutputCollectingDelegationService(Protocol):
 
     async def collect_outputs(
         self,
-        remote_task_id: str,
+        observation: RemoteObservation,
         *,
         owner_user_id: str | None,
         conversation_id: str,

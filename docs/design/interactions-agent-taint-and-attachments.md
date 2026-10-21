@@ -214,14 +214,15 @@ routing the user's own file is allowed without one.
 
 ### 4. Output files come back the same way
 
-What the agent saves under `/workspace/outputs` is returned as attachments on the run's result. The
-coder's prompt states the directory and the caps (20 files, 50 MB a run); a file past them is named
-in the reply rather than dropped. The run's environment outlives it, so the files are read back
-after it finishes -- through one worker step that both terminal paths, the completing poll and
-late-completion recovery, go through. Each file is owned by the run's user and carries the taint of
-the run's own reply, since the agent produced both from the same inputs. A transient failure
-fetching them leaves the run to be read again; a permanent one delivers the text and says the files
-could not be fetched.
+What the agent saves under `/workspace/outputs` is returned as attachments on a delegated run's
+result. The prompt states the directory and the caps (20 files, 50 MB a run) on the submit path
+only, since a run streamed straight into a chat collects nothing and must not promise files; a file
+past the caps is named in the reply rather than dropped. The run's environment outlives it, so the
+files are read back after it finishes -- through one worker step that both terminal paths, the
+completing poll and late-completion recovery, go through. Each file is owned by the run's user and
+carries the taint of the run's own reply, since the agent produced both from the same inputs. A
+transient failure fetching them leaves the run to be read again; a permanent one delivers the text
+and says the files could not be fetched.
 
 ## Deliberate simplifications
 

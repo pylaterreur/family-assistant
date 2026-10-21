@@ -2252,23 +2252,37 @@ class GoogleGenAIClient(BaseLLMClient):
         error: the API answers it with a 404, which would otherwise classify as
         the *run* having vanished.
         """
-        try:
-            response = await self.client.aio.environments.files.list(
-                environment=environment_id, path=directory, recursive=True
+        entries: list[SandboxFileEntry] = []
+        page_token: str | None = None
+        while True:
+            try:
+                response = await self.client.aio.environments.files.list(
+                    environment=environment_id,
+                    path=directory,
+                    recursive=True,
+                    page_token=page_token,
+                )
+            except Exception as e:
+                if getattr(e, "status_code", None) == 404:
+                    return []
+                raise self._classify_agent_delegation_error(e) from e
+            entries.extend(
+                SandboxFileEntry(
+                    path=entry.path,
+                    size_bytes=entry.size_bytes,
+                    mime_type=entry.mime_type,
+                )
+                for entry in response.files or []
+                if entry.type == "FILE" and entry.path
             )
-        except Exception as e:
-            if getattr(e, "status_code", None) == 404:
-                return []
-            raise self._classify_agent_delegation_error(e) from e
-        return [
-            SandboxFileEntry(
-                path=entry.path,
-                size_bytes=entry.size_bytes,
-                mime_type=entry.mime_type,
-            )
-            for entry in response.files or []
-            if entry.type == "FILE" and entry.path
-        ]
+            if not response.next_page_token:
+                return entries
+            page_token = response.next_page_token
+
+    @property
+    def runs_in_sandbox(self) -> bool:
+        """Whether this client's agent works in a sandbox it can leave files in."""
+        return is_antigravity_model(self._agent_name)
 
     async def download_sandbox_file(self, environment_id: str, path: str) -> bytes:
         """The content of one file in a run's environment."""

@@ -10,6 +10,7 @@ integration test of the shipped ``coder`` profile.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, TypedDict
 
 import pytest
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
 
 
 class _CollectCall(TypedDict):
-    remote_task_id: str
+    environment_id: str | None
     owner_user_id: str | None
     conversation_id: str
     taint_state: TurnTaintState
@@ -66,7 +67,7 @@ class FakeCollectingService(FakeObservableService):
 
     async def collect_outputs(
         self,
-        remote_task_id: str,
+        observation: RemoteObservation,
         *,
         owner_user_id: str | None,
         conversation_id: str,
@@ -75,7 +76,7 @@ class FakeCollectingService(FakeObservableService):
     ) -> CollectedOutputs:
         _ = db_context
         self.collect_calls.append({
-            "remote_task_id": remote_task_id,
+            "environment_id": observation.environment_id,
             "owner_user_id": owner_user_id,
             "conversation_id": conversation_id,
             "taint_state": taint_state,
@@ -86,8 +87,11 @@ class FakeCollectingService(FakeObservableService):
 
 
 def _completed() -> RemoteObservation:
-    return _observation(
-        RemoteDisposition.COMPLETED, output_text="Both bookmarks are done."
+    return replace(
+        _observation(
+            RemoteDisposition.COMPLETED, output_text="Both bookmarks are done."
+        ),
+        environment_id="env-bookmarks",
     )
 
 
@@ -138,7 +142,7 @@ async def test_a_completed_poll_delivers_the_runs_output_files(
     assert run["result_attachment_ids_json"] == ["att-stl", "att-png"]
     assert len(target.collect_calls) == 1
     call = target.collect_calls[0]
-    assert call["remote_task_id"] == REMOTE_TASK_ID
+    assert call["environment_id"] == "env-bookmarks"
     assert call["owner_user_id"] == "async-delegation-user"
     assert call["conversation_id"] == TEST_CONVERSATION_ID
 

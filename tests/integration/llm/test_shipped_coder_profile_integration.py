@@ -233,6 +233,9 @@ async def test_the_agent_receives_the_profiles_prompt_not_its_routing_blurb(
     assert "spawn_worker" not in instruction
     assert "complex_tasks" not in instruction
     assert not instruction.startswith("System:")
+    # A delegated run collects what the agent leaves for the user, so it is
+    # told where to leave it.
+    assert "/workspace/outputs" in instruction
 
 
 @pytest.mark.asyncio
@@ -316,7 +319,7 @@ async def test_files_the_agent_leaves_in_outputs_come_back_as_attachments(
 
     db_context = Database(db_engine)
     collected = await coder.collect_outputs(
-        interaction.id,
+        await coder.observe_async(interaction.id),
         owner_user_id="tester",
         conversation_id="coder-integration",
         taint_state=TurnTaintState.empty(),

@@ -91,6 +91,19 @@ _SANDBOX_OUTPUT_DIR = "workspace/outputs"
 MAX_RETURNED_OUTPUT_FILES = 20
 MAX_RETURNED_OUTPUT_BYTES = 50 * 1024 * 1024
 
+# Added to a sandboxed agent's prompt on the submit path only: that is the path
+# whose completion collects outputs. A run streamed directly into a chat does
+# not, so its prompt must not promise the files.
+_OUTPUTS_INSTRUCTION = (
+    "Files you are sent are in /workspace. Save every file meant for "
+    "{user_name} (a model, image, document or data file) under "
+    "/workspace/outputs: the files there are sent to {user_name} as "
+    "attachments with your reply, up to "
+    f"{MAX_RETURNED_OUTPUT_FILES} files and "
+    f"{MAX_RETURNED_OUTPUT_BYTES // (1024 * 1024)} MB in all. Nothing else in "
+    "the sandbox is returned."
+)
+
 # Filenames come from user-supplied metadata, so they are reduced to a safe
 # basename: no directory traversal, no separators, nothing that could land the
 # file outside the mount directory.
@@ -504,6 +517,15 @@ class InteractionsAgentProcessingService(ProcessingService):
             state = state.add_source(source)
 
         system_prompt = self.format_system_prompt(user_name=user_name)
+        if self._google_client(llm_client).runs_in_sandbox:
+            system_prompt = "\n\n".join(
+                part
+                for part in (
+                    system_prompt,
+                    _OUTPUTS_INSTRUCTION.format(user_name=user_name),
+                )
+                if part
+            )
         user_text = self._extract_user_content_for_history(content_parts)
         messages: list[LLMMessage] = []
         if system_prompt:
@@ -560,7 +582,7 @@ class InteractionsAgentProcessingService(ProcessingService):
 
     async def collect_outputs(
         self,
-        remote_task_id: str,
+        observation: RemoteObservation,
         *,
         owner_user_id: str | None,
         conversation_id: str,
@@ -576,13 +598,11 @@ class InteractionsAgentProcessingService(ProcessingService):
         the run's own reply, since the agent produced both from the same
         inputs.
         """
-        client = self._google_client()
-        interaction = await client.get_agent_interaction(remote_task_id)
-        if not interaction.environment_id:
+        environment_id = observation.environment_id
+        if not environment_id:
             return CollectedOutputs(attachment_ids=[], omitted=[])
-        entries = await client.list_sandbox_files(
-            interaction.environment_id, _SANDBOX_OUTPUT_DIR
-        )
+        client = self._google_client()
+        entries = await client.list_sandbox_files(environment_id, _SANDBOX_OUTPUT_DIR)
         if not entries:
             return CollectedOutputs(attachment_ids=[], omitted=[])
         registry = self.attachment_registry
@@ -612,9 +632,7 @@ class InteractionsAgentProcessingService(ProcessingService):
                     f"{relative} ({size:,} bytes, over the {limit_mb} MB a run returns)"
                 )
                 continue
-            content = await client.download_sandbox_file(
-                interaction.environment_id, entry.path
-            )
+            content = await client.download_sandbox_file(environment_id, entry.path)
             total_bytes += len(content)
             metadata = await registry.store_and_register_tool_attachment(
                 file_content=content,
@@ -692,6 +710,7 @@ class InteractionsAgentProcessingService(ProcessingService):
             resolved_model=interaction.model,
             error_summary=error_summary,
             event_cursor=interaction.previous_interaction_id,
+            environment_id=interaction.environment_id,
         )
 
     def _completion_is_useful(

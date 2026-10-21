@@ -3310,7 +3310,7 @@ class TaskWorker:
             and observation.disposition is RemoteDisposition.COMPLETED
         ):
             result = await self._with_collected_outputs(
-                exec_context, run, target_service, remote_task_id, result
+                exec_context, run, target_service, observation, result
             )
         return result, observation, False
 
@@ -3319,7 +3319,7 @@ class TaskWorker:
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
         target_service: PollableDelegationService | ObservableDelegationService,
-        remote_task_id: str,
+        observation: RemoteObservation,
         result: ChatInteractionResult,
     ) -> ChatInteractionResult:
         """Attach the files a completed run left behind to its result.
@@ -3338,7 +3338,7 @@ class TaskWorker:
         )
         try:
             collected = await target_service.collect_outputs(
-                remote_task_id,
+                observation,
                 owner_user_id=run["user_id"],
                 conversation_id=run["conversation_id"],
                 taint_state=taint_state,
@@ -4057,21 +4057,18 @@ class TaskWorker:
         ):
             return False
         clock = exec_context.clock or self.clock
-        remote_task_id = run["remote_task_id"]
-        result = observation.result
-        if remote_task_id is not None:
-            try:
-                result = await self._with_collected_outputs(
-                    exec_context, run, target_service, remote_task_id, result
-                )
-            except DelegationTransientError:
-                # The run stays eligible, so the next reading tries again.
-                logger.info(
-                    "Output files of delegation %s were not fetched; retrying later.",
-                    run["delegation_id"],
-                    exc_info=True,
-                )
-                return False
+        try:
+            result = await self._with_collected_outputs(
+                exec_context, run, target_service, observation, observation.result
+            )
+        except DelegationTransientError:
+            # The run stays eligible, so the next reading tries again.
+            logger.info(
+                "Output files of delegation %s were not fetched; retrying later.",
+                run["delegation_id"],
+                exc_info=True,
+            )
+            return False
         recovered = (
             await exec_context.db_context.delegation_runs.recover_late_completion(
                 delegation_id=run["delegation_id"],
