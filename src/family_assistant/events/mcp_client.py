@@ -64,7 +64,7 @@ class MCPEventOccurrence:
 
     event_id: str
     name: str
-    timestamp: str | None
+    timestamp: str
     # ast-grep-ignore: no-dict-any - payloads follow each server's payloadSchema
     data: dict[str, Any]
 
@@ -274,16 +274,21 @@ def _event_type(entry: dict[str, Any]) -> MCPEventType:
 # ast-grep-ignore: no-dict-any - a delivered event is protocol-defined JSON
 def _occurrence(entry: dict[str, Any]) -> MCPEventOccurrence:
     event_id = entry.get("eventId")
-    data = entry.get("data")
-    if not isinstance(event_id, str) or not event_id or not isinstance(data, dict):
-        raise MCPEventsError(
-            "events/poll returned a malformed event (it needs an eventId and "
-            f"object data): {entry!r}"
-        )
     timestamp = entry.get("timestamp")
+    data = entry.get("data")
+    if (
+        not isinstance(event_id, str)
+        or not event_id
+        or not isinstance(timestamp, str)
+        or not isinstance(data, dict)
+    ):
+        raise MCPEventsError(
+            "events/poll returned a malformed event (it needs an eventId, a "
+            f"timestamp and object data): {entry!r}"
+        )
     return MCPEventOccurrence(
         event_id=event_id,
         name=str(entry.get("name") or ""),
-        timestamp=timestamp if isinstance(timestamp, str) else None,
+        timestamp=timestamp,
         data=data,
     )

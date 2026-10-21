@@ -635,8 +635,17 @@ async def test_an_action_edit_rechecks_the_trigger_for_the_new_poller(
     "event",
     [
         pytest.param("not an event", id="not-an-object"),
-        pytest.param({"eventId": "evt_1", "name": "a.b"}, id="no-data"),
-        pytest.param({"name": "a.b", "data": {}}, id="no-event-id"),
+        pytest.param(
+            {"eventId": "evt_1", "name": "a.b", "timestamp": "2026-10-21T09:00:00Z"},
+            id="no-data",
+        ),
+        pytest.param(
+            {"name": "a.b", "timestamp": "2026-10-21T09:00:00Z", "data": {}},
+            id="no-event-id",
+        ),
+        pytest.param(
+            {"eventId": "evt_1", "name": "a.b", "data": {}}, id="no-timestamp"
+        ),
     ],
 )
 async def test_a_malformed_page_is_not_skipped(event: object) -> None:
