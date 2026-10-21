@@ -2212,28 +2212,26 @@ async def test_a_run_without_a_provider_start_is_bounded_by_its_submit_time(
     registry = AttachmentRegistry(
         storage_path=str(tmp_path), db_engine=db_engine, config=None
     )
-    client, download = _client_with_outputs({})
+    client = _client_with_outputs({})
     submitted = datetime(2026, 10, 21, 9, 0, 0, tzinfo=UTC)
-    client.list_sandbox_files = AsyncMock(
-        return_value=[
-            SandboxFileEntry(
-                path=f"workspace/outputs/{name}",
-                size_bytes=1,
-                mime_type="text/plain",
-                modified=submitted + offset,
-            )
-            for name, offset in (
-                ("predecessor.stl", timedelta(minutes=-10)),
-                ("just-before.txt", timedelta(seconds=-3)),
-                ("new.stl", timedelta(minutes=2)),
-            )
-        ]
-    )
+    client.sandbox_entries = [
+        SandboxFileEntry(
+            path=f"workspace/outputs/{name}",
+            size_bytes=1,
+            mime_type="text/plain",
+            modified=submitted + offset,
+        )
+        for name, offset in (
+            ("predecessor.stl", timedelta(minutes=-10)),
+            ("just-before.txt", timedelta(seconds=-3)),
+            ("new.stl", timedelta(minutes=2)),
+        )
+    ]
 
-    async def fetch(_environment_id: str, _path: str) -> bytes:
+    async def fetch(_path: str) -> bytes:
         return b"x"
 
-    download.side_effect = fetch
+    client.respond_to_download = fetch
     service = _make_service(client, attachment_registry=registry)
 
     await service.collect_outputs(
@@ -2245,5 +2243,5 @@ async def test_a_run_without_a_provider_start_is_bounded_by_its_submit_time(
         submitted_at=submitted,
     )
 
-    fetched = sorted(call.args[1] for call in download.await_args_list)
+    fetched = sorted(client.downloaded)
     assert fetched == ["workspace/outputs/just-before.txt", "workspace/outputs/new.stl"]

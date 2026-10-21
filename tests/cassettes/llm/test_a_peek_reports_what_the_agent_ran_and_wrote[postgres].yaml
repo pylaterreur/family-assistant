@@ -23,8 +23,8 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAC/6tWykxRslJKsTRMNUgzMjE1SzG0NE9LNU81TjEysDBPNjI0NjQzSFTSUSouSSwp
-        LQaqTUwuySxLVaoFAAvwOHI7AAAA
+        H4sIAAAAAAAC/6tWykxRslIyS0wzTUxMSzJMMzAxtbBMsky1sDAwNLM0TU2yMLQwM1bSUSouSSwp
+        LQaqTUwuySxLVaoFACvzoMw7AAAA
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -33,11 +33,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 12:02:14 GMT
+      - Wed, 21 Oct 2026 14:09:32 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=2795
+      - gfet4t7; dur=2279
       Transfer-Encoding:
       - chunked
       Vary:
@@ -57,7 +57,7 @@ interactions:
     body: '{"agent": "antigravity-preview-09-2026", "input": "Run `printf peeked >
       /workspace/a.txt`, then run `echo hello-peek`, then reply with just the word
       DONE.", "agent_config": {"model": "gemini-3.8-flash", "type": "antigravity"},
-      "background": true, "environment": {"environment_id": "d91e0f2456d197fe7e3d2087c213160a",
+      "background": true, "environment": {"environment_id": "6af5aafb1f04589b9e8801695eb81863",
       "type": "remote"}, "stream": false, "system_instruction": "[Active Processing
       Profile: coder]\n\nYou are a coding agent working for Tester. You run in an
       isolated sandbox with code execution, a scratch filesystem and web access; you
@@ -77,7 +77,9 @@ interactions:
       before continuing.\n\nCurrent time: <pinned>\n\nFiles you are sent are in /workspace.
       Save every file meant for Tester (a model, image, document or data file) under
       /workspace/outputs: the files there are sent to Tester as attachments with your
-      reply, up to 20 files and 50 MB in all. Nothing else in the sandbox is returned."}'
+      reply, up to 20 files and 50 MB in all. Only files saved or changed during this
+      run are sent, so to send again a file an earlier run already returned, save
+      it again. Nothing else in the sandbox is returned."}'
     headers:
       accept:
       - application/json
@@ -86,7 +88,7 @@ interactions:
       connection:
       - keep-alive
       content-length:
-      - '1903'
+      - '2029'
       content-type:
       - application/json
       host:
@@ -100,11 +102,11 @@ interactions:
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAC/5SPzW6DMBCE38XXlso2f4Vj2iTKJVFRKIQL2tob6ioYaoyrqOq71+QNcp2dmf3m
-        lyhJcuJY+/Ipo30fN6cq+z6VxQXqXSzX7K1hYy22sjisdjW+NnNVbRz0m3VTXa6HutiXWwnv4UqX
-        x448ksmCnSffqHQ7mqEzOE1eFgbB4vKJU54EjAacHRnPKc9Z/MR5FEdRmiUPlOaUev88yrv8qJ0y
-        g+5R2/Y2SGYM6dn7Esmy9IwphpLT51RwFrKEwoKKximBrVVofMKTawlG+svw8YXC3kZYNCCsGrSX
-        ofP1XgVtVWfAKXsNRoNO4U9As2AhJX//AAAA//8DAEOlqrFRAQAA
+        H4sIAAAAAAAC/5SPzVKEMBCE34WrYiWwRMIRF8vlwBa6P8CFSsiAUQlUCFiU5bsb9g28ftPd0/3j
+        SOFEzoLrp3cxl15VlUV6aJLsM8dlIBKcZ346n9UlPsaHgvdZf70+r28v8b5KsuuxeM3Oe7HyrxTn
+        p865dybDzDzZRKnqUQ+dhmmyuNHADGyfPOQRFyPXwye8ixCNfP8BE0QfiUfIHUIRQlY/j+JfelCL
+        1IPqQZn6NoiwNmCs5bhFuyCknEIYIkxoADzEIfG3qqAX2UBtJGjrsM2VYFrYy8A/oDG3EQY0a4wc
+        lMWss/GWMmVkp9kizeqOGhYJ3y6i7tbU+f0DAAD//wMAms0lklEBAAA=
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -113,11 +115,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 12:02:20 GMT
+      - Wed, 21 Oct 2026 14:09:38 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=5859
+      - gfet4t7; dur=5839
       Transfer-Encoding:
       - chunked
       Vary:
@@ -151,15 +153,15 @@ interactions:
       x-goog-api-client:
       - google-genai-sdk/2.24.0 gl-python/3.13.13
     method: GET
-    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_Chd4Nm5ZYW9qYURlaXI5dE1QZ1pXcGdROBIXeDZuWWFvamFEZWlyOXRNUGdaV3BnUTg?stream=false
+    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_ChduY2ZZYXJIcENkQ1Y5dE1QN3JuUnVBOBIXbmNmWWFySHBDZENWOXRNUDdyblJ1QTg?stream=false
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAC/4yPy26DMBBF/8XblspjXoFl2iTKJlFRKIQNcu0JdRUMNcZVVPXfa/IF3Z65c+fM
-        D1GS5MRB+/who0MfN+cq+zqXxZXX+1hu4LWBsRY7WRzX+xpfmrmqto73201TXW/HujiUO8nfwrUu
-        Tx15JJPldp58o9LtaIbO4DR5LAxyi8slRlkSAA0YnIDllOWQPoVxFGarB0pzSn14HuX/w6idMoPu
-        Udv2/orMAOmFRXEiIUsvmGIoGV2lgkEICeWLJBqnBLZWofEb3llLbqSfDO+fKOxd36LhwqpBe8w7
-        X+8p11Z1hjtlb8Fo0Cn8DmgWLJrk9w8AAP//AwDewT+PSwEAAA==
+        H4sIAAAAAAAC/4yPy1KEMBBF/4WtYiW8KmGJg+WwYAqdkceGSkiDUQlUCFiU5b+bmS9we/r27dM/
+        jhRO7Gy4fXwXa+01TV1lxy7NPwtchyLFRe5n60W9JafkWPExH8vyaX99Tg5Nmpen6iW/HMTOvzJc
+        nAfn3lkMM+tiG6VqZz0NGpbF4k4DM3C95CEvcjFyPXzGQYxo7IcPmJAA0TuEYoRseJ3F/8OgNqkn
+        NYIy7e2ViPUhYz3HPQpCQjkFQhCOaAicYBL5V0nQm+ygNRK03bDOSjAt7GTiH9CZm74BzTojJ2Ux
+        G2y9pUwZOWi2SbO7s4ZNwreLqHvVdH7/AAAA//8DAGYQ1mRLAQAA
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -168,11 +170,11 @@ interactions:
       Content-Type:
       - application/json
       Date:
-      - Wed, 21 Oct 2026 12:02:21 GMT
+      - Wed, 21 Oct 2026 14:09:39 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=1466
+      - gfet4t7; dur=1404
       Transfer-Encoding:
       - chunked
       Vary:
@@ -206,26 +208,26 @@ interactions:
       x-goog-api-client:
       - google-genai-sdk/2.24.0 gl-python/3.13.13
     method: GET
-    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_Chd4Nm5ZYW9qYURlaXI5dE1QZ1pXcGdROBIXeDZuWWFvamFEZWlyOXRNUGdaV3BnUTg?stream=true
+    uri: https://generativelanguage.googleapis.com/v1beta/interactions/v1_ChduY2ZZYXJIcENkQ1Y5dE1QN3JuUnVBOBIXbmNmWWFySHBDZENWOXRNUDdyblJ1QTg?stream=true
   response:
     body:
       string: !!binary |
-        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
+        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
-        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
+        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
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -234,11 +236,11 @@ interactions:
       Content-Type:
       - text/event-stream
       Date:
-      - Wed, 21 Oct 2026 12:02:23 GMT
+      - Wed, 21 Oct 2026 14:09:41 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=1745
+      - gfet4t7; dur=1602
       Transfer-Encoding:
       - chunked
       Vary:
@@ -272,14 +274,14 @@ interactions:
       x-goog-api-client:
       - google-genai-sdk/2.24.0 gl-python/3.13.13
     method: GET
-    uri: https://generativelanguage.googleapis.com/v1beta/environments/d91e0f2456d197fe7e3d2087c213160a/files/workspace?recursive=true
+    uri: https://generativelanguage.googleapis.com/v1beta/environments/6af5aafb1f04589b9e8801695eb81863/files/workspace?recursive=true
   response:
     body:
       string: !!binary |
-        H4sIAAAAAAAC/32NTQuCQBCG7/6KZc+ZuoGE4bEg6NipCJl0xCU/FnciTfzvrQtidOjywjzzvDOD
-        wxjPZYmaR+xqBsYGmwbXUKGhHNbUEV/NWAEVE3417UMrSNH7EahXtnc4nvYL1fKNyb0n+4mHy6KS
-        FSZzh7AjT5Ug6x1LC2g1Uvyk3N0uftoiEGaTLXwRuoHviuAciMgXkdhcvg43mczlH9OKo8mbMzof
-        ra1TiwoBAAA=
+        H4sIAAAAAAAC/32NTQuCQBCG7/6KZc+ZroiU0bEg6NipCJlsxCU/FnciTfzvrQtidOjywjzzvDO9
+        wxjPZIGax+xiBsZ6mwZXUKKhHJbUEl9MWAHlI37VzUMrSNH7EahTtrc/HHcz1fKNya0j+4lH86KU
+        JSZTh7AlTxUgqw1Lc2g00vZJmbua/bRBILyPduAHkSt8NxAnEcb+Og7F+etwfZeZ/GNacTB5dQbn
+        A+yoFQAKAQAA
     headers:
       Alt-Svc:
       - h3=":443"; ma=2592000,h3-29=":443"; ma=2592000
@@ -288,11 +290,11 @@ interactions:
       Content-Type:
       - application/json; charset=UTF-8
       Date:
-      - Wed, 21 Oct 2026 12:02:31 GMT
+      - Wed, 21 Oct 2026 14:09:51 GMT
       Server:
       - scaffolding on HTTPServer2
       Server-Timing:
-      - gfet4t7; dur=3594
+      - gfet4t7; dur=3639
       Transfer-Encoding:
       - chunked
       Vary:
