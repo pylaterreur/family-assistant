@@ -13,8 +13,10 @@ tier resolution, the per-tier client, the frozen selection reaching submit,
 prompt assembly -- shows up here.
 """
 
+import hashlib
 import json
 import os
+import random
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -25,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from family_assistant.assistant import Assistant
 from family_assistant.config_loader import load_config
+from family_assistant.llm.content_parts import ContentPartDict
 from family_assistant.llm.model_selection import ModelSelectionRequest
 from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
@@ -39,15 +42,28 @@ from tests.helpers import wait_for_condition
 from .vcr_helpers import sanitize_response
 
 _CURRENT_TIME = re.compile(r"Current time: [^\n\"]*")
+_UPLOAD_PLACEHOLDER = re.compile(rb"<\d+ bytes, sha256 [0-9a-f]{64}>")
 
 
 def _pin_prompt_clock(request: Any) -> Any:  # noqa: ANN401 # VCR request objects are dynamically typed
     """Make the clock the service folds into the prompt match across runs.
 
     Applied by VCR to a request both before recording it and before matching
-    it, so the recorded and the replayed prompt agree on the time.
+    it, so the recorded and the replayed prompt agree on the time. A file
+    upload's bytes are reduced to their length and digest the same way, which
+    keeps a megabyte out of the cassette while replay still checks exactly
+    those bytes were sent.
     """
     if not request.body:
+        return request
+    if request.headers.get("X-Goog-Upload-Command") == "upload, finalize":
+        content = (
+            request.body if isinstance(request.body, bytes) else request.body.encode()
+        )
+        # VCR applies this to the same request more than once while matching.
+        if not _UPLOAD_PLACEHOLDER.fullmatch(content):
+            digest = hashlib.sha256(content).hexdigest()
+            request.body = f"<{len(content)} bytes, sha256 {digest}>".encode()
         return request
     body = json.loads(request.body)
     instruction = body.get("system_instruction")
@@ -57,6 +73,23 @@ def _pin_prompt_clock(request: Any) -> Any:  # noqa: ANN401 # VCR request object
         )
         request.body = json.dumps(body).encode()
     return request
+
+
+def _sanitize_keeping_upload_sessions(
+    # ast-grep-ignore: no-dict-any - VCR response matches external HTTP response format
+    response: dict[str, Any],
+    # ast-grep-ignore: no-dict-any - VCR response matches external HTTP response format
+) -> dict[str, Any] | None:
+    """``sanitize_response``, except an upload handshake is kept.
+
+    The handshake that opens a file upload answers with an empty body -- the
+    session URL is in a header -- and ``sanitize_response`` drops empty bodies
+    as duplicates, which would leave replay unable to start the upload.
+    """
+    headers = {name.lower() for name in response.get("headers", {})}
+    if "x-goog-upload-url" in headers:
+        return response
+    return sanitize_response(response)
 
 
 @pytest.fixture(name="vcr_config")
@@ -100,6 +133,9 @@ async def _run_to_completion(
     *,
     model_tier: str | None,
     llm_record_mode: str,
+    content_parts: list[ContentPartDict] | None = None,
+    acting_user_id: str | None = None,
+    expected_output: str = "39287",
 ) -> Interaction:
     selection = (
         coder.resolve_model_selection(
@@ -109,11 +145,13 @@ async def _run_to_completion(
         else None
     )
     submission = await coder.submit_async(
-        [{"type": "text", "text": "Run Python to print 17 * 2311, then stop."}],
+        content_parts
+        or [{"type": "text", "text": "Run Python to print 17 * 2311, then stop."}],
         conversation_id="coder-integration",
         subconversation_id=None,
         user_name="Tester",
         db_context=Database(db_engine),
+        acting_user_id=acting_user_id,
         model_selection=selection,
     )
     # Reading a run back goes by its id alone, which any of the profile's
@@ -140,7 +178,7 @@ async def _run_to_completion(
         if interaction.status == "in_progress":
             await client.cancel_agent_interaction(submission.remote_task_id)
     assert interaction.status == "completed"
-    assert "39287" in (interaction.output_text or "")
+    assert expected_output in (interaction.output_text or "")
     return interaction
 
 
@@ -194,3 +232,47 @@ async def test_the_agent_receives_the_profiles_prompt_not_its_routing_blurb(
     assert "spawn_worker" not in instruction
     assert "complex_tasks" not in instruction
     assert not instruction.startswith("System:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.llm_integration
+@pytest.mark.vcr(before_record_response=_sanitize_keeping_upload_sessions)
+async def test_a_delegated_attachment_reaches_the_sandbox_intact(
+    coder: InteractionsAgentProcessingService,
+    db_engine: AsyncEngine,
+    llm_record_mode: str,
+) -> None:
+    """A screenshot-sized file arrives in the sandbox byte for byte.
+
+    Sized past the 1 MiB of base64 the API accepts for an inline source, which
+    is where every ordinary photo was refused with a bare 400 (#1457). The
+    agent reporting the file's digest is evidence that it got the whole file.
+    """
+    content = random.Random(1457).randbytes(1_100_000)
+    registry = coder.attachment_registry
+    assert registry is not None
+    attachment = await registry.register_user_attachment(
+        db_context=Database(db_engine),
+        content=content,
+        filename="screenshot.png",
+        mime_type="image/png",
+        user_id="tester",
+    )
+
+    await _run_to_completion(
+        coder,
+        db_engine,
+        model_tier=None,
+        llm_record_mode=llm_record_mode,
+        content_parts=[
+            {
+                "type": "text",
+                "text": "Print the SHA-256 of /workspace/screenshot.png with "
+                "sha256sum and report the hex digest, then stop.",
+            },
+            {"type": "attachment", "attachment_id": attachment.attachment_id},
+        ],
+        acting_user_id="tester",
+        expected_output=hashlib.sha256(content).hexdigest(),
+    )
