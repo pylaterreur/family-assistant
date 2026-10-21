@@ -21,7 +21,10 @@ from family_assistant.events.mcp_source import MCPEventSource
 from family_assistant.events.processor import EventProcessor
 from family_assistant.storage.database import Database
 from family_assistant.storage.events import EventActionType, EventSourceType
-from family_assistant.tools.automations import create_automation_tool
+from family_assistant.tools.automations import (
+    create_automation_tool,
+    update_automation_tool,
+)
 from family_assistant.tools.mcp_events import list_mcp_events_tool
 from family_assistant.tools.types import ToolExecutionContext
 
@@ -588,10 +591,48 @@ async def test_an_edited_trigger_is_matched_with_its_new_conditions(
 
 
 @pytest.mark.asyncio
-async def test_a_malformed_page_is_not_skipped() -> None:
+async def test_an_action_edit_rechecks_the_trigger_for_the_new_poller(
+    db_engine: AsyncEngine,
+    servers: dict[str, MCPServerConfig],
+    http_client: httpx.AsyncClient,
+) -> None:
+    db = Database(db_engine)
+    listener_id = await add_listener(db, "inbox", ANDREW)
+    source = make_source(db_engine, servers, http_client)
+
+    refused = await update_automation_tool(
+        exec_context=tool_context(db, source, "guest@example.com"),
+        automation_id=listener_id,
+        automation_type="event",
+        action_config={"context": "Tell the guest"},
+    )
+    assert "no tasks credential" in refused.get_text(), refused.get_text()
+    listener = await db.events.get_event_listener_by_id(listener_id)
+    assert listener is not None
+    assert listener["created_by_user_id"] == ANDREW
+
+    updated = await update_automation_tool(
+        exec_context=tool_context(db, source, TEIJA),
+        automation_id=listener_id,
+        automation_type="event",
+        action_config={"context": "Tell Teija"},
+    )
+    assert "Error" not in updated.get_text(), updated.get_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event",
+    [
+        pytest.param("not an event", id="not-an-object"),
+        pytest.param({"eventId": "evt_1", "name": "a.b"}, id="no-data"),
+        pytest.param({"name": "a.b", "data": {}}, id="no-event-id"),
+    ],
+)
+async def test_a_malformed_page_is_not_skipped(event: object) -> None:
     def handle(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        result = {"events": ["not an event"], "cursor": "9"}
+        result = {"events": [event], "cursor": "9"}
         return httpx.Response(
             200, json={"jsonrpc": "2.0", "id": body["id"], "result": result}
         )

@@ -1027,7 +1027,13 @@ async def update_automation_tool(
             if match_conditions is None:
                 match_conditions = {}
 
-            if trigger_config and "event_filter" in trigger_config:
+            # An action edit restamps the listener to the editor, who then polls
+            # with their own credential, so the trigger is rechecked for them.
+            poller_changed = (
+                restamp_user_id is not None
+                and restamp_user_id != existing.created_by_user_id
+            )
+            if (trigger_config and "event_filter" in trigger_config) or poller_changed:
                 trigger_error = await validate_mcp_trigger(
                     exec_context,
                     existing.source_id or "",
