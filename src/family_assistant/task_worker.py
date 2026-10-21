@@ -327,6 +327,28 @@ def _delegation_continuation_text(children: list[DelegationRunDict]) -> str:
     )
 
 
+def _carry_remote_start(
+    observation: RemoteObservation, run: DelegationRunDict
+) -> RemoteObservation:
+    """Keep the provider's start time an earlier reading of the run reported.
+
+    An Antigravity interaction reports when it was created while it is in
+    progress, but not once it has completed -- so the terminal reading, the
+    one that is stored last and that output collection works from, would
+    otherwise erase the start an earlier poll saw.
+    """
+    if observation.remote_created_at is not None:
+        return observation
+    previous = (run["remote_observation_json"] or {}).get("remote_created_at")
+    if not previous:
+        return observation
+    try:
+        started = datetime.fromisoformat(previous)
+    except ValueError:
+        return observation
+    return replace(observation, remote_created_at=started)
+
+
 def _taint_state_from_delegation_run(run: DelegationRunDict) -> TurnTaintState:
     """Return the parent taint *state* persisted with a delegation run.
 
@@ -3400,7 +3422,9 @@ class TaskWorker:
                 remote_task_id, run["remote_context_id"]
             )
             return result, None, False
-        observation = await target_service.observe_async(remote_task_id)
+        observation = _carry_remote_start(
+            await target_service.observe_async(remote_task_id), run
+        )
         accepted = (
             await exec_context.db_context.delegation_runs.record_remote_observation(
                 run["delegation_id"],
@@ -3454,6 +3478,12 @@ class TaskWorker:
                 conversation_id=run["conversation_id"],
                 taint_state=taint_state,
                 db_context=exec_context.db_context,
+                # SQLite hands timestamps back naive; the filter needs UTC.
+                submitted_at=(
+                    _as_aware_utc(run["started_at"])
+                    if run["started_at"] is not None
+                    else None
+                ),
             )
         except DelegationPermanentError as exc:
             logger.exception(
@@ -4104,7 +4134,9 @@ class TaskWorker:
         )
 
         try:
-            observation = await target_service.observe_async(remote_task_id)
+            observation = _carry_remote_start(
+                await target_service.observe_async(remote_task_id), run
+            )
         except DelegationTaskNotFoundError:
             # The provider no longer knows this run, so there is nothing left
             # to learn from it. Settle rather than spend the remaining reads.

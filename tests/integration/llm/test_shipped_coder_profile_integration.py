@@ -327,6 +327,7 @@ async def test_files_the_agent_leaves_in_outputs_come_back_as_attachments(
         conversation_id="coder-integration",
         taint_state=TurnTaintState.empty(),
         db_context=db_context,
+        submitted_at=None,
     )
 
     assert collected.omitted == []

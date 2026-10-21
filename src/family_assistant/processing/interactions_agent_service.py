@@ -21,7 +21,7 @@ import logging
 import mimetypes
 import re
 from collections import OrderedDict, deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -112,6 +112,9 @@ OUTPUT_DOWNLOAD_MIN_BYTES_PER_SECOND = 256 * 1024
 # Files fetched by an attempt that then ran out of budget are kept for the next,
 # up to this much, so a retry continues rather than starting over.
 OUTPUT_DOWNLOAD_CACHE_BYTES = 200 * 1024 * 1024
+# How far before our own submit time a run's outputs may be dated, for the
+# gap between this host's clock and the provider's.
+OUTPUT_CLOCK_SKEW_MARGIN = timedelta(seconds=5)
 
 # How a peek at a running agent reads and reports. The event stream replays the
 # run from its start and then waits, so it is read for a few seconds and let go.
@@ -129,14 +132,36 @@ _OUTPUTS_INSTRUCTION = (
     "/workspace/outputs: the files there are sent to {user_name} as "
     "attachments with your reply, up to "
     f"{MAX_RETURNED_OUTPUT_FILES} files and "
-    f"{MAX_RETURNED_OUTPUT_BYTES // (1024 * 1024)} MB in all. Nothing else in "
-    "the sandbox is returned."
+    f"{MAX_RETURNED_OUTPUT_BYTES // (1024 * 1024)} MB in all. Only files saved "
+    "or changed during this run are sent, so to send again a file an earlier "
+    "run already returned, save it again. Nothing else in the sandbox is "
+    "returned."
 )
 
 # Filenames come from user-supplied metadata, so they are reduced to a safe
 # basename: no directory traversal, no separators, nothing that could land the
 # file outside the mount directory.
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _run_start(
+    observation: RemoteObservation, submitted_at: datetime | None
+) -> datetime | None:
+    """When the run began, by the provider's clock where it says.
+
+    An Antigravity interaction reports its creation time only while it is in
+    progress; the worker carries that forward from an earlier poll. A run that
+    finished before it was first polled has none, so the time this application
+    submitted it stands in, moved earlier by a margin for the gap between the
+    two clocks: a file the predecessor wrote just before the resume is returned
+    again, which is harmless, rather than one this run wrote early being lost.
+    """
+    started = observation.remote_created_at
+    if started is None and submitted_at is not None:
+        started = submitted_at - OUTPUT_CLOCK_SKEW_MARGIN
+    if started is None or started.tzinfo is None:
+        return None
+    return started.replace(microsecond=0)
 
 
 def _output_name(entry: SandboxFileEntry) -> str:
@@ -743,6 +768,7 @@ class InteractionsAgentProcessingService(ProcessingService):
         conversation_id: str,
         taint_state: TurnTaintState,
         db_context: Database,
+        submitted_at: datetime | None,
     ) -> CollectedOutputs:
         """Return what the agent left under ``/workspace/outputs`` as attachments.
 
@@ -760,11 +786,10 @@ class InteractionsAgentProcessingService(ProcessingService):
         entries = await client.list_sandbox_files(environment_id, _SANDBOX_OUTPUT_DIR)
         # A resumed run works in its predecessor's sandbox, whose outputs were
         # returned with that run: only what this run wrote is its output. The
-        # listing has whole-second timestamps, so the run's start is truncated
-        # to match; a file that reports no time is returned rather than lost.
-        started = observation.remote_created_at
-        if started is not None and started.tzinfo is not None:
-            started = started.replace(microsecond=0)
+        # listing has whole-second timestamps, so the start is truncated to
+        # match; a file that reports no time is returned rather than lost.
+        started = _run_start(observation, submitted_at)
+        if started is not None:
             entries = [
                 entry
                 for entry in entries
