@@ -31,8 +31,7 @@ from family_assistant.observability.metrics import (
     record_memory_conversations_due,
     record_memory_review_enqueued,
 )
-from family_assistant.storage.repositories.tasks import TaskAlreadyExistsError
-from family_assistant.storage.tasks import TaskPriority
+from family_assistant.storage.tasks import TaskAlreadyExistsError, TaskPriority
 from family_assistant.utils.clock import SystemClock
 
 if TYPE_CHECKING:

@@ -24,6 +24,7 @@ from family_assistant.storage.datetime_utils import normalize_datetime
 from family_assistant.storage.repositories.base import BaseRepository
 from family_assistant.storage.tasks import (
     ACTIVE_TASK_STATUSES,
+    TaskAlreadyExistsError,
     TaskPriority,
     notify_workers,
     tasks_table,
@@ -40,17 +41,6 @@ TERMINAL_TASK_STATUSES = ("done", "failed")
 # dead and reclaims it. Must be well above the handler timeout (300s), or a
 # running worker is reclaimed out from under itself.
 STALE_TASK_TIMEOUT_MINUTES = 15
-
-
-class TaskAlreadyExistsError(RuntimeError):
-    """A non-system task id is already in the queue.
-
-    A deterministic task id is how a producer says "one of these at a time",
-    so the collision is information rather than a failure: the work is already
-    in flight. Typed, so a producer that means it can catch this and nothing
-    else; a subclass of RuntimeError, because that is what this has always
-    raised and a caller that catches the general case still does.
-    """
 
 
 def _revive_if_terminal(
@@ -364,6 +354,45 @@ class TasksRepository(BaseRepository):
         stmt = delete(tasks_table).where(
             tasks_table.c.task_id == task_id,
             tasks_table.c.status == "pending",
+        )
+        return (await self._db.execute(stmt)).rowcount > 0
+
+    async def release_claim(
+        self, task_id: str, scheduled_at: datetime, *, locked_by: str
+    ) -> bool:
+        """Hand ``locked_by``'s claim on a task back to the queue, due at ``scheduled_at``.
+
+        For a claim whose worker is known to be gone before the stale-claim
+        cutoff says so -- its process stopped renewing a turn lease. A claim
+        some other worker has taken since (the stale-claim reclaim) is left
+        alone: that worker is still running it. The lost
+        attempt counts as a failed one, so work that keeps taking its process
+        down runs out of retries rather than looping; on its last attempt the
+        row is failed instead. Returns whether a claimed row was released; any
+        other row is left alone.
+        """
+        if scheduled_at.tzinfo is None:
+            raise ValueError("scheduled_at must be timezone-aware")
+        stmt = (
+            update(tasks_table)
+            .where(
+                tasks_table.c.task_id == task_id,
+                tasks_table.c.status == "processing",
+                tasks_table.c.locked_by == locked_by,
+            )
+            .values(
+                status=case(
+                    (
+                        tasks_table.c.retry_count >= tasks_table.c.max_retries,
+                        "failed",
+                    ),
+                    else_="pending",
+                ),
+                retry_count=tasks_table.c.retry_count + 1,
+                locked_by=None,
+                locked_at=None,
+                scheduled_at=scheduled_at.astimezone(UTC),
+            )
         )
         return (await self._db.execute(stmt)).rowcount > 0
 

@@ -26,6 +26,7 @@ from family_assistant.storage.database import Database
 from family_assistant.storage.delegation_runs import delegation_runs_table
 from family_assistant.task_worker import DelegationRunCleanupPayload, TaskWorker
 from family_assistant.utils.clock import SystemClock
+from tests.helpers import deliver_queued_delegations
 from tests.mocks.recording_chat_interface import ScriptedChatInterface
 
 from .test_async_delegation import (
@@ -106,10 +107,11 @@ async def _run_cleanup(
     chat_interface: ChatInterface,
 ) -> None:
     worker = _worker(db_engine, processing_service, chat_interface)
-    await worker.handle_delegation_run_cleanup(
-        _tool_context(Database(engine=db_engine), processing_service, chat_interface),
-        _CLEANUP_PAYLOAD,
+    context = _tool_context(
+        Database(engine=db_engine), processing_service, chat_interface
     )
+    await worker.handle_delegation_run_cleanup(context, _CLEANUP_PAYLOAD)
+    await deliver_queued_delegations(worker, context, exhaust_failures=True)
 
 
 @pytest.mark.asyncio
@@ -435,6 +437,14 @@ async def test_a_permanent_failure_on_the_finishing_task_fails_forward_immediate
             chat_interface,
         ),
         _payload("delegation_finishing_task"),
+    )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            Database(engine=db_engine),
+            cast("ProcessingService", processing_service),
+            chat_interface,
+        ),
     )
 
     assert processing_service.wake_call_count == 2

@@ -61,6 +61,7 @@ from tests.functional.automations.test_async_delegation import (
     _source_processing_service,
     _tool_context,
 )
+from tests.helpers import deliver_queued_delegations
 from tests.mocks.recording_chat_interface import ScriptedChatInterface
 
 if TYPE_CHECKING:
@@ -231,6 +232,9 @@ async def test_a_cancelled_run_that_later_completes_is_recovered(
         _tool_context(db_context, processing_service, chat_interface),
         _reconcile_payload("delegation_late_success"),
     )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     run = await db_context.delegation_runs.get_by_delegation_id(
         "delegation_late_success"
@@ -277,6 +281,9 @@ async def test_a_late_result_says_that_it_is_late(
     await worker.handle_delegation_reconcile(
         _tool_context(db_context, processing_service, chat_interface),
         _reconcile_payload("delegation_marked_late"),
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
 
     text = chat_interface.last_sent.text
@@ -325,6 +332,17 @@ async def test_racing_reconcilers_recover_a_late_result_once(
 
     async with asyncio.timeout(60):
         await asyncio.gather(reconcile(), reconcile())
+    # One delivery task, however many recoveries queued it: the queue holds
+    # one per run.
+    assert (
+        await deliver_queued_delegations(
+            worker,
+            _tool_context(
+                Database(engine=db_engine), processing_service, chat_interface
+            ),
+        )
+        == 1
+    )
 
     assert len(target.observe_calls) == 2
     assert len(chat_interface.sent) == 1
@@ -356,11 +374,13 @@ async def test_a_recovered_run_is_not_read_again(
     await worker.handle_delegation_reconcile(
         context, _reconcile_payload("delegation_recovered")
     )
+    await deliver_queued_delegations(worker, context)
     reads_before = len(target.observe_calls)
 
     await worker.handle_delegation_reconcile(
         context, _reconcile_payload("delegation_recovered")
     )
+    await deliver_queued_delegations(worker, context)
 
     assert len(target.observe_calls) == reads_before
     assert len(chat_interface.sent) == 1
@@ -397,6 +417,9 @@ async def test_a_recovered_result_carries_the_runs_own_taint(
     await worker.handle_delegation_reconcile(
         _tool_context(db_context, processing_service, chat_interface),
         _reconcile_payload("delegation_tainted"),
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
     )
 
     assert len(chat_interface.sent) == 1
@@ -845,11 +868,13 @@ async def test_a_recovered_run_wakes_the_source_again_instead_of_replaying_the_f
     # leaves the wake turn's reply stored with no interface_message_id because
     # "web" is a history interface.
     await worker.handle_delegation_run_cleanup(context, _CLEANUP_PAYLOAD)
+    await deliver_queued_delegations(worker, context)
     assert source.wake_call_count == 1
 
     await worker.handle_delegation_reconcile(
         context, _reconcile_payload("delegation_rewake")
     )
+    await deliver_queued_delegations(worker, context)
 
     run = await db_context.delegation_runs.get_by_delegation_id("delegation_rewake")
     assert run is not None

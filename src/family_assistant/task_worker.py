@@ -159,17 +159,30 @@ from family_assistant.indexing.tasks import (
 )
 from family_assistant.interfaces import ChatDeliveryError, HistoryBackedChatInterface
 from family_assistant.processing.quiet_turn import QUIET_END_TRIGGER_HINT
-from family_assistant.processing.types import ChatInteractionStatus
+from family_assistant.processing.types import ChatInteractionStatus, MidTurnUserInput
 from family_assistant.processing.utils import get_file_extension_from_mime_type
 from family_assistant.services.confirmation_service import ConfirmationService
 from family_assistant.services.deferred_tool_confirmation import (
     build_deferred_confirmation_callback,
+)
+from family_assistant.services.delegation_delivery import (
+    DELEGATION_DELIVERY_TASK_TYPE,
+    DELEGATION_DELIVERY_TIMEOUT_SECONDS,
+    DELEGATION_WAKE_RESUMER,
+    DelegationDeliveryPayload,
+    queue_delegation_delivery,
 )
 from family_assistant.services.notification_targets import notify_conversation
 from family_assistant.services.notifier import MESSAGE_CATEGORY, NotificationMetadata
 from family_assistant.services.tool_call_review import (
     TriggerReviewInput,
     build_delegation_review_trigger,
+)
+from family_assistant.services.turn_resumption import (
+    TurnLease,
+    TurnLeaseRegistry,
+    TurnResumePayload,
+    resumed_model_selection,
 )
 from family_assistant.services.user_identity import UserIdentityResolver
 from family_assistant.storage.database import (
@@ -456,6 +469,26 @@ def _turn_id_for_delegation_wake(
     if stage == "initial":
         return str(uuid.uuid5(_DELEGATION_WAKE_TURN_NAMESPACE, name))
     return str(uuid.uuid5(_DELEGATION_WAKE_TURN_NAMESPACE, f"{name}:{stage}"))
+
+
+class _WakeTurnController:
+    """Lets a shutdown suspend a delegation wake turn at its next loop boundary.
+
+    A wake turn takes no steering input; this exists so the turn stops where a
+    resume can pick it up, rather than being cancelled mid-tool.
+    """
+
+    def __init__(self) -> None:
+        self._suspend_requested = False
+
+    def request_suspend(self) -> None:
+        self._suspend_requested = True
+
+    async def drain_pending_mid_turn_inputs(self) -> list[MidTurnUserInput]:
+        return []
+
+    def should_interrupt(self) -> bool:
+        return self._suspend_requested
 
 
 _NEXT_NOTIFY_STAGE: dict[DelegationNotifyStage, DelegationNotifyStage] = {
@@ -1317,6 +1350,9 @@ class TaskHandlerBudget:
 # tool-calling iterations. It parks on nothing, so the budget is model latency
 # rather than waiting, but two turns can outlast the 300s default on a slow
 # provider, and a review cut off midway leaves its conversation due for ever.
+#
+# A delegation delivery can run the delegating profile's whole follow-up turn,
+# so it gets a budget of its own (see ``delegation_delivery``).
 DELEGATED_RUN_TURN_BUDGET_SECONDS = 1800.0
 DELEGATED_RUN_SETTLE_SECONDS = 120.0
 DEFAULT_TASK_HANDLER_BUDGETS: dict[str, TaskHandlerBudget] = {
@@ -1325,6 +1361,9 @@ DEFAULT_TASK_HANDLER_BUDGETS: dict[str, TaskHandlerBudget] = {
         parks_on_queued_work=True,
     ),
     MEMORY_REVIEW_TASK_TYPE: TaskHandlerBudget(timeout=600),
+    DELEGATION_DELIVERY_TASK_TYPE: TaskHandlerBudget(
+        timeout=DELEGATION_DELIVERY_TIMEOUT_SECONDS
+    ),
 }
 
 
@@ -2046,6 +2085,7 @@ class TaskWorker:
         stream_hub: ConversationStreamHub | None = None,
         min_priority: TaskPriority | None = None,
         thread_turn_runner: ThreadTurnRunner | None = None,
+        turn_lease_registry: TurnLeaseRegistry | None = None,
     ) -> None:
         """Initializes the TaskWorker with its dependencies.
 
@@ -2064,6 +2104,9 @@ class TaskWorker:
         self.notification_dispatcher = notification_dispatcher
         self.stream_hub = stream_hub
         self.thread_turn_runner = thread_turn_runner
+        # Leases the delegation wake turns this worker runs, so one cut off by
+        # its process going away is resumed elsewhere.
+        self.turn_lease_registry = turn_lease_registry
         # Strong references to in-flight stream-hub publish tasks scheduled from
         # on_commit hooks, so the event loop doesn't garbage-collect them mid-flight.
         self._hub_publish_tasks: set[asyncio.Task[object]] = set()
@@ -2194,10 +2237,11 @@ class TaskWorker:
             raise ValueError(f"Delegation run '{delegation_id}' not found")
 
         if run["status"] in TERMINAL_DELEGATION_STATUSES:
-            # A terminal run is re-entered only when a prior attempt's
-            # notification delivery failed; retry it (keyed on notified_at).
+            # A terminal run is re-entered only when a prior attempt did not
+            # get as far as queuing its delivery; queue it (keyed on
+            # notified_at).
             if run["notified_at"] is None:
-                await self._deliver_terminal_delegation(exec_context, run, force=False)
+                await self._queue_delegation_delivery(exec_context, run, force=False)
             else:
                 logger.info(
                     "Delegation run %s already terminal (%s) and notified.",
@@ -2847,10 +2891,13 @@ class TaskWorker:
         ``on_committed`` runs for the caller that wins that CAS -- the one
         caller that may count the run, since anything recorded by a loser would
         be recorded again by whichever attempt eventually commits. It runs
-        before the notification, which can raise (a transient
-        ``ChatDeliveryError`` is expected here): the run is terminal either
-        way, and the retry exits at the terminal-status guard without another
-        chance to record it, so accounting must not sit behind delivery.
+        before delivery is queued: the run is terminal either way, and a retry
+        exits at the terminal-status guard without another chance to record
+        it, so accounting must not sit behind delivery.
+
+        Delivery is queued as a task of its own rather than run here: it can
+        wake the delegating profile for a whole turn, which must not run in
+        whatever is left of this caller's handler budget.
 
         Returns whether this caller won the CAS.
         """
@@ -2891,7 +2938,7 @@ class TaskWorker:
         if on_committed is not None:
             await on_committed()
         await self._schedule_delegation_reconcile(exec_context, terminal_run)
-        await self._deliver_terminal_delegation(exec_context, terminal_run, force=False)
+        await self._queue_delegation_delivery(exec_context, terminal_run, force=False)
         return True
 
     async def _submit_pollable_delegation(
@@ -3197,7 +3244,13 @@ class TaskWorker:
         run = await exec_context.db_context.delegation_runs.get_by_delegation_id(
             delegation_id
         )
-        if run is None or run["status"] in TERMINAL_DELEGATION_STATUSES:
+        if run is None:
+            return
+        if run["status"] in TERMINAL_DELEGATION_STATUSES:
+            # A retry of a poll that finalized the run but was cut off before
+            # it queued the delivery.
+            if run["notified_at"] is None:
+                await self._queue_delegation_delivery(exec_context, run, force=False)
             return
         if run["status"] != "awaiting_remote":
             logger.warning(
@@ -3714,18 +3767,61 @@ class TaskWorker:
         exec_context: ToolExecutionContext,
         run: DelegationRunDict,
     ) -> None:
-        """Force-notify a terminal run, isolating per-run delivery failures.
+        """Queue a forced delivery of a terminal run.
 
-        A delivery failure for one run must not abort the rest of a cleanup
-        batch. A transient one leaves the run terminal with ``notified_at``
-        NULL, so the next cleanup pass re-attempts it via
-        ``find_terminal_unnotified`` rather than stranding it (or its siblings).
-        A permanent one advances the run's delivery stage and tries the next
-        thing, because retrying what was just refused for a settled reason only
-        produces the same refusal every hour forever.
+        Queued rather than delivered here, so one run's delivery neither
+        aborts the rest of a cleanup batch nor spends its handler budget. A
+        delivery that keeps failing transiently leaves the run terminal with
+        ``notified_at`` NULL, so a later cleanup pass queues it again via
+        ``find_terminal_unnotified`` rather than stranding it.
         """
-        with contextlib.suppress(DelegationNotificationError):
-            await self._deliver_terminal_delegation(exec_context, run, force=True)
+        await self._queue_delegation_delivery(exec_context, run, force=True)
+
+    async def _queue_delegation_delivery(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        *,
+        force: bool,
+    ) -> None:
+        """Queue the delivery of a terminal run (see ``delegation_delivery``)."""
+        await queue_delegation_delivery(
+            exec_context.db_context.tasks, run["delegation_id"], force=force
+        )
+
+    async def handle_delegation_delivery(
+        self,
+        exec_context: ToolExecutionContext,
+        payload: DelegationDeliveryPayload,
+    ) -> None:
+        """Deliver a terminal run's result, unless it already has been.
+
+        A transient failure raises, so the task retries; once its retries are
+        spent, the hourly cleanup queues the run again. A delivery cut off
+        partway -- by this task's timeout or by its process going away --
+        resumes the wake turn it was running rather than starting it again
+        (see :meth:`_wake_source_profile_for_delegation`).
+        """
+        delegation_id = payload["delegation_id"]
+        run = await exec_context.db_context.delegation_runs.get_by_delegation_id(
+            delegation_id
+        )
+        if run is None:
+            raise ValueError(f"Delegation run '{delegation_id}' not found")
+        if run["status"] not in TERMINAL_DELEGATION_STATUSES:
+            logger.warning(
+                "Delivery queued for delegation %s, which is not terminal (%s); "
+                "skipping.",
+                delegation_id,
+                run["status"],
+            )
+            return
+        if run["notified_at"] is not None:
+            logger.info("Delegation %s was already delivered.", delegation_id)
+            return
+        await self._deliver_terminal_delegation(
+            exec_context, run, force=payload["force"]
+        )
 
     async def _deliver_terminal_delegation(
         self,
@@ -4014,7 +4110,7 @@ class TaskWorker:
         if on_committed is not None:
             await on_committed()
         await self._schedule_delegation_reconcile(exec_context, run)
-        await self._deliver_terminal_delegation(exec_context, run, force=force_notify)
+        await self._queue_delegation_delivery(exec_context, run, force=force_notify)
         return True
 
     def _observable_target_for(
@@ -4570,7 +4666,114 @@ class TaskWorker:
                 stage=stage,
             )
 
-        # Phase 1: Commit the wakeup message before the LLM turn.
+        # A wake turn already started on an earlier attempt -- cut off by this
+        # task's timeout, or by its process going away -- has its data row and
+        # whatever its tools did in history. Under commit-as-you-go those tool
+        # effects are durable, so the turn continues from them rather than
+        # starting over and repeating them.
+        existing_data_row = (
+            await exec_context.db_context.message_history.get_user_row_by_turn_id(
+                wake_turn_id
+            )
+        )
+        resume = existing_data_row is not None
+        lease = await self._arm_wake_turn_lease(
+            exec_context, run, source_service, wake_turn_id
+        )
+        controller = _WakeTurnController()
+        try:
+            if existing_data_row is not None:
+                logger.info(
+                    "Resuming delegation wake turn %s for %s from the rows an "
+                    "earlier attempt persisted.",
+                    wake_turn_id,
+                    run["delegation_id"],
+                )
+                data_message_internal_id = existing_data_row["internal_id"]
+            else:
+                # Phase 1: Commit the wakeup message before the LLM turn.
+                data_message_internal_id = await self._persist_wake_data_row(
+                    exec_context,
+                    run,
+                    source_service,
+                    clock,
+                    wake_turn_id,
+                )
+
+            model_selection = (
+                await resumed_model_selection(exec_context.db_context, lease.payload)
+                if lease is not None and resume
+                else None
+            )
+            self._track_wake_turn_lease(exec_context, lease, controller)
+
+            # Phase 2: Run the LLM turn untransacted.
+            result = await source_service.handle_chat_interaction(
+                db_context=exec_context.db_context,
+                interface_type=run["interface_type"],
+                conversation_id=run["conversation_id"],
+                trigger_content_parts=[{"type": "text", "text": trigger_text}],
+                trigger_interface_message_id=None,
+                user_name=run["user_name"] or exec_context.user_name,
+                user_id=run["user_id"],
+                replied_to_interface_id=None,
+                chat_interface=chat_interface,
+                chat_interfaces=exec_context.chat_interfaces,
+                confirmation_ui_managers=exec_context.confirmation_ui_managers,
+                request_confirmation_callback=build_deferred_confirmation_callback(
+                    target_user_id=run["user_id"],
+                    source_prefix=("From a completed delegated task — approve to run:"),
+                    missing_owner_message=lambda tool_name: (
+                        "This delegated task has no recorded owner, so the "
+                        f"confirm-gated tool '{tool_name}' cannot be approved and "
+                        "was not run."
+                    ),
+                ),
+                trigger_attachments=self._delegation_notification_attachments(run),
+                subconversation_id=source_subconversation_id,
+                thread_root_id=data_message_internal_id,
+                trigger_is_internal=True,
+                pinned_history_message_ids=[data_message_internal_id],
+                trigger_role="system",
+                turn_id=wake_turn_id,
+                mid_turn_input_provider=controller,
+                model_selection=model_selection,
+                resume=resume,
+                initial_taint_sources=_taint_sources_from_delegation_run(run),
+                tool_call_review_trigger=await _delegation_run_review_trigger(
+                    exec_context,
+                    run,
+                    trigger_type="delegation_completion",
+                    active_request_role="system",
+                    payload_present=True,
+                ),
+            )
+
+            # Phase 3: deliver, then record the delivery and mark notified
+            # atomically.
+            return await self._deliver_delegation_wake_response(
+                exec_context,
+                run,
+                result,
+                chat_interface,
+                clock,
+                wake_turn_id,
+                data_message_internal_id,
+                stage=stage,
+            )
+        finally:
+            if lease is not None and self.turn_lease_registry is not None:
+                await self.turn_lease_registry.release(lease)
+
+    async def _persist_wake_data_row(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        source_service: ProcessingService,
+        clock: Clock,
+        wake_turn_id: str,
+    ) -> int:
+        """Persist the wake turn's data row: the result, as lower-priority data."""
         wakeup_data_taint_metadata = await delegation_run_result_taint_metadata(
             exec_context.db_context, run
         )
@@ -4592,7 +4795,7 @@ class TaskWorker:
                 processing_profile_id=source_service.service_config.id,
                 user_id=run["user_id"],
                 attachments=self._delegation_notification_attachments(run),
-                subconversation_id=source_subconversation_id,
+                subconversation_id=run["source_subconversation_id"],
                 is_internal=True,
             )
         )
@@ -4600,56 +4803,58 @@ class TaskWorker:
             raise DelegationNotificationError(
                 f"Failed to persist wakeup data for delegation {run['delegation_id']}."
             )
+        return data_message_internal_id
 
-        # Phase 2: Run the LLM turn untransacted.
-        result = await source_service.handle_chat_interaction(
-            db_context=exec_context.db_context,
-            interface_type=run["interface_type"],
-            conversation_id=run["conversation_id"],
-            trigger_content_parts=[{"type": "text", "text": trigger_text}],
-            trigger_interface_message_id=None,
-            user_name=run["user_name"] or exec_context.user_name,
-            user_id=run["user_id"],
-            replied_to_interface_id=None,
-            chat_interface=chat_interface,
-            chat_interfaces=exec_context.chat_interfaces,
-            confirmation_ui_managers=exec_context.confirmation_ui_managers,
-            request_confirmation_callback=build_deferred_confirmation_callback(
-                target_user_id=run["user_id"],
-                source_prefix=("From a completed delegated task — approve to run:"),
-                missing_owner_message=lambda tool_name: (
-                    "This delegated task has no recorded owner, so the "
-                    f"confirm-gated tool '{tool_name}' cannot be approved and "
-                    "was not run."
-                ),
-            ),
-            trigger_attachments=self._delegation_notification_attachments(run),
-            subconversation_id=source_subconversation_id,
-            thread_root_id=data_message_internal_id,
-            trigger_is_internal=True,
-            pinned_history_message_ids=[data_message_internal_id],
-            trigger_role="system",
-            turn_id=wake_turn_id,
-            initial_taint_sources=_taint_sources_from_delegation_run(run),
-            tool_call_review_trigger=await _delegation_run_review_trigger(
-                exec_context,
-                run,
-                trigger_type="delegation_completion",
-                active_request_role="system",
-                payload_present=True,
+    async def _arm_wake_turn_lease(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        source_service: ProcessingService,
+        wake_turn_id: str,
+    ) -> TurnLease | None:
+        """Arm the lease that resumes this wake turn if its process goes away.
+
+        Armed before the turn writes anything, like every other turn's lease.
+        The attempt is the delivery task's: a lost attempt counts against its
+        retries (see ``TasksRepository.release_claim``), so a turn that keeps
+        taking its process down is closed off rather than resumed for ever.
+        """
+        registry = self.turn_lease_registry
+        if registry is None:
+            return None
+        attempt = exec_context.task_attempt
+        return await registry.arm(
+            exec_context.db_context.tasks,
+            TurnResumePayload(
+                resumer=DELEGATION_WAKE_RESUMER,
+                interface_type=run["interface_type"],
+                conversation_id=run["conversation_id"],
+                turn_id=wake_turn_id,
+                user_id=run["user_id"] or "",
+                user_name=run["user_name"] or exec_context.user_name,
+                processing_profile_id=source_service.service_config.id,
+                attempt=attempt.retry_count if attempt is not None else 0,
+                delegation_id=run["delegation_id"],
+                claimed_by=self.worker_id,
             ),
         )
 
-        # Phase 3: deliver, then record the delivery and mark notified atomically.
-        return await self._deliver_delegation_wake_response(
-            exec_context,
-            run,
-            result,
-            chat_interface,
-            clock,
-            wake_turn_id,
-            data_message_internal_id,
-            stage=stage,
+    def _track_wake_turn_lease(
+        self,
+        exec_context: ToolExecutionContext,
+        lease: TurnLease | None,
+        controller: _WakeTurnController,
+    ) -> None:
+        """Renew the lease while the turn runs; a shutdown suspends the turn."""
+        registry = self.turn_lease_registry
+        task = asyncio.current_task()
+        if registry is None or lease is None or task is None:
+            return
+        registry.track(
+            lease,
+            task,
+            database=exec_context.db_context,
+            request_suspend=controller.request_suspend,
         )
 
     async def _deliver_delegation_wake_response(

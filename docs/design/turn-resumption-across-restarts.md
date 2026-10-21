@@ -1,7 +1,8 @@
 # Resuming in-progress turns across server restarts
 
-**Status:** Milestones 1 (web streaming turns, graceful hand-off, crash recovery) and 2 (Telegram
-turns) implemented. Milestone 3 (task-worker handlers) is proposed. **Date:** 2026-10-02
+**Status:** Milestones 1 (web streaming turns, graceful hand-off, crash recovery), 2 (Telegram
+turns) and 4 (delegation wake turns) implemented. Milestone 3 (task-worker handlers) is proposed.
+**Date:** 2026-10-02
 
 ## Problem
 
@@ -185,3 +186,32 @@ For web turns, the relaunch goes through the same producer as a new turn, with t
    stale reclaim. On graceful shutdown, return those rows to `pending` straight away. Their own
    checkpoints (delivery checkpoint, `delegation_runs.status`) already govern what a re-run does.
    Verified by a worker test asserting the row is claimable immediately after shutdown.
+
+4. **Delegation wake turns** (implemented). The turn that tells the user about a finished delegation
+   -- the delegating profile woken with the result -- used to run inline in whichever handler
+   noticed the run had finished: a poll, a reconcile, or the hourly cleanup, inside that handler's
+   300-second budget. A wake turn that was still calling tools when the budget ran out was
+   cancelled, which records nothing, and the hourly cleanup reran it from the top an hour later. Its
+   earlier tool effects were durable, so the rerun could repeat them.
+
+   - **Delivery is a task of its own.** Every path that finishes a run queues a
+     `delegation_delivery` task instead of delivering. There is one per delegation, under a
+     deterministic id: a pending or running delivery owns the work, and a finished one is replaced
+     when the run is queued again. Its budget is ten minutes, under the 15-minute stale-claim
+     cutoff, so a live delivery is never reclaimed into a second, concurrent wake turn.
+   - **A retry resumes the wake turn.** The wake turn's id is deterministic, so a delivery that
+     finds the turn already has its data row continues it with `resume=True` rather than starting
+     over. Resume accepts the wake's system trigger: it finds the trigger row (or saves it, if the
+     turn was cut off before writing it) and keeps it in place, ahead of the turn's own tool calls.
+   - **The wake turn holds a lease.** A process that goes away mid-turn leaves the delivery task
+     claimed. When the lease comes due, its resumer hands the claim back to the queue (counting the
+     lost attempt against the task's retries), and the next delivery resumes the turn.
+
+   Verified by functional tests: a delivery cut off mid-turn is resumed without rerunning its tool,
+   a turn cut off before its trigger resumes from its data row, a turn suspended by a shutdown is
+   resumed through its lease on another worker, and a poll retry queues the delivery its cut-off
+   attempt never queued.
+
+   Deliberate simplification: a wake lease that comes due after the conversation has moved on is not
+   resumed through the lease, by the same rule as any other turn. Its delivery task is still
+   claimed, so the stale-claim reclaim picks it up 15 minutes later and resumes it then.

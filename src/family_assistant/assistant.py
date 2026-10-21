@@ -211,6 +211,11 @@ from family_assistant.web.mcp_adapter.config import require_authentication_for_a
 from family_assistant.web.thread_turns import WebThreadTurnRunner
 from family_assistant.web.web_confirmation_ui_manager import WebConfirmationUIManager
 
+from .services.delegation_delivery import (
+    DELEGATION_DELIVERY_TASK_TYPE,
+    DELEGATION_WAKE_RESUMER,
+    DelegationWakeResumer,
+)
 from .services.turn_resumption import TURN_RESUME_TASK_TYPE, TurnLeaseRegistry
 from .telegram.service import TelegramService
 from .telegram.turn_resumption import TELEGRAM_RESUMER, TelegramTurnResumer
@@ -2294,6 +2299,10 @@ class Assistant:
         # it; in-process only, since workers share in-memory futures and registries
         # within this event loop. The reserved workers additionally keep capacity
         # free for interactive work while the general ones are busy.
+        # The workers run delegation wake turns, so they are what resumes one.
+        self._turn_lease_registry().register_resumer(
+            DELEGATION_WAKE_RESUMER, DelegationWakeResumer(self._database())
+        )
         worker_count = self.config.task_worker_count
         reserved_worker_count = self.config.reserved_task_worker_count
         worker_lanes: list[TaskPriority | None] = [None] * worker_count + [
@@ -2829,6 +2838,7 @@ class Assistant:
             # Web threads stream their first turn live; other surfaces' threads
             # run in the worker itself.
             thread_turn_runner=WebThreadTurnRunner(self.fastapi_app.state),
+            turn_lease_registry=self._turn_lease_registry(),
         )
         worker.register_task_handler("log_message", task_wrapper_handle_log_message)
         if self.document_indexer:
@@ -2854,6 +2864,10 @@ class Assistant:
         worker.register_task_handler(
             "delegated_profile_run",
             worker.handle_delegated_profile_run,
+        )
+        worker.register_task_handler(
+            DELEGATION_DELIVERY_TASK_TYPE,
+            worker.handle_delegation_delivery,
         )
         worker.register_task_handler(
             "delegation_poll",
