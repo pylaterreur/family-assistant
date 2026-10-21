@@ -2067,3 +2067,29 @@ async def test_a_failed_collection_leaves_no_download_running(
         await _collect(service, db_engine)
 
     assert cancelled == ["workspace/outputs/b.stl"]
+
+
+@pytest.mark.asyncio
+async def test_an_unlisted_file_over_a_limit_frees_its_slot(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cap counts files returned, not files fetched."""
+    monkeypatch.setattr(interactions_agent_service, "MAX_RETURNED_OUTPUT_FILES", 2)
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config={"max_file_size": 4}
+    )
+    client, _ = _client_with_outputs(
+        {"a-huge.bin": b"x" * 9, "b.txt": b"b", "c.txt": b"c", "d.txt": b"d"},
+        sizes_listed=False,
+    )
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await _collect(service, db_engine)
+
+    assert len(collected.attachment_ids) == 2
+    assert collected.omitted == [
+        "a-huge.bin (9 bytes, over the attachment size limit)",
+        "d.txt (beyond the first 2 files)",
+    ]

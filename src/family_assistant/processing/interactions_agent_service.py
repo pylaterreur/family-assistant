@@ -20,7 +20,7 @@ import asyncio
 import logging
 import mimetypes
 import re
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import datetime
 from functools import cached_property
 from typing import TYPE_CHECKING
@@ -129,6 +129,11 @@ _OUTPUTS_INSTRUCTION = (
 # basename: no directory traversal, no separators, nothing that could land the
 # file outside the mount directory.
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _output_name(entry: SandboxFileEntry) -> str:
+    """An output's path within the outputs directory."""
+    return entry.path.removeprefix(f"{_SANDBOX_OUTPUT_DIR}/")
 
 
 def _first_failure(failures: BaseExceptionGroup) -> BaseException:
@@ -760,31 +765,54 @@ class InteractionsAgentProcessingService(ProcessingService):
     ) -> tuple[list[tuple[str, bytes, str]], list[str]]:
         """Fetch the returnable outputs; name the rest and why.
 
-        Files are chosen in path order against the caps by their listed size
-        first, so nothing is fetched that could not be returned, then fetched
-        several at a time; the downloaded size is what finally decides, for a
-        file whose size was not listed.
+        Files are taken in path order, in waves that fill the slots still free,
+        and each wave is fetched several at a time. A listed size rules a file
+        out before it is fetched; the downloaded size is what finally decides,
+        and a file it rules out frees its slot for the next wave.
         """
+        pending = deque(sorted(entries, key=lambda e: e.path))
+        staged: list[tuple[str, bytes, str]] = []
         omitted: list[str] = []
-        candidates: list[SandboxFileEntry] = []
-        listed_total = 0
-        for entry in sorted(entries, key=lambda e: e.path):
-            relative = entry.path.removeprefix(f"{_SANDBOX_OUTPUT_DIR}/")
-            if len(candidates) >= MAX_RETURNED_OUTPUT_FILES:
-                omitted.append(
-                    f"{relative} (beyond the first {MAX_RETURNED_OUTPUT_FILES} files)"
-                )
-                continue
-            if entry.size_bytes is not None:
-                reason = _output_over_limit(
-                    entry.size_bytes, listed_total, max_file_size
-                )
+        total_bytes = 0
+        while pending and len(staged) < MAX_RETURNED_OUTPUT_FILES:
+            wave: list[SandboxFileEntry] = []
+            projected = total_bytes
+            while pending and len(staged) + len(wave) < MAX_RETURNED_OUTPUT_FILES:
+                entry = pending.popleft()
+                if entry.size_bytes is not None:
+                    reason = _output_over_limit(
+                        entry.size_bytes, projected, max_file_size
+                    )
+                    if reason is not None:
+                        omitted.append(f"{_output_name(entry)} ({reason})")
+                        continue
+                    projected += entry.size_bytes
+                wave.append(entry)
+            contents = await self._fetch_outputs(client, environment_id, wave)
+            for entry, content in zip(wave, contents, strict=True):
+                reason = _output_over_limit(len(content), total_bytes, max_file_size)
                 if reason is not None:
-                    omitted.append(f"{relative} ({reason})")
+                    omitted.append(f"{_output_name(entry)} ({reason})")
                     continue
-                listed_total += entry.size_bytes
-            candidates.append(entry)
+                total_bytes += len(content)
+                staged.append((
+                    _output_name(entry),
+                    content,
+                    _output_mime_type(entry.mime_type, _output_name(entry)),
+                ))
+        omitted.extend(
+            f"{_output_name(entry)} (beyond the first {MAX_RETURNED_OUTPUT_FILES} files)"
+            for entry in pending
+        )
+        return staged, omitted
 
+    async def _fetch_outputs(
+        self,
+        client: GoogleGenAIClient,
+        environment_id: str,
+        entries: Sequence[SandboxFileEntry],
+    ) -> list[bytes]:
+        """Fetch ``entries`` several at a time, in their order."""
         gate = asyncio.Semaphore(OUTPUT_DOWNLOAD_CONCURRENCY)
 
         async def fetch(entry: SandboxFileEntry) -> bytes:
@@ -796,26 +824,10 @@ class InteractionsAgentProcessingService(ProcessingService):
         # running past the collection's budget beside the next attempt's.
         try:
             async with asyncio.TaskGroup() as group:
-                tasks = [group.create_task(fetch(entry)) for entry in candidates]
+                tasks = [group.create_task(fetch(entry)) for entry in entries]
         except BaseExceptionGroup as failures:
             raise _first_failure(failures) from failures
-        contents = [task.result() for task in tasks]
-
-        staged: list[tuple[str, bytes, str]] = []
-        total_bytes = 0
-        for entry, content in zip(candidates, contents, strict=True):
-            relative = entry.path.removeprefix(f"{_SANDBOX_OUTPUT_DIR}/")
-            reason = _output_over_limit(len(content), total_bytes, max_file_size)
-            if reason is not None:
-                omitted.append(f"{relative} ({reason})")
-                continue
-            total_bytes += len(content)
-            staged.append((
-                relative,
-                content,
-                _output_mime_type(entry.mime_type, relative),
-            ))
-        return staged, omitted
+        return [task.result() for task in tasks]
 
     async def _download_output(
         self,
