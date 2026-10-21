@@ -24,6 +24,7 @@ import pytest
 from alembic.config import Config
 
 # Import pytest-alembic built-in tests
+from pytest_alembic import MigrationContext
 from pytest_alembic.tests import (
     test_model_definitions_match_ddl,
     test_single_head_revision,
@@ -32,6 +33,7 @@ from pytest_alembic.tests import (
 )
 from sqlalchemy import Engine, create_engine, text
 
+from family_assistant.storage.events import EventSourceType
 from tests.conftest import ContainerProtocol
 
 # Re-export the tests to ensure they're available
@@ -159,3 +161,23 @@ def alembic_config() -> Config:
     # Use relative path to alembic.ini
     config_path = Path(__file__).parent.parent / "alembic.ini"
     return Config(str(config_path))
+
+
+def test_event_source_enum_has_every_source(
+    alembic_runner: MigrationContext, alembic_engine: Engine
+) -> None:
+    """The migrated PostgreSQL ``eventsourcetype`` enum names every Python source.
+
+    Metadata-created test databases always match the Python enum, so a source
+    added without extending the deployed enum would only fail in production.
+    """
+    if alembic_engine.dialect.name != "postgresql":
+        pytest.skip("only PostgreSQL stores eventsourcetype as a native enum")
+    alembic_runner.migrate_up_to("heads")
+    with alembic_engine.connect() as connection:
+        labels = set(
+            connection.execute(
+                text("SELECT unnest(enum_range(NULL::eventsourcetype))::text")
+            ).scalars()
+        )
+    assert labels == {member.name for member in EventSourceType}

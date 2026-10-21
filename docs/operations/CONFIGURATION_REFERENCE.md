@@ -4499,6 +4499,36 @@ to `tools_config.on_demand_mcp_server_ids`. This does not enable notifications.
 example, `tuit_` exposes `create_task` as `tuit_create_task`, while MCP calls and `tool_metadata` /
 `parameter_overrides` configuration use the original server tool name.
 
+### MCP server events
+
+Event automations can watch MCP servers that implement the
+[Events extension](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415) of
+protocol revision 2026-07-28 (Tuit does). FA polls `events/poll` over the server's Streamable HTTP
+`url`; it never asks a server to call back, so nothing needs to be reachable from outside the
+cluster and no path is exempted from edge authentication. Servers that offer an event type only by
+webhook or stream cannot be used.
+
+There is nothing to configure per server. Each automation polls with its creator's credential for
+that server: their `user_auth` token (identity check included) when the server has one, otherwise
+the server's shared `token`. A person can only watch servers they have a credential for, and only
+ever hears what that server would show them. stdio servers are not polled.
+
+```yaml
+event_system:
+  sources:
+    mcp:
+      enabled: true                    # default
+      reconcile_interval_seconds: 30   # how soon a new or removed automation starts or stops polling
+      default_poll_interval_seconds: 30  # when a server suggests no interval (nextPollMs)
+      min_poll_interval_seconds: 10    # a faster suggestion is raised to this
+      max_error_backoff_seconds: 300
+      request_timeout_seconds: 30
+```
+
+Positions are stored in the `mcp_event_cursors` table, so a restart resumes where it stopped. An
+event can be delivered twice if FA stops between processing a page and storing its cursor. When a
+server reports that events were lost (`truncated`), FA logs a warning.
+
 ### Embedded iOS web pages
 
 The iOS app opens Documents and More under `/app`; their frontend assets are served under

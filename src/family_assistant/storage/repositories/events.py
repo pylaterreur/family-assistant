@@ -264,6 +264,19 @@ class EventsRepository(BaseRepository):
             self._logger.exception(f"Database error in create_event_listener: {e}")
             raise
 
+    async def get_enabled_listeners_for_source(
+        self, source_id: str
+    ) -> list[EventListenerDict]:
+        """Every enabled listener on one source, across all conversations."""
+        stmt = (
+            select(event_listeners_table)
+            .where(event_listeners_table.c.source_id == source_id)
+            .where(event_listeners_table.c.enabled.is_(True))
+            .order_by(event_listeners_table.c.id)
+        )
+        rows = await self._db.fetch_all(stmt)
+        return [self._normalize_event_listener(dict(row)) for row in rows]
+
     async def get_event_listeners(
         self,
         conversation_id: str,

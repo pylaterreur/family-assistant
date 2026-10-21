@@ -47,6 +47,7 @@ class EventSourceType(StrEnum):
 
     home_assistant = "home_assistant"
     indexing = "indexing"
+    mcp = "mcp"
     webhook = "webhook"
 
 

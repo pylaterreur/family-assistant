@@ -148,6 +148,10 @@ from family_assistant.tools.image_tools import (
     IMAGE_TOOLS_DEFINITION,
     highlight_image_tool,
 )
+from family_assistant.tools.mcp_events import (
+    MCP_EVENTS_TOOLS_DEFINITION,
+    list_mcp_events_tool,
+)
 from family_assistant.tools.media_download import (
     MEDIA_DOWNLOAD_TOOLS_DEFINITION,
     download_media_tool,
@@ -301,6 +305,7 @@ _LOCAL_TOOL_DEFINITIONS: list[ToolDefinition] = (
     + TASK_TOOLS_DEFINITION
     + DOCUMENT_TOOLS_DEFINITION
     + EVENT_TOOLS_DEFINITION
+    + MCP_EVENTS_TOOLS_DEFINITION
     + AUTOMATIONS_TOOLS_DEFINITION
     + CALENDAR_TOOLS_DEFINITION
     + COMMUNICATION_TOOLS_DEFINITION
@@ -364,6 +369,7 @@ _LOCAL_TOOL_IMPLEMENTATIONS: dict[str, ToolImplementation] = {
     "cancel_pending_callback": cancel_pending_callback_tool,
     "query_recent_events": query_recent_events_tool,
     "test_event_listener": test_event_listener_tool,
+    "list_mcp_events": list_mcp_events_tool,
     "execute_script": execute_script_tool,
     # Stored scripts
     "save_script": save_script_tool,
@@ -649,6 +655,14 @@ _CORE_TOOL_METADATA_BY_NAME: dict[str, LocalToolMetadata] = {
         ToolTag.SENSITIVE_DATA,
         ToolTag.AUTOMATION,
         ToolTag.OUTPUT_UNTRUSTED,
+    ),
+    # Event names, descriptions and schemas published by configured MCP
+    # servers: the same operator-chosen servers whose tool descriptions are
+    # already in every prompt.
+    "list_mcp_events": _metadata(
+        ToolTag.READ_ONLY,
+        ToolTag.AUTOMATION,
+        ToolTag.OUTPUT_TRUSTED,
     ),
     "create_automation": _metadata(
         ToolTag.STATE_CHANGING,

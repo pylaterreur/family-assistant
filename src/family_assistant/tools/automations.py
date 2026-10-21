@@ -14,12 +14,15 @@ from family_assistant.actions import (
     validate_wake_destination,
     with_default_wake_destination,
 )
+from family_assistant.events.mcp_source import MCPEventSource
+from family_assistant.events.validation import format_validation_errors
 from family_assistant.scripting.apis.keychute import (
     get_keychute_config,
     keychute_external_function_names,
 )
 from family_assistant.scripting.validator import ScriptValidator
 from family_assistant.security.definition_records import authoring_taint_state
+from family_assistant.storage.events import EventSourceType
 from family_assistant.tools.stored_scripts import (
     AUTOMATION_RUNTIME_GLOBALS,
     validate_script_action_config,
@@ -34,7 +37,7 @@ if TYPE_CHECKING:
     from family_assistant.storage.database import Database
     from family_assistant.storage.models import Automation
     from family_assistant.storage.repositories.automations import AutomationType
-    from family_assistant.storage.types import ActionConfig
+    from family_assistant.storage.types import ActionConfig, MatchConditions
     from family_assistant.tools.infrastructure import ToolsProvider
     from family_assistant.tools.types import ToolExecutionContext
 
@@ -485,6 +488,24 @@ async def validate_action_scripts(
     )
 
 
+async def validate_mcp_trigger(
+    exec_context: ToolExecutionContext,
+    source_id: str,
+    match_conditions: MatchConditions,
+    user_id: str | None,
+) -> str | None:
+    """An error message if an MCP event trigger cannot be polled, else None."""
+    if source_id != EventSourceType.mcp.value:
+        return None
+    source = (exec_context.event_sources or {}).get(source_id)
+    if not isinstance(source, MCPEventSource):
+        return "MCP event automations are not enabled on this deployment"
+    validation = await source.validate_listener(match_conditions, user_id)
+    if validation.valid:
+        return None
+    return "\n".join(format_validation_errors(validation))
+
+
 # Tool Implementations
 async def create_automation_tool(
     exec_context: ToolExecutionContext,
@@ -586,6 +607,14 @@ async def create_automation_tool(
                 return ToolResult(text=f"Error: {error_msg}", data={"error": error_msg})
 
             condition_script = trigger_config.get("condition_script")
+
+            trigger_error = await validate_mcp_trigger(
+                exec_context, source_id, match_conditions, exec_context.user_id
+            )
+            if trigger_error:
+                return ToolResult(
+                    text=f"Error: {trigger_error}", data={"error": trigger_error}
+                )
 
             automation_id = await exec_context.db_context.events.create_event_listener(
                 name=name,
@@ -997,6 +1026,24 @@ async def update_automation_tool(
             # Default to empty dict if still None
             if match_conditions is None:
                 match_conditions = {}
+
+            # An action edit restamps the listener to the editor, who then polls
+            # with their own credential, so the trigger is rechecked for them.
+            poller_changed = (
+                restamp_user_id is not None
+                and restamp_user_id != existing.created_by_user_id
+            )
+            if (trigger_config and "event_filter" in trigger_config) or poller_changed:
+                trigger_error = await validate_mcp_trigger(
+                    exec_context,
+                    existing.source_id or "",
+                    match_conditions,
+                    restamp_user_id or existing.created_by_user_id,
+                )
+                if trigger_error:
+                    return ToolResult(
+                        text=f"Error: {trigger_error}", data={"error": trigger_error}
+                    )
 
             # Extract condition_script from trigger_config if provided
             if trigger_config and "condition_script" in trigger_config:

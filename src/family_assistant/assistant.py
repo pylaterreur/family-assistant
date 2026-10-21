@@ -55,6 +55,7 @@ from family_assistant.embeddings import (
     OpenAIEmbeddingGenerator,
 )
 from family_assistant.events.indexing_source import IndexingSource
+from family_assistant.events.mcp_source import MCPEventSource, is_http_mcp_server
 from family_assistant.events.processor import EventProcessor
 from family_assistant.events.webhook_source import WebhookEventSource
 
@@ -162,6 +163,7 @@ from family_assistant.storage.database import (
     set_engine_history_taint_epoch,
     set_engine_memory_limits,
 )
+from family_assistant.storage.events import EventSourceType
 from family_assistant.storage.repositories.notes import NoteReadPolicy
 from family_assistant.storage.tasks import TaskPriority
 from family_assistant.task_worker import (
@@ -2129,6 +2131,17 @@ class Assistant:
             else:
                 self.webhook_source = None
 
+            if event_config.sources.mcp.enabled and any(
+                is_http_mcp_server(server)
+                for server in self.config.mcp_config.mcpServers.values()
+            ):
+                event_sources[EventSourceType.mcp.value] = MCPEventSource(
+                    servers=self.config.mcp_config.mcpServers,
+                    database=self._database,
+                    config=event_config.sources.mcp,
+                )
+                logger.info("Created MCPEventSource for MCP server events")
+
             if event_sources:
                 sample_interval_hours = event_config.storage.sample_interval_hours
 
@@ -2154,6 +2167,13 @@ class Assistant:
                 logger.info(
                     f"Event processor initialized with {len(event_sources)} sources"
                 )
+                # Processing services are built before the event system, so they
+                # get the sources here rather than at construction.
+                for service in self.processing_services_registry.values():
+                    if isinstance(service, ProcessingService):
+                        service.event_sources = self.event_processor.sources
+                if self.fastapi_app is not None:
+                    self.fastapi_app.state.event_sources = self.event_processor.sources
             else:
                 logger.info("Event system enabled but no event sources configured")
 

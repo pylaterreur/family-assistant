@@ -11,6 +11,7 @@ activate_tools:
   - get_automation
   - get_automation_stats
   - test_event_listener
+  - list_mcp_events
   - query_recent_events
   - execute_script
   - test_script_with_simulated_tools
@@ -108,6 +109,33 @@ silently dead. If it matches nothing, find out why before creating it.
 
 For Home Assistant entity IDs and states, load the Home Assistant skill and check the entity
 directly rather than trusting a name from the conversation.
+
+**MCP server events** (event source `mcp`) come from connected MCP servers that announce changes,
+such as the Tuit task tracker. Call `list_mcp_events` to see which servers offer which events, the
+arguments each takes and the payload it delivers; only `pollable` events can be used. The
+`event_filter` names what to watch, and creating the automation is what subscribes to it:
+
+```
+create_automation(
+    name="Tuit handoffs",
+    automation_type="event",
+    trigger_config={
+        "event_source": "mcp",
+        "event_filter": {
+            "server_id": "tuit",
+            "event": "inbox.changed",
+            "arguments.actor": "me",       # one arguments.<name> key per subscription argument
+            "data.category": "handoff",    # any other key filters delivered events as usual
+        },
+    },
+    action_type="wake_llm",
+    action_config={"context": "Something was handed to the user in Tuit. Tell them what."},
+)
+```
+
+The subscription runs with the user's own credential, starts from now (nothing that already happened
+fires it), and stops when the automation is disabled or deleted. There is no history to test against
+until the first events arrive; `query_recent_events(source_id="mcp")` shows them afterwards.
 
 ### 3. Choose the action type
 
