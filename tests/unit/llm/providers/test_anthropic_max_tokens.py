@@ -5,7 +5,7 @@ own refusal of large non-streaming requests is exercised rather than mocked.
 """
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import anthropic
 import httpx
@@ -97,11 +97,13 @@ def _client(
     return client
 
 
+async def _no_vcr_replay(_params: dict[str, object]) -> None:
+    return None
+
+
 async def _stream(client: AnthropicClient) -> None:
     # Skips the test-only replay branch so the request goes out as a stream.
-    with patch.object(
-        client, "_maybe_parse_vcr_stream", new=AsyncMock(return_value=None)
-    ):
+    with patch.object(client, "_maybe_parse_vcr_stream", new=_no_vcr_replay):
         async for _event in client.generate_response_stream([
             UserMessage(content="hi")
         ]):

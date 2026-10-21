@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -16,6 +15,7 @@ from family_assistant.services.effective_tool_registry import (
     build_effective_local_tool_registrations,
 )
 from family_assistant.services.oauth_integration_state import OAuthIntegrationState
+from family_assistant.storage.base import create_engine_with_sqlite_optimizations
 from family_assistant.storage.database import Database
 from family_assistant.tools.infrastructure import LocalToolsProvider
 from family_assistant.tools.types import ToolExecutionContext, ToolResult
@@ -203,7 +203,11 @@ def _exec_context(timezone: ZoneInfo = SYDNEY) -> ToolExecutionContext:
         conversation_id="weather-test",
         user_name="Tester",
         turn_id=None,
-        db_context=MagicMock(spec=Database),
+        # The weather tool reads nothing from the database; an engine that is
+        # never connected keeps the module database-free.
+        db_context=Database(
+            create_engine_with_sqlite_optimizations("sqlite+aiosqlite:///:memory:")
+        ),
         processing_service=None,
         clock=None,
         plugins=None,

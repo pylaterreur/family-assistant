@@ -1,7 +1,7 @@
 """Unit tests for GoogleEmbeddingGenerator (model name handling, no API calls)."""
 
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -23,8 +23,12 @@ async def test_api_model_name_strips_prefix() -> None:
         model="gemini/gemini-embedding-001", api_key="fake-key"
     )
     response = FakeEmbedResponse(embeddings=[FakeEmbedding(values=[1.0, 2.0, 3.0])])
-    mock_embed = AsyncMock(return_value=response)
-    with patch.object(generator._client.aio.models, "embed_content", mock_embed):
+    with patch.object(
+        generator._client.aio.models,
+        "embed_content",
+        autospec=True,
+        return_value=response,
+    ) as mock_embed:
         await generator.generate_embeddings(["hello"])
 
     mock_embed.assert_called_once()
@@ -69,9 +73,13 @@ async def test_missing_embeddings_raises() -> None:
     generator = GoogleEmbeddingGenerator(
         model="gemini-embedding-001", api_key="fake-key"
     )
-    mock_embed = AsyncMock(return_value=FakeEmbedResponse(embeddings=None))
     with (
-        patch.object(generator._client.aio.models, "embed_content", mock_embed),
+        patch.object(
+            generator._client.aio.models,
+            "embed_content",
+            autospec=True,
+            return_value=FakeEmbedResponse(embeddings=None),
+        ),
         pytest.raises(ValueError, match="returned no embeddings"),
     ):
         await generator.generate_embeddings(["hello"])
@@ -86,9 +94,13 @@ async def test_none_values_raises() -> None:
     response = FakeEmbedResponse(
         embeddings=[FakeEmbedding(values=[1.0, 2.0]), FakeEmbedding(values=None)]
     )
-    mock_embed = AsyncMock(return_value=response)
     with (
-        patch.object(generator._client.aio.models, "embed_content", mock_embed),
+        patch.object(
+            generator._client.aio.models,
+            "embed_content",
+            autospec=True,
+            return_value=response,
+        ),
         pytest.raises(ValueError, match="no values"),
     ):
         await generator.generate_embeddings(["hello", "world"])
@@ -101,9 +113,13 @@ async def test_count_mismatch_raises() -> None:
         model="gemini-embedding-001", api_key="fake-key"
     )
     response = FakeEmbedResponse(embeddings=[FakeEmbedding(values=[1.0, 2.0])])
-    mock_embed = AsyncMock(return_value=response)
     with (
-        patch.object(generator._client.aio.models, "embed_content", mock_embed),
+        patch.object(
+            generator._client.aio.models,
+            "embed_content",
+            autospec=True,
+            return_value=response,
+        ),
         pytest.raises(ValueError, match="returned 1 embeddings for 2"),
     ):
         await generator.generate_embeddings(["hello", "world"])

@@ -5,7 +5,6 @@ from __future__ import annotations
 from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
 
 from family_assistant.a2a.remote_service import RemoteA2AService
 from family_assistant.assistant import Assistant
@@ -17,14 +16,20 @@ from family_assistant.config_models import (
 )
 from family_assistant.plugins.config import PluginsConfig
 from family_assistant.plugins.runtime import PluginRuntime
+from family_assistant.services.attachment_registry import AttachmentRegistry
+from family_assistant.storage.database import Database
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
     from family_assistant.config_models import AppConfig
 
 
-def _stand_in_assistant(config: AppConfig | None = None) -> SimpleNamespace:
+def _stand_in_assistant(
+    db_engine: AsyncEngine, tmp_path: Path, config: AppConfig | None = None
+) -> SimpleNamespace:
     """A duck-typed `self` for the profile-setup methods under test.
 
     They read only the registries they wire the service from, so a lightweight
@@ -35,8 +40,10 @@ def _stand_in_assistant(config: AppConfig | None = None) -> SimpleNamespace:
     fake_self = SimpleNamespace(
         config=config,
         processing_services_registry={},
-        attachment_registry=MagicMock(),
-        _database=MagicMock(),
+        attachment_registry=AttachmentRegistry(
+            storage_path=str(tmp_path), db_engine=db_engine, config=None
+        ),
+        _database=partial(Database, db_engine),
         plugin_runtime=PluginRuntime(config.plugins if config else PluginsConfig()),
     )
     # The arg-type suppression covers the deliberate duck-typed stand-in.
@@ -47,14 +54,18 @@ def _stand_in_assistant(config: AppConfig | None = None) -> SimpleNamespace:
     return fake_self
 
 
-def _register(profile: ServiceProfile) -> RemoteA2AService:
+def _register(
+    profile: ServiceProfile, db_engine: AsyncEngine, tmp_path: Path
+) -> RemoteA2AService:
     """Run ``_setup_remote_a2a_profile`` against a minimal stand-in self."""
-    fake_self = _stand_in_assistant()
+    fake_self = _stand_in_assistant(db_engine, tmp_path)
     fake_self._setup_remote_a2a_profile(profile)
     return fake_self.processing_services_registry[profile.id]
 
 
-def test_max_async_seconds_defaults_to_one_hour_not_call_timeout() -> None:
+def test_max_async_seconds_defaults_to_one_hour_not_call_timeout(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
     """Unset max_async_seconds resolves to the 1-hour default, decoupled from timeout_seconds."""
     profile = ServiceProfile(
         id="remote_agent",
@@ -64,7 +75,7 @@ def test_max_async_seconds_defaults_to_one_hour_not_call_timeout() -> None:
         ),
     )
 
-    service = _register(profile)
+    service = _register(profile, db_engine, tmp_path)
 
     assert service.service_config.max_async_seconds == DEFAULT_REMOTE_MAX_ASYNC_SECONDS
     assert service.service_config.max_async_seconds == 3600.0
@@ -73,7 +84,7 @@ def test_max_async_seconds_defaults_to_one_hour_not_call_timeout() -> None:
 
 
 async def test_remote_profile_from_shipped_defaults_reaches_registration(
-    tmp_path: Path,
+    db_engine: AsyncEngine, tmp_path: Path
 ) -> None:
     """Setup validates the tier before the remote early return, so it must pass.
 
@@ -94,7 +105,7 @@ async def test_remote_profile_from_shipped_defaults_reaches_registration(
     config = load_config(config_file_path=str(config_file), load_dotenv_file=False)
     profile = next(p for p in config.service_profiles if p.id == "k8s_agent")
 
-    fake_self = _stand_in_assistant(config)
+    fake_self = _stand_in_assistant(db_engine, tmp_path, config)
     # The arg-type suppression covers the duck-typed stand-in for `self`.
     await Assistant._setup_processing_profile(
         fake_self,  # type: ignore[arg-type]
@@ -109,7 +120,9 @@ async def test_remote_profile_from_shipped_defaults_reaches_registration(
     )
 
 
-def test_explicit_max_async_seconds_is_preserved() -> None:
+def test_explicit_max_async_seconds_is_preserved(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
     """An explicit max_async_seconds overrides the default."""
     profile = ServiceProfile(
         id="remote_agent",
@@ -120,6 +133,6 @@ def test_explicit_max_async_seconds_is_preserved() -> None:
         ),
     )
 
-    service = _register(profile)
+    service = _register(profile, db_engine, tmp_path)
 
     assert service.service_config.max_async_seconds == 7200.0

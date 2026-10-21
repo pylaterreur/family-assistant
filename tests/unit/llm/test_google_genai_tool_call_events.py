@@ -1,7 +1,6 @@
 """Test Google GenAI streamed tool call events."""
 
 from collections.abc import AsyncIterator
-from unittest.mock import AsyncMock
 
 import pytest
 from google.genai import types
@@ -11,7 +10,7 @@ from family_assistant.llm.providers.google_genai_client import GoogleGenAIClient
 
 
 @pytest.mark.asyncio
-async def test_tool_call_events_are_emitted() -> None:
+async def test_tool_call_events_are_emitted(monkeypatch: pytest.MonkeyPatch) -> None:
     """A streamed SDK function call retains its name, arguments, and signature."""
     client = GoogleGenAIClient(
         api_key="test_key_for_unit_tests",
@@ -40,7 +39,17 @@ async def test_tool_call_events_are_emitted() -> None:
     async def stream() -> AsyncIterator[types.GenerateContentResponse]:
         yield response
 
-    client.client.aio.models.generate_content_stream = AsyncMock(return_value=stream())
+    async def generate_content_stream(
+        *,
+        model: str,
+        contents: object,
+        config: object = None,
+    ) -> AsyncIterator[types.GenerateContentResponse]:
+        return stream()
+
+    monkeypatch.setattr(
+        client.client.aio.models, "generate_content_stream", generate_content_stream
+    )
 
     events = [
         event

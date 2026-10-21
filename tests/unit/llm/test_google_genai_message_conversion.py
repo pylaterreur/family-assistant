@@ -5,15 +5,13 @@ and their association with function calls.
 """
 
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from google.genai import types
+from google.genai import types as genai_types
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-    from google.genai import types
-    from google.genai import types as genai_types
 
 from family_assistant.llm import ToolCallFunction, ToolCallItem
 from family_assistant.llm.messages import (
@@ -284,7 +282,7 @@ class TestThoughtSignatureConversion:
         assert converted_texts == ["Hello", "World", "Test"]
 
     async def test_end_to_end_thought_signature_workflow(
-        self, google_client: GoogleGenAIClient
+        self, google_client: GoogleGenAIClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """End-to-end test: streaming response → tool call → reconstruction.
 
@@ -299,56 +297,72 @@ class TestThoughtSignatureConversion:
         and attached to all tool calls with wrong part indices.
 
         Response structure that causes the bug:
-        - Part 0: thought (reasoning, has signature but not a function call)
-        - Part 1: text "I'll check the weather"
+        - Part 0: text "I'll check the weather"
+        - Part 1: thought (reasoning, has signature but not a function call)
         - Part 2: function_call with signature
 
-        When we emit this, ALL thought signatures (0 and 2) get attached to the tool call.
-        When we reconstruct, we try to apply signatures at indices 0 and 2 to a
+        When we emit this, ALL thought signatures (1 and 2) get attached to the tool call.
+        When we reconstruct, we try to apply signatures at indices 1 and 2 to a
         2-part structure [text, function_call], causing index mismatch.
         """
 
-        # Create a mock streaming response that mimics Google's API
         test_reasoning_sig = b"signature_for_reasoning"
         test_function_sig = b"signature_for_weather_call"
 
-        # Part 0: Thought/reasoning part (has signature but no function call)
-        thought_part = MagicMock()
-        thought_part.text = "Let me think about this..."
-        thought_part.thought = True  # This is a thought/reasoning part
-        thought_part.thought_signature = test_reasoning_sig
-        thought_part.function_call = None
+        text_chunk = genai_types.GenerateContentResponse(
+            candidates=[
+                genai_types.Candidate(
+                    content=genai_types.Content(
+                        role="model",
+                        parts=[
+                            genai_types.Part(text="I'll check the weather for you.")
+                        ],
+                    )
+                )
+            ]
+        )
+        # The reasoning part's signature arrives in the same chunk as the
+        # function call's, so a signature collected per chunk rather than per
+        # part would land on the tool call.
+        thought_and_call_chunk = genai_types.GenerateContentResponse(
+            candidates=[
+                genai_types.Candidate(
+                    content=genai_types.Content(
+                        role="model",
+                        parts=[
+                            genai_types.Part(
+                                text="Let me think about this...",
+                                thought=True,
+                                thought_signature=test_reasoning_sig,
+                            ),
+                            genai_types.Part(
+                                function_call=genai_types.FunctionCall(
+                                    name="get_weather", args={"location": "Paris"}
+                                ),
+                                thought_signature=test_function_sig,
+                            ),
+                        ],
+                    )
+                )
+            ]
+        )
 
-        # Part 1: Text part (no signature, no function call)
-        text_part = MagicMock()
-        text_part.text = "I'll check the weather for you."
-        text_part.thought = False
-        text_part.thought_signature = None
-        text_part.function_call = None
+        async def stream() -> "AsyncIterator[genai_types.GenerateContentResponse]":
+            yield text_chunk
+            yield thought_and_call_chunk
 
-        # Part 2: Function call part (has its own signature)
-        function_call_part = MagicMock()
-        function_call_part.text = None
-        function_call_part.thought = False
-        function_call_part.thought_signature = test_function_sig
-        function_call_part.function_call = MagicMock()
-        function_call_part.function_call.name = "get_weather"
-        function_call_part.function_call.args = {"location": "Paris"}
+        async def generate_content_stream(
+            *,
+            model: str,
+            contents: object,
+            config: object = None,
+        ) -> "AsyncIterator[genai_types.GenerateContentResponse]":
+            return stream()
 
-        # Create mock candidate and chunk
-        mock_candidate = MagicMock()
-        mock_candidate.content.parts = [thought_part, text_part, function_call_part]
-
-        mock_chunk = MagicMock()
-        mock_chunk.text = None
-        mock_chunk.candidates = [mock_candidate]
-
-        # Mock the streaming API call
-        async def mock_stream() -> "AsyncIterator[MagicMock]":
-            yield mock_chunk
-
-        google_client.client.aio.models.generate_content_stream = AsyncMock(
-            return_value=mock_stream()
+        monkeypatch.setattr(
+            google_client.client.aio.models,
+            "generate_content_stream",
+            generate_content_stream,
         )
 
         # Step 1: Process streaming response

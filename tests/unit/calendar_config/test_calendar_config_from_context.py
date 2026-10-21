@@ -1,11 +1,11 @@
 """Calendar tools get their calendar_config from the execution context."""
 
 from typing import cast
-from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
 
+from family_assistant.storage.base import create_engine_with_sqlite_optimizations
 from family_assistant.storage.database import Database
 from family_assistant.tools.infrastructure import LocalToolsProvider
 from family_assistant.tools.types import (
@@ -61,14 +61,15 @@ async def test_calendar_config_from_context() -> None:
         implementations={"mock_calendar_tool": mock_calendar_tool},
     )
 
-    # Create execution context
-    mock_db_context = MagicMock(spec=Database)
     exec_context = ToolExecutionContext(
         interface_type="test",
         conversation_id="test_conv",
         user_name="TestUser",
         turn_id="test_turn",
-        db_context=mock_db_context,
+        # The tool reads nothing from the database; this engine never connects.
+        db_context=Database(
+            create_engine_with_sqlite_optimizations("sqlite+aiosqlite:///:memory:")
+        ),
         processing_service=None,
         clock=None,
         plugins=None,
@@ -124,14 +125,15 @@ async def test_calendar_tool_without_config() -> None:
         implementations={"mock_calendar_tool": mock_calendar_tool},
     )
 
-    # Create execution context
-    mock_db_context = MagicMock(spec=Database)
     exec_context = ToolExecutionContext(
         interface_type="test",
         conversation_id="test_conv",
         user_name="TestUser",
         turn_id="test_turn",
-        db_context=mock_db_context,
+        # The tool reads nothing from the database; this engine never connects.
+        db_context=Database(
+            create_engine_with_sqlite_optimizations("sqlite+aiosqlite:///:memory:")
+        ),
         processing_service=None,
         clock=None,
         plugins=None,

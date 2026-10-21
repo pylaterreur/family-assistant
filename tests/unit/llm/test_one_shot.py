@@ -1,17 +1,21 @@
 """Unit tests for one_shot LLM utilities."""
 
-from unittest.mock import AsyncMock, patch
+import json
+from collections.abc import Mapping, Sequence
 
 import pytest
 from pydantic import BaseModel
 
-from family_assistant.llm import LLMOutput
+from family_assistant.llm import LLMInterface, LLMOutput
+from family_assistant.llm.factory import LLMClientFactory
+from family_assistant.llm.messages import LLMMessage
 from family_assistant.llm.one_shot import (
     DEFAULT_MODEL,
     one_shot,
     one_shot_json,
     one_shot_structured,
 )
+from tests.mocks.mock_llm import RuleBasedMockLLMClient
 
 
 class SummaryModel(BaseModel):
@@ -21,214 +25,202 @@ class SummaryModel(BaseModel):
     key_points: list[str]
 
 
-@pytest.fixture
-def mock_llm_client() -> AsyncMock:
-    """Create a mock LLM client."""
-    mock = AsyncMock()
-    mock.generate_response = AsyncMock(return_value=LLMOutput(content="Test response"))
-    return mock
+class RecordingClientFactory:
+    """Stands in for ``LLMClientFactory.create_client``, returning one client."""
+
+    def __init__(self, client: LLMInterface) -> None:
+        self.client = client
+        self.configs: list[Mapping[str, object]] = []
+
+    def __call__(self, config: Mapping[str, object]) -> LLMInterface:
+        self.configs.append(config)
+        return self.client
+
+
+def install_client(
+    monkeypatch: pytest.MonkeyPatch, client: RuleBasedMockLLMClient
+) -> RecordingClientFactory:
+    factory = RecordingClientFactory(client)
+    monkeypatch.setattr(LLMClientFactory, "create_client", factory)
+    return factory
+
+
+def text_client(content: str | None = "Test response") -> RuleBasedMockLLMClient:
+    return RuleBasedMockLLMClient(rules=[], default_response=LLMOutput(content=content))
+
+
+def structured_client(result: BaseModel) -> RuleBasedMockLLMClient:
+    return RuleBasedMockLLMClient(
+        rules=[], structured_rules=[(lambda _kwargs: True, result)]
+    )
+
+
+def messages_sent(client: RuleBasedMockLLMClient, method: str) -> Sequence[LLMMessage]:
+    calls = [c for c in client.get_calls() if c["method_name"] == method]
+    assert len(calls) == 1
+    return calls[0]["kwargs"]["messages"]
 
 
 @pytest.mark.no_db
-async def test_one_shot_simple(mock_llm_client: AsyncMock) -> None:
+async def test_one_shot_simple(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test basic one_shot call."""
-    with patch(
-        "family_assistant.llm.one_shot.LLMClientFactory.create_client",
-        return_value=mock_llm_client,
-    ) as mock_factory:
-        result = await one_shot("Hello, world!")
+    client = text_client()
+    factory = install_client(monkeypatch, client)
 
-        mock_factory.assert_called_once_with({"model": DEFAULT_MODEL})
-        mock_llm_client.generate_response.assert_called_once()
+    result = await one_shot("Hello, world!")
 
-        call_args = mock_llm_client.generate_response.call_args
-        messages = call_args[0][0]
-        assert len(messages) == 1
-        assert messages[0].role == "user"
-        assert messages[0].content == "Hello, world!"
-
-        assert result == "Test response"
+    assert factory.configs == [{"model": DEFAULT_MODEL}]
+    messages = messages_sent(client, "generate_response")
+    assert len(messages) == 1
+    assert messages[0].role == "user"
+    assert messages[0].content == "Hello, world!"
+    assert result == "Test response"
 
 
 @pytest.mark.no_db
-async def test_one_shot_with_system_message(mock_llm_client: AsyncMock) -> None:
+async def test_one_shot_with_system_message(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test one_shot with system message."""
-    with patch(
-        "family_assistant.llm.one_shot.LLMClientFactory.create_client",
-        return_value=mock_llm_client,
-    ):
-        await one_shot(
-            "Hello",
-            system="You are a helpful assistant.",
-        )
+    client = text_client()
+    install_client(monkeypatch, client)
 
-        call_args = mock_llm_client.generate_response.call_args
-        messages = call_args[0][0]
-        assert len(messages) == 2
-        assert messages[0].role == "system"
-        assert messages[0].content == "You are a helpful assistant."
-        assert messages[1].role == "user"
-        assert messages[1].content == "Hello"
+    await one_shot(
+        "Hello",
+        system="You are a helpful assistant.",
+    )
+
+    messages = messages_sent(client, "generate_response")
+    assert len(messages) == 2
+    assert messages[0].role == "system"
+    assert messages[0].content == "You are a helpful assistant."
+    assert messages[1].role == "user"
+    assert messages[1].content == "Hello"
 
 
 @pytest.mark.no_db
-async def test_one_shot_with_custom_model(mock_llm_client: AsyncMock) -> None:
+async def test_one_shot_with_custom_model(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test one_shot with custom model."""
-    with patch(
-        "family_assistant.llm.one_shot.LLMClientFactory.create_client",
-        return_value=mock_llm_client,
-    ) as mock_factory:
-        await one_shot("Hello", model="gpt-4o")
+    factory = install_client(monkeypatch, text_client())
 
-        mock_factory.assert_called_once_with({"model": "gpt-4o"})
+    await one_shot("Hello", model="gpt-4o")
+
+    assert factory.configs == [{"model": "gpt-4o"}]
 
 
 @pytest.mark.no_db
-async def test_one_shot_raises_on_empty_content(mock_llm_client: AsyncMock) -> None:
+async def test_one_shot_raises_on_empty_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Test one_shot raises ValueError when LLM returns no content."""
-    mock_llm_client.generate_response = AsyncMock(return_value=LLMOutput(content=None))
+    install_client(monkeypatch, text_client(content=None))
 
-    with (
-        patch(
-            "family_assistant.llm.one_shot.LLMClientFactory.create_client",
-            return_value=mock_llm_client,
-        ),
-        pytest.raises(ValueError, match="LLM returned no content"),
-    ):
+    with pytest.raises(ValueError, match="LLM returned no content"):
         await one_shot("Hello")
 
 
 @pytest.mark.no_db
-async def test_one_shot_structured(mock_llm_client: AsyncMock) -> None:
+async def test_one_shot_structured(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test one_shot_structured call."""
     expected_result = SummaryModel(title="Test", key_points=["Point 1", "Point 2"])
-    mock_llm_client.generate_structured = AsyncMock(return_value=expected_result)
+    client = structured_client(expected_result)
+    factory = install_client(monkeypatch, client)
 
-    with patch(
-        "family_assistant.llm.one_shot.LLMClientFactory.create_client",
-        return_value=mock_llm_client,
-    ) as mock_factory:
-        result = await one_shot_structured(
-            "Summarize this",
-            response_model=SummaryModel,
-        )
+    result = await one_shot_structured(
+        "Summarize this",
+        response_model=SummaryModel,
+    )
 
-        mock_factory.assert_called_once_with({"model": DEFAULT_MODEL})
-
-        call_args = mock_llm_client.generate_structured.call_args
-        messages = call_args[0][0]
-        response_model = call_args[0][1]
-
-        assert len(messages) == 1
-        assert messages[0].role == "user"
-        assert response_model is SummaryModel
-
-        assert result == expected_result
-        assert result.title == "Test"
-        assert result.key_points == ["Point 1", "Point 2"]
+    assert factory.configs == [{"model": DEFAULT_MODEL}]
+    calls = [c for c in client.get_calls() if c["method_name"] == "generate_structured"]
+    assert len(calls) == 1
+    messages = calls[0]["kwargs"]["messages"]
+    assert len(messages) == 1
+    assert messages[0].role == "user"
+    assert calls[0]["kwargs"]["response_model"] is SummaryModel
+    assert result == expected_result
+    assert result.title == "Test"
+    assert result.key_points == ["Point 1", "Point 2"]
 
 
 @pytest.mark.no_db
-async def test_one_shot_structured_with_system(mock_llm_client: AsyncMock) -> None:
+async def test_one_shot_structured_with_system(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Test one_shot_structured with system message."""
-    expected_result = SummaryModel(title="Test", key_points=[])
-    mock_llm_client.generate_structured = AsyncMock(return_value=expected_result)
+    client = structured_client(SummaryModel(title="Test", key_points=[]))
+    install_client(monkeypatch, client)
 
-    with patch(
-        "family_assistant.llm.one_shot.LLMClientFactory.create_client",
-        return_value=mock_llm_client,
-    ):
-        await one_shot_structured(
-            "Summarize this",
-            response_model=SummaryModel,
-            system="You are a summarizer.",
-        )
+    await one_shot_structured(
+        "Summarize this",
+        response_model=SummaryModel,
+        system="You are a summarizer.",
+    )
 
-        call_args = mock_llm_client.generate_structured.call_args
-        messages = call_args[0][0]
-
-        assert len(messages) == 2
-        assert messages[0].role == "system"
-        assert messages[0].content == "You are a summarizer."
-        assert messages[1].role == "user"
+    messages = messages_sent(client, "generate_structured")
+    assert len(messages) == 2
+    assert messages[0].role == "system"
+    assert messages[0].content == "You are a summarizer."
+    assert messages[1].role == "user"
 
 
 @pytest.mark.no_db
 async def test_one_shot_structured_with_custom_model(
-    mock_llm_client: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test one_shot_structured with custom model."""
-    expected_result = SummaryModel(title="Test", key_points=[])
-    mock_llm_client.generate_structured = AsyncMock(return_value=expected_result)
+    factory = install_client(
+        monkeypatch, structured_client(SummaryModel(title="Test", key_points=[]))
+    )
 
-    with patch(
-        "family_assistant.llm.one_shot.LLMClientFactory.create_client",
-        return_value=mock_llm_client,
-    ) as mock_factory:
-        await one_shot_structured(
-            "Summarize this",
-            response_model=SummaryModel,
-            model="claude-3-sonnet",
-        )
+    await one_shot_structured(
+        "Summarize this",
+        response_model=SummaryModel,
+        model="claude-3-sonnet",
+    )
 
-        mock_factory.assert_called_once_with({"model": "claude-3-sonnet"})
+    assert factory.configs == [{"model": "claude-3-sonnet"}]
 
 
 @pytest.mark.no_db
-async def test_one_shot_json(mock_llm_client: AsyncMock) -> None:
+async def test_one_shot_json(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test one_shot_json call."""
     expected_result = {"name": "Alice", "age": 30}
-    mock_llm_client.generate_json = AsyncMock(return_value=expected_result)
+    client = text_client(json.dumps(expected_result))
+    factory = install_client(monkeypatch, client)
 
-    with patch(
-        "family_assistant.llm.one_shot.LLMClientFactory.create_client",
-        return_value=mock_llm_client,
-    ) as mock_factory:
-        result = await one_shot_json("Extract info from: Alice is 30 years old")
+    result = await one_shot_json("Extract info from: Alice is 30 years old")
 
-        mock_factory.assert_called_once_with({"model": DEFAULT_MODEL})
-
-        call_args = mock_llm_client.generate_json.call_args
-        messages = call_args[0][0]
-
-        assert len(messages) == 1
-        assert messages[0].role == "user"
-
-        assert result == expected_result
+    assert factory.configs == [{"model": DEFAULT_MODEL}]
+    messages = messages_sent(client, "generate_json")
+    assert len(messages) == 1
+    assert messages[0].role == "user"
+    assert result == expected_result
 
 
 @pytest.mark.no_db
-async def test_one_shot_json_with_system(mock_llm_client: AsyncMock) -> None:
+async def test_one_shot_json_with_system(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test one_shot_json with system message."""
-    mock_llm_client.generate_json = AsyncMock(return_value={"key": "value"})
+    client = text_client('{"key": "value"}')
+    install_client(monkeypatch, client)
 
-    with patch(
-        "family_assistant.llm.one_shot.LLMClientFactory.create_client",
-        return_value=mock_llm_client,
-    ):
-        await one_shot_json(
-            "Extract info",
-            system="Be concise.",
-        )
+    await one_shot_json(
+        "Extract info",
+        system="Be concise.",
+    )
 
-        call_args = mock_llm_client.generate_json.call_args
-        messages = call_args[0][0]
-
-        assert len(messages) == 2
-        assert messages[0].role == "system"
-        assert messages[0].content == "Be concise."
-        assert messages[1].role == "user"
+    messages = messages_sent(client, "generate_json")
+    assert len(messages) == 2
+    assert messages[0].role == "system"
+    assert messages[0].content == "Be concise."
+    assert messages[1].role == "user"
 
 
 @pytest.mark.no_db
-async def test_one_shot_json_with_custom_model(mock_llm_client: AsyncMock) -> None:
+async def test_one_shot_json_with_custom_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Test one_shot_json with custom model."""
-    mock_llm_client.generate_json = AsyncMock(return_value={})
+    factory = install_client(monkeypatch, text_client("{}"))
 
-    with patch(
-        "family_assistant.llm.one_shot.LLMClientFactory.create_client",
-        return_value=mock_llm_client,
-    ) as mock_factory:
-        await one_shot_json("Extract info", model="gpt-4o")
+    await one_shot_json("Extract info", model="gpt-4o")
 
-        mock_factory.assert_called_once_with({"model": "gpt-4o"})
+    assert factory.configs == [{"model": "gpt-4o"}]

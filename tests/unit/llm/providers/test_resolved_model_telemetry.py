@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -20,9 +20,22 @@ from family_assistant.llm.providers.openai_client import OpenAIClient
 from family_assistant.llm.request_buffer import LLMRequestBuffer, get_request_buffer
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+    from collections.abc import (
+        AsyncGenerator,
+        AsyncIterator,
+        Awaitable,
+        Callable,
+        Iterator,
+    )
 
     from family_assistant.llm import LLMStreamEvent
+
+
+def _returning(response: object) -> Callable[..., Awaitable[object]]:
+    async def create(**_kwargs: object) -> object:
+        return response
+
+    return create
 
 
 @pytest.fixture
@@ -44,9 +57,7 @@ async def test_anthropic_records_the_served_model(buffer: LLMRequestBuffer) -> N
         stop_reason="end_turn",
     )
 
-    with patch.object(
-        client.client.messages, "create", new=AsyncMock(return_value=response)
-    ):
+    with patch.object(client.client.messages, "create", new=_returning(response)):
         output = await client.generate_response([UserMessage(content="hi")])
 
     assert output.resolved_model == "claude-sonnet-4-6-20250929"
@@ -199,9 +210,7 @@ async def test_the_usage_returned_to_the_caller_carries_the_measurements(
         stop_reason="end_turn",
     )
 
-    with patch.object(
-        client.client.messages, "create", new=AsyncMock(return_value=response)
-    ):
+    with patch.object(client.client.messages, "create", new=_returning(response)):
         output = await client.generate_response([UserMessage(content="hi")])
 
     usage = output.reasoning_info

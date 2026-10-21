@@ -4,8 +4,9 @@ Tests the tool_choice parameter implementation in GoogleGenAIClient, verifying
 that different tool_choice values correctly configure the FunctionCallingConfig.
 """
 
+from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from google.genai import types
@@ -13,6 +14,32 @@ from google.genai import types
 from family_assistant.llm import UserMessage
 from family_assistant.llm.providers.google_genai_client import GoogleGenAIClient
 from family_assistant.tools.types import ToolDefinition
+from tests.mocks.recording_async_call import RecordedCall, RecordingAsyncCall
+
+
+def text_response(text: str) -> types.GenerateContentResponse:
+    return types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(role="model", parts=[types.Part(text=text)])
+            )
+        ]
+    )
+
+
+async def stream_of(
+    *responses: types.GenerateContentResponse,
+) -> AsyncIterator[types.GenerateContentResponse]:
+    for response in responses:
+        yield response
+
+
+def sent_config(calls: list[RecordedCall]) -> types.GenerateContentConfig:
+    """The generation config of the single call made to the SDK."""
+    assert len(calls) == 1
+    config = calls[0].kwargs["config"]
+    assert isinstance(config, types.GenerateContentConfig)
+    return config
 
 
 class TestGoogleGenAIToolChoice:
@@ -76,14 +103,10 @@ class TestGoogleGenAIToolChoice:
         sample_messages: list[Any],
     ) -> None:
         """Test that tool_choice='required' sets FunctionCallingConfigMode.ANY."""
+        generate = RecordingAsyncCall(text_response("Tool response"))
         with patch.object(
-            google_client.client.aio.models, "generate_content", new_callable=AsyncMock
-        ) as mock_generate:
-            # Setup mock response
-            mock_response = MagicMock()
-            mock_response.text = "Tool response"
-            mock_generate.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content", new=generate
+        ):
             # Call generate_response with tool_choice="required"
             await google_client.generate_response(
                 sample_messages,
@@ -91,15 +114,9 @@ class TestGoogleGenAIToolChoice:
                 tool_choice="required",
             )
 
-            # Verify generate_content was called
-            assert mock_generate.called
-
-            # Get the config argument
-            call_args = mock_generate.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(generate.calls)
 
             # Verify tool_config is set with mode ANY
-            assert config is not None
             assert config.tool_config is not None
             assert config.tool_config.function_calling_config is not None
 
@@ -126,14 +143,10 @@ class TestGoogleGenAIToolChoice:
         sample_messages: list[Any],
     ) -> None:
         """Test that specific tool_choice restricts to allowed_function_names."""
+        generate = RecordingAsyncCall(text_response("Tool response"))
         with patch.object(
-            google_client.client.aio.models, "generate_content", new_callable=AsyncMock
-        ) as mock_generate:
-            # Setup mock response
-            mock_response = MagicMock()
-            mock_response.text = "Tool response"
-            mock_generate.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content", new=generate
+        ):
             # Call generate_response with specific tool name
             await google_client.generate_response(
                 sample_messages,
@@ -141,15 +154,9 @@ class TestGoogleGenAIToolChoice:
                 tool_choice="attach_to_response",
             )
 
-            # Verify generate_content was called
-            assert mock_generate.called
-
-            # Get the config argument
-            call_args = mock_generate.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(generate.calls)
 
             # Verify tool_config is set with mode ANY and allowed_function_names
-            assert config is not None
             assert config.tool_config is not None
             assert config.tool_config.function_calling_config is not None
 
@@ -172,14 +179,10 @@ class TestGoogleGenAIToolChoice:
         sample_messages: list[Any],
     ) -> None:
         """Test that tool_choice='auto' doesn't set restrictive tool config."""
+        generate = RecordingAsyncCall(text_response("Tool response"))
         with patch.object(
-            google_client.client.aio.models, "generate_content", new_callable=AsyncMock
-        ) as mock_generate:
-            # Setup mock response
-            mock_response = MagicMock()
-            mock_response.text = "Tool response"
-            mock_generate.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content", new=generate
+        ):
             # Call generate_response with tool_choice="auto" (default)
             await google_client.generate_response(
                 sample_messages,
@@ -187,16 +190,10 @@ class TestGoogleGenAIToolChoice:
                 tool_choice="auto",
             )
 
-            # Verify generate_content was called
-            assert mock_generate.called
-
-            # Get the config argument
-            call_args = mock_generate.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(generate.calls)
 
             # Verify tool_config is not set for "auto" mode
             # In "auto" mode, we rely on the model's default behavior
-            assert config is not None
             # tool_config should be None or not contain function_calling_config
             if config.tool_config is not None:
                 # If tool_config exists, it shouldn't have function_calling_config set
@@ -213,14 +210,10 @@ class TestGoogleGenAIToolChoice:
         sample_messages: list[Any],
     ) -> None:
         """Test that tool_choice='none' sets FunctionCallingConfigMode.NONE."""
+        generate = RecordingAsyncCall(text_response("Text only response"))
         with patch.object(
-            google_client.client.aio.models, "generate_content", new_callable=AsyncMock
-        ) as mock_generate:
-            # Setup mock response
-            mock_response = MagicMock()
-            mock_response.text = "Text only response"
-            mock_generate.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content", new=generate
+        ):
             # Call generate_response with tool_choice="none"
             await google_client.generate_response(
                 sample_messages,
@@ -228,15 +221,9 @@ class TestGoogleGenAIToolChoice:
                 tool_choice="none",
             )
 
-            # Verify generate_content was called
-            assert mock_generate.called
-
-            # Get the config argument
-            call_args = mock_generate.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(generate.calls)
 
             # Verify tool_config is set with mode NONE
-            assert config is not None
             assert config.tool_config is not None
             assert config.tool_config.function_calling_config is not None
 
@@ -253,14 +240,10 @@ class TestGoogleGenAIToolChoice:
         sample_messages: list[Any],
     ) -> None:
         """Test that tool_choice='none' prevents tools from being included in config."""
+        generate = RecordingAsyncCall(text_response("Text only response"))
         with patch.object(
-            google_client.client.aio.models, "generate_content", new_callable=AsyncMock
-        ) as mock_generate:
-            # Setup mock response
-            mock_response = MagicMock()
-            mock_response.text = "Text only response"
-            mock_generate.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content", new=generate
+        ):
             # Call generate_response with tool_choice="none" and tools provided
             await google_client.generate_response(
                 sample_messages,
@@ -268,16 +251,10 @@ class TestGoogleGenAIToolChoice:
                 tool_choice="none",
             )
 
-            # Verify generate_content was called
-            assert mock_generate.called
-
-            # Get the config argument
-            call_args = mock_generate.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(generate.calls)
 
             # Verify tools are not included in generation config
             # When tool_choice="none", _prepare_all_tools should return empty list
-            assert config is not None
             assert config.tools is None or len(config.tools) == 0
 
     @pytest.mark.asyncio
@@ -288,14 +265,10 @@ class TestGoogleGenAIToolChoice:
         sample_messages: list[Any],
     ) -> None:
         """Test that tool_choice='required' includes tools in config."""
+        generate = RecordingAsyncCall(text_response("Tool response"))
         with patch.object(
-            google_client.client.aio.models, "generate_content", new_callable=AsyncMock
-        ) as mock_generate:
-            # Setup mock response
-            mock_response = MagicMock()
-            mock_response.text = "Tool response"
-            mock_generate.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content", new=generate
+        ):
             # Call generate_response with tool_choice="required"
             await google_client.generate_response(
                 sample_messages,
@@ -303,15 +276,9 @@ class TestGoogleGenAIToolChoice:
                 tool_choice="required",
             )
 
-            # Verify generate_content was called
-            assert mock_generate.called
-
-            # Get the config argument
-            call_args = mock_generate.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(generate.calls)
 
             # Verify tools are included in generation config
-            assert config is not None
             assert config.tools is not None
             assert len(config.tools) > 0
 
@@ -323,14 +290,10 @@ class TestGoogleGenAIToolChoice:
         sample_messages: list[Any],
     ) -> None:
         """Test that specific tool_choice includes tools in config."""
+        generate = RecordingAsyncCall(text_response("Tool response"))
         with patch.object(
-            google_client.client.aio.models, "generate_content", new_callable=AsyncMock
-        ) as mock_generate:
-            # Setup mock response
-            mock_response = MagicMock()
-            mock_response.text = "Tool response"
-            mock_generate.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content", new=generate
+        ):
             # Call generate_response with specific tool name
             await google_client.generate_response(
                 sample_messages,
@@ -338,15 +301,9 @@ class TestGoogleGenAIToolChoice:
                 tool_choice="search_calendar",
             )
 
-            # Verify generate_content was called
-            assert mock_generate.called
-
-            # Get the config argument
-            call_args = mock_generate.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(generate.calls)
 
             # Verify tools are included in generation config
-            assert config is not None
             assert config.tools is not None
             assert len(config.tools) > 0
 
@@ -358,14 +315,10 @@ class TestGoogleGenAIToolChoice:
         sample_messages: list[Any],
     ) -> None:
         """Test that automatic function calling is disabled when tools are provided."""
+        generate = RecordingAsyncCall(text_response("Response"))
         with patch.object(
-            google_client.client.aio.models, "generate_content", new_callable=AsyncMock
-        ) as mock_generate:
-            # Setup mock response
-            mock_response = MagicMock()
-            mock_response.text = "Response"
-            mock_generate.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content", new=generate
+        ):
             # Call generate_response with tools
             await google_client.generate_response(
                 sample_messages,
@@ -373,12 +326,9 @@ class TestGoogleGenAIToolChoice:
                 tool_choice="required",
             )
 
-            # Get the config argument
-            call_args = mock_generate.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(generate.calls)
 
             # Verify automatic_function_calling is disabled
-            assert config is not None
             assert config.automatic_function_calling is not None
             assert config.automatic_function_calling.disable is True
 
@@ -389,14 +339,10 @@ class TestGoogleGenAIToolChoice:
         sample_messages: list[Any],
     ) -> None:
         """Test tool_choice behavior when no tools are provided."""
+        generate = RecordingAsyncCall(text_response("Response without tools"))
         with patch.object(
-            google_client.client.aio.models, "generate_content", new_callable=AsyncMock
-        ) as mock_generate:
-            # Setup mock response
-            mock_response = MagicMock()
-            mock_response.text = "Response without tools"
-            mock_generate.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content", new=generate
+        ):
             # Call generate_response without tools
             await google_client.generate_response(
                 sample_messages,
@@ -404,15 +350,9 @@ class TestGoogleGenAIToolChoice:
                 tool_choice="required",
             )
 
-            # Verify generate_content was called
-            assert mock_generate.called
-
-            # Get the config argument
-            call_args = mock_generate.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(generate.calls)
 
             # When tools are empty, config.tools should be empty/None
-            assert config is not None
             assert config.tools is None or len(config.tools) == 0
 
 
@@ -459,19 +399,10 @@ class TestGoogleGenAIToolChoiceStreaming:
         sample_messages: list[Any],
     ) -> None:
         """Test that tool_choice='required' works in streaming mode."""
+        stream = RecordingAsyncCall(stream_of(text_response("Streamed")))
         with patch.object(
-            google_client.client.aio.models,
-            "generate_content_stream",
-            new_callable=AsyncMock,
-        ) as mock_stream:
-            # Setup mock streaming response
-            mock_response = AsyncMock()
-            mock_response.__aiter__.return_value = AsyncMock()
-            mock_response.__aiter__.return_value.__anext__.side_effect = (
-                StopAsyncIteration()
-            )
-            mock_stream.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content_stream", new=stream
+        ):
             # Consume the stream
             async for _ in google_client.generate_response_stream(
                 sample_messages,
@@ -480,15 +411,9 @@ class TestGoogleGenAIToolChoiceStreaming:
             ):
                 pass
 
-            # Verify stream was called
-            assert mock_stream.called
-
-            # Get the config argument
-            call_args = mock_stream.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(stream.calls)
 
             # Verify tool_config is set
-            assert config is not None
             assert config.tool_config is not None
             assert config.tool_config.function_calling_config is not None
 
@@ -505,19 +430,10 @@ class TestGoogleGenAIToolChoiceStreaming:
         sample_messages: list[Any],
     ) -> None:
         """Test that specific tool_choice works in streaming mode."""
+        stream = RecordingAsyncCall(stream_of(text_response("Streamed")))
         with patch.object(
-            google_client.client.aio.models,
-            "generate_content_stream",
-            new_callable=AsyncMock,
-        ) as mock_stream:
-            # Setup mock streaming response
-            mock_response = AsyncMock()
-            mock_response.__aiter__.return_value = AsyncMock()
-            mock_response.__aiter__.return_value.__anext__.side_effect = (
-                StopAsyncIteration()
-            )
-            mock_stream.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content_stream", new=stream
+        ):
             # Consume the stream
             async for _ in google_client.generate_response_stream(
                 sample_messages,
@@ -526,15 +442,9 @@ class TestGoogleGenAIToolChoiceStreaming:
             ):
                 pass
 
-            # Verify stream was called
-            assert mock_stream.called
-
-            # Get the config argument
-            call_args = mock_stream.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(stream.calls)
 
             # Verify allowed_function_names is set
-            assert config is not None
             assert config.tool_config is not None
             assert config.tool_config.function_calling_config is not None
             assert (
@@ -550,19 +460,10 @@ class TestGoogleGenAIToolChoiceStreaming:
         sample_messages: list[Any],
     ) -> None:
         """Test that tool_choice='none' works in streaming mode."""
+        stream = RecordingAsyncCall(stream_of(text_response("Streamed")))
         with patch.object(
-            google_client.client.aio.models,
-            "generate_content_stream",
-            new_callable=AsyncMock,
-        ) as mock_stream:
-            # Setup mock streaming response
-            mock_response = AsyncMock()
-            mock_response.__aiter__.return_value = AsyncMock()
-            mock_response.__aiter__.return_value.__anext__.side_effect = (
-                StopAsyncIteration()
-            )
-            mock_stream.return_value = mock_response
-
+            google_client.client.aio.models, "generate_content_stream", new=stream
+        ):
             # Consume the stream
             async for _ in google_client.generate_response_stream(
                 sample_messages,
@@ -571,15 +472,9 @@ class TestGoogleGenAIToolChoiceStreaming:
             ):
                 pass
 
-            # Verify stream was called
-            assert mock_stream.called
-
-            # Get the config argument
-            call_args = mock_stream.call_args
-            config = call_args.kwargs.get("config")
+            config = sent_config(stream.calls)
 
             # Verify mode is NONE
-            assert config is not None
             assert config.tool_config is not None
             assert config.tool_config.function_calling_config is not None
 

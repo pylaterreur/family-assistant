@@ -7,7 +7,7 @@ to the provider must carry the override, even when a later global pattern matche
 """
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -138,15 +138,18 @@ async def test_per_entry_override_is_applied_after_every_global_pattern() -> Non
         status="completed",
         usage=None,
     )
-    with patch.object(
-        client.client.responses, "create", new=AsyncMock(return_value=response)
-    ) as create:
+    requests: list[dict[str, object]] = []
+
+    async def create(**kwargs: object) -> SimpleNamespace:
+        requests.append(kwargs)
+        return response
+
+    with patch.object(client.client.responses, "create", new=create):
         output = await client.generate_response([UserMessage(content="Hello")])
 
     assert output.content == "Ready"
-    request = create.await_args
-    assert request is not None
-    assert request.kwargs["reasoning"] == {"effort": "xhigh"}
+    assert len(requests) == 1
+    assert requests[0]["reasoning"] == {"effort": "xhigh"}
 
 
 def test_per_entry_override_merges_with_the_global_entry_for_that_model() -> None:

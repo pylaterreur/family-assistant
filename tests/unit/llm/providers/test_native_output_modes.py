@@ -3,16 +3,27 @@
 # pylint: disable=no-name-in-module
 
 import json
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from collections.abc import Sequence
+from unittest.mock import patch
 
 import pytest
+from anthropic.types import Message, StopReason, TextBlock, ToolUseBlock, Usage
+from google.genai import types
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionMessage,
+    ParsedChatCompletion,
+    ParsedChatCompletionMessage,
+    ParsedChoice,
+)
+from openai.types.chat.chat_completion import Choice
 from pydantic import BaseModel, ConfigDict
 
 from family_assistant.llm import StructuredOutputError, UserMessage
 from family_assistant.llm.providers.anthropic_client import AnthropicClient
 from family_assistant.llm.providers.google_genai_client import GoogleGenAIClient
 from family_assistant.llm.providers.openai_client import OpenAIClient
+from tests.mocks.recording_async_call import RecordingAsyncCall
 
 
 class SampleResponse(BaseModel):
@@ -28,31 +39,85 @@ class StrictResponse(BaseModel):
     values: dict[str, str]
 
 
+def openai_completion(content: str) -> ChatCompletion:
+    return ChatCompletion(
+        id="chatcmpl-test",
+        object="chat.completion",
+        created=0,
+        model="gpt-4.1-nano",
+        choices=[
+            Choice(
+                index=0,
+                finish_reason="stop",
+                message=ChatCompletionMessage(role="assistant", content=content),
+            )
+        ],
+    )
+
+
+def openai_parsed_completion(
+    parsed: SampleResponse, content: str
+) -> ParsedChatCompletion[SampleResponse]:
+    return ParsedChatCompletion[SampleResponse](
+        id="chatcmpl-test",
+        object="chat.completion",
+        created=0,
+        model="gpt-4.1-nano",
+        choices=[
+            ParsedChoice[SampleResponse](
+                index=0,
+                finish_reason="stop",
+                message=ParsedChatCompletionMessage[SampleResponse](
+                    role="assistant", content=content, parsed=parsed
+                ),
+            )
+        ],
+    )
+
+
+def anthropic_message(
+    content: Sequence[TextBlock | ToolUseBlock],
+    stop_reason: StopReason = "end_turn",
+) -> Message:
+    return Message(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model="claude-sonnet-4-5",
+        content=list(content),
+        stop_reason=stop_reason,
+        stop_sequence=None,
+        usage=Usage(input_tokens=1, output_tokens=1),
+    )
+
+
+def gemini_response(text: str) -> types.GenerateContentResponse:
+    return types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(role="model", parts=[types.Part(text=text)])
+            )
+        ]
+    )
+
+
 @pytest.mark.no_db
 @pytest.mark.asyncio
 async def test_openai_generate_structured_uses_native_parse() -> None:
     """OpenAI structured output should use the native parse endpoint."""
     client = OpenAIClient(api_key="test", model="gpt-4.1-nano")
-    response = MagicMock()
-    response.choices = [MagicMock()]
-    response.choices[0].message = MagicMock(
-        parsed=SampleResponse(answer="ok"),
-        content='{"answer":"ok"}',
+    parse = RecordingAsyncCall(
+        openai_parsed_completion(SampleResponse(answer="ok"), '{"answer":"ok"}')
     )
 
-    with patch.object(
-        client.client.beta.chat.completions, "parse", new_callable=AsyncMock
-    ) as mock_parse:
-        mock_parse.return_value = response
-
+    with patch.object(client.client.beta.chat.completions, "parse", new=parse):
         result = await client.generate_structured(
             messages=[UserMessage(content="Return structured output")],
             response_model=SampleResponse,
         )
 
     assert result == SampleResponse(answer="ok")
-    assert mock_parse.await_args is not None
-    assert mock_parse.await_args.kwargs["response_format"] is SampleResponse
+    assert parse.last_call.kwargs["response_format"] is SampleResponse
 
 
 @pytest.mark.no_db
@@ -60,22 +125,15 @@ async def test_openai_generate_structured_uses_native_parse() -> None:
 async def test_openai_generate_json_uses_native_json_mode() -> None:
     """OpenAI JSON output should use response_format=json_object."""
     client = OpenAIClient(api_key="test", model="gpt-4.1-nano")
-    response = MagicMock()
-    response.choices = [MagicMock()]
-    response.choices[0].message = MagicMock(content='{"answer":"ok"}')
+    create = RecordingAsyncCall(openai_completion('{"answer":"ok"}'))
 
-    with patch.object(
-        client.client.chat.completions, "create", new_callable=AsyncMock
-    ) as mock_create:
-        mock_create.return_value = response
-
+    with patch.object(client.client.chat.completions, "create", new=create):
         result = await client.generate_json(
             messages=[UserMessage(content="Return JSON")]
         )
 
     assert result == {"answer": "ok"}
-    assert mock_create.await_args is not None
-    assert mock_create.await_args.kwargs["response_format"] == {"type": "json_object"}
+    assert create.last_call.kwargs["response_format"] == {"type": "json_object"}
 
 
 @pytest.mark.no_db
@@ -88,19 +146,12 @@ async def test_openai_drops_the_openrouter_routing_prefix_on_the_wire() -> None:
         model="openrouter/moonshotai/kimi-k3",
         base_url="https://openrouter.ai/api/v1",
     )
-    response = MagicMock()
-    response.choices = [MagicMock()]
-    response.choices[0].message = MagicMock(content='{"answer":"ok"}')
+    create = RecordingAsyncCall(openai_completion('{"answer":"ok"}'))
 
-    with patch.object(
-        client.client.chat.completions, "create", new_callable=AsyncMock
-    ) as mock_create:
-        mock_create.return_value = response
-
+    with patch.object(client.client.chat.completions, "create", new=create):
         await client.generate_json(messages=[UserMessage(content="Return JSON")])
 
-    assert mock_create.await_args is not None
-    assert mock_create.await_args.kwargs["model"] == "moonshotai/kimi-k3"
+    assert create.last_call.kwargs["model"] == "moonshotai/kimi-k3"
     assert client.model == "openrouter/moonshotai/kimi-k3"
 
 
@@ -113,25 +164,22 @@ async def test_anthropic_generate_structured_uses_native_json_schema() -> None:
     enforce; pydantic still validates the full model on the way back.
     """
     client = AnthropicClient(api_key="test", model="claude-sonnet-4-5")
-    response = MagicMock()
-    response.stop_reason = "end_turn"
-    response.content = [SimpleNamespace(type="text", text='{"answer": "ok"}')]
+    create = RecordingAsyncCall(
+        anthropic_message([TextBlock(type="text", text='{"answer": "ok"}')])
+    )
 
-    with patch.object(
-        client.client.messages, "create", new_callable=AsyncMock
-    ) as mock_create:
-        mock_create.return_value = response
-
+    with patch.object(client.client.messages, "create", new=create):
         result = await client.generate_structured(
             messages=[UserMessage(content="Return structured output")],
             response_model=SampleResponse,
         )
 
     assert result == SampleResponse(answer="ok")
-    assert mock_create.await_args is not None
-    sent = mock_create.await_args.kwargs
+    sent = create.last_call.kwargs
     assert "tools" not in sent
-    output_format = sent["output_config"]["format"]
+    output_config = sent["output_config"]
+    assert isinstance(output_config, dict)
+    output_format = output_config["format"]
     assert output_format["type"] == "json_schema"
     assert output_format["schema"]["additionalProperties"] is False
 
@@ -141,24 +189,20 @@ async def test_anthropic_generate_structured_uses_native_json_schema() -> None:
 async def test_anthropic_generate_structured_retries_a_refusal() -> None:
     """A refusal is not the object asked for, so it is retried, then raised."""
     client = AnthropicClient(api_key="test", model="claude-sonnet-4-5")
-    response = MagicMock()
-    response.stop_reason = "refusal"
-    response.content = []
+    refusal = anthropic_message([], stop_reason="refusal")
+    create = RecordingAsyncCall(refusal, refusal)
 
     with (
-        patch.object(
-            client.client.messages, "create", new_callable=AsyncMock
-        ) as mock_create,
+        patch.object(client.client.messages, "create", new=create),
         pytest.raises(StructuredOutputError),
     ):
-        mock_create.return_value = response
         await client.generate_structured(
             messages=[UserMessage(content="Return structured output")],
             response_model=SampleResponse,
             max_retries=1,
         )
 
-    assert mock_create.await_count == 2
+    assert len(create.calls) == 2
 
 
 @pytest.mark.no_db
@@ -166,27 +210,28 @@ async def test_anthropic_generate_structured_retries_a_refusal() -> None:
 async def test_anthropic_generate_json_uses_native_object_tool() -> None:
     """Anthropic JSON output asks for its native object tool."""
     client = AnthropicClient(api_key="test", model="claude-sonnet-4-5")
-    response = MagicMock()
-    response.content = [
-        SimpleNamespace(
-            type="tool_use",
-            name="return_json_object",
-            input={"answer": "ok"},
+    create = RecordingAsyncCall(
+        anthropic_message(
+            [
+                ToolUseBlock(
+                    id="toolu_test",
+                    type="tool_use",
+                    name="return_json_object",
+                    input={"answer": "ok"},
+                )
+            ],
+            stop_reason="tool_use",
         )
-    ]
+    )
 
-    with patch.object(
-        client.client.messages, "create", new_callable=AsyncMock
-    ) as mock_create:
-        mock_create.return_value = response
-
+    with patch.object(client.client.messages, "create", new=create):
         result = await client.generate_json(
             messages=[UserMessage(content="Return JSON")]
         )
 
     assert result == {"answer": "ok"}
-    assert mock_create.await_args is not None
-    tools = mock_create.await_args.kwargs["tools"]
+    tools = create.last_call.kwargs["tools"]
+    assert isinstance(tools, list)
     assert tools[0]["input_schema"]["type"] == "object"
     assert tools[0]["input_schema"]["additionalProperties"] is True
 
@@ -196,22 +241,17 @@ async def test_anthropic_generate_json_uses_native_object_tool() -> None:
 async def test_google_generate_structured_uses_response_schema() -> None:
     """Gemini structured output should use response_schema and JSON MIME type."""
     client = GoogleGenAIClient(api_key="test", model="gemini-3.8-flash")
-    response = MagicMock()
-    response.text = '{"answer":"ok"}'
+    generate = RecordingAsyncCall(gemini_response('{"answer":"ok"}'))
 
-    with patch.object(
-        client.client.aio.models, "generate_content", new_callable=AsyncMock
-    ) as mock_generate:
-        mock_generate.return_value = response
-
+    with patch.object(client.client.aio.models, "generate_content", new=generate):
         result = await client.generate_structured(
             messages=[UserMessage(content="Return structured output")],
             response_model=SampleResponse,
         )
 
     assert result == SampleResponse(answer="ok")
-    assert mock_generate.await_args is not None
-    config = mock_generate.await_args.kwargs["config"]
+    config = generate.last_call.kwargs["config"]
+    assert isinstance(config, types.GenerateContentConfig)
     assert config.response_mime_type == "application/json"
     assert config.response_json_schema == SampleResponse.model_json_schema()
     assert config.response_schema is None
@@ -227,22 +267,17 @@ async def test_google_generate_structured_sends_strict_schema_unaltered() -> Non
     so the schema is passed through rather than sanitized.
     """
     client = GoogleGenAIClient(api_key="test", model="gemini-3.8-flash")
-    response = MagicMock()
-    response.text = '{"answer":"ok","values":{"a":"b"}}'
+    generate = RecordingAsyncCall(gemini_response('{"answer":"ok","values":{"a":"b"}}'))
 
-    with patch.object(
-        client.client.aio.models, "generate_content", new_callable=AsyncMock
-    ) as mock_generate:
-        mock_generate.return_value = response
-
+    with patch.object(client.client.aio.models, "generate_content", new=generate):
         result = await client.generate_structured(
             messages=[UserMessage(content="Return structured output")],
             response_model=StrictResponse,
         )
 
     assert result == StrictResponse(answer="ok", values={"a": "b"})
-    assert mock_generate.await_args is not None
-    config = mock_generate.await_args.kwargs["config"]
+    config = generate.last_call.kwargs["config"]
+    assert isinstance(config, types.GenerateContentConfig)
     assert config.response_json_schema == StrictResponse.model_json_schema()
     assert "additionalProperties" in json.dumps(config.response_json_schema)
 
@@ -252,16 +287,11 @@ async def test_google_generate_structured_sends_strict_schema_unaltered() -> Non
 async def test_google_generate_structured_retry_adds_feedback() -> None:
     """Gemini structured retries should mutate the conversation with feedback."""
     client = GoogleGenAIClient(api_key="test", model="gemini-3.8-flash")
-    invalid_response = MagicMock()
-    invalid_response.text = "not-json"
-    valid_response = MagicMock()
-    valid_response.text = '{"answer":"ok"}'
+    generate = RecordingAsyncCall(
+        gemini_response("not-json"), gemini_response('{"answer":"ok"}')
+    )
 
-    with patch.object(
-        client.client.aio.models, "generate_content", new_callable=AsyncMock
-    ) as mock_generate:
-        mock_generate.side_effect = [invalid_response, valid_response]
-
+    with patch.object(client.client.aio.models, "generate_content", new=generate):
         result = await client.generate_structured(
             messages=[UserMessage(content="Return structured output")],
             response_model=SampleResponse,
@@ -269,8 +299,11 @@ async def test_google_generate_structured_retry_adds_feedback() -> None:
         )
 
     assert result == SampleResponse(answer="ok")
-    first_contents = mock_generate.await_args_list[0].kwargs["contents"]
-    second_contents = mock_generate.await_args_list[1].kwargs["contents"]
+    assert len(generate.calls) == 2
+    first_contents = generate.calls[0].kwargs["contents"]
+    second_contents = generate.calls[1].kwargs["contents"]
+    assert isinstance(first_contents, list)
+    assert isinstance(second_contents, list)
     assert len(second_contents) == len(first_contents) + 2
     assert second_contents[:-2] == first_contents
     assert second_contents[-2].role == "model"
@@ -286,21 +319,16 @@ async def test_google_generate_structured_retry_adds_feedback() -> None:
 async def test_google_generate_json_uses_object_schema() -> None:
     """Gemini JSON output should use an object response schema."""
     client = GoogleGenAIClient(api_key="test", model="gemini-3.8-flash")
-    response = MagicMock()
-    response.text = '{"answer":"ok"}'
+    generate = RecordingAsyncCall(gemini_response('{"answer":"ok"}'))
 
-    with patch.object(
-        client.client.aio.models, "generate_content", new_callable=AsyncMock
-    ) as mock_generate:
-        mock_generate.return_value = response
-
+    with patch.object(client.client.aio.models, "generate_content", new=generate):
         result = await client.generate_json(
             messages=[UserMessage(content="Return JSON")]
         )
 
     assert result == {"answer": "ok"}
-    assert mock_generate.await_args is not None
-    config = mock_generate.await_args.kwargs["config"]
+    config = generate.last_call.kwargs["config"]
+    assert isinstance(config, types.GenerateContentConfig)
     assert config.response_mime_type == "application/json"
     assert config.response_schema is None
 
@@ -310,24 +338,22 @@ async def test_google_generate_json_uses_object_schema() -> None:
 async def test_google_generate_json_retry_adds_feedback() -> None:
     """Gemini JSON retries should mutate the conversation with feedback."""
     client = GoogleGenAIClient(api_key="test", model="gemini-3.8-flash")
-    invalid_response = MagicMock()
-    invalid_response.text = '["wrong"]'
-    valid_response = MagicMock()
-    valid_response.text = '{"answer":"ok"}'
+    generate = RecordingAsyncCall(
+        gemini_response('["wrong"]'), gemini_response('{"answer":"ok"}')
+    )
 
-    with patch.object(
-        client.client.aio.models, "generate_content", new_callable=AsyncMock
-    ) as mock_generate:
-        mock_generate.side_effect = [invalid_response, valid_response]
-
+    with patch.object(client.client.aio.models, "generate_content", new=generate):
         result = await client.generate_json(
             messages=[UserMessage(content="Return JSON")],
             max_retries=1,
         )
 
     assert result == {"answer": "ok"}
-    first_contents = mock_generate.await_args_list[0].kwargs["contents"]
-    second_contents = mock_generate.await_args_list[1].kwargs["contents"]
+    assert len(generate.calls) == 2
+    first_contents = generate.calls[0].kwargs["contents"]
+    second_contents = generate.calls[1].kwargs["contents"]
+    assert isinstance(first_contents, list)
+    assert isinstance(second_contents, list)
     assert len(second_contents) == len(first_contents) + 2
     assert second_contents[:-2] == first_contents
     assert second_contents[-2].role == "model"

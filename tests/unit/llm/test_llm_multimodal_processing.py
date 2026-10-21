@@ -4,7 +4,6 @@ Unit tests for LLM provider multimodal message processing.
 
 import base64
 from typing import Any, cast
-from unittest.mock import patch
 
 import pytest
 
@@ -127,8 +126,7 @@ class TestGoogleGenAIClient:
 
     def test_older_model_injects_tool_attachment(self) -> None:
         """Older Gemini models receive tool images in a following user message."""
-        with patch("family_assistant.llm.providers.google_genai_client.genai"):
-            client = GoogleGenAIClient(api_key="test", model="gemini-pro")
+        client = GoogleGenAIClient(api_key="test", model="gemini-pro")
 
         attachment = ToolAttachment(
             mime_type="image/png", content=b"image bytes", description="Chart"
@@ -153,8 +151,7 @@ class TestGoogleGenAIClient:
 
     def test_gemini_3_keeps_tool_attachment_inline(self) -> None:
         """Gemini 3 receives tool images with the tool response."""
-        with patch("family_assistant.llm.providers.google_genai_client.genai"):
-            client = GoogleGenAIClient(api_key="test", model="gemini-3.8-flash")
+        client = GoogleGenAIClient(api_key="test", model="gemini-3.8-flash")
 
         attachment = ToolAttachment(mime_type="image/png", content=b"image bytes")
         tool_message = ToolMessage(
@@ -173,106 +170,98 @@ class TestGoogleGenAIClient:
 
     def test_create_attachment_injection_image(self) -> None:
         """Test Gemini attachment injection for images"""
-        with patch("family_assistant.llm.providers.google_genai_client.genai"):
-            client = GoogleGenAIClient(api_key="test", model="gemini-pro")
+        client = GoogleGenAIClient(api_key="test", model="gemini-pro")
 
-            attachment = ToolAttachment(
-                mime_type="image/png", content=b"fake png data", description="Test PNG"
-            )
+        attachment = ToolAttachment(
+            mime_type="image/png", content=b"fake png data", description="Test PNG"
+        )
 
-            result = client.create_attachment_injection(attachment)
+        result = client.create_attachment_injection(attachment)
 
-            assert result.role == "user"
-            assert result.parts is not None
-            assert len(result.parts) == 2
+        assert result.role == "user"
+        assert result.parts is not None
+        assert len(result.parts) == 2
 
-            # First part should be system message
-            assert (
-                result.parts[0]["text"] == "[System: File from previous tool response]"
-            )
+        # First part should be system message
+        assert result.parts[0]["text"] == "[System: File from previous tool response]"
 
-            # Second part should be a types.Part object with inline_data
-            part = result.parts[1]
-            assert hasattr(part, "inline_data")
-            assert part.inline_data.mime_type == "image/png"
-            assert part.inline_data.data == b"fake png data"
+        # Second part should be a types.Part object with inline_data
+        part = result.parts[1]
+        assert hasattr(part, "inline_data")
+        assert part.inline_data.mime_type == "image/png"
+        assert part.inline_data.data == b"fake png data"
 
     def test_create_attachment_injection_pdf_with_content(self) -> None:
         """Test Gemini attachment injection for PDF content"""
-        with patch("family_assistant.llm.providers.google_genai_client.genai"):
-            client = GoogleGenAIClient(api_key="test", model="gemini-pro")
+        client = GoogleGenAIClient(api_key="test", model="gemini-pro")
 
-            # 1KB of fake PDF data
-            fake_data = b"x" * 1024
-            attachment = ToolAttachment(
-                mime_type="application/pdf",
-                content=fake_data,
-                description="Test PDF document",
-            )
+        # 1KB of fake PDF data
+        fake_data = b"x" * 1024
+        attachment = ToolAttachment(
+            mime_type="application/pdf",
+            content=fake_data,
+            description="Test PDF document",
+        )
 
-            result = client.create_attachment_injection(attachment)
+        result = client.create_attachment_injection(attachment)
 
-            assert result.role == "user"
-            assert result.parts is not None
-            assert len(result.parts) == 2
+        assert result.role == "user"
+        assert result.parts is not None
+        assert len(result.parts) == 2
 
-            # First part should be system message
-            assert (
-                result.parts[0]["text"] == "[System: File from previous tool response]"
-            )
+        # First part should be system message
+        assert result.parts[0]["text"] == "[System: File from previous tool response]"
 
-            # Second part should be a types.Part object with inline_data for PDF
-            part = result.parts[1]
-            assert hasattr(part, "inline_data")
-            assert part.inline_data.mime_type == "application/pdf"
-            assert part.inline_data.data == fake_data
+        # Second part should be a types.Part object with inline_data for PDF
+        part = result.parts[1]
+        assert hasattr(part, "inline_data")
+        assert part.inline_data.mime_type == "application/pdf"
+        assert part.inline_data.data == fake_data
 
     def test_create_attachment_injection_non_pdf_binary_content(self) -> None:
         """Test Gemini attachment injection for non-PDF binary content"""
-        with patch("family_assistant.llm.providers.google_genai_client.genai"):
-            client = GoogleGenAIClient(api_key="test", model="gemini-pro")
+        client = GoogleGenAIClient(api_key="test", model="gemini-pro")
 
-            # 1KB of fake ZIP data
-            fake_data = b"x" * 1024
-            attachment = ToolAttachment(
-                mime_type="application/zip",
-                content=fake_data,
-                description="Test ZIP archive",
-            )
+        # 1KB of fake ZIP data
+        fake_data = b"x" * 1024
+        attachment = ToolAttachment(
+            mime_type="application/zip",
+            content=fake_data,
+            description="Test ZIP archive",
+        )
 
-            result = client.create_attachment_injection(attachment)
+        result = client.create_attachment_injection(attachment)
 
-            assert result.role == "user"
-            assert result.parts is not None
-            assert len(result.parts) == 2
+        assert result.role == "user"
+        assert result.parts is not None
+        assert len(result.parts) == 2
 
-            # Should describe the non-PDF binary content
-            text_part = result.parts[1]["text"]
-            assert "application/zip" in text_part
-            assert "0.0MB" in text_part  # 1KB shows as 0.0MB
-            assert "Test ZIP archive" in text_part
-            assert "Binary content not accessible" in text_part
+        # Should describe the non-PDF binary content
+        text_part = result.parts[1]["text"]
+        assert "application/zip" in text_part
+        assert "0.0MB" in text_part  # 1KB shows as 0.0MB
+        assert "Test ZIP archive" in text_part
+        assert "Binary content not accessible" in text_part
 
     def test_create_attachment_injection_file_path_only(self) -> None:
         """Test Gemini attachment injection with file path only"""
-        with patch("family_assistant.llm.providers.google_genai_client.genai"):
-            client = GoogleGenAIClient(api_key="test", model="gemini-pro")
+        client = GoogleGenAIClient(api_key="test", model="gemini-pro")
 
-            attachment = ToolAttachment(
-                mime_type="application/pdf",
-                file_path="/path/to/document.pdf",
-                description="File reference",
-            )
+        attachment = ToolAttachment(
+            mime_type="application/pdf",
+            file_path="/path/to/document.pdf",
+            description="File reference",
+        )
 
-            result = client.create_attachment_injection(attachment)
+        result = client.create_attachment_injection(attachment)
 
-            assert result.role == "user"
-            assert result.parts is not None
-            assert len(result.parts) == 2
+        assert result.role == "user"
+        assert result.parts is not None
+        assert len(result.parts) == 2
 
-            text_part = result.parts[1]["text"]
-            assert "/path/to/document.pdf" in text_part
-            assert "File not found or inaccessible" in text_part
+        text_part = result.parts[1]["text"]
+        assert "/path/to/document.pdf" in text_part
+        assert "File not found or inaccessible" in text_part
 
 
 class TestOpenAIClient:
