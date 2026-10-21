@@ -1415,10 +1415,6 @@ class AttachmentRegistry:
 
     # File storage methods (previously from AttachmentService)
 
-    def _calculate_content_hash(self, content: bytes) -> str:
-        """Calculate SHA-256 hash of file content."""
-        return hashlib.sha256(content).hexdigest()
-
     def _get_file_path(self, attachment_id: str, filename: str) -> Path:
         """
         Generate file storage path for an attachment.
@@ -1537,7 +1533,6 @@ class AttachmentRegistry:
 
         try:
             # Calculate content hash for potential future deduplication
-            _ = self._calculate_content_hash(file_content)
 
             # Get storage path
             file_path = self._get_file_path(attachment_id, safe_filename)
@@ -1601,7 +1596,6 @@ class AttachmentRegistry:
             file_content = await file.read()
 
             # Calculate content hash for potential future deduplication
-            _ = self._calculate_content_hash(file_content)
 
             # Get storage path
             file_path = self._get_file_path(attachment_id, safe_filename)
