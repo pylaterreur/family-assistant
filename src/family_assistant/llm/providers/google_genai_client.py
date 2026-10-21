@@ -2787,9 +2787,12 @@ class GoogleGenAIClient(BaseLLMClient):
 
                     # Walk the parts rather than reading ``chunk.text``: that
                     # joins the text parts of a chunk that also carries a
-                    # function call, and the call would be lost with it.
+                    # function call, and the call would be lost with it. Only
+                    # the first candidate is the answer, as ``chunk.text`` and
+                    # the non-streaming path read it; any others are
+                    # alternatives to it.
                     if chunk.candidates:
-                        for candidate in chunk.candidates:
+                        for candidate in chunk.candidates[:1]:
                             if (
                                 hasattr(candidate, "content")
                                 and candidate.content
