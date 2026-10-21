@@ -231,6 +231,11 @@ has a budget well inside the handler's. Running out of either is a transient fai
 rescheduled rather than its task retries spent, and files an earlier attempt fetched are kept in
 memory for the next.
 
+The environments listing keeps an entry for a file the agent moved or deleted after writing it, a
+moved directory included, and downloading one answers 404 or 503 for a while and then an empty 200.
+So an empty download, or one that stays missing, is skipped and logged rather than delivered or
+named: there is nothing in it, and a file the agent moved away is not one the user is missing.
+
 ### 5. A resumed run continues in the same sandbox
 
 Resuming a delegation chains onto the earlier run's interaction, and the resumed run executes in

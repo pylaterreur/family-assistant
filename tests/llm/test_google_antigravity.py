@@ -40,6 +40,7 @@ from family_assistant.llm.providers import google_genai_client
 from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
     SandboxFile,
+    SandboxFileMissingError,
     is_antigravity_model,
     is_deep_research_model,
     is_interactions_agent_model,
@@ -938,7 +939,7 @@ async def test_a_file_that_stays_missing_is_lost_not_the_run(
     client = _egress_client("disabled")
     sdk.download.side_effect = _download_not_found()
 
-    with pytest.raises(DelegationPermanentError, match="could not be read back"):
+    with pytest.raises(SandboxFileMissingError, match="could not be read back"):
         await client.download_sandbox_file("env_1", "workspace/outputs/a.stl")
 
 

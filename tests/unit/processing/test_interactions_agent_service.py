@@ -34,6 +34,7 @@ from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
     SandboxFile,
     SandboxFileEntry,
+    SandboxFileMissingError,
 )
 from family_assistant.processing import interactions_agent_service
 from family_assistant.processing.interactions_agent_service import (
@@ -2245,3 +2246,39 @@ async def test_a_run_without_a_provider_start_is_bounded_by_its_submit_time(
 
     fetched = sorted(client.downloaded)
     assert fetched == ["workspace/outputs/just-before.txt", "workspace/outputs/new.stl"]
+
+
+@pytest.mark.asyncio
+async def test_files_the_agent_moved_away_are_not_returned_as_empty_attachments(
+    db_engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    """The listing keeps a moved file, and its download is empty or 404 (Tuit #97).
+
+    Probed live on 21 Oct: after the agent moved report.md and a scripts
+    directory out of outputs, both stayed listed as sizeless files; their
+    downloads answered 404 or 503 and then an empty 200. Twelve such entries
+    were once stored as zero-byte attachments.
+    """
+    registry = AttachmentRegistry(
+        storage_path=str(tmp_path), db_engine=db_engine, config=None
+    )
+    client = _client_with_outputs(
+        {
+            "keep.txt": b"keep",
+            "report.md": b"",
+            "scripts": SandboxFileMissingError("scripts could not be read back"),
+        },
+        sizes_listed=False,
+    )
+    service = _make_service(client, attachment_registry=registry)
+
+    collected = await _collect(service, db_engine)
+
+    assert collected.omitted == []
+    [attachment_id] = collected.attachment_ids
+    metadata = await registry.get_attachment(
+        Database(db_engine), attachment_id, acting_user_id="user-1"
+    )
+    assert metadata is not None
+    assert metadata.metadata["original_filename"] == "keep.txt"

@@ -36,6 +36,7 @@ from family_assistant.llm.providers.google_genai_client import (
     GoogleGenAIClient,
     SandboxFile,
     SandboxFileEntry,
+    SandboxFileMissingError,
     is_interaction_terminal_error_status,
 )
 from family_assistant.observability.metrics import record_llm_call
@@ -880,6 +881,18 @@ class InteractionsAgentProcessingService(ProcessingService):
                 wave.append(entry)
             contents = await self._fetch_outputs(client, environment_id, wave)
             for entry, content in zip(wave, contents, strict=True):
+                # Nothing to deliver: a file the agent emptied, or -- far more
+                # often -- one it moved away, which the listing keeps and the
+                # download answers with nothing or a 404. Neither is named in
+                # the reply; a moved file is not one the user is missing.
+                if not content:
+                    logger.warning(
+                        "Skipping output %s from %s: %s.",
+                        entry.path,
+                        environment_id,
+                        "it could not be read" if content is None else "it is empty",
+                    )
+                    continue
                 reason = _output_over_limit(len(content), total_bytes, max_file_size)
                 if reason is not None:
                     omitted.append(f"{_output_name(entry)} ({reason})")
@@ -901,13 +914,16 @@ class InteractionsAgentProcessingService(ProcessingService):
         client: GoogleGenAIClient,
         environment_id: str,
         entries: Sequence[SandboxFileEntry],
-    ) -> list[bytes]:
-        """Fetch ``entries`` several at a time, in their order."""
+    ) -> list[bytes | None]:
+        """Fetch ``entries`` several at a time, in their order; None if gone."""
         gate = asyncio.Semaphore(OUTPUT_DOWNLOAD_CONCURRENCY)
 
-        async def fetch(entry: SandboxFileEntry) -> bytes:
+        async def fetch(entry: SandboxFileEntry) -> bytes | None:
             async with gate:
-                return await self._download_output(client, environment_id, entry)
+                try:
+                    return await self._download_output(client, environment_id, entry)
+                except SandboxFileMissingError:
+                    return None
 
         # A task group, not gather: when one download fails, the rest are
         # cancelled and awaited before the failure propagates, so none keeps
