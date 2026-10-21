@@ -4,6 +4,8 @@ import os
 from unittest import mock
 from unittest.mock import create_autospec, patch
 
+from pytest_mock import MockerFixture
+
 
 class Client:
     def fetch(self) -> str:
@@ -36,6 +38,12 @@ def explicit_replacements() -> None:
         pass
     with patch.dict(os.environ, {"KEY": "value"}):
         pass
+
+
+def pytest_mock_specced(mocker: MockerFixture) -> None:
+    mocker.patch("module.Client", autospec=True)
+    mocker.patch.object(Client, "fetch", new=FakeClient.fetch)
+    mocker.create_autospec(Client, spec_set=True)
 
 
 @patch("module.Client", autospec=True)

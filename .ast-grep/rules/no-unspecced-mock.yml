@@ -23,7 +23,7 @@ note: |
   replacement (which would otherwise substitute a bare MagicMock).
 utils:
   mock-function:
-    regex: '^((unittest\.)?mock\.)?(Mock|MagicMock|AsyncMock|NonCallableMock|NonCallableMagicMock|PropertyMock)$'
+    regex: '^(((unittest\.)?mock|(\w+\.)*mocker)\.)?(Mock|MagicMock|AsyncMock|NonCallableMock|NonCallableMagicMock|PropertyMock)$'
   spec-set-true:
     kind: keyword_argument
     all:
@@ -44,16 +44,19 @@ rule:
         - has:
             field: function
             matches: mock-function
+        - has:
+            field: function
+            regex: '^(\w+\.)*mocker\.(stub|async_stub)$'
         - all:
             - has:
                 field: function
-                regex: '^((unittest\.)?mock\.)?create_autospec$'
+                regex: '^(((unittest\.)?mock|(\w+\.)*mocker)\.)?create_autospec$'
             - not:
                 has: {field: arguments, has: {matches: spec-set-true}}
         - all:
             - has:
                 field: function
-                regex: '^((unittest\.)?mock\.)?patch$'
+                regex: '^(((unittest\.)?mock|(\w+\.)*mocker)\.)?patch$'
             - not:
                 has: {field: arguments, has: {any: [{matches: autospec-true}, {matches: new-keyword}]}}
             - not:
@@ -63,7 +66,7 @@ rule:
         - all:
             - has:
                 field: function
-                regex: '^((unittest\.)?mock\.)?patch\.object$'
+                regex: '^(((unittest\.)?mock|(\w+\.)*mocker)\.)?patch\.object$'
             - not:
                 has: {field: arguments, has: {any: [{matches: autospec-true}, {matches: new-keyword}]}}
             - not:

@@ -12,6 +12,8 @@ from unittest.mock import (
     patch,
 )
 
+from pytest_mock import MockerFixture
+
 
 class Client:
     def fetch(self) -> str:
@@ -47,6 +49,24 @@ def patches_without_spec() -> None:
         pass
     with mock.patch("module.Client", autospec=False):
         pass
+
+
+class UsesMocker:
+    def __init__(self, mocker: MockerFixture) -> None:
+        self.mocker = mocker
+
+    def unspecced(self) -> None:
+        self.mocker.patch("module.Client", return_value=1)
+        self.mocker.MagicMock()
+        self.mocker.stub()
+
+
+def pytest_mock_fixture(mocker: MockerFixture) -> None:
+    mocker.patch("module.Client")
+    mocker.patch.object(Client, "fetch")
+    mocker.AsyncMock()
+    mocker.create_autospec(Client)
+    mocker.async_stub()
 
 
 @patch("module.Client")

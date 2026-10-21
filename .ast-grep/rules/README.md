@@ -74,7 +74,9 @@ await page.locator('[data-testid="assistant-message"]').first.wait_for(state="vi
 and `patch(...)` / `patch.object(...)` with neither `autospec=True` nor an explicit replacement
 (`new=` or the positional `new` argument), since those substitute a bare `MagicMock`. Aliasing
 `unittest.mock` or any name imported from it is banned too, because an alias would hide the call
-from every other pattern. Applies to all Python files; `patch.dict` is not affected.
+from every other pattern. pytest-mock's `mocker` spellings of the same calls (`mocker.patch`,
+`mocker.MagicMock`, `mocker.stub`, ...) are covered. Applies to all Python files; `patch.dict` is
+not affected.
 
 **Why it's banned**: a bare mock accepts any attribute and any call signature, so the test keeps
 passing after the interface it stands in for changes, and heavily mocked tests tend to assert the
