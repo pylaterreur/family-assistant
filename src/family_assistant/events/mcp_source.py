@@ -191,13 +191,13 @@ class MCPEventSource(BaseEventSource, EventSource):
 
     async def reconcile(self, *, start_polling: bool = True) -> None:
         """Make the running subscriptions match the enabled listeners."""
-        listeners = await self._database().events.get_enabled_listeners_for_source(
-            self.source_id
-        )
+        db = self._database()
+        listeners = await db.events.get_enabled_listeners_for_source(self.source_id)
         wanted = {
             sub.key: (sub, ids)
             for sub, ids in self.subscriptions_for(listeners).items()
         }
+        await db.mcp_event_cursors.delete_except(wanted.keys())
         for key in list(self._running):
             if key not in wanted:
                 running = self._running.pop(key)

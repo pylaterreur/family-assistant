@@ -234,6 +234,21 @@ class EventProcessor:
 
         triggered_listener_ids = await db_ctx.atomic(_process_matched)
 
+        # A one-time listener that just fired is disabled in the database, but
+        # the cache would offer it to the next event until the next refresh.
+        spent = {
+            listener["id"]
+            for listener in matched
+            if listener.get("one_time") and listener["id"] in triggered_listener_ids
+        }
+        if spent:
+            async with self._process_lock:
+                self._listener_cache[source_id] = [
+                    item
+                    for item in self._listener_cache.get(source_id, [])
+                    if item["id"] not in spent
+                ]
+
         # Deliberately after the commit, on the handle, and unable to fail the
         # call. This row is a debug and sampling artifact: nothing derives from
         # it, so losing one costs nothing, while letting it affect the listeners

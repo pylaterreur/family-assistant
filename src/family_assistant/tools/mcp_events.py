@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from family_assistant.events.mcp_client import MCPEventsError
+from family_assistant.events.mcp_client import (
+    MCPEventsError,
+    MCPEventsNotSupportedError,
+)
 from family_assistant.events.mcp_source import MCPEventSource
 from family_assistant.storage.events import EventSourceType
 from family_assistant.tools.types import ToolDefinition, ToolResult
@@ -61,10 +64,15 @@ async def list_mcp_events_tool(
     for candidate in server_ids:
         try:
             event_types = await source.list_event_types(candidate, user_id)
-        except (MCPEventsError, ValueError) as exc:
+        except MCPEventsNotSupportedError as exc:
             if server_id:
                 return ToolResult(text=f"Error: {exc}", data={"error": str(exc)})
             logger.debug("MCP server %s offers no events: %s", candidate, exc)
+            continue
+        except (MCPEventsError, ValueError) as exc:
+            if server_id:
+                return ToolResult(text=f"Error: {exc}", data={"error": str(exc)})
+            servers.append({"server_id": candidate, "error": str(exc)})
             continue
         servers.append({
             "server_id": candidate,

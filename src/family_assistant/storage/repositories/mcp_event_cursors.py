@@ -1,6 +1,8 @@
 """Repository for MCP event subscription cursors."""
 
-from sqlalchemy import select
+from collections.abc import Collection
+
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.sql import functions as func
@@ -46,4 +48,19 @@ class MCPEventCursorsRepository(BaseRepository):
             index_elements=[mcp_event_cursors_table.c.subscription_key],
             set_={"cursor": cursor, "updated_at": func.now()},
         )
+        await self._db.execute(stmt)
+
+    async def delete_except(self, subscription_keys: Collection[str]) -> None:
+        """Forget every cursor whose subscription no enabled listener names.
+
+        A subscription that comes back later starts from now, not from where
+        it was when its last automation was disabled or deleted.
+        """
+        stmt = delete(mcp_event_cursors_table)
+        if subscription_keys:
+            stmt = stmt.where(
+                mcp_event_cursors_table.c.subscription_key.not_in(
+                    list(subscription_keys)
+                )
+            )
         await self._db.execute(stmt)

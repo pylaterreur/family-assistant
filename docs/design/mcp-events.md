@@ -34,7 +34,8 @@ is still a draft.
   the listeners that own its subscription, so two people watching the same event never see each
   other's.
 - **Resumable.** Each subscription's cursor is stored after its page is processed, so a restart
-  resumes where it stopped. A new subscription starts from "now".
+  resumes where it stopped. A new subscription starts from "now", and so does one whose automations
+  were all disabled or deleted and later come back: a cursor no enabled listener names is forgotten.
 - **Validated at creation against the live server.** `create_automation` and `update_automation`
   check that the server is an HTTP server the user has a credential for, that the event exists and
   is pollable, and that the arguments satisfy its `inputSchema`.

@@ -30,6 +30,10 @@ class MCPEventsError(Exception):
     """An events request failed: transport, HTTP status, or JSON-RPC error."""
 
 
+class MCPEventsRPCError(MCPEventsError):
+    """The server answered, with a JSON-RPC error."""
+
+
 class MCPEventsNotSupportedError(MCPEventsError):
     """The server does not offer the Events extension or poll delivery."""
 
@@ -137,7 +141,7 @@ class MCPEventsClient:
             )
         error = message.get("error")
         if isinstance(error, dict):
-            raise MCPEventsError(
+            raise MCPEventsRPCError(
                 f"{method} failed: {error.get('message', 'error')} "
                 f"(code {error.get('code')})"
             )
@@ -147,11 +151,16 @@ class MCPEventsClient:
         return cast("dict[str, Any]", result)
 
     async def supports_events(self) -> bool:
-        """Whether ``server/discover`` advertises the Events extension."""
+        """Whether ``server/discover`` advertises the Events extension.
+
+        A server that answers with a JSON-RPC error does not speak 2026-07-28;
+        one that cannot be reached at all raises, so an outage is not reported
+        as a missing capability.
+        """
         try:
             result = await self._request("server/discover", {})
-        except MCPEventsError as exc:
-            logger.debug("server/discover failed at %s: %s", self._url, exc)
+        except MCPEventsRPCError as exc:
+            logger.debug("server/discover refused at %s: %s", self._url, exc)
             return False
         capabilities = result.get("capabilities")
         if not isinstance(capabilities, dict):

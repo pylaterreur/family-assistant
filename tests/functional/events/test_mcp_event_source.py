@@ -186,6 +186,8 @@ async def add_listener(
     name: str,
     user_id: str,
     extra: dict[str, str] | None = None,
+    *,
+    one_time: bool = False,
 ) -> int:
     return await db.events.create_event_listener(
         name=name,
@@ -201,6 +203,7 @@ async def add_listener(
         action_type=EventActionType.wake_llm,
         action_config={"context": "Something landed in the inbox"},
         created_by_user_id=user_id,
+        one_time=one_time,
     )
 
 
@@ -463,3 +466,81 @@ async def test_agent_creates_an_mcp_automation_from_discovered_events(
     running = next(iter(source._running.values()))
     assert running.subscription.user_id == ANDREW
     assert running.subscription.argument_dict == {"actor": "me"}
+
+
+@pytest.mark.asyncio
+async def test_a_one_time_automation_fires_once_per_page(
+    db_engine: AsyncEngine,
+    servers: dict[str, MCPServerConfig],
+    http_client: httpx.AsyncClient,
+    fake_server: FakeEventsServer,
+) -> None:
+    db = Database(db_engine)
+    listener_id = await add_listener(db, "once", ANDREW, one_time=True)
+    processor = await make_processor(db_engine)
+    source = make_source(db_engine, servers, http_client)
+    source.processor = processor
+    await source.reconcile(start_polling=False)
+    await poll_all(source)
+
+    fake_server.publish("andrew", "handoff", "First")
+    fake_server.publish("andrew", "handoff", "Second")
+    await poll_all(source)
+
+    assert await executions(db, listener_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_re_enabled_automation_starts_from_now(
+    db_engine: AsyncEngine,
+    servers: dict[str, MCPServerConfig],
+    http_client: httpx.AsyncClient,
+    fake_server: FakeEventsServer,
+) -> None:
+    db = Database(db_engine)
+    listener_id = await add_listener(db, "inbox", ANDREW)
+    listener = await db.events.get_event_listener_by_id(listener_id)
+    assert listener is not None
+    processor = await make_processor(db_engine)
+    source = make_source(db_engine, servers, http_client)
+    source.processor = processor
+    await source.reconcile(start_polling=False)
+    await poll_all(source)
+
+    await db.events.update_event_listener_enabled(
+        listener_id, listener["conversation_id"], enabled=False
+    )
+    await source.reconcile(start_polling=False)
+    fake_server.publish("andrew", "handoff", "While it was off")
+    await db.events.update_event_listener_enabled(
+        listener_id, listener["conversation_id"], enabled=True
+    )
+    await source.reconcile(start_polling=False)
+    await poll_all(source)
+    await poll_all(source)
+    assert await executions(db, listener_id) == 0
+
+    fake_server.publish("andrew", "handoff", "After it came back")
+    await poll_all(source)
+    assert await executions(db, listener_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_discovery_reports_an_unreachable_server_instead_of_hiding_it(
+    db_engine: AsyncEngine,
+    servers: dict[str, MCPServerConfig],
+) -> None:
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unreachable)) as http:
+        source = make_source(db_engine, servers, http)
+        listed = (
+            await list_mcp_events_tool(
+                tool_context(Database(db_engine), source, ANDREW)
+            )
+        ).get_data()
+    assert isinstance(listed, dict)
+    [server] = listed["servers"]
+    assert server["server_id"] == "tasks"
+    assert "connection refused" in server["error"]
