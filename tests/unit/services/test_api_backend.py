@@ -83,6 +83,32 @@ async def test_forwards_request_content_and_content_type() -> None:
 
 
 @pytest.mark.asyncio
+async def test_forwards_extra_headers_and_returns_lowercased_response_headers() -> None:
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["upload_type"] = request.headers.get("x-upload-content-type")
+        captured["authorization"] = request.headers.get("authorization")
+        return httpx.Response(
+            200, headers={"Location": "https://www.googleapis.com/upload/session"}
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+    backend = HttpApiBackend(client)
+
+    response = await backend.request(
+        method="POST",
+        url="https://www.googleapis.com/upload/drive/v3/files",
+        access_token="tok",
+        headers={"X-Upload-Content-Type": "model/3mf", "Authorization": "spoofed"},
+    )
+
+    assert captured["upload_type"] == "model/3mf"
+    assert captured["authorization"] == "Bearer tok"
+    assert response.headers["location"] == "https://www.googleapis.com/upload/session"
+
+
+@pytest.mark.asyncio
 async def test_error_status_is_returned_not_raised() -> None:
     def _handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "unauthorized"})
