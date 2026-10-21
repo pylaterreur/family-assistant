@@ -55,7 +55,7 @@ from family_assistant.embeddings import (
     OpenAIEmbeddingGenerator,
 )
 from family_assistant.events.indexing_source import IndexingSource
-from family_assistant.events.mcp_source import MCPEventSource
+from family_assistant.events.mcp_source import MCPEventSource, is_http_mcp_server
 from family_assistant.events.processor import EventProcessor
 from family_assistant.events.webhook_source import WebhookEventSource
 
@@ -2126,7 +2126,10 @@ class Assistant:
             else:
                 self.webhook_source = None
 
-            if event_config.sources.mcp.enabled:
+            if event_config.sources.mcp.enabled and any(
+                is_http_mcp_server(server)
+                for server in self.config.mcp_config.mcpServers.values()
+            ):
                 event_sources[EventSourceType.mcp.value] = MCPEventSource(
                     servers=self.config.mcp_config.mcpServers,
                     database=self._database,

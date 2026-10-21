@@ -337,10 +337,8 @@ class MCPEventSource(BaseEventSource, EventSource):
         server = self._servers.get(server_id)
         if server is None:
             raise MCPEventsError(f"No MCP server named {server_id!r} is configured")
-        extra = server.model_extra or {}
-        transport = str(extra.get("transport") or "stdio").lower()
-        url = extra.get("url")
-        if transport not in _HTTP_TRANSPORTS or not isinstance(url, str):
+        url = (server.model_extra or {}).get("url")
+        if not is_http_mcp_server(server) or not isinstance(url, str):
             raise MCPEventsNotSupportedError(
                 f"MCP server {server_id!r} is not a Streamable HTTP server; "
                 "events are only polled over HTTP"
@@ -434,6 +432,13 @@ class MCPEventSource(BaseEventSource, EventSource):
                 exc.message,
             )
         return ValidationResult(valid=True)
+
+
+def is_http_mcp_server(server: MCPServerConfig) -> bool:
+    """Whether events could be polled from this server at all."""
+    extra = server.model_extra or {}
+    transport = str(extra.get("transport") or "stdio").lower()
+    return transport in _HTTP_TRANSPORTS and isinstance(extra.get("url"), str)
 
 
 def _resolve_token(server: MCPServerConfig) -> str | None:
