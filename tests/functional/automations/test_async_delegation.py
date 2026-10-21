@@ -7,7 +7,6 @@ from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, TypedDict, cast
-from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -15,6 +14,7 @@ from sqlalchemy import select, update
 
 from family_assistant.config_models import AppConfig, ToolsConfig
 from family_assistant.delegation_security import DelegationSecurityLevel
+from family_assistant.embeddings import MockEmbeddingGenerator
 from family_assistant.interfaces import ChatDeliveryError, ChatInterface
 from family_assistant.llm.messages import AssistantMessage, SystemMessage, UserMessage
 from family_assistant.llm.model_selection import (
@@ -86,10 +86,12 @@ from family_assistant.tools.types import (
 )
 from family_assistant.utils.clock import SystemClock
 from tests.helpers import wait_for_condition
+from tests.mocks.recording_chat_interface import ScriptedChatInterface
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from google import genai
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from family_assistant.storage.repositories.delegation_runs import (
@@ -572,10 +574,10 @@ async def test_voice_delegation_delivers_direct_notice_without_waking_chat(
 
     worker = TaskWorker(
         processing_service=processing_service,
-        chat_interface=AsyncMock(spec=ChatInterface),
+        chat_interface=ScriptedChatInterface(),
         calendar_config={},
         timezone=ZoneInfo("UTC"),
-        embedding_generator=MagicMock(),
+        embedding_generator=MockEmbeddingGenerator(),
         engine=db_engine,
     )
     await worker.handle_delegated_profile_run(
@@ -623,8 +625,7 @@ async def test_delegate_to_service_background_reference_and_completion_notificat
     confirmation_ui_managers: dict[str, ConfirmationUIManager] = {
         TEST_INTERFACE_TYPE: confirmation_manager
     }
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     db_context = Database(engine=db_engine)
     source_message_internal_id = await db_context.message_history.add_message(
@@ -661,7 +662,7 @@ async def test_delegate_to_service_background_reference_and_completion_notificat
         chat_interface=chat_interface,
         calendar_config={},
         timezone=ZoneInfo("UTC"),
-        embedding_generator=MagicMock(),
+        embedding_generator=MockEmbeddingGenerator(),
         engine=db_engine,
         confirmation_ui_managers=confirmation_ui_managers,
     )
@@ -718,10 +719,10 @@ async def test_delegate_to_service_background_reference_and_completion_notificat
     ]
     assert delegated_source_message_internal_id is not None
     assert delegated_source_message_internal_id != source_message_internal_id
-    chat_interface.send_message.assert_awaited_once()
-    sent_kwargs = chat_interface.send_message.await_args.kwargs
-    assert delegation_id in sent_kwargs["text"]
-    assert "background delegation done" in sent_kwargs["text"]
+    assert len(chat_interface.sent) == 1
+    sent = chat_interface.last_sent
+    assert delegation_id in sent.text
+    assert "background delegation done" in sent.text
 
     db_context = Database(engine=db_engine)
     delegated_source_row = await db_context.message_history.get_row_by_internal_id(
@@ -823,7 +824,7 @@ def _build_worker(
         chat_interface=chat_interface,
         calendar_config={},
         timezone=ZoneInfo("UTC"),
-        embedding_generator=MagicMock(),
+        embedding_generator=MockEmbeddingGenerator(),
         engine=db_engine,
         confirmation_ui_managers=confirmation_ui_managers,
     )
@@ -850,7 +851,7 @@ async def test_the_worker_runs_a_queued_delegation_at_its_persisted_tier(
     """
     target_service = FakeDelegatableService(tier_eligibility=_TIERED_TARGET)
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await _create_run(
@@ -893,7 +894,7 @@ async def test_a_run_queued_before_tiers_existed_still_runs(
     """
     target_service = FakeDelegatableService(tier_eligibility=_TIERED_TARGET)
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     await _create_run(Database(engine=db_engine), delegation_id="delegation_untiered")
 
@@ -931,7 +932,7 @@ async def test_an_enqueued_delegation_is_routed_before_it_is_persisted(
         tier_eligibility=_TIERED_TARGET, routes_to=routed
     )
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     await delegate_to_service_tool(
         exec_context=_tool_context(
@@ -975,8 +976,7 @@ async def test_a_malformed_persisted_envelope_fails_the_run(
     """
     target_service = FakeDelegatableService(tier_eligibility=_TIERED_TARGET)
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     await _create_run(
         Database(engine=db_engine),
@@ -1009,7 +1009,7 @@ async def test_worker_does_not_notify_when_caller_did_not_hand_off(
     """If the caller never handed off, it delivers inline; the worker must not notify."""
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await _create_run(db_context, delegation_id="delegation_no_handoff")
@@ -1021,7 +1021,7 @@ async def test_worker_does_not_notify_when_caller_did_not_hand_off(
         _payload("delegation_no_handoff"),
     )
 
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id("delegation_no_handoff")
     assert run is not None
@@ -1036,8 +1036,7 @@ async def test_terminal_run_renotifies_when_not_yet_notified(
     """A terminal run whose notification never landed is re-notified on retry (C3)."""
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     tainted_parent_state = TurnTaintState.empty().add_source(
         TaintSource(
@@ -1072,7 +1071,7 @@ async def test_terminal_run_renotifies_when_not_yet_notified(
 
     # The terminal run was not re-executed, but the notification was delivered.
     assert target_service.calls == []
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id("delegation_renotify")
     assert run is not None
@@ -1106,8 +1105,7 @@ async def test_notification_uses_delegated_result_taint_not_trusted_parent(
     """
     target_service = TaintReadingDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     trusted_parent_state = TurnTaintState.empty()
     clock = SystemClock()
@@ -1130,12 +1128,12 @@ async def test_notification_uses_delegated_result_taint_not_trusted_parent(
 
     # The delegated turn ran (and read untrusted content) before notifying.
     assert len(target_service.calls) == 1
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
     # The delivery copy handed to the interface carries the delegated result's
     # taint, not the trusted-empty parent baseline.
-    _, send_kwargs = chat_interface.send_message.await_args
-    assert send_kwargs["taint_metadata"] is not None
-    assert send_kwargs["taint_metadata"]["max_tier"] == "unknown_external"
+    sent_taint = chat_interface.last_sent.taint_metadata
+    assert sent_taint is not None
+    assert sent_taint.get("max_tier") == "unknown_external"
 
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id(
@@ -1171,9 +1169,8 @@ async def test_failed_delivery_is_not_recorded_as_notified(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.side_effect = ChatDeliveryError(
-        "delivery failed", transient=True
+    chat_interface = ScriptedChatInterface.failing_with(
+        ChatDeliveryError("delivery failed", transient=True)
     )
 
     clock = SystemClock()
@@ -1197,7 +1194,7 @@ async def test_failed_delivery_is_not_recorded_as_notified(
             _payload("delegation_send_fails"),
         )
 
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id("delegation_send_fails")
     assert run is not None
@@ -1225,11 +1222,10 @@ async def test_source_wake_delivery_failure_falls_back_without_recording_deliver
     """
     target_service = FakeDelegatableService()
     processing_service = FakeWakeCapableSourceService(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.side_effect = [
+    chat_interface = ScriptedChatInterface.exactly(
         ChatDeliveryError("wake delivery failed", transient=True),
         "fallback_external_message_id",
-    ]
+    )
 
     clock = SystemClock()
     db_context = Database(engine=db_engine)
@@ -1270,9 +1266,9 @@ async def test_source_wake_delivery_failure_falls_back_without_recording_deliver
             payload_present=True,
         )
     ]
-    assert chat_interface.send_message.await_count == 2
-    fallback_kwargs = chat_interface.send_message.await_args_list[1].kwargs
-    assert "Delegated task delegation_source_send_fails" in fallback_kwargs["text"]
+    assert len(chat_interface.sent) == 2
+    fallback = chat_interface.sent[1]
+    assert "Delegated task delegation_source_send_fails" in fallback.text
 
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id(
@@ -1316,12 +1312,11 @@ async def test_source_wake_retry_resumes_at_delivery_without_rerunning_the_turn(
     """
     target_service = FakeDelegatableService()
     processing_service = FakeWakeCapableSourceService(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.side_effect = [
+    chat_interface = ScriptedChatInterface.exactly(
         ChatDeliveryError("wake delivery failed", transient=True),
         ChatDeliveryError("fallback delivery failed", transient=True),
         "delivered_on_retry",
-    ]
+    )
 
     clock = SystemClock()
     db_context = Database(engine=db_engine)
@@ -1397,8 +1392,7 @@ async def test_source_wake_error_result_falls_back_to_direct_notification(
         target_service,
         wake_result_status="error",
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "fallback_external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="fallback_external_message_id")
 
     clock = SystemClock()
     db_context = Database(engine=db_engine)
@@ -1429,9 +1423,9 @@ async def test_source_wake_error_result_falls_back_to_direct_notification(
     )
 
     assert processing_service.wake_call_count == 1
-    chat_interface.send_message.assert_awaited_once()
-    sent_kwargs = chat_interface.send_message.await_args.kwargs
-    assert "successful delegated result" in sent_kwargs["text"]
+    assert len(chat_interface.sent) == 1
+    sent = chat_interface.last_sent
+    assert "successful delegated result" in sent.text
 
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id(
@@ -1599,7 +1593,7 @@ async def test_source_wake_creates_history_row_for_attachment_only_web_response(
         response_text="",
         persist_assistant_message=False,
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await _create_run(
@@ -1629,7 +1623,7 @@ async def test_source_wake_creates_history_row_for_attachment_only_web_response(
         _payload("delegation_web_attachment_only"),
     )
 
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id(
@@ -1686,7 +1680,7 @@ async def test_source_wake_publishes_history_backed_nested_response_to_main_hist
         target_service,
         response_text="source summarized nested result",
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await _create_run(
@@ -1721,7 +1715,7 @@ async def test_source_wake_publishes_history_backed_nested_response_to_main_hist
         _payload("delegation_web_nested_visible"),
     )
 
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id(
@@ -1754,8 +1748,7 @@ async def test_source_wake_publishes_non_history_nested_response_to_main_thread(
         target_service,
         response_text="source summarized nested external result",
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     db_context = Database(engine=db_engine)
     await _create_run(
@@ -1789,7 +1782,7 @@ async def test_source_wake_publishes_non_history_nested_response_to_main_thread(
         _payload("delegation_nested_ext_visible"),
     )
 
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
 
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id(
@@ -1903,8 +1896,7 @@ async def test_running_run_is_failed_not_reexecuted(db_engine: AsyncEngine) -> N
     """A run found 'running' on entry was interrupted; fail it, don't re-run (C6)."""
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     clock = SystemClock()
     db_context = Database(engine=db_engine)
@@ -1922,7 +1914,7 @@ async def test_running_run_is_failed_not_reexecuted(db_engine: AsyncEngine) -> N
     )
 
     assert target_service.calls == []
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id(
         "delegation_interrupted"
@@ -1945,8 +1937,7 @@ async def test_reaper_fails_and_notifies_stale_run(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     clock = SystemClock()
     stale_created_at = clock.now() - timedelta(hours=2)
@@ -1970,7 +1961,7 @@ async def test_reaper_fails_and_notifies_stale_run(
         {"running_timeout_seconds": 60.0},
     )
 
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id("delegation_stale")
     assert run is not None
@@ -1983,7 +1974,7 @@ async def test_reaper_leaves_recent_runs_untouched(db_engine: AsyncEngine) -> No
     """A freshly-created run is not reaped (its created_at is within threshold)."""
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await _create_run(db_context, delegation_id="delegation_recent")
@@ -1995,7 +1986,7 @@ async def test_reaper_leaves_recent_runs_untouched(db_engine: AsyncEngine) -> No
         {"running_timeout_seconds": 3600.0},
     )
 
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id("delegation_recent")
     assert run is not None
@@ -2055,8 +2046,7 @@ async def test_cleanup_recovers_terminal_unnotified_run(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     clock = SystemClock()
     stale_completed_at = clock.now() - timedelta(hours=2)
@@ -2077,7 +2067,7 @@ async def test_cleanup_recovers_terminal_unnotified_run(
         {"running_timeout_seconds": 60.0},
     )
 
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id("delegation_stranded")
     assert run is not None
@@ -2141,7 +2131,7 @@ async def test_inline_delivery_marks_run_notified(db_engine: AsyncEngine) -> Non
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     result, delegation_id = await _delegate_with_fast_completion(
         db_engine,
@@ -2150,7 +2140,7 @@ async def test_inline_delivery_marks_run_notified(db_engine: AsyncEngine) -> Non
     )
 
     assert result.text == "background delegation done"
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
     run = await Database(engine=db_engine).delegation_runs.get_by_delegation_id(
         delegation_id
     )
@@ -2188,7 +2178,7 @@ async def test_inline_delivery_returns_the_delegate_turns_taint(
         _tool_context(
             Database(engine=db_engine), processing_service, taint_tracker=tracker
         ),
-        AsyncMock(spec=ChatInterface),
+        ScriptedChatInterface(),
     )
 
     assert tracker.snapshot().max_tier is expected_tier
@@ -2206,8 +2196,7 @@ async def test_cleanup_does_not_redeliver_inline_delivered_run(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     _, delegation_id = await _delegate_with_fast_completion(
         db_engine,
@@ -2227,7 +2216,7 @@ async def test_cleanup_does_not_redeliver_inline_delivered_run(
         {"running_timeout_seconds": 60.0},
     )
 
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
 
 @pytest.mark.asyncio
@@ -2259,7 +2248,7 @@ async def test_inline_result_delivers_attachments_when_text_empty(
             processing_service,
             attachment_registry=attachment_registry,
         ),
-        AsyncMock(spec=ChatInterface),
+        ScriptedChatInterface(),
     )
 
     run = await Database(engine=db_engine).delegation_runs.get_by_delegation_id(
@@ -2288,7 +2277,7 @@ async def test_delegation_runs_synchronously_when_async_disabled(
     processing_service = _source_processing_service(
         target_service, async_delegation_enabled=False
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     result = await delegate_to_service_tool(
@@ -2330,7 +2319,7 @@ async def test_delegation_runs_synchronously_inside_a_script(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     result = await delegate_to_service_tool(
@@ -2582,7 +2571,7 @@ async def test_api_delegation_completion_stored_in_history(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     clock = SystemClock()
     db_context = Database(engine=db_engine)
@@ -2602,7 +2591,7 @@ async def test_api_delegation_completion_stored_in_history(
         _payload("delegation_api"),
     )
 
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
     db_context = Database(engine=db_engine)
     run = await db_context.delegation_runs.get_by_delegation_id("delegation_api")
     assert run is not None
@@ -2655,8 +2644,7 @@ async def test_web_delegation_can_request_confirmation(db_engine: AsyncEngine) -
     confirmation_ui_managers: dict[str, ConfirmationUIManager] = {
         "web": confirmation_manager
     }
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     db_context = Database(engine=db_engine)
     await _create_run(db_context, delegation_id="delegation_web", interface_type="web")
@@ -2771,8 +2759,7 @@ async def test_source_wake_can_request_durable_confirmation(
     """A delegation completion notification can defer a confirm-gated tool call to a
     durable confirmation addressed to the source user, instead of being denied."""
     processing_service = FakeConfirmingWakeSourceService()
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     clock = SystemClock()
     db_context = Database(engine=db_engine)
@@ -3016,8 +3003,7 @@ async def test_pollable_delegation_submits_and_enqueues_poll(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3042,7 +3028,7 @@ async def test_pollable_delegation_submits_and_enqueues_poll(
     assert run["remote_task_id"] == assigned_task_id
     polls = await db_context.tasks.get_all(task_type="delegation_poll")
     assert len(polls) == 1
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
 
 @pytest.mark.asyncio
@@ -3056,8 +3042,7 @@ async def test_pollable_delegation_retry_reattaches_without_duplicate_submit(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3102,8 +3087,7 @@ async def test_pollable_delegation_retry_resubmits_when_id_unknown(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3142,8 +3126,7 @@ async def test_pollable_delegation_transient_submit_error_recovers_via_poll(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3162,7 +3145,7 @@ async def test_pollable_delegation_transient_submit_error_recovers_via_poll(
     assert run["status"] == "awaiting_remote"
     polls = await db_context.tasks.get_all(task_type="delegation_poll")
     assert len(polls) == 1
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
 
 @pytest.mark.asyncio
@@ -3175,8 +3158,7 @@ async def test_pollable_delegation_deterministic_submit_error_fails_fast(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3194,7 +3176,7 @@ async def test_pollable_delegation_deterministic_submit_error_fails_fast(
     assert run["status"] == "failed"
     polls = await db_context.tasks.get_all(task_type="delegation_poll")
     assert polls == []
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -3207,8 +3189,7 @@ async def test_cleanup_reenqueues_lost_poll_for_young_run(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3237,7 +3218,7 @@ async def test_cleanup_reenqueues_lost_poll_for_young_run(
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
     assert run["status"] == "awaiting_remote"
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
 
 @pytest.mark.asyncio
@@ -3251,8 +3232,7 @@ async def test_cleanup_does_not_reenqueue_poll_for_null_id_run_within_grace(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3279,7 +3259,7 @@ async def test_cleanup_does_not_reenqueue_poll_for_null_id_run_within_grace(
     assert run is not None
     assert run["status"] == "awaiting_remote"
     assert target.submitted == []
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
 
 @pytest.mark.asyncio
@@ -3294,8 +3274,7 @@ async def test_cleanup_reenqueues_poll_for_null_id_run_past_grace(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3322,7 +3301,7 @@ async def test_cleanup_reenqueues_poll_for_null_id_run_past_grace(
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
     assert run["status"] == "awaiting_remote"
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
 
 @pytest.mark.asyncio
@@ -3338,8 +3317,7 @@ async def test_pollable_delegation_polls_to_completion(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3362,7 +3340,7 @@ async def test_pollable_delegation_polls_to_completion(
     assert run is not None
     assert run["status"] == "awaiting_remote"
     assert run["poll_attempts"] == 1
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
     # Second poll: terminal -> finalize and notify.
     db_context = Database(engine=db_engine)
@@ -3374,8 +3352,8 @@ async def test_pollable_delegation_polls_to_completion(
     assert run is not None
     assert run["status"] == "completed"
     assert run["result_text"] == "remote done"
-    chat_interface.send_message.assert_awaited_once()
-    assert "remote done" in chat_interface.send_message.await_args.kwargs["text"]
+    assert len(chat_interface.sent) == 1
+    assert "remote done" in chat_interface.last_sent.text
 
 
 @pytest.mark.asyncio
@@ -3392,7 +3370,7 @@ async def test_a_pollable_submit_carries_the_parent_taint_as_sources_and_state(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
     tainted = TurnTaintState.empty().add_source(
         TaintSource(
             source_type=TaintSourceType.EMAIL,
@@ -3438,7 +3416,7 @@ async def test_a_pollable_submit_carries_the_runs_frozen_tier(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
     selection = ResolvedModelSelection(
         tier="gemini_4_argon", requested="gemini_4_argon", source="model"
     )
@@ -3486,8 +3464,7 @@ async def test_a_pollable_run_that_persists_no_history_is_tainted_conservatively
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3504,16 +3481,56 @@ async def test_a_pollable_run_that_persists_no_history_is_tainted_conservatively
         _delegation_payload(delegation_id),
     )
 
-    chat_interface.send_message.assert_awaited_once()
-    _, send_kwargs = chat_interface.send_message.await_args
-    assert send_kwargs["taint_metadata"] is not None
-    assert send_kwargs["taint_metadata"]["max_tier"] == "unknown_external"
+    assert len(chat_interface.sent) == 1
+    sent_taint = chat_interface.last_sent.taint_metadata
+    assert sent_taint is not None
+    assert sent_taint.get("max_tier") == "unknown_external"
     # Attributed to the target, so the audit can say which agent introduced it.
     assert [
         (source["source_type"], source["source_id"])
-        for source in send_kwargs["taint_metadata"]["sources"]
+        for source in sent_taint.get("sources", [])
         if source["tier"] == "unknown_external"
     ] == [("tool_output", "delegate_to_service:target_profile")]
+
+
+class FakeGenAIInteractions:
+    """The ``client.aio.interactions`` surface of the google-genai SDK.
+
+    ``create`` answers with ``created``; each ``get`` answers with the next of
+    ``polls``, and polling past the end is a test failure.
+    """
+
+    def __init__(
+        self,
+        *,
+        created: dict[str, object],
+        polls: list[dict[str, object]],
+    ) -> None:
+        self._created = created
+        self._polls = list(polls)
+        self.create_calls: list[dict[str, object]] = []
+        self.get_calls: list[str] = []
+
+    async def create(self, **kwargs: object) -> dict[str, object]:
+        self.create_calls.append(kwargs)
+        return self._created
+
+    async def get(self, interaction_id: str, **kwargs: object) -> dict[str, object]:
+        _ = kwargs
+        self.get_calls.append(interaction_id)
+        assert self._polls, f"unexpected poll #{len(self.get_calls)}"
+        return self._polls.pop(0)
+
+    async def cancel(self, interaction_id: str) -> None:
+        raise AssertionError(f"unexpected cancel of {interaction_id}")
+
+
+def fake_genai_client(interactions: FakeGenAIInteractions) -> genai.Client:
+    """A google-genai client whose only reachable surface is ``interactions``."""
+    return cast(
+        "genai.Client",
+        SimpleNamespace(aio=SimpleNamespace(interactions=interactions)),
+    )
 
 
 class _NoToolsProvider:
@@ -3607,29 +3624,34 @@ async def test_deep_research_delegation_polls_to_completion_and_notifies(
     llm_client = GoogleGenAIClient(
         api_key="test", model="deep-research-preview-04-2026"
     )
-    submitted_interaction = AsyncMock()
-    submitted_interaction.id = "inter_e2e_1"
-    llm_client.start_agent_interaction = AsyncMock(return_value=submitted_interaction)
-    pending_interaction = AsyncMock()
-    pending_interaction.status = "in_progress"
-    completed_interaction = AsyncMock()
-    completed_interaction.status = "completed"
-    completed_interaction.output_text = "Here is the research report."
-    # The SDK types these as ISO-8601 strings; a bare AsyncMock attribute is
-    # not one, and the run duration is read from them when the run terminates.
-    completed_interaction.created = "2026-01-01T00:00:00+00:00"
-    completed_interaction.updated = "2026-01-01T00:04:30+00:00"
-    completed_interaction.usage = None
-    llm_client.get_agent_interaction = AsyncMock(
-        side_effect=[pending_interaction, completed_interaction]
+    interactions = FakeGenAIInteractions(
+        created={"id": "inter_e2e_1", "status": "in_progress"},
+        polls=[
+            {"id": "inter_e2e_1", "status": "in_progress"},
+            {
+                "id": "inter_e2e_1",
+                "status": "completed",
+                "steps": [
+                    {
+                        "type": "model_output",
+                        "content": [
+                            {"type": "text", "text": "Here is the research report."}
+                        ],
+                    }
+                ],
+                # The run duration is read from these when the run terminates.
+                "created": "2026-01-01T00:00:00+00:00",
+                "updated": "2026-01-01T00:04:30+00:00",
+            },
+        ],
     )
+    llm_client.client = fake_genai_client(interactions)
 
     target = _deep_research_target_service(llm_client)
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3646,8 +3668,8 @@ async def test_deep_research_delegation_polls_to_completion_and_notifies(
     assert run is not None
     assert run["status"] == "awaiting_remote"
     assert run["remote_task_id"] == "inter_e2e_1"
-    llm_client.start_agent_interaction.assert_awaited_once()
-    chat_interface.send_message.assert_not_awaited()
+    assert len(interactions.create_calls) == 1
+    assert chat_interface.sent == []
 
     poll_payload = _delegation_payload(delegation_id)
     # First poll: still in_progress -> reschedules, no notification yet.
@@ -3659,7 +3681,7 @@ async def test_deep_research_delegation_polls_to_completion_and_notifies(
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
     assert run["status"] == "awaiting_remote"
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
     # Second poll: completed -> finalize and notify with the research output.
     db_context = Database(engine=db_engine)
@@ -3671,11 +3693,8 @@ async def test_deep_research_delegation_polls_to_completion_and_notifies(
     assert run is not None
     assert run["status"] == "completed"
     assert run["result_text"] == "Here is the research report."
-    chat_interface.send_message.assert_awaited_once()
-    assert (
-        "Here is the research report."
-        in chat_interface.send_message.await_args.kwargs["text"]
-    )
+    assert len(chat_interface.sent) == 1
+    assert "Here is the research report." in chat_interface.last_sent.text
 
 
 @pytest.mark.asyncio
@@ -3685,13 +3704,6 @@ async def test_coder_list_environment_delivers_result(
     """A list-form environment cannot hide the remote coder report."""
     llm_client = GoogleGenAIClient(api_key="test", model="antigravity-preview-09-2026")
     interaction_id = "inter_coder_env"
-    sdk = MagicMock()
-    sdk.aio.interactions.create = AsyncMock(
-        return_value={
-            "id": interaction_id,
-            "status": "in_progress",
-        }
-    )
     completed_response = {
         "id": interaction_id,
         "status": "completed",
@@ -3710,8 +3722,9 @@ async def test_coder_list_environment_delivers_result(
             ],
         },
     }
-    sdk.aio.interactions.get = AsyncMock(
-        side_effect=[
+    interactions = FakeGenAIInteractions(
+        created={"id": interaction_id, "status": "in_progress"},
+        polls=[
             {
                 "id": interaction_id,
                 "status": "in_progress",
@@ -3719,16 +3732,15 @@ async def test_coder_list_environment_delivers_result(
             },
             completed_response,
             completed_response,
-        ]
+        ],
     )
-    llm_client.client = sdk
+    llm_client.client = fake_genai_client(interactions)
 
     target = _deep_research_target_service(llm_client)
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3745,8 +3757,8 @@ async def test_coder_list_environment_delivers_result(
     assert run is not None
     assert run["status"] == "awaiting_remote"
     assert run["remote_task_id"] == interaction_id
-    sdk.aio.interactions.create.assert_awaited_once()
-    chat_interface.send_message.assert_not_awaited()
+    assert len(interactions.create_calls) == 1
+    assert chat_interface.sent == []
 
     poll_payload = _delegation_payload(delegation_id)
     # An in-progress reading reschedules without notifying or submitting again.
@@ -3758,7 +3770,7 @@ async def test_coder_list_environment_delivers_result(
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
     assert run["status"] == "awaiting_remote"
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
     # Second poll: completed -> finalize and notify with the research output.
     db_context = Database(engine=db_engine)
@@ -3770,15 +3782,12 @@ async def test_coder_list_environment_delivers_result(
     assert run is not None
     assert run["status"] == "completed"
     assert run["result_text"] == "Here is the research report."
-    chat_interface.send_message.assert_awaited_once()
-    assert (
-        "Here is the research report."
-        in chat_interface.send_message.await_args.kwargs["text"]
-    )
+    assert len(chat_interface.sent) == 1
+    assert "Here is the research report." in chat_interface.last_sent.text
 
     assert run["remote_task_id"] == interaction_id
-    sdk.aio.interactions.create.assert_awaited_once()
-    assert sdk.aio.interactions.get.await_count == 3
+    assert len(interactions.create_calls) == 1
+    assert interactions.get_calls == [interaction_id] * 3
 
 
 @pytest.mark.asyncio
@@ -3791,8 +3800,7 @@ async def test_pollable_delegation_synchronous_remote_completes_on_submit(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3811,7 +3819,7 @@ async def test_pollable_delegation_synchronous_remote_completes_on_submit(
     assert run["result_text"] == "sync remote done"
     polls = await db_context.tasks.get_all(task_type="delegation_poll")
     assert polls == []
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -3822,8 +3830,7 @@ async def test_reap_stale_awaiting_remote_cancels_and_fails(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3852,7 +3859,7 @@ async def test_reap_stale_awaiting_remote_cancels_and_fails(
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
     assert run["status"] == "failed"
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -3868,8 +3875,7 @@ async def test_late_poll_past_cap_delivers_terminal_result(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3898,7 +3904,7 @@ async def test_late_poll_past_cap_delivers_terminal_result(
     assert run["result_text"] == "finished just in time"
     # The terminal task was delivered, not cancelled.
     assert target.cancelled == []
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -3910,8 +3916,7 @@ async def test_late_poll_past_cap_cancels_when_still_pending(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3937,7 +3942,7 @@ async def test_late_poll_past_cap_cancels_when_still_pending(
     assert run is not None
     assert run["status"] == "failed"
     assert target.cancelled == [target.submitted[0][2]]
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -3953,8 +3958,7 @@ async def test_pollable_delegation_poll_transient_error_reschedules(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -3976,7 +3980,7 @@ async def test_pollable_delegation_poll_transient_error_reschedules(
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
     assert run["status"] == "awaiting_remote"
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
     # Next poll succeeds -> completed.
     db_context = Database(engine=db_engine)
@@ -3999,8 +4003,7 @@ async def test_pollable_delegation_poll_permanent_error_fails_fast(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -4021,7 +4024,7 @@ async def test_pollable_delegation_poll_permanent_error_fails_fast(
     run = await db_context.delegation_runs.get_by_delegation_id(delegation_id)
     assert run is not None
     assert run["status"] == "failed"
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -4037,8 +4040,7 @@ async def test_pollable_delegation_poll_not_found_resubmits(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -4074,7 +4076,7 @@ async def test_pollable_delegation_poll_not_found_resubmits(
     # One poll from the first submit, one from the re-submit.
     polls = await db_context.tasks.get_all(task_type="delegation_poll")
     assert len(polls) == 2
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
 
 @pytest.mark.asyncio
@@ -4095,8 +4097,7 @@ async def test_pollable_delegation_recovers_when_submit_never_landed(
     processing_service = _source_processing_service(
         cast("FakeDelegatableService", target)
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     delegation_id = await _start_background_delegation(
         db_engine, processing_service, chat_interface
@@ -4125,7 +4126,7 @@ async def test_pollable_delegation_recovers_when_submit_never_landed(
     assert run["status"] == "awaiting_remote"
     assert run["remote_task_id"] == target.submitted[1][2]
     assert len(target.submitted) == 2
-    chat_interface.send_message.assert_not_awaited()
+    assert chat_interface.sent == []
 
     # Next poll: the recreated task is terminal -> finalize and notify.
     db_context = Database(engine=db_engine)
@@ -4137,7 +4138,7 @@ async def test_pollable_delegation_recovers_when_submit_never_landed(
     assert run is not None
     assert run["status"] == "completed"
     assert run["result_text"] == "recovered after resubmit"
-    chat_interface.send_message.assert_awaited_once()
+    assert len(chat_interface.sent) == 1
 
 
 @pytest.mark.asyncio
@@ -4147,8 +4148,7 @@ async def test_resume_delegation_reuses_prior_subconversation(
     """Resuming a finished delegation continues its isolated subconversation."""
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
     worker = _build_worker(db_engine, processing_service, chat_interface)
 
     db_context = Database(engine=db_engine)
@@ -4210,7 +4210,7 @@ async def test_resume_delegation_rejected_on_synchronous_path(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await _create_run(db_context, delegation_id="delegation_prior_sync")
@@ -4241,7 +4241,7 @@ async def test_resume_delegation_unknown_reference_is_rejected(
     """An unknown resume reference errors and creates no run or delegated call."""
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     result = await delegate_to_service_tool(
@@ -4267,7 +4267,7 @@ async def test_resume_delegation_rejects_non_terminal_run(
     """A still-running delegation cannot be resumed."""
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await _create_run(db_context, delegation_id="delegation_still_running")
@@ -4299,7 +4299,7 @@ async def test_resume_delegation_rejects_target_profile_mismatch(
     cast("Any", processing_service).processing_services_registry["other_profile"] = (
         other_service
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await _create_run(db_context, delegation_id="delegation_for_target")
@@ -4333,7 +4333,7 @@ async def test_resume_delegation_rejects_when_active_resume_in_flight(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await _create_run(db_context, delegation_id="delegation_prior")
@@ -4393,7 +4393,7 @@ async def test_resume_delegation_rejects_other_users_delegation(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     # A finished delegation owned by a different user in the same conversation.
@@ -4445,8 +4445,7 @@ async def test_delegate_treats_blank_resume_id_as_fresh_delegation(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     db_context = Database(engine=db_engine)
     result = await delegate_to_service_tool(
@@ -4475,7 +4474,7 @@ async def test_resume_delegation_rejects_other_source_profile(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await db_context.delegation_runs.create_run({
@@ -4526,7 +4525,7 @@ async def test_resume_delegation_rejects_other_source_subconversation(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await db_context.delegation_runs.create_run({
@@ -4591,8 +4590,7 @@ async def test_tainted_delegation_propagates_the_users_request_to_the_run(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
     tainted = _tainted_delegating_state()
 
     db_context = Database(engine=db_engine)
@@ -4673,7 +4671,7 @@ async def test_delegation_off_an_untrusted_turn_propagates_no_intent(
     processing_service = _source_processing_service(
         target_service, async_delegation_enabled=False
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
     untrusted = TurnTaintState.empty().add_source(
         TaintSource(
             source_type=TaintSourceType.EMAIL,
@@ -4727,8 +4725,7 @@ async def test_nested_worker_run_delegation_propagates_no_composed_goal(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     db_context = Database(engine=db_engine)
     await db_context.message_history.add_message(
@@ -4781,7 +4778,7 @@ async def test_delegating_from_a_completion_wake_propagates_no_wake_data(
     processing_service = _source_processing_service(
         target_service, async_delegation_enabled=False
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     await db_context.message_history.add_message(
@@ -4834,8 +4831,7 @@ async def test_steering_sent_after_enqueue_is_not_the_originating_request(
     """
     target_service = FakeDelegatableService()
     processing_service = _source_processing_service(target_service)
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "external_message_id"
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
 
     db_context = Database(engine=db_engine)
     await db_context.message_history.add_message(
@@ -4901,7 +4897,7 @@ async def test_synchronous_delegation_ignores_earlier_turns(
     processing_service = _source_processing_service(
         target_service, async_delegation_enabled=False
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
 
     db_context = Database(engine=db_engine)
     earlier = UserMessage(
@@ -4991,8 +4987,7 @@ async def test_background_authenticated_outcome_survives_generic_worker_prose(
     processing_service = FakeWakeCapableSourceService(
         FakeDelegatableService(), wake_result_status="error"
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
-    chat_interface.send_message.return_value = "delivered"
+    chat_interface = ScriptedChatInterface(otherwise="delivered")
     db = Database(engine=db_engine)
     delegation_id = "authenticated_background"
     await _create_run(db, delegation_id=delegation_id)
@@ -5028,8 +5023,8 @@ async def test_background_authenticated_outcome_survives_generic_worker_prose(
         for row in rows
         if row["content"] and "Authenticated site task outcome" in row["content"]
     )
-    chat_interface.send_message.assert_awaited_once()
-    for delivered in (wake_data, chat_interface.send_message.await_args.kwargs["text"]):
+    assert len(chat_interface.sent) == 1
+    for delivered in (wake_data, chat_interface.last_sent.text):
         assert f"shop: {status}." in delivered
         assert "https://browser.example/takeover" in delivered
         assert f"resume='{delegation_id}'" in delivered
@@ -5069,7 +5064,7 @@ async def test_a_run_is_not_left_parked_when_queueing_its_next_turn_fails(
     processing_service = cast(
         "ProcessingService", FakeWakeCapableSourceService(FakeDelegatableService())
     )
-    chat_interface = AsyncMock(spec=ChatInterface)
+    chat_interface = ScriptedChatInterface()
     worker = _build_worker(db_engine, processing_service, chat_interface)
 
     with pytest.raises(RuntimeError, match="enqueue failed"):

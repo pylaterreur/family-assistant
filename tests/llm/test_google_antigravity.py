@@ -2,13 +2,21 @@
 
 import importlib
 from collections.abc import AsyncGenerator, Generator
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
+from dataclasses import dataclass
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 from google import genai
-from google.genai.interactions import Interaction
+from google.genai.interactions import (
+    Interaction,
+    InteractionCompletedEvent,
+    InteractionCreatedEvent,
+    InteractionSSEEvent,
+    InteractionSseEventInteraction,
+    StepDelta,
+    TextDelta,
+)
 from pydantic import TypeAdapter
 
 from family_assistant.llm import LLMStreamEvent
@@ -42,24 +50,54 @@ ANTIGRAVITY_AGENT_ID = "antigravity-preview-05-2026"
 
 _SDK_INTERACTIONS_MODULE = importlib.import_module("google.genai._gaos.models")
 _SDK_COMPAT_ERRORS = importlib.import_module("google.genai._gaos.lib.compat_errors")
-# The real async environments resources, resolved before any test patches
-# ``genai.Client``.
-_SDK_ASYNC_ENVIRONMENTS = type(genai.Client(api_key="test").aio.environments)
+_SDK_ENVIRONMENT_TYPES = importlib.import_module(
+    "google.genai._gaos.types.environments.environment"
+)
+_SDK_ASYNC_INTERACTIONS = type(genai.Client(api_key="test").aio.interactions)
+# The client-facing environments resource takes *args/**kwargs and forwards
+# to this base, which declares the real keywords, so the base is what gets
+# specced.
+_SDK_ASYNC_ENVIRONMENTS_BASE = importlib.import_module(
+    "google.genai._gaos.environments"
+).AsyncEnvironments
 _SDK_ASYNC_ENVIRONMENT_FILES = type(genai.Client(api_key="test").aio.environments.files)
 _CREATE_INTERACTION_ADAPTER = TypeAdapter(
     _SDK_INTERACTIONS_MODULE.CreateInteractionRequestBody
 )
 
 
+@dataclass(frozen=True)
+class _SdkCalls:
+    """The installed SDK's network-facing async methods, autospecced.
+
+    Each is patched on its class, so a call records the resource instance as
+    its first argument, and a method this SDK version lacks or a keyword it
+    does not take fails here rather than in production.
+    """
+
+    create: AsyncMock
+    get: AsyncMock
+    create_environment: AsyncMock
+    upload: AsyncMock
+
+
 @pytest.fixture
-def mock_genai_client() -> Generator[MagicMock]:
-    with patch(
-        "family_assistant.llm.providers.google_genai_client.genai.Client"
-    ) as mock_client:
-        mock_instance = mock_client.return_value
-        mock_instance.aio = MagicMock()
-        mock_instance.aio.interactions = MagicMock()
-        yield mock_instance
+def sdk() -> Generator[_SdkCalls]:
+    with (
+        patch.object(_SDK_ASYNC_INTERACTIONS, "create", autospec=True) as create,
+        patch.object(_SDK_ASYNC_INTERACTIONS, "get", autospec=True) as get,
+        patch.object(
+            _SDK_ASYNC_ENVIRONMENTS_BASE, "create_environment", autospec=True
+        ) as create_environment,
+        patch.object(_SDK_ASYNC_ENVIRONMENT_FILES, "upload", autospec=True) as upload,
+    ):
+        create_environment.return_value = _SDK_ENVIRONMENT_TYPES.Environment(id="env_1")
+        yield _SdkCalls(
+            create=create,
+            get=get,
+            create_environment=create_environment,
+            upload=upload,
+        )
 
 
 async def _drain_stream(
@@ -71,35 +109,31 @@ async def _drain_stream(
     return events
 
 
-def _completing_stream(interaction_id: str, text: str) -> AsyncGenerator[MagicMock]:
-    async def generator() -> AsyncGenerator[MagicMock]:
-        mock_start = MagicMock()
-        mock_start.event_type = "interaction.created"
-        mock_start.interaction.id = interaction_id
-        mock_start.event_id = "evt_0"
-        yield mock_start
-
-        mock_text = MagicMock()
-        mock_text.event_type = "step.delta"
-        mock_text.delta.type = "text"
-        mock_text.delta.text = text
-        mock_text.event_id = "evt_1"
-        yield mock_text
-
-        mock_complete = MagicMock()
-        mock_complete.event_type = "interaction.completed"
-        mock_complete.event_id = "evt_2"
-        yield mock_complete
+def _completing_stream(
+    interaction_id: str, text: str
+) -> AsyncGenerator[InteractionSSEEvent]:
+    async def generator() -> AsyncGenerator[InteractionSSEEvent]:
+        yield InteractionCreatedEvent(
+            interaction=InteractionSseEventInteraction(
+                id=interaction_id, status="in_progress"
+            ),
+            event_id="evt_0",
+        )
+        yield StepDelta(delta=TextDelta(text=text), index=0, event_id="evt_1")
+        yield InteractionCompletedEvent(
+            interaction=InteractionSseEventInteraction(
+                id=interaction_id, status="completed"
+            ),
+            event_id="evt_2",
+        )
 
     return generator()
 
 
-def _accept_submissions(mock_genai_client: MagicMock) -> AsyncMock:
+def _accept_submissions(sdk: _SdkCalls) -> AsyncMock:
     """Make the SDK's create() accept a submit-path request, and return it."""
-    interaction = Interaction(id="inter_ag_submitted", status="in_progress")
-    create = AsyncMock(return_value=interaction)
-    mock_genai_client.aio.interactions.create = create
-    return create
+    sdk.create.return_value = Interaction(id="inter_ag_submitted", status="in_progress")
+    return sdk.create
 
 
 @pytest.mark.parametrize(
@@ -127,7 +161,7 @@ def test_gemini_chat_model_is_not_an_interactions_agent() -> None:
 
 @pytest.mark.asyncio
 async def test_antigravity_stream_sends_agent_config_and_system_instruction(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """The interactive path submits the agent id, its model, and a separate prompt."""
     client = GoogleGenAIClient(
@@ -135,9 +169,7 @@ async def test_antigravity_stream_sends_agent_config_and_system_instruction(
         model=ANTIGRAVITY_AGENT_ID,
         antigravity_model="gemini-3.8-flash",
     )
-    mock_genai_client.aio.interactions.create = AsyncMock(
-        return_value=_completing_stream("inter_ag_1", "Done.")
-    )
+    sdk.create.return_value = _completing_stream("inter_ag_1", "Done.")
 
     events = await _drain_stream(
         client,
@@ -147,7 +179,7 @@ async def test_antigravity_stream_sends_agent_config_and_system_instruction(
         ],
     )
 
-    call_kwargs = mock_genai_client.aio.interactions.create.call_args.kwargs
+    call_kwargs = sdk.create.call_args.kwargs
     assert call_kwargs["agent"] == ANTIGRAVITY_AGENT_ID
     assert call_kwargs["agent_config"] == {
         "type": "antigravity",
@@ -166,24 +198,22 @@ async def test_antigravity_stream_sends_agent_config_and_system_instruction(
 
 @pytest.mark.asyncio
 async def test_antigravity_agent_config_omits_unset_fields(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """Without configured overrides the API's own defaults are left to apply."""
     client = GoogleGenAIClient(api_key="test", model=ANTIGRAVITY_AGENT_ID)
-    mock_genai_client.aio.interactions.create = AsyncMock(
-        return_value=_completing_stream("inter_ag_2", "Done.")
-    )
+    sdk.create.return_value = _completing_stream("inter_ag_2", "Done.")
 
     await _drain_stream(client, [UserMessage(content="Do the thing.")])
 
-    call_kwargs = mock_genai_client.aio.interactions.create.call_args.kwargs
+    call_kwargs = sdk.create.call_args.kwargs
     assert call_kwargs["agent_config"] == {"type": "antigravity"}
     assert "system_instruction" not in call_kwargs
 
 
 @pytest.mark.asyncio
 async def test_antigravity_agent_config_carries_max_total_tokens(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """A configured run budget reaches the API."""
     client = GoogleGenAIClient(
@@ -192,13 +222,11 @@ async def test_antigravity_agent_config_carries_max_total_tokens(
         antigravity_model="gemini-3.8-flash",
         antigravity_max_total_tokens=250_000,
     )
-    mock_genai_client.aio.interactions.create = AsyncMock(
-        return_value=_completing_stream("inter_ag_3", "Done.")
-    )
+    sdk.create.return_value = _completing_stream("inter_ag_3", "Done.")
 
     await _drain_stream(client, [UserMessage(content="Do the thing.")])
 
-    call_kwargs = mock_genai_client.aio.interactions.create.call_args.kwargs
+    call_kwargs = sdk.create.call_args.kwargs
     assert call_kwargs["agent_config"] == {
         "type": "antigravity",
         "model": "gemini-3.8-flash",
@@ -208,7 +236,7 @@ async def test_antigravity_agent_config_carries_max_total_tokens(
 
 @pytest.mark.asyncio
 async def test_antigravity_submitted_request_validates_against_the_sdk_request_model(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """The submitted body is what the installed SDK accepts, not just a dict we like."""
     client = GoogleGenAIClient(
@@ -217,7 +245,7 @@ async def test_antigravity_submitted_request_validates_against_the_sdk_request_m
         antigravity_model="gemini-3.8-flash",
         antigravity_max_total_tokens=250_000,
     )
-    create = _accept_submissions(mock_genai_client)
+    create = _accept_submissions(sdk)
 
     await client.start_agent_interaction([
         SystemMessage(content="Be careful."),
@@ -236,11 +264,11 @@ async def test_antigravity_submitted_request_validates_against_the_sdk_request_m
 
 @pytest.mark.asyncio
 async def test_antigravity_requires_non_empty_input(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """A system prompt alone is not a task for an agent that executes work."""
     client = GoogleGenAIClient(api_key="test", model=ANTIGRAVITY_AGENT_ID)
-    create = _accept_submissions(mock_genai_client)
+    create = _accept_submissions(sdk)
 
     with pytest.raises(InvalidRequestError, match="Antigravity requires non-empty"):
         await client.start_agent_interaction([SystemMessage(content="Be careful.")])
@@ -249,7 +277,7 @@ async def test_antigravity_requires_non_empty_input(
 
 @pytest.mark.asyncio
 async def test_start_agent_interaction_submits_antigravity_without_streaming(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """The submit-then-poll path reuses the same agent shaping with stream=False."""
     client = GoogleGenAIClient(
@@ -257,16 +285,16 @@ async def test_start_agent_interaction_submits_antigravity_without_streaming(
         model=ANTIGRAVITY_AGENT_ID,
         antigravity_model="gemini-3.8-flash",
     )
-    mock_interaction = Interaction(id="inter_ag_submit", status="in_progress")
-    mock_genai_client.aio.interactions.create = AsyncMock(return_value=mock_interaction)
+    interaction = Interaction(id="inter_ag_submit", status="in_progress")
+    sdk.create.return_value = interaction
 
     result = await client.start_agent_interaction(
         [UserMessage(content="Do the thing.")],
         previous_interaction_id="inter_ag_prev",
     )
 
-    assert result is mock_interaction
-    call_kwargs = mock_genai_client.aio.interactions.create.call_args.kwargs
+    assert result is interaction
+    call_kwargs = sdk.create.call_args.kwargs
     assert call_kwargs["stream"] is False
     assert call_kwargs["agent"] == ANTIGRAVITY_AGENT_ID
     assert call_kwargs["agent_config"]["model"] == "gemini-3.8-flash"
@@ -275,7 +303,7 @@ async def test_start_agent_interaction_submits_antigravity_without_streaming(
 
 @pytest.mark.asyncio
 async def test_media_injected_as_provider_parts_is_refused_not_dropped(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """An image or PDF injection has no text form the agent could receive.
 
@@ -284,7 +312,7 @@ async def test_media_injected_as_provider_parts_is_refused_not_dropped(
     turn fails rather than asking the agent about a file it never got.
     """
     client = GoogleGenAIClient(api_key="test", model=ANTIGRAVITY_AGENT_ID)
-    create = _accept_submissions(mock_genai_client)
+    create = _accept_submissions(sdk)
     injected = UserMessage(content="[System: File from previous tool response]")
     injected.parts = [{"inline_data": {"mime_type": "image/png"}}]
 
@@ -298,11 +326,11 @@ async def test_media_injected_as_provider_parts_is_refused_not_dropped(
 
 @pytest.mark.asyncio
 async def test_image_url_content_part_is_refused_not_dropped(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """The same holds for an image_url part reaching the agent path."""
     client = GoogleGenAIClient(api_key="test", model=ANTIGRAVITY_AGENT_ID)
-    create = _accept_submissions(mock_genai_client)
+    create = _accept_submissions(sdk)
 
     with pytest.raises(InvalidRequestError, match="cannot read image_url"):
         await client.start_agent_interaction([
@@ -320,11 +348,11 @@ async def test_image_url_content_part_is_refused_not_dropped(
 
 @pytest.mark.asyncio
 async def test_text_shaped_attachment_injection_still_reaches_the_agent(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """A CSV/JSON/text attachment is injected as text, so it must still pass."""
     client = GoogleGenAIClient(api_key="test", model=ANTIGRAVITY_AGENT_ID)
-    create = _accept_submissions(mock_genai_client)
+    create = _accept_submissions(sdk)
 
     await client.start_agent_interaction([
         UserMessage(content="Transform the attached CSV."),
@@ -360,7 +388,7 @@ def _egress_client(
 
 @pytest.mark.asyncio
 async def test_egress_policy_reaches_the_interactive_path(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """The stream path previously had nowhere to put an environment at all.
 
@@ -377,13 +405,11 @@ async def test_egress_policy_reaches_the_interactive_path(
             },
         ]
     })
-    mock_genai_client.aio.interactions.create = AsyncMock(
-        return_value=_completing_stream("inter_ag_env", "Done.")
-    )
+    sdk.create.return_value = _completing_stream("inter_ag_env", "Done.")
 
     await _drain_stream(client, [UserMessage(content="Open a PR.")])
 
-    call_kwargs = mock_genai_client.aio.interactions.create.call_args.kwargs
+    call_kwargs = sdk.create.call_args.kwargs
     assert call_kwargs["environment"] == {
         "type": "remote",
         "network": {
@@ -398,29 +424,14 @@ async def test_egress_policy_reaches_the_interactive_path(
     }
 
 
-def _accept_environments(mock_genai_client: MagicMock) -> MagicMock:
-    """Stub the environments API: creation returns ``env_1``, uploads succeed.
-
-    Specced from the installed SDK's async classes, so a method this SDK
-    version lacks, a sync one awaited, or a keyword it does not take fails here
-    rather than in production.
-    """
-    environments = create_autospec(_SDK_ASYNC_ENVIRONMENTS, instance=True)
-    environments.files = create_autospec(_SDK_ASYNC_ENVIRONMENT_FILES, instance=True)
-    environments.create_environment.return_value = SimpleNamespace(id="env_1")
-    mock_genai_client.aio.environments = environments
-    return environments
-
-
 @pytest.mark.asyncio
 async def test_submit_path_uploads_files_into_an_environment(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """Files are uploaded, not inlined: the API rejects an inline source over
     1 MiB of base64, which is any ordinary photo."""
     client = _egress_client("disabled")
-    environments = _accept_environments(mock_genai_client)
-    create = _accept_submissions(mock_genai_client)
+    create = _accept_submissions(sdk)
     photo = b"\x89PNG" + bytes(2 * 1024 * 1024)
 
     await client.start_agent_interaction(
@@ -432,7 +443,8 @@ async def test_submit_path_uploads_files_into_an_environment(
         ],
     )
 
-    environments.files.upload.assert_awaited_once_with(
+    sdk.upload.assert_awaited_once_with(
+        client.client.aio.environments.files,
         environment="env_1",
         path="/workspace/photo.png",
         file=photo,
@@ -448,13 +460,12 @@ async def test_submit_path_uploads_files_into_an_environment(
 
 @pytest.mark.asyncio
 async def test_uploaded_environment_carries_the_egress_policy(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """A run on an existing environment ignores ``env`` sent with the run, so
     network and env are set when the environment is created."""
     client = _egress_client(_STORED_GITHUB)
-    environments = _accept_environments(mock_genai_client)
-    _accept_submissions(mock_genai_client)
+    _accept_submissions(sdk)
 
     await client.start_agent_interaction(
         [UserMessage(content="Fix the bug in this file.")],
@@ -465,7 +476,8 @@ async def test_uploaded_environment_carries_the_egress_policy(
         ],
     )
 
-    environments.create_environment.assert_awaited_once_with(
+    sdk.create_environment.assert_awaited_once_with(
+        client.client.aio.environments,
         network=_STORED_GITHUB.network,
         extra_body={"env": _STORED_GITHUB.env},
     )
@@ -473,15 +485,14 @@ async def test_uploaded_environment_carries_the_egress_policy(
 
 @pytest.mark.asyncio
 async def test_a_rejected_upload_fails_the_delegation_permanently(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """Provisioning reaches Google, so its errors use the delegation taxonomy."""
     client = _egress_client("disabled")
-    environments = _accept_environments(mock_genai_client)
     rejection = Exception("Request contains an invalid argument.")
     rejection.status_code = 400  # pyright: ignore[reportAttributeAccessIssue]
-    environments.files.upload.side_effect = rejection
-    create = _accept_submissions(mock_genai_client)
+    sdk.upload.side_effect = rejection
+    create = _accept_submissions(sdk)
 
     with pytest.raises(DelegationPermanentError):
         await client.start_agent_interaction(
@@ -497,7 +508,7 @@ async def test_a_rejected_upload_fails_the_delegation_permanently(
 
 @pytest.mark.asyncio
 async def test_default_sandbox_is_stated_rather_than_omitted(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """The shipped profile mounts nothing and sets no egress policy.
 
@@ -510,18 +521,18 @@ async def test_default_sandbox_is_stated_rather_than_omitted(
         model=ANTIGRAVITY_AGENT_ID,
         antigravity_model="gemini-3.8-flash",
     )
-    mock_interaction = Interaction(id="inter_ag_plain", status="in_progress")
-    mock_genai_client.aio.interactions.create = AsyncMock(return_value=mock_interaction)
+    interaction = Interaction(id="inter_ag_plain", status="in_progress")
+    sdk.create.return_value = interaction
 
     await client.start_agent_interaction([UserMessage(content="Do the thing.")])
 
-    call_kwargs = mock_genai_client.aio.interactions.create.call_args.kwargs
+    call_kwargs = sdk.create.call_args.kwargs
     assert call_kwargs["environment"] == {"type": "remote"}
 
 
 @pytest.mark.asyncio
 async def test_interactive_path_also_states_the_default_sandbox(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """`/coder` run directly hit the same rejection as a delegated run."""
     client = GoogleGenAIClient(
@@ -529,19 +540,17 @@ async def test_interactive_path_also_states_the_default_sandbox(
         model=ANTIGRAVITY_AGENT_ID,
         antigravity_model="gemini-3.8-flash",
     )
-    mock_genai_client.aio.interactions.create = AsyncMock(
-        return_value=_completing_stream("inter_ag_plain_stream", "Done.")
-    )
+    sdk.create.return_value = _completing_stream("inter_ag_plain_stream", "Done.")
 
     await _drain_stream(client, [UserMessage(content="Do the thing.")])
 
-    call_kwargs = mock_genai_client.aio.interactions.create.call_args.kwargs
+    call_kwargs = sdk.create.call_args.kwargs
     assert call_kwargs["environment"] == {"type": "remote"}
 
 
 @pytest.mark.asyncio
 async def test_environment_with_egress_validates_against_the_sdk_request_model(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """The transform shape is what the installed SDK accepts, not just a dict we like."""
     client = _egress_client({
@@ -552,7 +561,7 @@ async def test_environment_with_egress_validates_against_the_sdk_request_model(
             }
         ]
     })
-    create = _accept_submissions(mock_genai_client)
+    create = _accept_submissions(sdk)
 
     await client.start_agent_interaction([UserMessage(content="Clone the repo.")])
 
@@ -578,11 +587,11 @@ _STORED_GITHUB = EgressResolution(
 
 @pytest.mark.asyncio
 async def test_a_stored_git_credential_is_bound_to_the_sandbox_variable(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """The request the installed SDK accepts carries the credential binding."""
     client = _egress_client(_STORED_GITHUB)
-    create = _accept_submissions(mock_genai_client)
+    create = _accept_submissions(sdk)
 
     await client.start_agent_interaction([UserMessage(content="Fix the bug.")])
 
@@ -594,12 +603,12 @@ async def test_a_stored_git_credential_is_bound_to_the_sandbox_variable(
 
 @pytest.mark.asyncio
 async def test_a_stored_git_credential_tells_the_agent_to_configure_git(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """Git sends nothing until the variable is in its header, so the binding
     is useless unless the agent is told to put it there."""
     client = _egress_client(_STORED_GITHUB)
-    create = _accept_submissions(mock_genai_client)
+    create = _accept_submissions(sdk)
 
     await client.start_agent_interaction([
         SystemMessage(content="You are a coding agent."),
@@ -616,7 +625,7 @@ async def test_a_stored_git_credential_tells_the_agent_to_configure_git(
 
 @pytest.mark.asyncio
 async def test_without_a_stored_git_credential_git_is_not_mentioned(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """A header-only rule carries its own Authorization, which the proxy would
     write over anything git sent."""
@@ -628,7 +637,7 @@ async def test_without_a_stored_git_credential_git_is_not_mentioned(
             }
         ]
     })
-    create = _accept_submissions(mock_genai_client)
+    create = _accept_submissions(sdk)
 
     await client.start_agent_interaction([
         SystemMessage(content="You are a coding agent."),
@@ -651,11 +660,11 @@ def _connection_blip() -> Exception:
 
 @pytest.mark.asyncio
 async def test_a_connection_blip_while_polling_is_transient(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """One failed poll of a long run must reschedule, not fail the delegation."""
     client = _egress_client("disabled")
-    mock_genai_client.aio.interactions.get = AsyncMock(side_effect=_connection_blip())
+    sdk.get.side_effect = _connection_blip()
 
     with pytest.raises(DelegationTransientError):
         await client.get_agent_interaction("inter_long_running")
@@ -663,7 +672,7 @@ async def test_a_connection_blip_while_polling_is_transient(
 
 @pytest.mark.asyncio
 async def test_a_connection_blip_storing_an_egress_credential_is_transient(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """The credential store is reached over the same network as the run."""
     request = httpx.Request("PATCH", "https://generativelanguage.googleapis.com/")
@@ -683,7 +692,7 @@ async def test_a_connection_blip_storing_an_egress_credential_is_transient(
         antigravity_model="gemini-3.8-flash",
         antigravity_egress_resolver=_BlippingResolver(),
     )
-    create = _accept_submissions(mock_genai_client)
+    create = _accept_submissions(sdk)
 
     with pytest.raises(DelegationTransientError):
         await client.start_agent_interaction([UserMessage(content="Fix the bug.")])
@@ -692,7 +701,7 @@ async def test_a_connection_blip_storing_an_egress_credential_is_transient(
 
 @pytest.mark.asyncio
 async def test_a_misconfigured_egress_credential_still_fails_fast(
-    mock_genai_client: MagicMock,
+    sdk: _SdkCalls,
 ) -> None:
     """Only a failed connection is retried; a configuration error is not."""
 
@@ -706,7 +715,7 @@ async def test_a_misconfigured_egress_credential_still_fails_fast(
         antigravity_model="gemini-3.8-flash",
         antigravity_egress_resolver=_MisconfiguredResolver(),
     )
-    _accept_submissions(mock_genai_client)
+    _accept_submissions(sdk)
 
     with pytest.raises(AntigravityEgressError):
         await client.start_agent_interaction([UserMessage(content="Fix the bug.")])
