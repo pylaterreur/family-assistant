@@ -2398,6 +2398,11 @@ class AppConfig(BaseSettings):
     # confirmation. Set to 0 to run general workers only.
     reserved_task_worker_count: int = Field(default=1, ge=0)
 
+    # How many background LLM turns (delegated runs) may run at once. They run
+    # outside the task workers, so this bounds model and tool load rather than
+    # worker capacity; a run that finds no room waits and tries again shortly.
+    max_background_turns: int = Field(default=4, ge=1)
+
     # Attachment selection thresholds (global)
     attachment_selection_threshold: int = 3  # Trigger selection when > this many
     max_response_attachments: int = 6  # Max attachments per response

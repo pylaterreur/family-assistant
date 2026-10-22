@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from family_assistant.services.delegation_delivery import (
         DelegationDeliveryPayload,
     )
-    from family_assistant.task_worker import TaskWorker
+    from family_assistant.task_worker import DelegatedProfileRunPayload, TaskWorker
     from family_assistant.tools.types import ToolExecutionContext
 
 T = TypeVar("T")
@@ -465,3 +465,18 @@ async def deliver_queued_delegations(
             task_id=task["task_id"], status="done"
         )
     return len(pending)
+
+
+async def run_delegated_profile_run(
+    worker: "TaskWorker",
+    exec_context: "ToolExecutionContext",
+    payload: "DelegatedProfileRunPayload",
+) -> None:
+    """Run a ``delegated_profile_run`` handler and the turn it launches.
+
+    The handler hands a local run's turn to the background turn runner and
+    returns; a test that drives the handler directly waits for that turn here,
+    as the queue would leave it to finish on its own.
+    """
+    await worker.handle_delegated_profile_run(exec_context, payload)
+    await worker.background_turns.wait_idle()
