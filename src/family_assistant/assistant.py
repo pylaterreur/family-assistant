@@ -78,6 +78,7 @@ from family_assistant.llm.antigravity_egress import (
     make_egress_credential_rotation_handler,
     stored_github_credentials,
 )
+from family_assistant.llm.connections import ProviderConnections
 from family_assistant.llm.factory import LLMClientFactory
 from family_assistant.llm.model_routing import (
     MODEL_ROUTING_PROMPT_KEY,
@@ -643,6 +644,10 @@ class Assistant:
         # tier's client is configured from the tier alone, so per-profile copies
         # would be identical objects multiplied by the profile count.
         self._tier_llm_clients: dict[str, LLMInterface] = {}
+        # Every client the application builds borrows its provider SDK client
+        # from here, so one endpoint is one connection pool however many tiers,
+        # profiles and helpers run on it.
+        self.llm_connections = ProviderConnections()
         self.a2a_cancel_events: dict[str, asyncio.Event] = {}
         self.a2a_background_tasks: dict[str, asyncio.Task[None]] = {}
         self.default_processing_service: ProcessingService | None = None
@@ -1359,7 +1364,10 @@ class Assistant:
                     }
 
                 def create_review_llm_client() -> LLMInterface:
-                    return LLMClientFactory.create_client(config=review_client_config)
+                    return LLMClientFactory.create_client(
+                        config=review_client_config,
+                        connections=self.llm_connections,
+                    )
 
                 tool_call_reviewer = ToolCallReviewer(
                     None,
@@ -1461,7 +1469,8 @@ class Assistant:
         llm_client = override or LLMClientFactory.create_client(
             config=resolve_entry_client_config(
                 routing.classifier, self.config.llm_parameters
-            )
+            ),
+            connections=self.llm_connections,
         )
         logger.info(
             "Model routing enabled in '%s' mode, classifier %s via %s.",
@@ -1503,7 +1512,8 @@ class Assistant:
             llm_client = override or LLMClientFactory.create_client(
                 config=resolve_entry_client_config(
                     summaries.model, self.config.llm_parameters
-                )
+                ),
+                connections=self.llm_connections,
             )
         except ValueError as error:
             # Summaries are on by default and the shipped model is Gemini, so a
@@ -1871,7 +1881,9 @@ class Assistant:
             client_config = self._build_profile_llm_client_config(
                 profile_conf, profile_llm_model, model_tier
             )
-            llm_client = LLMClientFactory.create_client(config=client_config)
+            llm_client = LLMClientFactory.create_client(
+                config=client_config, connections=self.llm_connections
+            )
             logger.info(
                 "Profile '%s' using client: %s", profile_id, type(llm_client).__name__
             )
@@ -1906,7 +1918,9 @@ class Assistant:
             client_config = resolve_tier_client_config(
                 self.config.model_tiers[tier_id], self.config.llm_parameters
             )
-            client = LLMClientFactory.create_client(config=client_config)
+            client = LLMClientFactory.create_client(
+                config=client_config, connections=self.llm_connections
+            )
             self._tier_llm_clients[tier_id] = client
         return client
 
@@ -1929,7 +1943,9 @@ class Assistant:
             antigravity_config.agent,
             client_config["antigravity_model"],
         )
-        return LLMClientFactory.create_client(config=client_config)
+        return LLMClientFactory.create_client(
+            config=client_config, connections=self.llm_connections
+        )
 
     @staticmethod
     def _validate_computer_use_config(
@@ -3226,6 +3242,10 @@ class Assistant:
             await self.plugin_runtime.close()
         if self._jev_client is not None:
             await self._jev_client.close()
+        try:
+            await self.llm_connections.aclose()
+        except Exception:
+            logger.exception("Error closing LLM provider connections")
         if self.shared_httpx_client:
             await self.shared_httpx_client.aclose()
             logger.info("Shared httpx client closed.")

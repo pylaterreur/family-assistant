@@ -41,6 +41,7 @@ from family_assistant.llm import (
     UserMessageDict,
     describe_attachment_for_fallback,
 )
+from family_assistant.llm.connections import ConnectionKey, ProviderConnections
 from family_assistant.llm.deferred_tools import resolve_deferred_tools
 from family_assistant.llm.messages import (
     AssistantMessage,
@@ -159,6 +160,7 @@ class OpenAIClient(BaseLLMClient):
         api_key: str,
         model: str,
         model_parameters: dict[str, dict[str, object]] | None = None,
+        connections: ProviderConnections | None = None,
         **kwargs: Any,  # noqa: ANN401 # Accepts arbitrary OpenAI API parameters
     ) -> None:
         """
@@ -168,10 +170,20 @@ class OpenAIClient(BaseLLMClient):
             api_key: OpenAI API key
             model: Model identifier (e.g., "gpt-4", "gpt-3.5-turbo")
             model_parameters: Pattern-based parameters matching existing config format
+            connections: Registry to borrow the SDK client from; the client
+                owns a private one when omitted
             **kwargs: Default parameters for completions
         """
         base_url = kwargs.pop("base_url", None)
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._owns_client = connections is None
+        if connections is None:
+            self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        else:
+            self.client = connections.get(
+                ConnectionKey("openai", base_url, api_key),
+                lambda: AsyncOpenAI(api_key=api_key, base_url=base_url),
+                AsyncOpenAI.close,
+            )
         # Read the URL the SDK actually resolved, not the argument we passed.
         # `OPENAI_BASE_URL` in the environment redirects the client without ever
         # reaching this constructor, so trusting the argument would classify a
@@ -193,8 +205,9 @@ class OpenAIClient(BaseLLMClient):
         )
 
     async def close(self) -> None:
-        """Close the owned asynchronous OpenAI SDK client."""
-        await self.client.close()
+        """Close the asynchronous OpenAI SDK client, unless it was borrowed."""
+        if self._owns_client:
+            await self.client.close()
 
     def _supports_multimodal_tools(self) -> bool:
         """OpenAI doesn't support multimodal tool responses"""

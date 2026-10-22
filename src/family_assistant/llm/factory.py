@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from family_assistant.llm import LLMInterface
+    from family_assistant.llm.connections import ProviderConnections
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ class LLMClientFactory:
         cls,
         # ast-grep-ignore: no-dict-any - LLM config dict has varying keys per provider/format
         config: dict[str, Any],
+        connections: "ProviderConnections | None" = None,
     ) -> "LLMInterface":
         """
         Create appropriate LLM client based on configuration.
@@ -59,6 +61,9 @@ class LLMClientFactory:
 
                 Retry format:
                 - retry_config: Dict with 'primary' and optional 'fallback' configs
+            connections: Registry the clients borrow their provider SDK clients
+                from, so clients on one endpoint share a connection pool. Each
+                client builds a private one when omitted.
 
         Returns:
             Instantiated LLM client
@@ -71,14 +76,18 @@ class LLMClientFactory:
             retry_config = config["retry_config"]
 
             # Create primary client
-            primary_client = cls._create_single_client(retry_config["primary"])
+            primary_client = cls._create_single_client(
+                retry_config["primary"], connections
+            )
             primary_model = retry_config["primary"]["model"]
 
             # Create fallback if specified
             fallback_client = None
             fallback_model = None
             if "fallback" in retry_config:
-                fallback_client = cls._create_single_client(retry_config["fallback"])
+                fallback_client = cls._create_single_client(
+                    retry_config["fallback"], connections
+                )
                 fallback_model = retry_config["fallback"]["model"]
 
             # Return retrying wrapper
@@ -94,11 +103,15 @@ class LLMClientFactory:
             )
 
         # Simple configuration - create single client
-        return cls._create_single_client(config)
+        return cls._create_single_client(config, connections)
 
     @classmethod
-    # ast-grep-ignore: no-dict-any - LLM config dict has varying keys per provider/format
-    def _create_single_client(cls, config: dict[str, Any]) -> "LLMInterface":
+    def _create_single_client(
+        cls,
+        # ast-grep-ignore: no-dict-any - LLM config dict has varying keys per provider/format
+        config: dict[str, Any],
+        connections: "ProviderConnections | None",
+    ) -> "LLMInterface":
         """Create a single LLM client (existing logic)."""
         model = config.get("model")
         if not model:
@@ -172,6 +185,7 @@ class LLMClientFactory:
             api_key=api_key,
             model=model,
             model_parameters=model_parameters,
+            connections=connections,
             **provider_params,
         )
 
