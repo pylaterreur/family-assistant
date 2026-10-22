@@ -377,12 +377,11 @@ class TasksRepository(BaseRepository):
     ) -> bool:
         """Hand ``locked_by``'s claim on a task back to the queue, due at ``scheduled_at``.
 
-        For a claim whose turn was stopped before the stale-claim cutoff would
-        notice -- its process is shutting down. A claim some other worker has
-        taken since is left alone. The lost attempt counts as a failed one, so
-        work that keeps being cut off runs out of retries rather than looping;
-        on its last attempt the row is failed instead. Returns whether a claimed
-        row was released.
+        For a claim whose turn was stopped by its process shutting down, before
+        the stale-claim cutoff would notice. The task did not fail, so the
+        attempt is not counted against its retries. A claim some other worker
+        has taken since is left alone. Returns whether a claimed row was
+        released.
         """
         if scheduled_at.tzinfo is None:
             raise ValueError("scheduled_at must be timezone-aware")
@@ -394,14 +393,7 @@ class TasksRepository(BaseRepository):
                 tasks_table.c.locked_by == locked_by,
             )
             .values(
-                status=case(
-                    (
-                        tasks_table.c.retry_count >= tasks_table.c.max_retries,
-                        "failed",
-                    ),
-                    else_="pending",
-                ),
-                retry_count=tasks_table.c.retry_count + 1,
+                status="pending",
                 locked_by=None,
                 locked_at=None,
                 scheduled_at=scheduled_at.astimezone(UTC),

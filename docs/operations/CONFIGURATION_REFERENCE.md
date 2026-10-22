@@ -190,12 +190,12 @@ callbacks and reminders, and memory reviews -- do not hold a worker while they r
 
 How many background turns may run at once: delegated runs' turns, including a web thread's first
 turn, the follow-up turns that deliver a delegation's result, scheduled callbacks and reminders
-(including scripts' and automations' wakes), and memory reviews. The task that starts such a turn
-returns once it is running: the turn itself runs outside the task workers, so it neither occupies a
-worker nor is bound by a worker's handler timeout, and a turn cut off by a restart is resumed rather
-than failed. This bounds model and tool load. A run that finds every slot taken stays queued and
-tries again a few seconds later; a delivery is not held back, because its run was already admitted.
-See
+(including scripts' and automations' wakes), and memory reviews. None of them occupies a worker
+while it runs, and a turn cut off by a restart is resumed rather than failed. Delegated and
+follow-up turns run on budgets of their own rather than a worker's handler timeout; a callback or
+memory review still runs under its task's handler timeout, and is retried when it overruns. This
+bounds model and tool load. A run that finds every slot taken stays queued and tries again a few
+seconds later; a delivery is not held back, because its run was already admitted. See
 [docs/design/background-turns-off-the-task-worker.md](../design/background-turns-off-the-task-worker.md).
 
 | Property  | Value |

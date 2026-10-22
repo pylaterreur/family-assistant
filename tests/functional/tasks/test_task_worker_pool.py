@@ -915,7 +915,7 @@ async def test_a_turn_task_stopped_by_shutdown_goes_back_to_the_queue(
         [task] = await db_context.tasks.get_all(task_type="llm_callback")
         assert task["status"] == "pending"
         assert task["locked_by"] is None
-        assert task["retry_count"] == 1
+        assert task["retry_count"] == 0
     finally:
         await worker.background_turns.cancel_all()
         await _dispose_worker_engine(worker, db_engine)
