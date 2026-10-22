@@ -2472,6 +2472,9 @@ class TaskWorker:
                 )
         except asyncio.CancelledError:
             if self.stuck_cancellation_reason is not None:
+                await self._withdraw_stopped_turn_confirmations(
+                    exec_context, started, confirmation_sources
+                )
                 await self._fail_delegation_run(
                     exec_context,
                     delegation_id=delegation_id,
@@ -2689,6 +2692,14 @@ class TaskWorker:
                     tool_call_review_trigger=review_trigger,
                     claim=claim,
                 )
+        except asyncio.CancelledError:
+            if claimed and self.stuck_cancellation_reason is not None:
+                await self._fail_delegation_run(
+                    exec_context,
+                    delegation_id=delegation_id,
+                    error=_stuck_worker_error(self.stuck_cancellation_reason),
+                )
+            raise
         except Exception:
             if not claimed:
                 raise
