@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from family_assistant.llm import LLMInterface
+    from family_assistant.llm.connections import ProviderConnections
     from family_assistant.tools.metadata import ToolDescriptor
 
 pytestmark = pytest.mark.no_db
@@ -1414,7 +1415,9 @@ async def test_retry_config_judges_with_the_fallback_when_the_primary_fails(
     # are the stand-ins; the factory's retry composition above them is real.
     legs: list[dict[str, object]] = []
 
-    def _create_single(config: dict[str, object]) -> LLMInterface:
+    def _create_single(
+        config: dict[str, object], connections: ProviderConnections | None
+    ) -> LLMInterface:
         legs.append(config)
         if config["model"] == "gemini-3.7-flash":
             return cast(

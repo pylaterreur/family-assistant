@@ -111,7 +111,12 @@ class FlexClient:
 
     def __getattr__(self, name: str) -> object:
         # Code that reads a client's model or provider by duck typing
-        # (diagnostics, indexing provenance) sees the wrapped client's.
+        # (diagnostics, indexing provenance) sees the wrapped client's. Only
+        # reached for names not found normally, so `inner` itself lands here
+        # only before __init__ has set it -- copying, say -- where delegating
+        # would recurse.
+        if name == "inner":
+            raise AttributeError(name)
         return getattr(self.inner, name)
 
     @property

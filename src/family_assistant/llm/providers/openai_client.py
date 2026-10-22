@@ -1091,7 +1091,7 @@ class OpenAIClient(BaseLLMClient):
         # Extract usage information
         reasoning_info = _stamp_served_service_tier(
             self._reasoning_info_from_chat_usage(response.usage),
-            response.service_tier,
+            getattr(response, "service_tier", None),
         )
 
         telemetry.record_response_metadata(

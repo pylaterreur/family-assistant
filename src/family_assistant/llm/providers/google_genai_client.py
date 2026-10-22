@@ -1753,8 +1753,8 @@ class GoogleGenAIClient(BaseLLMClient):
                 # terminal path has recorded the call.
                 telemetry.finish_abandoned()
 
-    def _map_error_to_typed_exception(self, e: Exception) -> LLMProviderError:
-        """Map a raw exception to a typed LLMProviderError subclass."""
+    def _map_error_message_to_typed_exception(self, e: Exception) -> LLMProviderError:
+        """Map an exception that carries no HTTP status, by its message."""
         error_message = str(e)
 
         if "401" in error_message or "api key" in error_message.lower():
@@ -1767,6 +1767,14 @@ class GoogleGenAIClient(BaseLLMClient):
                 provider="google",
                 model=self.model_name,
                 retry_after=self._parse_retry_after(error_message),
+            )
+        elif (
+            "503" in error_message
+            or "unavailable" in error_message.lower()
+            or "overloaded" in error_message.lower()
+        ):
+            return ServiceUnavailableError(
+                error_message, provider="google", model=self.model_name
             )
         elif "404" in error_message or "not found" in error_message.lower():
             return ModelNotFoundError(
@@ -1895,11 +1903,14 @@ class GoogleGenAIClient(BaseLLMClient):
             return float(match.group(1))
         return None
 
-    def _map_interactions_error(self, e: Exception) -> LLMProviderError:
-        """Map an Interactions API exception to a typed LLMProviderError.
+    def _map_error_to_typed_exception(self, e: Exception) -> LLMProviderError:
+        """Map a raw exception to a typed LLMProviderError subclass.
 
-        Uses duck-typing to check for status_code (SDK APIStatusError) and
-        falls back to string-based matching for non-HTTP errors.
+        An HTTP status is authoritative where the SDK error carries one --
+        generateContent's ``APIError.code`` and the Interactions API's
+        ``status_code`` alike -- so a 503, which a Flex request returns when
+        capacity runs out, is unavailable rather than an unknown error. Only
+        errors without one fall back to matching the message.
         """
         error_message = str(e)
         status_code = _http_status(e)
@@ -1922,7 +1933,7 @@ class GoogleGenAIClient(BaseLLMClient):
                     error_message, provider="google", model=self.model_name
                 )
 
-        return self._map_error_to_typed_exception(e)
+        return self._map_error_message_to_typed_exception(e)
 
     async def format_user_message_with_file(
         self,
@@ -2354,8 +2365,8 @@ class GoogleGenAIClient(BaseLLMClient):
         future), not just Deep Research — used by the submit/poll/cancel
         primitives for the pollable-delegation path (not the interactive
         streaming path, which raises ``LLMProviderError`` subtypes via
-        ``_map_interactions_error`` instead). Duck-types on ``status_code``
-        (SDK ``APIStatusError``), mirroring ``_map_interactions_error``'s own
+        ``_map_error_to_typed_exception`` instead). Duck-types on ``status_code``
+        (SDK ``APIStatusError``), mirroring ``_map_error_to_typed_exception``'s own
         pattern.
 
         A connection that failed or timed out is transient wherever it
@@ -2795,7 +2806,7 @@ class GoogleGenAIClient(BaseLLMClient):
             if isinstance(e, LLMProviderError):
                 typed_error = e
             else:
-                typed_error = self._map_interactions_error(e)
+                typed_error = self._map_error_to_typed_exception(e)
             logger.exception(
                 f"Google {agent_label} error ({type(typed_error).__name__}): {e}"
             )

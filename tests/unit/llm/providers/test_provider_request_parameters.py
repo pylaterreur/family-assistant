@@ -15,8 +15,9 @@ from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
 
-from family_assistant.llm.call_context import with_service_tier
+from family_assistant.llm.call_context import Workload, running_as, with_service_tier
 from family_assistant.llm.factory import LLMClientFactory
+from family_assistant.llm.flex import FlexClient
 from family_assistant.llm.messages import UserMessage
 from family_assistant.llm.providers.anthropic_client import AnthropicClient
 from family_assistant.llm.providers.google_genai_client import GoogleGenAIClient
@@ -353,3 +354,42 @@ async def test_openai_default_tier_is_recorded_as_standard() -> None:
 
     assert output.reasoning_info is not None
     assert output.reasoning_info.get("service_tier") == "standard"
+
+
+async def test_a_gemini_503_at_flex_is_retried_at_standard() -> None:
+    """A capacity rejection as the Gemini API sends it, not a pre-typed error."""
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append(body)
+        if body.get("serviceTier") == "flex":
+            return httpx.Response(
+                503,
+                json={
+                    "error": {
+                        "code": 503,
+                        "message": "No Flex capacity is available.",
+                        "status": "UNAVAILABLE",
+                    }
+                },
+            )
+        return httpx.Response(200, json=_GEMINI_REPLY)
+
+    gemini = GoogleGenAIClient(api_key="test-key", model="gemini-3.8-flash")
+    gemini.client = genai.Client(
+        api_key="test-key",
+        http_options=types.HttpOptions(
+            httpx_async_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ),
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
+    client = FlexClient(gemini, model="gemini-3.8-flash")
+
+    with running_as(Workload.BACKGROUND):
+        output = await client.generate_response([UserMessage(content="hi")])
+
+    assert output.content == "{}"
+    assert [request.get("serviceTier") for request in requests] == ["flex", None]
