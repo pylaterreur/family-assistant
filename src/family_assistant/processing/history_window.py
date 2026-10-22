@@ -112,6 +112,10 @@ class HistoryTurn:
         return min(int(row.internal_id) for row in self.rows)
 
     @property
+    def last_internal_id(self) -> int:
+        return max(int(row.internal_id) for row in self.rows)
+
+    @property
     def is_complete(self) -> bool:
         """Whether the turn has finished: it has a final reply or an error.
 
@@ -497,7 +501,12 @@ class HistoryWindowLoader:
             )
         if turn.first_internal_id > boundary:
             return VERBATIM
-        return decided.get(turn.key)
+        decision = decided.get(turn.key)
+        # A turn the event dropped while it looked abandoned, and that has
+        # written rows since, is not the turn the event decided on.
+        if decision is None and turn.last_internal_id > boundary:
+            return VERBATIM
+        return decision
 
     @staticmethod
     def _trigger(
