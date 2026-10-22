@@ -80,6 +80,11 @@ async def test_copy_keyboard_focus_reveals_latest_and_older_controls(
     await expect(bar).to_have_css("pointer-events", "auto")
     await expect(page.get_by_role("tooltip")).to_have_text("Copy")
     await _assert_icon_geometry(button)
+    # The rating controls follow Copy in the bar and keep it shown.
+    for name in ("Good response", "Bad response"):
+        await page.keyboard.press("Tab")
+        await expect(page.get_by_role("button", name=name).first).to_be_focused()
+        await expect(bar).to_have_css("opacity", "1")
     await page.keyboard.press("Tab")
     await expect(bar).to_have_css("opacity", "0")
 

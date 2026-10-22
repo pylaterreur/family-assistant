@@ -1121,6 +1121,8 @@ describe('Resumable streaming client', () => {
         },
         { timeout: 10000 }
       );
+      // The marker has no stored reply behind it, so there is nothing to rate.
+      expect(screen.queryByRole('button', { name: 'Good response' })).not.toBeInTheDocument();
     },
     { timeout: 30000 }
   );

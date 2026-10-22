@@ -70,6 +70,7 @@ from family_assistant.storage.schedule_automations import schedule_automations_t
 from family_assistant.storage.scripts import scripts_table
 from family_assistant.storage.taint_audit import taint_audit_events_table
 from family_assistant.storage.tasks import tasks_table
+from family_assistant.storage.turn_feedback import turn_feedback_table
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +398,7 @@ __all__ = [
     "scripts_table",
     "taint_audit_events_table",
     "tasks_table",
+    "turn_feedback_table",
     "user_oauth_connections_table",
     # Vector Storage Exports are added conditionally below
     # The names themselves will be defined (real or placeholder)

@@ -105,6 +105,13 @@ that produced it. Web message details add what was asked for and the model that 
 If you are wondering whether a disappointing answer was worth re-asking at a higher level, that is
 where to look first.
 
+Sometimes a reply is labelled **Experiment** instead. That conversation is part of a comparison
+between models, and which one answered is hidden on purpose so your thumbs up or down is a fair
+judgement. Choosing a level yourself usually takes the conversation out of the comparison. A
+comparison can also be set up for one level, such as Frontier: then every reply at that level is
+split between the models being compared, including when you chose the level, and your choice still
+holds for the rest of the conversation.
+
 ## Related
 
 - [slash-commands.md](slash-commands.md) — the commands that switch *which* assistant answers.

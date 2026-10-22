@@ -84,6 +84,7 @@ if TYPE_CHECKING:
         ScriptsRepository,
         TaintAuditEventsRepository,
         TasksRepository,
+        TurnFeedbackRepository,
         VectorRepository,
         WorkerTasksRepository,
     )
@@ -559,6 +560,15 @@ class DatabaseExecutor(ABC):
         )
 
         return self._repository(TasksRepository)
+
+    @property
+    def turn_feedback(self) -> TurnFeedbackRepository:
+        """Get the turn feedback repository instance."""
+        from family_assistant.storage.repositories import (  # noqa: PLC0415
+            TurnFeedbackRepository,
+        )
+
+        return self._repository(TurnFeedbackRepository)
 
     @property
     def message_history(self) -> MessageHistoryRepository:

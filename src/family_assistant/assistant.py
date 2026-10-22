@@ -1552,6 +1552,19 @@ class Assistant:
         tier_eligibility = ModelTierEligibility.from_profile(
             profile_conf, self.config.model_tiers
         )
+        runnable = {option.id for option in tier_eligibility.runnable}
+        for experiment in self.config.experiments_for_profile(profile_id):
+            # A covered tier the profile cannot reach would never see a turn.
+            unrunnable = sorted(
+                (set(experiment.arms) | set(experiment.tiers)) - runnable
+            )
+            if unrunnable:
+                msg = (
+                    f"Experiment '{experiment.id}' names tiers profile "
+                    f"'{profile_id}' cannot run on: {', '.join(unrunnable)}. Add "
+                    "them to its allowed_model_tiers or delegation_model_tiers."
+                )
+                raise ValueError(msg)
         llm_client_for_profile, tier_llm_clients = self._create_profile_llm_clients(
             profile_conf, profile_llm_model, model_tier, tier_eligibility
         )

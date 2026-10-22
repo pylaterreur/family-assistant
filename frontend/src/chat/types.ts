@@ -75,13 +75,14 @@ export interface ChatAppProps {
 /**
  * What is known about the LLM call that produced a message: the serving model
  * and, where the profile offers a choice of them, the model tier it ran at.
- * `model_tier_source` says who chose that tier — the user, the Auto router
- * (`model`), or the profile default.
+ * `model_tier_source` says who chose that tier — the user, another profile
+ * (`model`), the Auto router (`auto`), a live experiment, or the profile
+ * default. An experiment's tier is not shown, so ratings stay blind.
  */
 export interface MessageReasoningInfo {
   model?: string | null;
   model_tier?: string | null;
-  model_tier_source?: 'user' | 'model' | 'default' | null;
+  model_tier_source?: 'user' | 'model' | 'auto' | 'experiment' | 'default' | null;
   model_tier_requested?: string | null;
 }
 
@@ -112,7 +113,13 @@ export interface Message {
   echoed_from_thread?: string;
   /** On the Home marker left by a turn moved into a thread: that thread's conversation. */
   moved_to_thread?: string;
+  /** The user's thumbs up/down on the turn this message belongs to. */
+  feedback?: TurnRating;
+  /** A marker made here with no stored reply behind it, so nothing to rate. */
+  unrateable?: boolean;
 }
+
+export type TurnRating = 'up' | 'down';
 
 export interface MessageContent {
   type: 'text' | 'tool-call';
@@ -191,6 +198,7 @@ export interface BackendConversationMessage extends Record<string, unknown> {
   echoed_from_thread?: string | null;
   /** On the Home marker left by a turn moved into a thread: that thread's conversation. */
   moved_to_thread?: string | null;
+  feedback?: TurnRating | null;
 }
 
 export interface ActiveTurnInfo {
