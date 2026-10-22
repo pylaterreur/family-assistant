@@ -51,6 +51,7 @@ def _tier_config_for(config: AppConfig, profile_id: str) -> dict[str, object]:
     [
         pytest.param("default_assistant", id="default-assistant"),
         pytest.param("camera_analyst", id="camera-analyst"),
+        pytest.param("engineer", id="engineer"),
     ],
 )
 def test_standard_tier_profiles_keep_the_gemini_terra_chain(
@@ -73,17 +74,8 @@ def test_standard_tier_profiles_keep_the_gemini_terra_chain(
     }
 
 
-@pytest.mark.parametrize(
-    "profile_id",
-    [
-        pytest.param("complex_tasks", id="complex-tasks"),
-        pytest.param("engineer", id="engineer"),
-    ],
-)
-def test_deep_tier_profiles_run_the_opus_sol_chain(
-    shipped_config: AppConfig, profile_id: str
-) -> None:
-    assert _tier_config_for(shipped_config, profile_id) == {
+def test_complex_tasks_runs_the_opus_sol_chain(shipped_config: AppConfig) -> None:
+    assert _tier_config_for(shipped_config, "complex_tasks") == {
         "retry_config": {
             "primary": {
                 "provider": "anthropic",
@@ -99,10 +91,10 @@ def test_deep_tier_profiles_run_the_opus_sol_chain(
     }
 
 
-def test_engineer_offers_every_tier_with_deep_as_its_floor(
+def test_engineer_offers_every_tier_with_standard_as_its_default(
     shipped_config: AppConfig,
 ) -> None:
-    """Diagnosis runs on `deep` by default; a person may still pick either way.
+    """The engineer has the assistant's tier setup; a person may pick up from there.
 
     `frontier` is absent from the automatic range for the same reason as on
     the assistant: it is chosen when somebody decides a request is worth the
@@ -110,7 +102,7 @@ def test_engineer_offers_every_tier_with_deep_as_its_floor(
     """
     profile = shipped_profile(shipped_config, "engineer")
 
-    assert profile.processing_config.model_tier == "deep"
+    assert profile.processing_config.model_tier == "standard"
     assert profile.processing_config.llm_model is None
     assert profile.processing_config.provider is None
     assert profile.allowed_model_tiers == ["standard", "deep", "frontier"]

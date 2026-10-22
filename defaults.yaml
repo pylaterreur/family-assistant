@@ -2569,12 +2569,10 @@ service_profiles:
       include_aggregated_context: true
       review_guidance: |
         This profile investigates the application. Its reads return content authored by anyone who has ever emailed, messaged or browsed through the assistant. Aligned egress carries diagnostic detail about the application — stack traces, component names, reproduction steps — never household content: no note text, message bodies, calendar entries, contact details or credentials.
-      # Diagnosis is long tool loops over code, logs and query results, where
-      # a weak model loops without converging, so `deep` is the floor rather
-      # than the upgrade it is for the assistant. Auto runs in shadow mode
-      # here as on `default_assistant`: it records what it would have chosen
-      # while every turn still executes on `deep`.
-      model_tier: "deep"
+      # The same tier setup as `default_assistant`: turns run on `standard`
+      # unless a person picks Deep or Max, and Auto runs in shadow mode,
+      # recording what it would have chosen.
+      model_tier: "standard"
       model_selection: "auto"
       max_iterations: 100
       prompts:
