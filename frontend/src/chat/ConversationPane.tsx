@@ -2629,6 +2629,9 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
       turnHasUserMessage: (turnId) => turnId !== undefined && userTurnIds.has(turnId),
     };
   }, [isHome, userTurnIdsKey]);
+  // The latest rating request per turn: only it may roll the shown rating
+  // back, so a slow failure cannot undo a newer choice the server kept.
+  const feedbackRequestRef = useRef(new Map<string, number>());
   const turnFeedback = useMemo<TurnFeedbackActions>(
     () => ({
       rate: async (turnId, rating, comment) => {
@@ -2636,6 +2639,8 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
         if (!convId) {
           throw new Error('No conversation is open');
         }
+        const request = (feedbackRequestRef.current.get(turnId) ?? 0) + 1;
+        feedbackRequestRef.current.set(turnId, request);
         let previous: TurnRating | undefined;
         setMessages((prev) =>
           prev.map((msg) => {
@@ -2649,9 +2654,11 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
         try {
           await submitTurnFeedback(convId, turnId, rating, comment);
         } catch (error) {
-          setMessages((prev) =>
-            prev.map((msg) => (msg.turnId === turnId ? { ...msg, feedback: previous } : msg))
-          );
+          if (feedbackRequestRef.current.get(turnId) === request) {
+            setMessages((prev) =>
+              prev.map((msg) => (msg.turnId === turnId ? { ...msg, feedback: previous } : msg))
+            );
+          }
           throw error;
         }
       },

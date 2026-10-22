@@ -1,7 +1,7 @@
 """Thumbs up/down feedback on an assistant turn.
 
-A rating is keyed by turn and person, so it follows a turn moved into a
-thread, and analysis joins it to ``message_history`` by ``turn_id`` to see
+A rating is keyed by turn and person (moving a turn into a thread re-keys
+it to the copy), and analysis joins it to ``message_history`` by ``turn_id`` to see
 which profile, model tier and model served the rated turn.
 """
 
