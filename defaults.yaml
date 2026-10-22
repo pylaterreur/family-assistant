@@ -143,8 +143,8 @@ llm_parameters:
   # to medium.
   #
   # This is Sol's recipe as the `deep` tier's fallback, reached for the hardest
-  # multi-step work, so it can afford to think longer; the interactive tiers
-  # that also use Sol set medium on their own entries. high is a step up from the default without max's tendency to
+  # multi-step work, so it can afford to think longer; the `browser` tier sets
+  # medium on its own entry. high is a step up from the default without max's tendency to
   # overthink; xhigh and max are the next dials if it still falls short.
   "gpt-6.1-sol":
     reasoning_effort: "high"
@@ -182,16 +182,19 @@ model_tiers:
     chain:
       # Gemini is the primary on the interactive path because it is the only
       # configured provider whose adapter represents audio and video at all, so
-      # media users send is read in the turn it arrives. Sol is the safety net,
-      # at medium effort because this path answers interactively, where
-      # time-to-first-token is felt directly; the global entry's high is for
-      # the deep tier.
+      # media users send is read in the turn it arrives. Sonnet is the safety
+      # net, at medium effort because this path answers interactively, where
+      # time-to-first-token is felt directly. Sonnet 5.5 takes the `adaptive`
+      # thinking shape and rejects `enabled` + `budget_tokens` mid-conversation.
       - provider: "google"
         model: "gemini-3.8-flash"
-      - provider: "openai"
-        model: "gpt-6.1-sol"
+      - provider: "anthropic"
+        model: "claude-sonnet-5-5"
         llm_parameters:
-          reasoning_effort: "medium"
+          thinking:
+            type: "adaptive"
+          output_config:
+            effort: "medium"
   deep:
     label: "Deep"
     description: "Multi-stage reasoning, difficult judgement, conflicting evidence."

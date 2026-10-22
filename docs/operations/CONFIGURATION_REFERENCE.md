@@ -4245,7 +4245,7 @@ Settings currently shipped in `defaults.yaml`:
 | ----------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `claude-opus-5`   | `thinking: {type: adaptive}`, `output_config: {effort: high}` | The recipe Opus 5 gets wherever a deployment names it; no shipped tier runs Opus 5 itself. Thinking on for the long tool loops it suits. See the comment in `defaults.yaml`.                                  |
 | `claude-opus-5-5` | `thinking: {type: adaptive}`, `output_config: {effort: high}` | The `deep` tier's primary, which `complex_tasks` runs on and the assistant and `engineer` reach by request. Restated rather than inherited from `claude-opus-5` because Opus 5.5 defaults to `medium` effort. |
-| `gpt-6.1-sol`     | `reasoning_effort: high`                                      | The `deep` tier's fallback, so it can afford to think longer. The `standard` and `browser` tiers set `medium` on their own entries.                                                                           |
+| `gpt-6.1-sol`     | `reasoning_effort: high`                                      | The `deep` tier's fallback, so it can afford to think longer. The `browser` tier sets `medium` on its own entry.                                                                                              |
 
 `reasoning_effort` accepts `none`, `low`, `medium`, `high`, `xhigh` or `max` on GPT-6 and GPT-5.6
 models and defaults to `medium` when unset. Raising it trades latency and tokens for capability; it

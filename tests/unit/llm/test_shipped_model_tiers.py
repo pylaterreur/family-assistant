@@ -54,10 +54,10 @@ def _standard_fallback_parameters(config: AppConfig) -> dict[str, dict[str, obje
     )
 
 
-def test_standard_tier_falls_back_to_sol_at_medium_effort(
+def test_standard_tier_falls_back_to_sonnet_at_medium_effort(
     shipped_config: AppConfig,
 ) -> None:
-    """The interactive tier's own medium wins over the global entry's high."""
+    """Sonnet 5.5 rejects `enabled` + `budget_tokens`, so its shape is asserted."""
     resolved = resolve_tier_client_config(
         shipped_config.model_tiers["standard"], shipped_config.llm_parameters
     )["retry_config"]
@@ -66,10 +66,11 @@ def test_standard_tier_falls_back_to_sol_at_medium_effort(
         "api_key": "test-key",
     })
 
-    assert isinstance(fallback, OpenAIClient)
-    assert fallback.model == "gpt-6.1-sol"
+    assert isinstance(fallback, AnthropicClient)
+    assert fallback.model == "claude-sonnet-5-5"
     assert fallback._get_model_specific_params(fallback.model) == {
-        "reasoning_effort": "medium"
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "medium"},
     }
 
 
@@ -81,7 +82,7 @@ def test_standard_tier_falls_back_to_sol_at_medium_effort(
         pytest.param("engineer", id="engineer"),
     ],
 )
-def test_standard_tier_profiles_keep_the_gemini_sol_chain(
+def test_standard_tier_profiles_keep_the_gemini_sonnet_chain(
     shipped_config: AppConfig, profile_id: str
 ) -> None:
     """Through the assistant, so the tier reaching the client is asserted too."""
@@ -93,8 +94,8 @@ def test_standard_tier_profiles_keep_the_gemini_sol_chain(
                 "model_parameters": shipped_config.llm_parameters,
             },
             "fallback": {
-                "provider": "openai",
-                "model": "gpt-6.1-sol",
+                "provider": "anthropic",
+                "model": "claude-sonnet-5-5",
                 "model_parameters": _standard_fallback_parameters(shipped_config),
             },
         }
@@ -151,8 +152,8 @@ def test_a_profile_inheriting_the_default_tier_keeps_the_default_chain(
                 "model_parameters": shipped_config.llm_parameters,
             },
             "fallback": {
-                "provider": "openai",
-                "model": "gpt-6.1-sol",
+                "provider": "anthropic",
+                "model": "claude-sonnet-5-5",
                 "model_parameters": _standard_fallback_parameters(shipped_config),
             },
         }
