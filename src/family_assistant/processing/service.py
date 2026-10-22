@@ -592,32 +592,34 @@ class ProcessingService:
         """The arm of a live experiment this turn is assigned to, if enrolled.
 
         *selection* is the tier the turn would otherwise run on, chosen by a
-        person (explicitly or sticky) or by nobody. An experiment naming that
-        tier swaps it for an arm, and the person's choice is kept in
-        ``requested`` so it stays sticky; an experiment naming no tiers only
-        takes turns nobody chose for. Delegated runs, frozen envelopes and
-        Auto are not enrolled. The arm is drawn per conversation so its turns
-        share one model and its prompt cache; Home never ends, so it is drawn
-        per day.
+        person (explicitly or sticky), by a delegating model, or by nobody. An
+        experiment naming that tier swaps it for an arm, and a person's choice
+        is kept in ``requested`` so it stays sticky; an experiment naming no
+        tiers only takes turns nobody chose for. Frozen envelopes and Auto are
+        not enrolled. The arm is drawn per conversation so its turns share one
+        model and its prompt cache; Home never ends, so it is drawn per day. A
+        delegated run is drawn per subconversation, which is the history it
+        extends.
         """
         default_tier = self.service_config.tier_eligibility.default_tier
         current = selection or ResolvedModelSelection.unselected(default_tier)
         if (
             default_tier is None
-            or subconversation_id is not None
             or current.frozen
-            or current.source not in {"default", "user"}
+            or current.source not in {"default", "user", "model"}
         ):
             return None
         experiment = self.app_config.experiment_for_turn(
             self.service_config.id,
             tier=current.tier,
-            chosen=current.source == "user",
+            chosen=current.source != "default",
         )
         if experiment is None:
             return None
-        unit = conversation_id
-        if await db_context.conversation_threads.is_home(conversation_id):
+        unit = subconversation_id or conversation_id
+        if subconversation_id is None and await db_context.conversation_threads.is_home(
+            conversation_id
+        ):
             today = self.clock.now().astimezone(self.service_config.timezone).date()
             unit = f"{conversation_id}:{today.isoformat()}"
         arm = assign_arm(experiment.id, unit, experiment.arms)
@@ -760,7 +762,18 @@ class ProcessingService:
         empty history of its own new subconversation, a resumed one reads the
         history it is continuing. Passing ``None`` would not mean "no history"
         -- it selects the main conversation.
+
+        A live experiment is applied here too, for the same reason: the run's
+        arm has to be in the envelope that is persisted.
         """
+        enrolled = await self._experiment_selection(
+            db_context,
+            selection,
+            conversation_id=conversation_id,
+            subconversation_id=subconversation_id,
+        )
+        if enrolled is not None:
+            return enrolled
         routed = await self._auto_routed_selection(
             db_context,
             selection,

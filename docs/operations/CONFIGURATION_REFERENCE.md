@@ -1022,13 +1022,14 @@ request *is* the authorization. A model choosing it is not, which is why the shi
 `default_assistant` allows `standard`, `deep` and `frontier` but admits only `standard` and `deep`
 automatically.
 
-The shipped presets — `gpt_6_astra`, `gpt_6_sol`, `claude_opus_5_5`, `claude_fable_5_1`, `kimi_k3`
-and `gemini_4_argon` — are listed once, in `default_profile_settings.delegation_model_tiers`, so a
-delegating model may pin any profile that has a tier to any of them without a confirmation ("run
-complex_tasks on Gemini 4 Argon"). A profile that names an inline model drops the inherited list,
-and a profile that declares its own replaces it, so `delegation_model_tiers: []` keeps a profile off
-presets entirely. Adding a preset is a `model_tiers` entry plus a name in that list. The profile
-catalog lists the presets most profiles share once, rather than under each profile.
+The shipped presets — `gpt_6_astra`, `gpt_6_1_sol`, `gpt_6_sol`, `claude_opus_5_5`,
+`claude_fable_5_1`, `kimi_k3` and `gemini_4_argon` — are listed once, in
+`default_profile_settings.delegation_model_tiers`, so a delegating model may pin any profile that
+has a tier to any of them without a confirmation ("run complex_tasks on Gemini 4 Argon"). A profile
+that names an inline model drops the inherited list, and a profile that declares its own replaces
+it, so `delegation_model_tiers: []` keeps a profile off presets entirely. Adding a preset is a
+`model_tiers` entry plus a name in that list. The profile catalog lists the presets most profiles
+share once, rather than under each profile.
 
 #### The council's seats
 
@@ -1170,7 +1171,9 @@ experiments:
   `model_tier_requested`.
 - The arm is a hash of the experiment id and the conversation, so every turn of a conversation runs
   on the same arm and keeps its prompt cache. Home is drawn again each day in the profile's time
-  zone. Delegated runs and turns a person chose Auto for are not enrolled.
+  zone. A delegated run (for example `browser_profile` or `complex_tasks` reached through
+  `delegate_to_service`) is drawn per delegation, and a tier the delegating model names counts as
+  chosen, like a person's pick. Turns a person chose Auto for are not enrolled.
 - Enrolled replies record `model_tier_source: experiment`, `experiment_id` and `experiment_arm` in
   `message_history.reasoning_info`; the web and iOS badges show "Experiment" rather than the tier,
   so ratings are blind. An enrolled turn is not Auto-routed.
@@ -1188,6 +1191,23 @@ FROM message_history mh
 LEFT JOIN turn_feedback f ON f.turn_id = mh.turn_id
 WHERE mh.role IN ('assistant', 'error')
   AND mh.reasoning_info->>'experiment_id' = 'argon-vs-opus-2026-10'
+GROUP BY 1;
+```
+
+A delegated run's reply is not shown to the person, so its rating sits on the turn that delegated
+it. Compare those arms through `delegation_runs`:
+
+```sql
+SELECT mh.reasoning_info->>'experiment_arm' AS arm,
+       count(DISTINCT dr.delegation_id) AS runs,
+       count(DISTINCT dr.delegation_id) FILTER (WHERE dr.status = 'failed') AS failed,
+       count(DISTINCT f.id) FILTER (WHERE f.rating = 'up') AS up,
+       count(DISTINCT f.id) FILTER (WHERE f.rating = 'down') AS down
+FROM message_history mh
+JOIN delegation_runs dr ON dr.subconversation_id = mh.subconversation_id
+LEFT JOIN turn_feedback f ON f.turn_id = dr.source_turn_id
+WHERE mh.role IN ('assistant', 'error')
+  AND mh.reasoning_info->>'experiment_id' = 'browser-argon-vs-sol-2026-10'
 GROUP BY 1;
 ```
 

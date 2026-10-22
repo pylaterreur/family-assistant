@@ -265,6 +265,17 @@ model_tiers:
     chain:
       - provider: "openai"
         model: "gpt-6-sol"
+  gpt_6_1_sol:
+    label: "GPT-6.1 Sol"
+    description: "OpenAI's GPT-6.1 reasoning model, reasoning at high effort."
+    chain:
+      - provider: "openai"
+        model: "gpt-6.1-sol"
+        # The global "gpt-6-sol" key does not match this id, and the browser
+        # tier sets medium on its own entry, so high is set here to match
+        # gpt_6_sol on the deep tier.
+        llm_parameters:
+          reasoning_effort: "high"
   gpt_6_astra:
     label: "GPT-6 Astra"
     description: "OpenAI's strongest GPT-6 model, reasoning at high effort."
@@ -919,7 +930,7 @@ default_profile_settings:
   # ("run complex_tasks on Gemini 4 Argon"). Auto never routes to these and the
   # tier picker does not list them. A profile that names an inline model drops
   # this list, and one that declares its own replaces it.
-  delegation_model_tiers: ["gpt_6_astra", "gpt_6_sol", "claude_opus_5_5", "claude_fable_5_1", "kimi_k3", "gemini_4_argon"]
+  delegation_model_tiers: ["gpt_6_astra", "gpt_6_1_sol", "gpt_6_sol", "claude_opus_5_5", "claude_fable_5_1", "kimi_k3", "gemini_4_argon"]
   processing_config:
     # Inherited by every profile that does not select its own tier or name an
     # inline model.
