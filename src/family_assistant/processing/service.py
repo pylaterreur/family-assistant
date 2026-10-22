@@ -558,23 +558,25 @@ class ProcessingService:
             )
         )
         previous = model_selection_from_reasoning(reasoning)
-        if (
-            previous is None
-            or previous.source != "user"
-            or previous.tier is None
-            or previous.tier == default_tier
-        ):
+        if previous is None:
+            return None
+        # An experiment covering the person's tier ran an arm instead, and kept
+        # what they chose in ``requested``.
+        chosen = {"user": previous.tier, "experiment": previous.requested}.get(
+            previous.source
+        )
+        if chosen is None or chosen == default_tier:
             return None
         try:
             return self.resolve_model_selection(
-                ModelSelectionRequest(tier=previous.tier, source="user")
+                ModelSelectionRequest(tier=chosen, source="user")
             )
         except ModelTierNotPermitted:
             logger.info(
                 "Conversation %s was on model tier '%s', which profile '%s' no "
                 "longer allows; continuing on its default.",
                 conversation_id,
-                previous.tier,
+                chosen,
                 self.service_config.id,
             )
             return None
@@ -582,23 +584,37 @@ class ProcessingService:
     async def _experiment_selection(
         self,
         db_context: Database,
+        selection: ResolvedModelSelection | None,
         *,
         conversation_id: str,
         subconversation_id: str | None,
     ) -> ResolvedModelSelection | None:
         """The arm of a live experiment this turn is assigned to, if enrolled.
 
-        Only asked about a turn nobody chose a tier for, explicitly or by a
-        sticky choice: a person's choice always wins. Delegated runs are not
-        enrolled. The arm is drawn per conversation so its turns share one
-        model and its prompt cache; Home never ends, so it is drawn per day.
+        *selection* is the tier the turn would otherwise run on, chosen by a
+        person (explicitly or sticky) or by nobody. An experiment naming that
+        tier swaps it for an arm, and the person's choice is kept in
+        ``requested`` so it stays sticky; an experiment naming no tiers only
+        takes turns nobody chose for. Delegated runs, frozen envelopes and
+        Auto are not enrolled. The arm is drawn per conversation so its turns
+        share one model and its prompt cache; Home never ends, so it is drawn
+        per day.
         """
-        experiment = self.app_config.experiment_for_profile(self.service_config.id)
+        default_tier = self.service_config.tier_eligibility.default_tier
+        current = selection or ResolvedModelSelection.unselected(default_tier)
         if (
-            experiment is None
+            default_tier is None
             or subconversation_id is not None
-            or self.service_config.tier_eligibility.default_tier is None
+            or current.frozen
+            or current.source not in {"default", "user"}
         ):
+            return None
+        experiment = self.app_config.experiment_for_turn(
+            self.service_config.id,
+            tier=current.tier,
+            chosen=current.source == "user",
+        )
+        if experiment is None:
             return None
         unit = conversation_id
         if await db_context.conversation_threads.is_home(conversation_id):
@@ -608,7 +624,11 @@ class ProcessingService:
         admitted = self.resolve_model_selection(
             ModelSelectionRequest(tier=arm, source="experiment")
         )
-        return replace(admitted, experiment_id=experiment.id)
+        return replace(
+            admitted,
+            requested=current.tier if current.source == "user" else None,
+            experiment_id=experiment.id,
+        )
 
     def _run_binding(
         self, selection: ResolvedModelSelection | None
@@ -676,7 +696,8 @@ class ProcessingService:
         A turn that names no tier continues the conversation's sticky choice,
         wakes included: they extend the same history, so running them at
         another tier would cost the cache the choice exists to keep. A frozen
-        envelope is a queued run's own authorization and is left alone.
+        envelope is a queued run's own authorization and is left alone. A live
+        experiment covering the tier settled so far then swaps it for an arm.
         """
         if selection is None or (
             selection.source == "default" and not selection.frozen
@@ -687,13 +708,17 @@ class ProcessingService:
                     conversation_id=conversation_id,
                     subconversation_id=subconversation_id,
                 )
-                or await self._experiment_selection(
-                    db_context,
-                    conversation_id=conversation_id,
-                    subconversation_id=subconversation_id,
-                )
                 or selection
             )
+        selection = (
+            await self._experiment_selection(
+                db_context,
+                selection,
+                conversation_id=conversation_id,
+                subconversation_id=subconversation_id,
+            )
+            or selection
+        )
         routed = await self._auto_routed_selection(
             db_context,
             selection,

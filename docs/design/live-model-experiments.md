@@ -40,18 +40,34 @@ experiments:
       claude_opus_5_5: 1
       gemini_4_argon: 1
     enabled: true
+  - id: frontier-fable-vs-astra-2026-10
+    profiles: [default_assistant]
+    tiers: [frontier]
+    arms:
+      claude_fable_5_1: 1
+      gemini_astra: 1
 ```
 
-Startup validation: every arm must be a tier each listed profile can run on (`runnable`), and a
-profile is in at most one enabled experiment. Turning an experiment off is a config change; turns
+Startup validation: every arm must be a tier each listed profile can run on (`runnable`), and no
+turn can be covered by two enabled experiments. Turning an experiment off is a config change; turns
 already recorded keep their arm.
 
 ### Which turns are enrolled
 
-A turn is enrolled when its profile is in an enabled experiment **and nothing else has chosen its
-tier**: no explicit choice on the turn, and no sticky choice carried from earlier in the
-conversation. A person who picks a tier is never overridden; their turn simply is not part of the
-experiment.
+An experiment covers a set of turns, and the rule is the same for both kinds: a covered turn runs on
+an arm instead of the tier it would otherwise have run on.
+
+- **Without `tiers`**, it covers turns **nothing else has chosen a tier for**: no explicit choice on
+  the turn, and no sticky choice carried from earlier in the conversation. A person who picks a tier
+  is left alone. This is the everyday-chat comparison.
+- **With `tiers`**, it covers every turn on those tiers, whoever chose them. This is how to compare
+  candidates for a tier people pick deliberately, such as Frontier (Fable against Astra): nobody
+  lands on Frontier by default, so an experiment on unchosen turns would never see it. The person's
+  choice is kept in `requested`, so it stays sticky and the tier picker still shows Frontier; the
+  arm is just which model serves that choice in this conversation.
+
+An experiment naming a turn's tier wins over one on unchosen turns. A person who chose Auto asked
+for routing, so their turns are not enrolled.
 
 Wakes, reminders and delegation results in an assigned conversation run on that conversation's arm,
 for the same reason sticky tiers carry to wakes: they extend the same history, and switching models
@@ -80,9 +96,11 @@ still gives both arms Home traffic.
 ### Recording
 
 `stamp_model_selection` gets a new source, `"experiment"`, plus `experiment_id` and `experiment_arm`
-written into `reasoning_info` beside `model_tier`. Because `conversation_model_selection` only
-carries forward `source == "user"`, an experiment assignment can never turn into a sticky tier.
-Nothing new is stored; the experiment record *is* the turn record.
+written into `reasoning_info` beside `model_tier`. `model_tier_requested` holds the tier a person
+chose, where one did. `conversation_model_selection` carries forward a person's choice, read from
+`model_tier` on a `user` row or from `model_tier_requested` on an `experiment` row, so an assignment
+can never turn into a sticky tier of its own, while a person's choice survives being served by an
+arm. Nothing new is stored; the experiment record *is* the turn record.
 
 ### Blindness
 
@@ -141,6 +159,9 @@ Both are follow-ups; neither is needed to start collecting.
 ## Deliberate simplifications
 
 - Delegated runs are not enrolled.
+- iOS restores a conversation's chosen tier into its picker from the latest reply's `user` source,
+  so reopening a conversation whose chosen tier an experiment covers shows the default in the
+  picker. The server still continues the choice; only the picker is behind.
 - Auto shadow is not collected on enrolled turns.
 - Blindness is presentation only, and stays on after an experiment ends; the record keeps the arm.
 - Assignment is not stored, so changing an experiment's arms or weights mid-run reshuffles future

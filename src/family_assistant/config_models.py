@@ -311,8 +311,8 @@ class ModelRoutingConfig(BaseModel):
 
 
 class ExperimentConfig(BaseModel):
-    """A live model experiment: turns nobody chose a tier for are randomly
-    assigned one of the arms, and the assignment is recorded on each reply.
+    """A live model experiment: the turns it covers are randomly assigned one
+    of the arms, and the assignment is recorded on each reply.
 
     See docs/design/live-model-experiments.md.
     """
@@ -324,6 +324,11 @@ class ExperimentConfig(BaseModel):
     running experiment's arms: assignment is re-derived from the id, so
     changing the arms reshuffles conversations already under way."""
     profiles: list[str] = Field(min_length=1)
+    tiers: list[str] = Field(default_factory=list)
+    """The tiers whose turns this experiment covers, whoever chose them: an
+    experiment on ``frontier`` splits every Frontier turn between its arms,
+    including turns a person picked Frontier for. Empty covers only the turns
+    nobody chose a tier for."""
     arms: dict[str, int] = Field(min_length=2)
     """Model tier id -> relative weight."""
     enabled: bool = True
@@ -2454,7 +2459,7 @@ class AppConfig(BaseSettings):
 
     @model_validator(mode="after")
     def validate_experiments(self) -> AppConfig:
-        """Arms name configured tiers, and a profile is in one experiment.
+        """Arms and tiers name configured tiers, and no turn is in two experiments.
 
         Whether each arm is a tier its profiles can actually run on is checked
         when the profiles are built, which is where their eligibility exists.
@@ -2464,13 +2469,16 @@ class AppConfig(BaseSettings):
             msg = f"Experiment ids must be unique: {', '.join(ids)}."
             raise ValueError(msg)
         profile_ids = {profile.id for profile in self.service_profiles}
-        enrolled: dict[str, str] = {}
+        # (profile, covered tier) -> experiment; ``None`` is "nobody chose".
+        enrolled: dict[tuple[str, str | None], str] = {}
         for experiment in self.experiments:
-            unknown_tiers = sorted(set(experiment.arms) - set(self.model_tiers))
+            unknown_tiers = sorted(
+                (set(experiment.arms) | set(experiment.tiers)) - set(self.model_tiers)
+            )
             if unknown_tiers:
                 msg = (
-                    f"Experiment '{experiment.id}' has arms that are not model "
-                    f"tiers: {', '.join(unknown_tiers)}."
+                    f"Experiment '{experiment.id}' names tiers that are not "
+                    f"model tiers: {', '.join(unknown_tiers)}."
                 )
                 raise ValueError(msg)
             # Profiles may be supplied after the YAML (by tests, or a layered
@@ -2486,26 +2494,40 @@ class AppConfig(BaseSettings):
                 raise ValueError(msg)
             if not experiment.enabled:
                 continue
+            covered: list[str | None] = list(experiment.tiers) or [None]
             for profile_id in experiment.profiles:
-                if profile_id in enrolled:
-                    msg = (
-                        f"Profile '{profile_id}' is in two enabled experiments: "
-                        f"'{enrolled[profile_id]}' and '{experiment.id}'."
-                    )
-                    raise ValueError(msg)
-                enrolled[profile_id] = experiment.id
+                for tier in covered:
+                    other = enrolled.setdefault((profile_id, tier), experiment.id)
+                    if other != experiment.id:
+                        scope = f"tier '{tier}'" if tier else "unchosen turns"
+                        msg = (
+                            f"Profile '{profile_id}' has two enabled experiments "
+                            f"on {scope}: '{other}' and '{experiment.id}'."
+                        )
+                        raise ValueError(msg)
         return self
 
-    def experiment_for_profile(self, profile_id: str) -> ExperimentConfig | None:
-        """The enabled experiment *profile_id* is enrolled in, if any."""
-        return next(
-            (
-                experiment
-                for experiment in self.experiments
-                if experiment.enabled and profile_id in experiment.profiles
-            ),
-            None,
-        )
+    def experiments_for_profile(self, profile_id: str) -> list[ExperimentConfig]:
+        """The enabled experiments *profile_id* is enrolled in."""
+        return [
+            experiment
+            for experiment in self.experiments
+            if experiment.enabled and profile_id in experiment.profiles
+        ]
+
+    def experiment_for_turn(
+        self, profile_id: str, *, tier: str | None, chosen: bool
+    ) -> ExperimentConfig | None:
+        """The enabled experiment covering a turn of *profile_id* on *tier*.
+
+        An experiment naming the tier wins over one on unchosen turns, which
+        only sees a turn nobody chose a tier for.
+        """
+        experiments = self.experiments_for_profile(profile_id)
+        named = next((e for e in experiments if tier in e.tiers), None)
+        if named is not None or chosen:
+            return named
+        return next((e for e in experiments if not e.tiers), None)
 
     @model_validator(mode="after")
     def validate_model_tier_slash_commands_are_unique(self) -> AppConfig:

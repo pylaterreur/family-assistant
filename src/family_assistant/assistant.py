@@ -1546,9 +1546,8 @@ class Assistant:
         tier_eligibility = ModelTierEligibility.from_profile(
             profile_conf, self.config.model_tiers
         )
-        experiment = self.config.experiment_for_profile(profile_id)
-        if experiment is not None:
-            runnable = {option.id for option in tier_eligibility.runnable}
+        runnable = {option.id for option in tier_eligibility.runnable}
+        for experiment in self.config.experiments_for_profile(profile_id):
             unrunnable = sorted(set(experiment.arms) - runnable)
             if unrunnable:
                 msg = (

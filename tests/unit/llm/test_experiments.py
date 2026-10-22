@@ -155,10 +155,96 @@ def test_only_an_enabled_experiment_enrolls_a_profile() -> None:
             ),
         ],
     )
-    experiment = config.experiment_for_profile("default_assistant")
+    experiment = config.experiment_for_turn(
+        "default_assistant", tier="standard", chosen=False
+    )
     assert experiment is not None
     assert experiment.id == "new"
-    assert config.experiment_for_profile("research") is None
+    assert config.experiment_for_turn("research", tier="standard", chosen=False) is None
+
+
+_TIER_TARGETED = AppConfig(
+    model_tiers={**_TIERS, "frontier": _tier("frontier")},
+    service_profiles=[ServiceProfile(id="default_assistant")],
+    experiments=[
+        ExperimentConfig(
+            id="unchosen",
+            profiles=["default_assistant"],
+            arms={"argon": 1, "opus": 1},
+        ),
+        ExperimentConfig(
+            id="frontier",
+            profiles=["default_assistant"],
+            tiers=["frontier"],
+            arms={"argon": 1, "opus": 1},
+        ),
+        ExperimentConfig(
+            id="standard",
+            profiles=["default_assistant"],
+            tiers=["standard"],
+            arms={"argon": 1, "opus": 1},
+        ),
+    ],
+)
+
+
+@pytest.mark.parametrize(
+    ("tier", "chosen", "expected"),
+    [
+        ("frontier", True, "frontier"),
+        ("frontier", False, "frontier"),
+        ("standard", True, "standard"),
+        # Naming the tier wins over covering turns nobody chose for.
+        ("standard", False, "standard"),
+        ("deep", False, "unchosen"),
+        # A person's choice of a tier no experiment names is left alone.
+        ("deep", True, None),
+    ],
+)
+def test_a_turn_is_covered_by_the_experiment_naming_its_tier(
+    tier: str, chosen: bool, expected: str | None
+) -> None:
+    experiment = _TIER_TARGETED.experiment_for_turn(
+        "default_assistant", tier=tier, chosen=chosen
+    )
+    assert (experiment.id if experiment else None) == expected
+
+
+def test_two_experiments_on_one_tier_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="two enabled experiments on tier 'opus'"):
+        AppConfig(
+            model_tiers=_TIERS,
+            service_profiles=[ServiceProfile(id="default_assistant")],
+            experiments=[
+                ExperimentConfig(
+                    id="one",
+                    profiles=["default_assistant"],
+                    tiers=["standard", "opus"],
+                    arms={"argon": 1, "opus": 1},
+                ),
+                ExperimentConfig(
+                    id="two",
+                    profiles=["default_assistant"],
+                    tiers=["opus"],
+                    arms={"argon": 1, "standard": 1},
+                ),
+            ],
+        )
+
+
+def test_a_covered_tier_that_is_not_a_tier_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="not model tiers: frontier"):
+        AppConfig(
+            model_tiers=_TIERS,
+            experiments=[
+                ExperimentConfig(
+                    id="exp",
+                    profiles=["default_assistant"],
+                    tiers=["frontier"],
+                    arms={"argon": 1, "opus": 1},
+                )
+            ],
+        )
 
 
 def test_an_experiment_needs_two_arms_with_positive_weights() -> None:

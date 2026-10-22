@@ -2,8 +2,9 @@
 
 A turn nobody chose a tier for is assigned an arm by hashing its conversation,
 served by that arm's client, and recorded with the experiment on its reply. A
-person's choice, explicit or sticky, always wins, and an assignment never turns
-into a sticky choice of its own.
+person's choice of a tier no experiment names wins, and an assignment never
+turns into a sticky choice of its own. An experiment naming a tier swaps even a
+person's choice of it for an arm, and the choice stays sticky.
 """
 
 from __future__ import annotations
@@ -37,17 +38,22 @@ if TYPE_CHECKING:
 
 EXPERIMENT = "argon-vs-opus"
 ARMS = {"argon": 1, "opus": 1}
+FRONTIER_EXPERIMENT = "fable-vs-astra"
+FRONTIER_ARMS = {"fable": 1, "astra": 1}
 
 _ELIGIBILITY = ModelTierEligibility(
     default_tier="standard",
     selectable=(
         ModelTierOption(id="standard", label="Standard"),
         ModelTierOption(id="deep", label="Deep"),
+        ModelTierOption(id="frontier", label="Frontier"),
     ),
     auto=frozenset({"standard", "deep"}),
     delegation=(
         ModelTierOption(id="argon", label="Argon"),
         ModelTierOption(id="opus", label="Opus"),
+        ModelTierOption(id="fable", label="Fable"),
+        ModelTierOption(id="astra", label="Astra"),
     ),
 )
 
@@ -72,13 +78,19 @@ def experiment_app_fixture(
     app_config = api_test_processing_service.app_config.model_copy(
         update={
             "experiments": [
-                ExperimentConfig(id=EXPERIMENT, profiles=[config.id], arms=ARMS)
+                ExperimentConfig(id=EXPERIMENT, profiles=[config.id], arms=ARMS),
+                ExperimentConfig(
+                    id=FRONTIER_EXPERIMENT,
+                    profiles=[config.id],
+                    tiers=["frontier"],
+                    arms=FRONTIER_ARMS,
+                ),
             ]
         }
     )
     tier_clients = {
         tier: _client_saying(f"{tier} served this")
-        for tier in ("standard", "deep", "argon", "opus")
+        for tier in ("standard", "deep", "frontier", "argon", "opus", "fable", "astra")
     }
     service = ProcessingService(
         llm_client=tier_clients["standard"],
@@ -120,11 +132,13 @@ async def _latest_reasoning(
     return cast("MessageReasoningInfo", reasoning)
 
 
-def _conversation_on(arm: str) -> str:
-    """A conversation id the experiment assigns to *arm*."""
+def _conversation_on(
+    arm: str, experiment: str = EXPERIMENT, arms: dict[str, int] = ARMS
+) -> str:
+    """A conversation id *experiment* assigns to *arm*."""
     while True:
         conversation_id = f"exp-{uuid.uuid4()}"
-        if assign_arm(EXPERIMENT, conversation_id, ARMS) == arm:
+        if assign_arm(experiment, conversation_id, arms) == arm:
             return conversation_id
 
 
@@ -172,6 +186,30 @@ async def test_a_persons_choice_wins_and_sticks(
     reasoning = await _latest_reasoning(db_engine, conversation_id)
     assert reasoning.get("model_tier_source") == "user"
     assert "experiment_id" not in reasoning
+
+
+@pytest.mark.usefixtures("experiment_app")
+@pytest.mark.parametrize("arm", ["fable", "astra"])
+async def test_an_experiment_on_a_tier_takes_a_persons_choice_of_it(
+    api_test_client: AsyncClient, db_engine: AsyncEngine, arm: str
+) -> None:
+    conversation_id = _conversation_on(arm, FRONTIER_EXPERIMENT, FRONTIER_ARMS)
+
+    served = await _send(api_test_client, conversation_id, "frontier")
+    assert served == f"{arm} served this"
+    # The choice of Frontier stays sticky, and keeps landing on the same arm.
+    assert await _send(api_test_client, conversation_id) == f"{arm} served this"
+
+    reasoning = await _latest_reasoning(db_engine, conversation_id)
+    assert reasoning.get("model_tier") == arm
+    assert reasoning.get("model_tier_requested") == "frontier"
+    assert reasoning.get("model_tier_source") == "experiment"
+    assert reasoning.get("experiment_id") == FRONTIER_EXPERIMENT
+    response = await api_test_client.get(
+        f"/api/v1/chat/conversations/{conversation_id}/messages",
+        params={"include_conversation_profile": "true"},
+    )
+    assert response.json()["conversation_model_tier"] == "frontier"
 
 
 async def test_home_is_drawn_again_each_day(

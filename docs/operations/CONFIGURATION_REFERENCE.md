@@ -1126,9 +1126,10 @@ asymmetric cost, so reaching Max remains a person's explicit choice.
 
 #### Live model experiments: `experiments`
 
-Compares tiers on real use: a turn that nobody chose a tier for (no explicit choice, no sticky
-choice carried from earlier in the conversation) is randomly assigned one arm of the experiment its
-profile is enrolled in.
+Compares tiers on real use: each turn an experiment covers is randomly assigned one of its arms.
+Without `tiers`, an experiment covers the turns nobody chose a tier for (no explicit choice, no
+sticky choice carried from earlier in the conversation). With `tiers`, it covers every turn on those
+tiers, including turns a person picked the tier for.
 
 ```yaml
 experiments:
@@ -1138,13 +1139,24 @@ experiments:
       claude_opus_5_5: 1
       gemini_4_argon: 1
     enabled: true
+  - id: frontier-fable-vs-astra-2026-10
+    profiles: [default_assistant]
+    tiers: [frontier]  # whoever chose Frontier
+    arms:
+      claude_fable_5_1: 1
+      gemini_astra: 1
 ```
 
 - Each arm must be a configured tier the profile can run on (`allowed_model_tiers` or
-  `delegation_model_tiers`); startup fails otherwise. A profile may be in one enabled experiment.
+  `delegation_model_tiers`); startup fails otherwise. Per profile, one enabled experiment may cover
+  unchosen turns and one may cover each tier; an experiment naming the tier a turn is on wins over
+  one covering unchosen turns.
+- A person who picks a covered tier keeps it: it stays sticky and the tier picker still shows it,
+  and their turns keep landing on their conversation's arm. The reply records the tier they chose in
+  `model_tier_requested`.
 - The arm is a hash of the experiment id and the conversation, so every turn of a conversation runs
   on the same arm and keeps its prompt cache. Home is drawn again each day in the profile's time
-  zone. Delegated runs are not enrolled.
+  zone. Delegated runs and turns a person chose Auto for are not enrolled.
 - Enrolled replies record `model_tier_source: experiment`, `experiment_id` and `experiment_arm` in
   `message_history.reasoning_info`; the web and iOS badges show "Experiment" rather than the tier,
   so ratings are blind. An enrolled turn is not Auto-routed.
