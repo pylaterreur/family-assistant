@@ -196,16 +196,37 @@ Open the reference whose trigger matches the task; no need to preload all three.
 ## Local notes (not from upstream)
 
 This skill is vendored from `github/gh-stack` v0.2.1 (`skills/gh-stack`). Everything above this
-section is upstream text; refresh it from a new release together with the pinned binary in
-`.claude/hooks/install-gh-stack.sh`.
+section is upstream text; refresh it from a new release together with the pinned binary in the
+SessionStart hook that installs `gh-stack`.
 
-- **Cloud sessions:** a SessionStart hook installs the pinned prebuilt binary, so `gh stack` is
-  ready. Do not run `gh extension install github/gh-stack` or build it from source; the extension
-  install fails there because api.github.com is only served for attached repositories.
-- **Branch names:** if the session may only push branches under its own branch name, name each
-  layer `<session-branch>-<layer>` (for example `claude/foo-schema`, `claude/foo-api`).
-- **Ready PRs:** this project opens PRs ready for review, so use `gh stack submit --auto --open`.
-  Then fix each PR's title and body with `gh pr edit`, since `submit` generates them.
-- **Auto-merge is unavailable on stacked PRs.** GitHub does not support it for any PR in a stack
-  (direct merge or merge queue). Do not try to enable it; the stack is merged with
-  `gh stack merge` once its PRs are ready, and merging is the owner's call.
+### Claude Code on the web (cloud sessions)
+
+A SessionStart hook installs the pinned prebuilt binary, so `gh stack` is ready. Do not run
+`gh extension install github/gh-stack` or build it from source: the install resolves the release
+through api.github.com, which the session proxy serves only for attached repositories.
+
+GitHub GraphQL is blocked in these sessions, and `gh stack` uses it to find and open PRs. Local
+commands (`init`, `add`, `rebase`, `push`, navigation) and the REST stack endpoints work; `submit`
+pushes every branch but cannot open PRs, and `link` cannot look them up. `gh pr create` and
+`gh pr edit` are GraphQL too. So:
+
+1. Build the stack locally as above, then `gh stack push` (or `submit --auto`, which pushes and
+   then warns about PR lookups).
+2. If the first push fails with `(stale info)`, the session pre-created an `origin/<branch>`
+   tracking ref for a branch that is not on the remote yet. Run `git fetch --prune origin` and
+   push again.
+3. Open one PR per layer over REST, ready for review, each based on the layer below (the bottom
+   one on trunk): the GitHub MCP `create_pull_request` tool, or
+   `gh api repos/{owner}/{repo}/pulls -f head=<branch> -f base=<parent> -f title=... -F body=@file`.
+4. Link them, bottom to top:
+   `gh api -X POST repos/{owner}/{repo}/stacks --input - <<< '{"pull_requests":[101,102]}'`.
+   Add a new top layer to an existing stack with `POST repos/{owner}/{repo}/stacks/<n>/add`.
+   Check with `gh api repos/{owner}/{repo}/stacks?pull_request=<n>`.
+
+If the session may only push branches under its own branch name, name each layer
+`<session-branch>-<layer>` (for example `claude/foo-schema`, `claude/foo-api`).
+
+### Merging
+
+Auto-merge is unavailable on stacked PRs (GitHub does not support it for any PR in a stack, by
+direct merge or merge queue), so do not try to enable it. Merging is the repository owner's call.
