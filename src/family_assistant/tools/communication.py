@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 # recovering one detail does not put a whole large row back into the prompt.
 DEFAULT_HISTORY_CONTENT_CHARS = 4_000
 MAX_HISTORY_CONTENT_CHARS = 20_000
+# query_history's own cap on rows per call.
+MAX_HISTORY_RESULTS = 100
 
 
 # Tool Definitions
@@ -123,6 +125,10 @@ COMMUNICATION_TOOLS_DEFINITION: list[ToolDefinition] = [
                         "type": "array",
                         "items": {"type": "integer"},
                         "description": "Optional exact lookup: the rows with these message_ids.",
+                    },
+                    "after_message_id": {
+                        "type": "integer",
+                        "description": "Optional: continue an exact lookup after this message_id. A lookup that filled its limit returns next_after_message_id to pass here.",
                     },
                     "scope": {
                         "type": "string",
@@ -282,6 +288,7 @@ async def get_message_history_tool(
     turn_id: str | None = None,
     tool_call_ids: list[str] | None = None,
     message_ids: list[int] | None = None,
+    after_message_id: int | None = None,
     content_offset: int = 0,
     max_content_chars: int = DEFAULT_HISTORY_CONTENT_CHARS,
 ) -> ToolResult:
@@ -308,6 +315,7 @@ async def get_message_history_tool(
         turn_id: Optional exact lookup of one turn's rows.
         tool_call_ids: Optional exact lookup of calls and their results.
         message_ids: Optional exact lookup of rows by message id.
+        after_message_id: Continue an exact lookup after this message id.
         content_offset: Character offset each row's content starts at.
         max_content_chars: Maximum characters of content returned per row.
 
@@ -319,7 +327,6 @@ async def get_message_history_tool(
         MessageHistoryQuery,
     )
 
-    db_context = exec_context.db_context
     effective_embedding_generator = (
         embedding_generator or exec_context.embedding_generator
     )
@@ -352,6 +359,7 @@ async def get_message_history_tool(
             message_ids=tuple(message_ids or ()),
             turn_ids=(turn_id,) if turn_id else (),
             tool_call_ids=tuple(tool_call_ids or ()),
+            after_message_id=after_message_id,
             interface_type=exec_context.interface_type,
             current_conversation_id=exec_context.conversation_id,
             current_user_id=exec_context.user_id,
@@ -368,22 +376,15 @@ async def get_message_history_tool(
             history_query=history_query,
         )
         _merge_message_history_taint(exec_context, returned_rows)
-        data = {
-            "search_mode": search_mode,
-            "scope": scope,
-            "query": query,
-            "result_count": len(rows),
-            "results": _bound_history_content(
-                await db_context.message_history.hydrate_history_results(
-                    rows,
-                    include_context=include_context,
-                    access_query=history_query,
-                ),
-                offset=max(content_offset, 0),
-                limit=min(max(max_content_chars, 1), MAX_HISTORY_CONTENT_CHARS),
-            ),
-        }
-        return ToolResult(data=data)
+        return ToolResult(
+            data=await _history_response(
+                exec_context,
+                history_query,
+                rows,
+                content_offset=content_offset,
+                max_content_chars=max_content_chars,
+            )
+        )
     except MessageHistoryAccessDeniedError as exc:
         return ToolResult(
             data={
@@ -409,6 +410,38 @@ async def get_message_history_tool(
                 "results": [],
             }
         )
+
+
+async def _history_response(
+    exec_context: ToolExecutionContext,
+    history_query: MessageHistoryQuery,
+    rows: list[MessageHistoryRow],
+    *,
+    content_offset: int,
+    max_content_chars: int,
+) -> dict[str, object]:
+    data: dict[str, object] = {
+        "search_mode": history_query.search_mode,
+        "scope": history_query.scope,
+        "query": history_query.query,
+        "result_count": len(rows),
+        "results": _bound_history_content(
+            await exec_context.db_context.message_history.hydrate_history_results(
+                rows,
+                include_context=history_query.include_context,
+                access_query=history_query,
+            ),
+            offset=max(content_offset, 0),
+            limit=min(max(max_content_chars, 1), MAX_HISTORY_CONTENT_CHARS),
+        ),
+    }
+    if (
+        history_query.is_exact_lookup
+        and history_query.search_mode == "structured"
+        and len(rows) >= min(max(history_query.limit, 1), MAX_HISTORY_RESULTS)
+    ):
+        data["next_after_message_id"] = rows[-1]["internal_id"]
+    return data
 
 
 def _bound_history_content(

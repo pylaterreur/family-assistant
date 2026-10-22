@@ -362,10 +362,16 @@ class MessageHistoryQuery:
     message_ids: tuple[int, ...] = ()
     turn_ids: tuple[str, ...] = ()
     tool_call_ids: tuple[str, ...] = ()
+    # Pages an exact lookup: only rows written after this message id.
+    after_message_id: int | None = None
     interface_type: str | None = None
     current_conversation_id: str | None = None
     current_user_id: str | None = None
     include_internal: bool = False
+
+    @property
+    def is_exact_lookup(self) -> bool:
+        return bool(self.message_ids or self.turn_ids or self.tool_call_ids)
 
 
 class MessageHistoryAccessDeniedError(ValueError):
@@ -562,15 +568,12 @@ class MessageHistoryRepository(BaseRepository):
         """Query message history with structured filters and conservative access scope."""
         limit = min(max(query.limit, 1), _MAX_MESSAGE_HISTORY_LIMIT)
         conditions = self._build_history_query_conditions(query)
-        # A lookup by id reads a turn or a call in the order it happened; a
-        # search wants the newest matches first.
-        by_id = bool(query.message_ids or query.turn_ids or query.tool_call_ids)
+        # A lookup by id reads a turn or a call in the order it was written,
+        # which ``after_message_id`` pages through; a search wants the newest
+        # matches first.
         order = (
-            (
-                message_history_table.c.timestamp.asc(),
-                message_history_table.c.internal_id.asc(),
-            )
-            if by_id
+            (message_history_table.c.internal_id.asc(),)
+            if query.is_exact_lookup
             else (
                 message_history_table.c.timestamp.desc(),
                 message_history_table.c.internal_id.desc(),
@@ -1021,6 +1024,10 @@ class MessageHistoryRepository(BaseRepository):
             )
         if id_conditions:
             conditions.append(or_(*id_conditions))
+        if query.after_message_id is not None:
+            conditions.append(
+                message_history_table.c.internal_id > query.after_message_id
+            )
         if query.roles:
             conditions.append(message_history_table.c.role.in_(query.roles))
         if query.tool_names:

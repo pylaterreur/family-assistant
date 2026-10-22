@@ -547,6 +547,39 @@ async def test_get_message_history_tool_looks_up_a_turn_and_a_call_by_id(
 
 
 @pytest.mark.asyncio
+async def test_get_message_history_tool_pages_through_a_long_turn(
+    db_engine: AsyncEngine,
+) -> None:
+    """A turn longer than the limit is read in pages, none skipped or repeated."""
+    db = Database(engine=db_engine)
+    now = datetime.now(UTC)
+    for index in range(5):
+        await _store_user_message(
+            db,
+            conversation_id="current",
+            user_id="user-a",
+            content=f"row {index}",
+            timestamp=now + timedelta(seconds=index),
+            turn_id="turn-long",
+        )
+    context = _build_exec_context(db)
+
+    pages: list[list[str]] = []
+    after: int | None = None
+    while True:
+        result = await get_message_history_tool(
+            exec_context=context, turn_id="turn-long", limit=2, after_message_id=after
+        )
+        data = cast("dict[str, Any]", result.data)
+        pages.append([row["content"] for row in data["results"]])
+        after = data.get("next_after_message_id")
+        if after is None:
+            break
+
+    assert pages == [["row 0", "row 1"], ["row 2", "row 3"], ["row 4"]]
+
+
+@pytest.mark.asyncio
 async def test_get_message_history_lookup_by_id_keeps_the_access_scope(
     db_engine: AsyncEngine,
 ) -> None:
