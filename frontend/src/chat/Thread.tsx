@@ -754,14 +754,13 @@ const AssistantMessage: React.FC = () => {
               {/* Images the assistant attached, shown inline rather than only
                   behind the collapsed attachments tool group. */}
               <AssistantResponseImages />
-              {hasCopyableContent && (
-                <AssistantActionBar
-                  internalId={custom.internal_id}
-                  turnId={custom.turn_id}
-                  isEcho={Boolean(echoedFromThread)}
-                  feedback={custom.feedback}
-                />
-              )}
+              <AssistantActionBar
+                internalId={custom.internal_id}
+                turnId={custom.turn_id}
+                isEcho={Boolean(echoedFromThread)}
+                feedback={custom.feedback}
+                canCopy={hasCopyableContent}
+              />
             </div>
           </div>
         </div>
@@ -813,7 +812,8 @@ const AssistantActionBar: React.FC<{
   turnId?: string;
   isEcho: boolean;
   feedback?: TurnRating;
-}> = ({ internalId, turnId, isEcho, feedback }) => {
+  canCopy: boolean;
+}> = ({ internalId, turnId, isEcho, feedback, canCopy }) => {
   const aui = useAui();
   const homeActions = useHomeTurnActions();
   const turnFeedback = useTurnFeedback();
@@ -893,6 +893,12 @@ const AssistantActionBar: React.FC<{
     setCopied(true);
   };
 
+  // A reply of only images or tool results has nothing to copy but can still
+  // be rated.
+  if (!canCopy && !canRate) {
+    return null;
+  }
+
   return (
     <>
       {copyError && (
@@ -947,21 +953,25 @@ const AssistantActionBar: React.FC<{
         data-testid="assistant-action-bar"
         className="absolute left-0 top-full z-10 mt-1 flex items-center gap-1 rounded-lg border border-border/50 bg-background/95 p-1 opacity-0 shadow-sm backdrop-blur-sm pointer-events-none transition-opacity duration-200 group-hover:opacity-100 group-hover:pointer-events-auto focus-within:opacity-100 focus-within:pointer-events-auto"
       >
-        {/* @ts-expect-error - TooltipIconButton JSX component */}
-        <TooltipIconButton
-          tooltip={copied ? 'Copied' : 'Copy'}
-          aria-label="Copy response"
-          size="icon"
-          variant="ghost"
-          className="h-7 w-7 rounded-lg"
-          onClick={copyResponse}
-        >
-          {copied ? (
-            <CheckIcon size={12} aria-hidden="true" />
-          ) : (
-            <CopyIcon size={12} aria-hidden="true" />
-          )}
-        </TooltipIconButton>
+        {canCopy && (
+          <>
+            {/* @ts-expect-error - TooltipIconButton JSX component */}
+            <TooltipIconButton
+              tooltip={copied ? 'Copied' : 'Copy'}
+              aria-label="Copy response"
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7 rounded-lg"
+              onClick={copyResponse}
+            >
+              {copied ? (
+                <CheckIcon size={12} aria-hidden="true" />
+              ) : (
+                <CopyIcon size={12} aria-hidden="true" />
+              )}
+            </TooltipIconButton>
+          </>
+        )}
         {canRate && (
           <>
             {/* @ts-expect-error - TooltipIconButton JSX component */}

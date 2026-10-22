@@ -171,7 +171,7 @@ describe('rating a reply', () => {
     expect(up).toHaveAttribute('aria-pressed', 'false');
   });
 
-  it('keeps a slower earlier thumbs down from reopening the comment form', async () => {
+  it('sends rating changes one at a time, so the last press is the one kept', async () => {
     const state = serveConversation();
     let release = () => {};
     state.holdNext = new Promise((resolve) => {
@@ -183,12 +183,71 @@ describe('rating a reply', () => {
     await user.click(reply.getByRole('button', { name: 'Bad response' }));
     const up = reply.getByRole('button', { name: 'Good response' });
     await user.click(up);
-    await waitFor(() => expect(state.writes).toHaveLength(2));
+    await waitFor(() => expect(up).toHaveAttribute('aria-pressed', 'true'));
+    // The thumbs up waits for the held thumbs down to finish.
+    expect(state.writes).toHaveLength(1);
     release();
 
-    await waitFor(() => expect(up).toHaveAttribute('aria-pressed', 'true'));
-    // Let the held request's completion run before checking it changed nothing.
+    await waitFor(() => expect(state.writes).toHaveLength(2));
+    expect(state.writes.map((write) => write.body?.rating)).toEqual(['down', 'up']);
+    // Let the earlier request's completion run before checking it changed nothing.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(reply.queryByTestId('feedback-comment-form')).not.toBeInTheDocument();
+    expect(up).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('offers rating on a reply with nothing to copy', async () => {
+    serveConversation();
+    server.use(
+      http.get('/api/v1/chat/conversations/:conversationId/messages', () =>
+        HttpResponse.json({
+          conversation_id: CONVERSATION,
+          messages: [
+            {
+              internal_id: 1,
+              turn_id: 'turn-weather',
+              role: 'user',
+              content: 'Weather?',
+              timestamp: '2026-10-22T09:00:00Z',
+            },
+            {
+              internal_id: 2,
+              turn_id: 'turn-weather',
+              role: 'assistant',
+              content: '',
+              timestamp: '2026-10-22T09:00:01Z',
+              tool_calls: [
+                {
+                  id: 'call_weather',
+                  type: 'function',
+                  function: { name: 'get_weather', arguments: '{}' },
+                },
+              ],
+            },
+            {
+              internal_id: 3,
+              turn_id: 'turn-weather',
+              role: 'tool',
+              tool_call_id: 'call_weather',
+              content: 'Sunny',
+              timestamp: '2026-10-22T09:00:02Z',
+            },
+          ],
+          count: 3,
+          total_messages: 3,
+          has_more_before: false,
+          has_more_after: false,
+          active_turns: [],
+        })
+      )
+    );
+    await renderChatApp({
+      waitForReady: true,
+      initialEntries: [`/chat?conversation_id=${CONVERSATION}`],
+    });
+
+    const up = await screen.findByRole('button', { name: 'Good response' });
+    expect(up).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copy response' })).not.toBeInTheDocument();
   });
 });
