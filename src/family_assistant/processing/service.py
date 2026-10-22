@@ -62,7 +62,7 @@ from family_assistant.security.taint import (
     sources_explaining_state,
 )
 from family_assistant.storage.delegation_runs import (
-    historical_delegation_wake_content,
+    delegation_wake_instruction,
     is_delegation_wake_trigger,
 )
 from family_assistant.storage.history_compaction import HistoryScope
@@ -1820,46 +1820,6 @@ class ProcessingService:
                 msg.content = f"{msg.content}\n\n{metadata_text}"
                 return
 
-    @staticmethod
-    def _replace_historical_delegation_wake_with_active_system_trigger(
-        messages_for_llm: list[LLMMessage],
-        trigger_content: str,
-        *,
-        in_place: bool = False,
-    ) -> None:
-        """Make the current wake a system trigger without replaying old wakes as system.
-
-        ``in_place`` keeps the trigger where its row is: on a resume the turn's
-        own tool calls follow it, and moving it after them would ask the model
-        to start the work again.
-        """
-        delegation_reference_line = next(
-            (
-                line
-                for line in trigger_content.splitlines()
-                if line.startswith("Delegation reference:")
-            ),
-            None,
-        )
-        historical_trigger = historical_delegation_wake_content(trigger_content)
-        for index in range(len(messages_for_llm) - 1, -1, -1):
-            msg = messages_for_llm[index]
-            if not (isinstance(msg, UserMessage) and isinstance(msg.content, str)):
-                continue
-            if (
-                delegation_reference_line is not None
-                and msg.content.startswith(
-                    "Historical delegation completion event from a previous turn."
-                )
-                and delegation_reference_line in msg.content
-            ) or msg.content == historical_trigger:
-                if in_place:
-                    messages_for_llm[index] = SystemMessage(content=trigger_content)
-                    return
-                messages_for_llm.pop(index)
-                break
-        messages_for_llm.append(SystemMessage(content=trigger_content))
-
     async def _echo_if_thread_finished(
         self,
         db_context: Database,
@@ -2026,9 +1986,14 @@ class ProcessingService:
         list[LLMMessage],
         tuple[TaintSource, ...],
         ContextLengthCompactor,
+        str | None,
         int,
     ]:
         """Build the full pre-LLM turn state shared by sync and streaming flows.
+
+        The fifth element is an instruction to send after the conversation on
+        every request of this turn, and on no later turn's (see
+        ``trailing_instruction`` on the loop).
 
         ``resume`` continues a turn whose earlier run was interrupted: its user
         row and every row it produced are already in history, so nothing is
@@ -2132,14 +2097,6 @@ class ProcessingService:
             resume=resume,
             referenced_row_ids=window_referenced_row_ids,
         )
-        if trigger_role == "system" and is_delegation_wake_trigger(
-            user_content_for_history
-        ):
-            self._replace_historical_delegation_wake_with_active_system_trigger(
-                active_messages,
-                user_content_for_history,
-                in_place=resume,
-            )
         window_messages = self._repaired_window(window_messages, conversation_id)
         synthesized, dropped = self._repair_unmatched_tool_calls(active_messages)
         if synthesized or dropped:
@@ -2169,23 +2126,37 @@ class ProcessingService:
             acting_user_id=user_id,
             llm_client=llm_client,
         )
-        # Before the injection messages are appended, so the block lands on the
-        # trigger rather than on the newest injection. An injection built by a
-        # provider adapter can carry its payload in `parts`, which is what that
-        # provider renders -- text appended to `content` there is dropped on the
-        # floor.
-        #
         # Injected attachments are listed alongside the trigger's own: a
         # delegated profile receives its attachments only as injections, and
         # without their ids in the block it can see the image but cannot name
         # it to transform_image or any other attachment-taking tool.
-        self._inject_trigger_attachment_metadata(
-            messages_for_llm=messages_for_llm,
-            target=resumed_turn_opening,
-            trigger_attachments=merge_attachment_metadata(
-                trigger_attachments, processed_content_parts.attachments
-            ),
+        turn_attachments = merge_attachment_metadata(
+            trigger_attachments, processed_content_parts.attachments
         )
+        trailing_instruction: str | None = None
+        if trigger_role == "system" and is_delegation_wake_trigger(
+            user_content_for_history
+        ):
+            # The wake's row is in the history as every later turn will replay
+            # it, so its prefix stays cached across that boundary; what makes
+            # this turn the one that acts on it is sent after the conversation
+            # instead. The attachment block goes there too, since writing it
+            # into the row would change the row on this turn only.
+            trailing_instruction = delegation_wake_instruction(user_content_for_history)
+            metadata_text = format_attachment_metadata_block(turn_attachments)
+            if metadata_text:
+                trailing_instruction = f"{trailing_instruction}\n\n{metadata_text}"
+        else:
+            # Before the injection messages are appended, so the block lands on
+            # the trigger rather than on the newest injection. An injection
+            # built by a provider adapter can carry its payload in `parts`,
+            # which is what that provider renders -- text appended to `content`
+            # there is dropped on the floor.
+            self._inject_trigger_attachment_metadata(
+                messages_for_llm=messages_for_llm,
+                target=resumed_turn_opening,
+                trigger_attachments=turn_attachments,
+            )
         messages_for_llm.extend(processed_content_parts.messages)
         # A reply to a thread carries a summary of the thread's attachments. It is
         # rebuilt rather than persisted, which is acceptable only because such a
@@ -2267,6 +2238,7 @@ class ProcessingService:
             typed_messages_for_llm,
             context_taint_sources,
             compact_for_context_length,
+            trailing_instruction,
             window_slot.start + window_slot.length,
         )
 
@@ -2379,6 +2351,7 @@ class ProcessingService:
         allow_quiet_end: bool = False,
         completed_iterations: int = 0,
         context_length_compactor: ContextLengthCompactor | None = None,
+        trailing_instruction: str | None = None,
         history_prefix_len: int | None = None,
     ) -> AsyncIterator[tuple[LLMStreamEvent, LLMMessage | None]]:
         """
@@ -2417,6 +2390,7 @@ class ProcessingService:
             allow_quiet_end=allow_quiet_end,
             completed_iterations=completed_iterations,
             context_length_compactor=context_length_compactor,
+            trailing_instruction=trailing_instruction,
         ):
             yield item
 
@@ -2528,6 +2502,7 @@ class ProcessingService:
                 typed_messages_for_llm,
                 context_taint_sources,
                 compact_for_context_length,
+                trailing_instruction,
                 history_prefix_len,
             ) = await self._prepare_turn_messages_for_llm(
                 db_context,
@@ -2570,6 +2545,7 @@ class ProcessingService:
             recorded_on_tool_rows: set[str] = set()
             async for event, turn_msg in self.process_message_stream(
                 context_length_compactor=compact_for_context_length,
+                trailing_instruction=trailing_instruction,
                 history_prefix_len=history_prefix_len,
                 db_context=db_context,
                 messages=typed_messages_for_llm,
@@ -2808,6 +2784,7 @@ class ProcessingService:
                 typed_messages_for_llm,
                 context_taint_sources,
                 compact_for_context_length,
+                trailing_instruction,
                 history_prefix_len,
             ) = await self._prepare_turn_messages_for_llm(
                 db_context,
@@ -2835,6 +2812,7 @@ class ProcessingService:
             recorded_on_tool_rows: set[str] = set()
             async for event, stream_msg in self.process_message_stream(
                 context_length_compactor=compact_for_context_length,
+                trailing_instruction=trailing_instruction,
                 history_prefix_len=history_prefix_len,
                 db_context=db_context,
                 messages=typed_messages_for_llm,

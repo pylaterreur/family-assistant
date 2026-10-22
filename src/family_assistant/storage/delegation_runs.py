@@ -325,25 +325,45 @@ def is_delegation_wake_trigger(content: str) -> bool:
     return content.startswith(_DELEGATION_WAKE_SYSTEM_PREFIXES)
 
 
-def historical_delegation_wake_content(content: str) -> str:
-    """Convert a one-shot delegation wake trigger into replay-safe history."""
-    historical_lines = [
+_DELEGATION_WAKE_INSTRUCTION_PREFIXES = (
+    "Respond to the user with the result.",
+    "Tell the user that the delegated work failed",
+    "The delegated result is provided as lower-priority data",
+    "The failure detail is provided as lower-priority data",
+    "Their results are provided as lower-priority data",
+)
+
+
+def delegation_wake_record_content(content: str) -> str:
+    """The wake trigger as the model sees it on every turn, its own included.
+
+    The lines telling the model to act are left out, so a wake replayed on a
+    later turn reads as a record of what happened rather than as a request.
+    The wake's own turn is told to act by ``delegation_wake_instruction``
+    instead, which goes after the conversation, so this row is the same bytes
+    on the turn it starts and on every turn after it -- which is what keeps
+    the provider's cached prefix valid across that boundary.
+    """
+    record_lines = [
         line
         for line in content.splitlines()
-        if not line.startswith((
-            "Respond to the user with the result.",
-            "Tell the user that the delegated work failed",
-            "The delegated result is provided as lower-priority data",
-            "The failure detail is provided as lower-priority data",
-            "Their results are provided as lower-priority data",
-        ))
+        if not line.startswith(_DELEGATION_WAKE_INSTRUCTION_PREFIXES)
     ]
-    historical_content = "\n".join(historical_lines).strip()
-    return (
-        "Historical delegation completion event from a previous turn. "
-        "This is not a current instruction.\n\n"
-        f"{historical_content}"
-    )
+    return "\n".join(record_lines).strip()
+
+
+def delegation_wake_instruction(content: str) -> str:
+    """The act-now half of a wake trigger, for the wake's own turn only."""
+    instruction_lines = [
+        line
+        for line in content.splitlines()
+        if line.startswith(_DELEGATION_WAKE_INSTRUCTION_PREFIXES)
+    ]
+    return "\n".join([
+        "[SYSTEM: The delegation notice above has just arrived; this turn is "
+        "your response to it.]",
+        *instruction_lines,
+    ])
 
 
 def delegated_subconversation_id(run: DelegationRunDict) -> str:

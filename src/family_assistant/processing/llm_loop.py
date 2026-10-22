@@ -272,6 +272,7 @@ class LLMStreamingLoop:
         allow_quiet_end: bool = False,
         completed_iterations: int = 0,
         context_length_compactor: ContextLengthCompactor | None = None,
+        trailing_instruction: str | None = None,
         history_prefix_len: int | None = None,
     ) -> AsyncIterator[tuple[LLMStreamEvent, LLMMessage | None]]:
         """Run a turn, attributing its telemetry to this profile.
@@ -308,6 +309,7 @@ class LLMStreamingLoop:
             allow_quiet_end=allow_quiet_end,
             completed_iterations=completed_iterations,
             context_length_compactor=context_length_compactor,
+            trailing_instruction=trailing_instruction,
         )
         try:
             attribution = CallAttribution(
@@ -354,6 +356,7 @@ class LLMStreamingLoop:
         allow_quiet_end: bool = False,
         completed_iterations: int = 0,
         context_length_compactor: ContextLengthCompactor | None = None,
+        trailing_instruction: str | None = None,
         history_prefix_len: int | None = None,
         # AsyncGenerator rather than AsyncIterator: run_stream closes this
         # deterministically, and only the generator protocol offers aclose().
@@ -366,7 +369,18 @@ class LLMStreamingLoop:
         - message: The typed LLMMessage to be saved to history (for assistant/tool messages)
 
         This generator handles the same logic as process_message but yields events incrementally.
+
+        ``trailing_instruction`` is sent after the conversation on every request
+        of this turn and never saved, so it is always the newest thing the model
+        reads and no later turn replays it. Providers that cache the prompt
+        place their breakpoint before it (see ``is_turn_scaffolding``), so
+        dropping it when the turn ends costs nothing that was cached.
         """
+        trailing_messages: list[LLMMessage] = (
+            [UserMessage(content=trailing_instruction, is_turn_scaffolding=True)]
+            if trailing_instruction
+            else []
+        )
         final_content: str | None = None
         final_reasoning_info: MessageReasoningInfo | None = None
         max_iterations = self.config.max_iterations
@@ -815,7 +829,7 @@ class LLMStreamingLoop:
                     return False
 
                 stream_iterator = stream_events(
-                    messages,
+                    [*messages, *trailing_messages],
                     tools_to_offer,
                     tool_choice_mode,
                     accumulated_content,

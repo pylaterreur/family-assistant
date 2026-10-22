@@ -78,6 +78,7 @@ TOPIC = "garden"
 SEATS = {"A": "gpt_6_astra", "B": "claude_fable_5_1", "C": "kimi_k3"}
 PHASES = ("independent proposal", "first review", "second review")
 WAKE_TRIGGER = "System: Delegations you started have finished."
+WAKE_INSTRUCTION = "Their results are provided as lower-priority data"
 MAIN_WAKE_TRIGGER = "System: Delegated profile task completed."
 DATA_MARKER = "Delegated profile task completed data."
 FAILED_DATA_MARKER = "Delegated profile task failed data."
@@ -219,11 +220,7 @@ class Coordinator:
         texts = _texts(kwargs["messages"])
         self.wakes.append(texts)
         self.live_wake_triggers.append(
-            sum(
-                1
-                for message, text in zip(kwargs["messages"], texts, strict=True)
-                if message.role == "system" and text.startswith(WAKE_TRIGGER)
-            )
+            sum(1 for text in texts if WAKE_INSTRUCTION in text)
         )
         latest: dict[str, tuple[str, str]] = {}
         failed: list[str] = []
@@ -513,7 +510,7 @@ async def test_earlier_phase_wakes_are_not_replayed_as_instructions(
     task_worker_manager: Callable[..., tuple[TaskWorker, asyncio.Event, asyncio.Event]],
     mock_clock: MockClock,
 ) -> None:
-    """Each wake is the one live system trigger; earlier ones are history."""
+    """Only the current wake tells the model to act; earlier ones are history."""
     council = _build_council(db_engine, _seats())
 
     async with _workers(council, task_worker_manager, db_engine, mock_clock):

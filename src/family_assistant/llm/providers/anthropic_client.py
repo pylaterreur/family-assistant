@@ -72,6 +72,7 @@ from family_assistant.llm.messages import (
     TextContentPart,
     ToolMessage,
     UserMessage,
+    is_turn_scaffolding,
 )
 from family_assistant.llm.utils.call_telemetry import LLMCallTelemetry
 from family_assistant.tools.types import ToolDefinition
@@ -960,8 +961,14 @@ class AnthropicClient(BaseLLMClient):
             and 0 < history_prefix_len < len(messages)
             else None
         )
+        # The newest message that is conversation rather than scaffolding: the
+        # trailing breakpoint goes at its end (see below).
+        # ast-grep-ignore: no-dict-any - MessageParam TypedDict incompatible with dynamic content merging in _merge_consecutive_roles
+        breakpoint_message: dict[str, Any] | None = None
+        breakpoint_index: int | None = None
 
         for index, msg in enumerate(messages):
+            converted_before = len(api_messages)
             if isinstance(msg, SystemMessage) and not api_messages:
                 if not system_parts:
                     stable_prefix_len = msg.stable_prefix_len
@@ -1040,6 +1047,10 @@ class AnthropicClient(BaseLLMClient):
                 )
                 api_messages.append({"role": "user", "content": [tool_result_block]})
 
+            if len(api_messages) > converted_before and not is_turn_scaffolding(msg):
+                breakpoint_message = api_messages[-1]
+                breakpoint_index = index
+
             if index == history_boundary and api_messages:
                 # An hour, not five minutes: this block ends the settled history,
                 # which the next turn re-sends unchanged after however long the
@@ -1053,16 +1064,21 @@ class AnthropicClient(BaseLLMClient):
         if activations:
             api_messages = self._insert_tool_additions(api_messages, activations)
 
-        # One breakpoint at the very end. Each request is the previous one plus
-        # appended messages, so the previous request's breakpoint is a prefix of
-        # this one and is read back; this one is what the next request reads.
-        # A trailing tool-addition message cannot carry one, so it goes on the
-        # user turn before it.
-        if cache_conversation:
-            for api_message in reversed(api_messages):
-                if api_message["role"] != "system":
-                    self._mark_cache_breakpoint(api_message)
-                    break
+        # One breakpoint, at the end of the conversation. Each request is the
+        # previous one plus appended messages, so the previous request's
+        # breakpoint is a prefix of this one and is read back; this one is what
+        # the next request reads. Trailing scaffolding -- an instruction meant
+        # for this request only -- comes after it: the next request drops or
+        # moves that, and an entry that ended with it would never be read. A
+        # tool-addition message is inserted after this point and never carries
+        # one. Merging keeps the content blocks themselves, so a block marked on
+        # a message merged into its neighbour stays marked.
+        if (
+            cache_conversation
+            and breakpoint_message is not None
+            and breakpoint_index != history_boundary
+        ):
+            self._mark_cache_breakpoint(breakpoint_message)
 
         system_blocks = self._build_system_blocks(system_parts, stable_prefix_len)
         return system_blocks, api_messages

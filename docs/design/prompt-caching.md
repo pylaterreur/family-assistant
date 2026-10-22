@@ -131,9 +131,8 @@ Two mechanisms, one before deploy and one after:
   the two prompts diverged: `system_changed`, `tools_changed`, `messages_changed`, `model_changed`,
   or why it could not compare. The reason lands in `reasoning_info.cache_miss_reason`, in the
   `family_assistant_llm_cache_misses_total{reason}` counter, and — for an actual divergence — in a
-  warning log. Some divergences are expected (the final iteration drops the tool list; a historical
-  delegation wake is rewritten on the next turn); what the counter is for is noticing a new one, or
-  a familiar one becoming common.
+  warning log. Some divergences are expected (the final iteration drops the tool list); what the
+  counter is for is noticing a new one, or a familiar one becoming common.
 
 ### Loop stability
 
@@ -147,6 +146,19 @@ whole conversation -- every tool is declared on every request, the on-demand one
 `defer_loading`, and the catalog lists them whether or not they are active -- so activating one
 appends a `tool_addition` block and leaves every earlier byte alone. Models without that beta get
 the deferred tools filtered out of the list instead, as on any other provider.
+
+An instruction meant for one turn only is sent as **trailing scaffolding**: a user message flagged
+`is_turn_scaffolding` that follows the conversation on that turn's requests and is never saved. The
+Anthropic client puts the conversation breakpoint on the last message that is *not* scaffolding, so
+the cache entry each request writes ends before the instruction, and the next request — which has
+moved the instruction or dropped it — reads that entry back whole.
+
+A delegation wake is the case this exists for. Its row is replayed on every later turn with the
+lines telling the model to act left out, so an old wake reads as a record rather than a request.
+Were the wake's own turn to see the row any other way, the turn after it would diverge at the wake
+and rewrite everything from there — the wake's handling of the result, often tens of thousands of
+tokens of tool rounds. So the wake's turn sees the row exactly as later turns replay it, and gets
+the act-now lines, with the attachment ids it may need, as the loop's `trailing_instruction`.
 
 ### Measurement
 
