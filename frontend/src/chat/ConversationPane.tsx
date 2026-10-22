@@ -2633,6 +2633,9 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
   // The latest rating request per turn: only it may roll the shown rating
   // back, so a slow failure cannot undo a newer choice the server kept.
   const feedbackRequestRef = useRef(new Map<string, number>());
+  // Writes for one turn go out one at a time, so the server keeps the last
+  // choice rather than whichever request it happened to commit last.
+  const feedbackWritesRef = useRef(new Map<string, Promise<void>>());
   const turnFeedback = useMemo<TurnFeedbackActions>(
     () => ({
       rate: async (turnId, rating, comment) => {
@@ -2652,8 +2655,12 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
             return { ...msg, feedback: rating ?? undefined };
           })
         );
+        const write = (feedbackWritesRef.current.get(turnId) ?? Promise.resolve())
+          .catch(() => undefined)
+          .then(() => submitTurnFeedback(convId, turnId, rating, comment));
+        feedbackWritesRef.current.set(turnId, write);
         try {
-          await submitTurnFeedback(convId, turnId, rating, comment);
+          await write;
         } catch (error) {
           if (feedbackRequestRef.current.get(turnId) === request) {
             setMessages((prev) =>
