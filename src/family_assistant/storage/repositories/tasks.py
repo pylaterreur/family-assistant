@@ -536,26 +536,13 @@ class TasksRepository(BaseRepository):
                     .values(
                         status="processing", locked_by=worker_id, locked_at=current_time
                     )
+                    # The claimed row itself: a worker can hold several claims
+                    # at once (turn tasks run on in the background), so "this
+                    # worker's newest claim" is not necessarily this one.
+                    .returning(tasks_table)
                 )
-
-                result = await txn.execute(update_stmt)
-                if result.rowcount > 0:
-                    # Successfully claimed a task, now fetch it
-                    fetch_stmt = (
-                        select(tasks_table)
-                        .where(
-                            tasks_table.c.locked_by == worker_id,
-                            tasks_table.c.status == "processing",
-                            tasks_table.c.task_type.in_(task_types),
-                        )
-                        .order_by(tasks_table.c.locked_at.desc())
-                        .limit(1)
-                    )
-                    task_row = await txn.fetch_one(fetch_stmt)
-                    if task_row:
-                        return cast("TaskDict", dict(task_row))
-
-                return None
+                task_row = (await txn.execute(update_stmt)).one_or_none()
+                return cast("TaskDict", task_row) if task_row else None
 
         return await self._db.atomic(_claim)
 
