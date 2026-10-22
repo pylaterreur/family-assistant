@@ -14,7 +14,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from family_assistant.embeddings import MockEmbeddingGenerator
-from family_assistant.llm.messages import UserMessage
+from family_assistant.llm.messages import (
+    AssistantMessage,
+    MessageAttachmentMetadata,
+    UserMessage,
+)
 from family_assistant.processing.background_turns import BackgroundTurnRunner
 from family_assistant.processing.types import (
     ChatInteractionResult,
@@ -314,3 +318,46 @@ async def test_a_continuation_cut_off_before_recording_its_inputs_starts_afresh(
 
     assert [call["resume"] for call in target.calls] == [False]
     assert target.calls[0]["turn_id"] == "turn_unrecorded"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_finished_before_a_restart_settles_with_its_attachments(
+    db_engine: AsyncEngine,
+) -> None:
+    """Settling from the saved reply keeps what the turn produced, not just its text."""
+    target = FakeDelegatableService()
+    processing_service = _source_processing_service(target)
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
+    db = Database(engine=db_engine)
+    await _start_run(db, "delegation_finished")
+    await db.delegation_runs.mark_running("delegation_finished", SystemClock().now())
+    payload = _payload("delegation_finished")
+    chart: list[MessageAttachmentMetadata] = [
+        {"type": "tool_result", "attachment_id": "chart-attachment"}
+    ]
+    for message, attachments in (
+        (UserMessage.from_trusted_user(content="draw a chart"), None),
+        (AssistantMessage(content="Here is the chart."), chart),
+    ):
+        await db.message_history.add_message(
+            message,
+            interface_type=payload["interface_type"],
+            conversation_id=payload["conversation_id"],
+            timestamp=SystemClock().now(),
+            turn_id="turn_finished",
+            attachments=attachments,
+        )
+    runner = BackgroundTurnRunner()
+    worker = _worker(db_engine, processing_service, chat_interface, runner=runner)
+    payload["resume"] = {"turn_id": "turn_finished", "kind": "request", "attempt": 1}
+
+    await run_delegated_profile_run(
+        worker, _tool_context(db, processing_service, chat_interface), payload
+    )
+
+    assert target.calls == []
+    run = await db.delegation_runs.get_by_delegation_id("delegation_finished")
+    assert run is not None
+    assert run["status"] == "completed"
+    assert run["result_text"] == "Here is the chart."
+    assert run["result_attachment_ids_json"] == ["chart-attachment"]

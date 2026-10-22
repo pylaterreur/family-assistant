@@ -1470,6 +1470,19 @@ def _attachment_ids_from_row(row: MessageHistoryRow) -> list[str]:
     ]
 
 
+def _result_from_terminal_row(row: MessageHistoryRow) -> ChatInteractionResult:
+    """The result a turn returned, rebuilt from the terminal row it saved."""
+    if row["is_internal"]:
+        return ChatInteractionResult.quiet(
+            assistant_message_internal_id=row["internal_id"]
+        )
+    return ChatInteractionResult.success(
+        text_reply=row["content"] or "",
+        assistant_message_internal_id=row["internal_id"],
+        attachment_ids=_attachment_ids_from_row(row) or None,
+    )
+
+
 async def _send_llm_callback_reply(
     *,
     db_context: Database,
@@ -2810,13 +2823,7 @@ class TaskWorker:
             )
             return
         await self._settle_delegated_turn(
-            exec_context,
-            run,
-            ChatInteractionResult(
-                status=ChatInteractionStatus.SUCCESS,
-                text_reply=reply["content"] or "",
-                assistant_message_internal_id=reply["internal_id"],
-            ),
+            exec_context, run, _result_from_terminal_row(reply)
         )
 
     async def _run_stoppable_delegated_turn(
