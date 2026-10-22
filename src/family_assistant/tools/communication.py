@@ -32,11 +32,19 @@ if TYPE_CHECKING:
     from family_assistant.embeddings import EmbeddingGenerator
     from family_assistant.storage.repositories.message_history import (
         MessageHistoryQuery,
+        MessageHistorySummary,
     )
     from family_assistant.storage.types import MessageHistoryRow
     from family_assistant.tools.types import ToolDefinition, ToolExecutionContext
 
 logger = logging.getLogger(__name__)
+
+# How much of each row's content one get_message_history call returns, so
+# recovering one detail does not put a whole large row back into the prompt.
+DEFAULT_HISTORY_CONTENT_CHARS = 4_000
+MAX_HISTORY_CONTENT_CHARS = 20_000
+# query_history's own cap on rows per call.
+MAX_HISTORY_RESULTS = 100
 
 
 # Tool Definitions
@@ -82,7 +90,9 @@ COMMUNICATION_TOOLS_DEFINITION: list[ToolDefinition] = [
             "name": "get_message_history",
             "description": (
                 "Structured and semantic lookup against past conversation history. Use structured mode for exact filters like dates, roles, tools, attachments, or errors; semantic mode for fuzzy recall; and hybrid mode when both are useful. "
-                "Returns compact message summaries (each with a stable message_id, timestamp, role, content, and optional neighboring context), or an empty list when nothing matches. "
+                "When you already know a turn_id, tool_call_ids or message_ids (an earlier turn's compacted note names them), pass them to read exactly those rows, oldest first, instead of searching. "
+                "Returns compact message summaries (each with a stable message_id, turn_id, timestamp, role, content, and optional neighboring context), or an empty list when nothing matches. "
+                "Each content and tool-call arguments string is cut to max_content_chars starting at content_offset; a cut one reports content_length or arguments_length, so read further with a larger content_offset. A result too large to keep inline was saved as an attachment, which read_text_attachment can page through or grep. "
                 "Semantic recall lags the conversation by a couple of minutes because a turn is indexed once it has finished, so use structured mode to look up something said in the last few exchanges."
             ),
             "parameters": {
@@ -101,6 +111,24 @@ COMMUNICATION_TOOLS_DEFINITION: list[ToolDefinition] = [
                     "conversation_id": {
                         "type": "string",
                         "description": "Optional conversation filter. Narrows results to one conversation.",
+                    },
+                    "turn_id": {
+                        "type": "string",
+                        "description": "Optional exact lookup: every row of this turn.",
+                    },
+                    "tool_call_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional exact lookup: the calls with these ids and their results.",
+                    },
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Optional exact lookup: the rows with these message_ids.",
+                    },
+                    "after_message_id": {
+                        "type": "integer",
+                        "description": "Optional: continue an exact lookup after this message_id. A lookup that filled its limit returns next_after_message_id to pass here.",
                     },
                     "scope": {
                         "type": "string",
@@ -158,6 +186,16 @@ COMMUNICATION_TOOLS_DEFINITION: list[ToolDefinition] = [
                         "type": "integer",
                         "description": "Optional number of neighboring messages per side to include for each result. Default is 0, maximum is 10.",
                         "default": 0,
+                    },
+                    "content_offset": {
+                        "type": "integer",
+                        "description": "Optional character offset to start each row's content at, for reading further into a long row. Default is 0.",
+                        "default": 0,
+                    },
+                    "max_content_chars": {
+                        "type": "integer",
+                        "description": f"Optional maximum characters of content per row. Default is {DEFAULT_HISTORY_CONTENT_CHARS}, maximum is {MAX_HISTORY_CONTENT_CHARS}.",
+                        "default": DEFAULT_HISTORY_CONTENT_CHARS,
                     },
                 },
                 "required": [],
@@ -247,6 +285,12 @@ async def get_message_history_tool(
     subconversation_id: str | None = None,
     limit: int = 20,
     include_context: int = 0,
+    turn_id: str | None = None,
+    tool_call_ids: list[str] | None = None,
+    message_ids: list[int] | None = None,
+    after_message_id: int | None = None,
+    content_offset: int = 0,
+    max_content_chars: int = DEFAULT_HISTORY_CONTENT_CHARS,
 ) -> ToolResult:
     """
     Query persisted message history with structured filters and optional semantic search.
@@ -268,6 +312,12 @@ async def get_message_history_tool(
         subconversation_id: Optional subconversation filter; defaults to current value.
         limit: Maximum number of results.
         include_context: Number of neighboring messages per side to include.
+        turn_id: Optional exact lookup of one turn's rows.
+        tool_call_ids: Optional exact lookup of calls and their results.
+        message_ids: Optional exact lookup of rows by message id.
+        after_message_id: Continue an exact lookup after this message id.
+        content_offset: Character offset each row's content starts at.
+        max_content_chars: Maximum characters of content returned per row.
 
     Returns:
         Structured tool result containing compact message history results.
@@ -277,7 +327,6 @@ async def get_message_history_tool(
         MessageHistoryQuery,
     )
 
-    db_context = exec_context.db_context
     effective_embedding_generator = (
         embedding_generator or exec_context.embedding_generator
     )
@@ -307,6 +356,10 @@ async def get_message_history_tool(
             subconversation_id=effective_subconversation_id,
             limit=limit,
             include_context=include_context,
+            message_ids=tuple(message_ids or ()),
+            turn_ids=(turn_id,) if turn_id else (),
+            tool_call_ids=tuple(tool_call_ids or ()),
+            after_message_id=after_message_id,
             interface_type=exec_context.interface_type,
             current_conversation_id=exec_context.conversation_id,
             current_user_id=exec_context.user_id,
@@ -323,18 +376,15 @@ async def get_message_history_tool(
             history_query=history_query,
         )
         _merge_message_history_taint(exec_context, returned_rows)
-        data = {
-            "search_mode": search_mode,
-            "scope": scope,
-            "query": query,
-            "result_count": len(rows),
-            "results": await db_context.message_history.hydrate_history_results(
+        return ToolResult(
+            data=await _history_response(
+                exec_context,
+                history_query,
                 rows,
-                include_context=include_context,
-                access_query=history_query,
-            ),
-        }
-        return ToolResult(data=data)
+                content_offset=content_offset,
+                max_content_chars=max_content_chars,
+            )
+        )
     except MessageHistoryAccessDeniedError as exc:
         return ToolResult(
             data={
@@ -360,6 +410,64 @@ async def get_message_history_tool(
                 "results": [],
             }
         )
+
+
+async def _history_response(
+    exec_context: ToolExecutionContext,
+    history_query: MessageHistoryQuery,
+    rows: list[MessageHistoryRow],
+    *,
+    content_offset: int,
+    max_content_chars: int,
+) -> dict[str, object]:
+    data: dict[str, object] = {
+        "search_mode": history_query.search_mode,
+        "scope": history_query.scope,
+        "query": history_query.query,
+        "result_count": len(rows),
+        "results": _bound_history_content(
+            await exec_context.db_context.message_history.hydrate_history_results(
+                rows,
+                include_context=history_query.include_context,
+                access_query=history_query,
+            ),
+            offset=max(content_offset, 0),
+            limit=min(max(max_content_chars, 1), MAX_HISTORY_CONTENT_CHARS),
+        ),
+    }
+    if (
+        history_query.is_exact_lookup
+        and history_query.search_mode == "structured"
+        and len(rows) >= min(max(history_query.limit, 1), MAX_HISTORY_RESULTS)
+    ):
+        data["next_after_message_id"] = rows[-1]["internal_id"]
+    return data
+
+
+def _bound_history_content(
+    results: list[MessageHistorySummary], *, offset: int, limit: int
+) -> list[MessageHistorySummary]:
+    """Each result's content and tool-call arguments cut to ``limit`` characters
+    from ``offset``.
+
+    A row that was cut reports its full ``content_length``, and a call its full
+    ``arguments_length``, so the model can read on with a larger offset.
+    """
+    for result in results:
+        content = result["content"]
+        if content is not None and (offset > 0 or len(content) > limit):
+            result["content"] = content[offset : offset + limit]
+            result["content_offset"] = offset
+            result["content_length"] = len(content)
+        for tool_call in result["tool_calls"]:
+            arguments = tool_call["arguments"]
+            text = arguments if isinstance(arguments, str) else json.dumps(arguments)
+            if offset > 0 or len(text) > limit:
+                tool_call["arguments"] = text[offset : offset + limit]
+                tool_call["arguments_length"] = len(text)
+        if "context" in result:
+            _bound_history_content(result["context"], offset=offset, limit=limit)
+    return results
 
 
 async def _execute_message_history_query(

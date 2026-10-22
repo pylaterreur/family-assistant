@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from family_assistant.tools.types import ToolDefinition
 
 NOW = datetime(2026, 10, 5, 12, tzinfo=UTC)
-STUB = "[Called web_fetch at 2026-10-05 12:00; get_message_history retrieves"
+STUB = '[Tool calls at 2026-10-05 12:00 compacted; get_message_history(turn_id="t")'
 ANSWER = "Here is what I found."
 
 
