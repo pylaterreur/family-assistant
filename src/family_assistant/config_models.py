@@ -2492,6 +2492,18 @@ class AppConfig(BaseSettings):
                     f"{', '.join(unknown_profiles)}."
                 )
                 raise ValueError(msg)
+            remote = sorted(
+                profile.id
+                for profile in self.service_profiles
+                if profile.remote_a2a and profile.id in experiment.profiles
+            )
+            if remote:
+                msg = (
+                    f"Experiment '{experiment.id}' names remote profiles, whose "
+                    f"turns run elsewhere and cannot be assigned an arm: "
+                    f"{', '.join(remote)}."
+                )
+                raise ValueError(msg)
             if not experiment.enabled:
                 continue
             covered: list[str | None] = list(experiment.tiers) or [None]

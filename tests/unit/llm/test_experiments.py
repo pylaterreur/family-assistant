@@ -10,6 +10,7 @@ from family_assistant.config_models import (
     AppConfig,
     ExperimentConfig,
     ModelTierConfig,
+    RemoteA2AConfig,
     RetryModelConfig,
     ServiceProfile,
 )
@@ -242,6 +243,24 @@ def test_a_covered_tier_that_is_not_a_tier_is_rejected() -> None:
                     profiles=["default_assistant"],
                     tiers=["frontier"],
                     arms={"argon": 1, "opus": 1},
+                )
+            ],
+        )
+
+
+def test_an_experiment_on_a_remote_profile_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="remote profiles.*: agent"):
+        AppConfig(
+            model_tiers=_TIERS,
+            service_profiles=[
+                ServiceProfile(
+                    id="agent",
+                    remote_a2a=RemoteA2AConfig(agent_url="https://example.invalid/a2a"),
+                )
+            ],
+            experiments=[
+                ExperimentConfig(
+                    id="exp", profiles=["agent"], arms={"argon": 1, "opus": 1}
                 )
             ],
         )
