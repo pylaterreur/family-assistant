@@ -18,7 +18,6 @@ extension EnvironmentValues {
 struct ChatEntryView: View {
     let authManager: AuthManager
     let route: ChatRoute
-    var tabReselections = 0
 
     @State private var discovery: HomeDiscovery
     @State private var hasRefreshed = false
@@ -28,10 +27,9 @@ struct ChatEntryView: View {
     /// What the conversation list held when Retry found Home.
     @State private var inheritedDraft: ChatDraft?
 
-    init(authManager: AuthManager, route: ChatRoute, tabReselections: Int = 0) {
+    init(authManager: AuthManager, route: ChatRoute) {
         self.authManager = authManager
         self.route = route
-        self.tabReselections = tabReselections
         _discovery = State(initialValue: HomeDiscovery(
             serverURL: authManager.validatedServerURL()?.absoluteString,
             lookUp: { try await ChatAPIClient(authManager: authManager).getHome() },
@@ -73,8 +71,7 @@ struct ChatEntryView: View {
                     authManager: authManager,
                     route: route,
                     homeConversationID: homeConversationID,
-                    inheritedDraft: inheritedDraft,
-                    tabReselections: tabReselections
+                    inheritedDraft: inheritedDraft
                 )
                 .id(homeConversationID)
             }
@@ -228,19 +225,15 @@ struct HomeRootView: View {
     @State private var showsSwitcher = false
     let authManager: AuthManager
     let route: ChatRoute
-    /// Taps on the already-selected Chat tab.
-    let tabReselections: Int
 
     init(
         authManager: AuthManager,
         route: ChatRoute,
         homeConversationID: String,
-        inheritedDraft: ChatDraft? = nil,
-        tabReselections: Int = 0
+        inheritedDraft: ChatDraft? = nil
     ) {
         self.authManager = authManager
         self.route = route
-        self.tabReselections = tabReselections
         let model = ChatViewModel(
             authManager: authManager,
             conversationID: homeConversationID,
@@ -342,16 +335,6 @@ struct HomeRootView: View {
         }
         .onChange(of: route) { _, newRoute in
             apply(newRoute)
-        }
-        .onChange(of: tabReselections) {
-            // The system answers a tap on the selected tab by scrolling the
-            // list to its top, which in a chat is its oldest loaded message.
-            // Home's newest message is the useful place to land. Over a pushed
-            // conversation the same tap pops back to Home, which keeps its
-            // place.
-            if path.isEmpty {
-                viewModel.scrollToLatest()
-            }
         }
         .onChange(of: showsSwitcher || store.presentedSheet != nil) { _, covered in
             viewModel.setCoveredBySheet(covered)

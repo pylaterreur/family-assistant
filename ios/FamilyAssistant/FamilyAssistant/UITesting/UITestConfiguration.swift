@@ -258,9 +258,6 @@ private final class UITestBackendURLProtocol: URLProtocol {
             startedThreads = []
             if threadsEnabled {
                 chatMessages.merge(UITestThreadsFixture.conversations) { current, _ in current }
-                if ProcessInfo.processInfo.environment["FAMILY_ASSISTANT_UITEST_LONG_HOME"] == "1" {
-                    chatMessages[UITestThreadsFixture.homeID, default: []] += UITestThreadsFixture.longHomeTail
-                }
             }
         }
     }
@@ -1333,34 +1330,6 @@ private enum UITestThreadsFixture {
             echoMessageID: 5
         ),
     ]
-
-    /// Turns after the fixture's own, so Home is taller than the screen: the
-    /// first of them is off screen once Home has landed at its newest message.
-    static var longHomeTail: [UITestChatMessage] {
-        (1 ... 12).flatMap { turn in
-            let minute = String(format: "%02d", 20 + turn)
-            return [
-                UITestChatMessage(
-                    internalID: 100 + turn * 2,
-                    role: "user",
-                    content: "Reminder question \(turn)",
-                    timestamp: "2026-06-08T09:\(minute):00Z",
-                    toolCalls: nil,
-                    toolCallID: nil,
-                    attachments: nil
-                ),
-                UITestChatMessage(
-                    internalID: 101 + turn * 2,
-                    role: "assistant",
-                    content: "Reminder answer \(turn)",
-                    timestamp: "2026-06-08T09:\(minute):01Z",
-                    toolCalls: nil,
-                    toolCallID: nil,
-                    attachments: nil
-                ),
-            ]
-        }
-    }
 
     static var conversations: [String: [UITestChatMessage]] {
         [

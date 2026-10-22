@@ -5989,11 +5989,6 @@ final class ChatViewModel {
     /// right after a send. See docs/design/ios-chat-layout-watchdog-crash.md.
     private(set) var scrollToLatestRequestID = 0
 
-    /// Show the newest message, wherever the reader has scrolled to.
-    func scrollToLatest() {
-        requestScrollToLatest()
-    }
-
     /// Request an unconditional scroll to the newest message on the next render.
     private func requestScrollToLatest() {
         displayedMessageNewerOffset = 0

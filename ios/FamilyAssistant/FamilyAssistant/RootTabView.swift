@@ -11,10 +11,7 @@ struct RootTabView: View {
     let onLogout: () -> Void
 
     var body: some View {
-        TabView(selection: Binding(
-            get: { appRouter.selectedTab },
-            set: { appRouter.selectTab($0) }
-        )) {
+        TabView(selection: $appRouter.selectedTab) {
             chatTab
             .tabItem { Label("Chat", systemImage: "message") }
             .tag(AppTab.chat)
@@ -67,8 +64,7 @@ struct RootTabView: View {
         } else {
             ChatEntryView(
                 authManager: authManager,
-                route: appRouter.chatSelection,
-                tabReselections: appRouter.chatTabReselections
+                route: appRouter.chatSelection
             )
         }
     }

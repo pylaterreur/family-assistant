@@ -33,18 +33,6 @@ final class RouteTests: XCTestCase {
         XCTAssertEqual(router.selectedTab, .chat)
         XCTAssertEqual(router.chatSelection.conversationID, "abc")
     }
-    func testOnlyTappingTheSelectedChatTabCountsAsAReselection() {
-        let router = AppRouter()
-        router.selectTab(.chat)
-        XCTAssertEqual(router.chatTabReselections, 1)
-
-        router.selectTab(.notes)
-        router.selectTab(.notes)
-        router.selectTab(.chat)
-        XCTAssertEqual(router.chatTabReselections, 1, "Arriving at Chat from another tab is not a reselection.")
-        XCTAssertEqual(router.selectedTab, .chat)
-    }
-
     func testWatchComplicationLaunchesVoice() {
         XCTAssertTrue(WatchVoiceLaunch.opensVoice(WatchVoiceLaunch.url))
     }
