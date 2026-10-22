@@ -1195,21 +1195,20 @@ GROUP BY 1;
 
 A delegated run's reply is not shown to the person, so its rating sits on the turn that delivered
 it: the delegating turn when the run finished inline, or a later wake turn when it was handed off.
-The wake turn is not recorded on the run, so the query below rates inline runs only and counts
-outcomes for all of them:
+The wake turn is not recorded on the run, so the query below rates inline runs only. It counts
+outcomes for every run from the arm persisted on the run when it was queued, so a run that failed
+before it started is counted too:
 
 ```sql
-SELECT mh.reasoning_info->>'experiment_arm' AS arm,
+SELECT dr.model_selection_json->>'tier' AS arm,
        count(DISTINCT dr.delegation_id) AS runs,
        count(DISTINCT dr.delegation_id) FILTER (WHERE dr.status = 'failed') AS failed,
        count(DISTINCT f.id) FILTER (WHERE f.rating = 'up') AS up,
        count(DISTINCT f.id) FILTER (WHERE f.rating = 'down') AS down
-FROM message_history mh
-JOIN delegation_runs dr ON dr.subconversation_id = mh.subconversation_id
+FROM delegation_runs dr
 LEFT JOIN turn_feedback f
        ON f.turn_id = dr.source_turn_id AND dr.handed_off_at IS NULL
-WHERE mh.role IN ('assistant', 'error')
-  AND mh.reasoning_info->>'experiment_id' = 'browser-argon-vs-sol-2026-10'
+WHERE dr.model_selection_json->>'experiment_id' = 'browser-argon-vs-sol-2026-10'
 GROUP BY 1;
 ```
 
