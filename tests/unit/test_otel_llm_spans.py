@@ -414,6 +414,7 @@ class TestRetryingLLMClientSpans:
                 messages: list[LLMMessage],
                 tools: list[ToolDefinition] | None = None,
                 tool_choice: str | None = "auto",
+                history_prefix_len: int | None = None,
             ) -> AsyncIterator[LLMStreamEvent]:
                 async def _stream() -> AsyncIterator[LLMStreamEvent]:
                     yield LLMStreamEvent(type="content", content="partial")
@@ -490,6 +491,7 @@ class TestRetryingLLMClientSpans:
                 messages: list[LLMMessage],
                 tools: list[ToolDefinition] | None = None,
                 tool_choice: str | None = "auto",
+                history_prefix_len: int | None = None,
             ) -> AsyncIterator[LLMStreamEvent]:
                 async def _stream() -> AsyncIterator[LLMStreamEvent]:
                     raise ProviderConnectionError(

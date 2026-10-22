@@ -910,6 +910,7 @@ class AnthropicClient(BaseLLMClient):
         activations: Mapping[str, Sequence[str]] | None = None,
         *,
         cache_conversation: bool,
+        history_prefix_len: int | None = None,
         # ast-grep-ignore: no-dict-any - MessageParam TypedDict incompatible with dynamic content merging in _merge_consecutive_roles
     ) -> tuple[str | list[TextBlockParam] | None, list[dict[str, Any]]]:
         """Convert typed messages to Anthropic API format.
@@ -921,6 +922,15 @@ class AnthropicClient(BaseLLMClient):
         set it: a breakpoint is a cache write billed above the input price, and
         a one-shot request (a tool-call review, a summary) writes an entry
         nothing ever reads.
+
+        ``history_prefix_len`` is how many leading ``messages`` are settled
+        history rather than the turn being run, and earns a second, one-hour
+        breakpoint where it ends. Without it the tail's five-minute breakpoint
+        is the only one in the conversation, so a reply arriving between five
+        and sixty minutes later rewrites the whole history rather than reading
+        it: 16.2M such write tokens bought 1.5M reads over seven weeks of
+        production traffic. The hour-long entry moves only when a turn ends, so
+        within a turn it is read rather than rewritten.
 
         Key differences from OpenAI:
         - Leading system messages are extracted to the top-level `system`
@@ -937,12 +947,27 @@ class AnthropicClient(BaseLLMClient):
         stable_prefix_len: int | None = None
         # ast-grep-ignore: no-dict-any - MessageParam TypedDict incompatible with dynamic content merging in _merge_consecutive_roles
         api_messages: list[dict[str, Any]] = []
+        # The history prefix's breakpoint is placed on the block that ends it,
+        # before the merge below, because merging concatenates content lists and
+        # leaves each block -- and its `cache_control` -- where it was. An index
+        # into `api_messages` would not survive that, nor the tool-addition
+        # messages inserted after it.
+        history_boundary = (
+            history_prefix_len - 1
+            if cache_conversation
+            and history_prefix_len is not None
+            # Marking the final message would collide with the trailing
+            # breakpoint: a prefix with no turn after it has nothing to separate.
+            and 0 < history_prefix_len < len(messages)
+            else None
+        )
         # The newest message that is conversation rather than scaffolding: the
-        # cache breakpoint goes at its end (see below).
+        # trailing breakpoint goes at its end (see below).
         # ast-grep-ignore: no-dict-any - MessageParam TypedDict incompatible with dynamic content merging in _merge_consecutive_roles
         breakpoint_message: dict[str, Any] | None = None
+        breakpoint_index: int | None = None
 
-        for msg in messages:
+        for index, msg in enumerate(messages):
             converted_before = len(api_messages)
             if isinstance(msg, SystemMessage) and not api_messages:
                 if not system_parts:
@@ -1024,6 +1049,15 @@ class AnthropicClient(BaseLLMClient):
 
             if len(api_messages) > converted_before and not is_turn_scaffolding(msg):
                 breakpoint_message = api_messages[-1]
+                breakpoint_index = index
+
+            if index == history_boundary and api_messages:
+                # An hour, not five minutes: this block ends the settled history,
+                # which the next turn re-sends unchanged after however long the
+                # person takes to reply. A one-hour write costs 2x input against
+                # 1.25x, and it moves only once per turn, so a single read of it
+                # repays the difference.
+                self._mark_cache_breakpoint(api_messages[-1], ttl="1h")
 
         # Merge consecutive same-role messages (Anthropic requires alternating roles)
         api_messages = self._merge_consecutive_roles(api_messages)
@@ -1039,7 +1073,11 @@ class AnthropicClient(BaseLLMClient):
         # tool-addition message is inserted after this point and never carries
         # one. Merging keeps the content blocks themselves, so a block marked on
         # a message merged into its neighbour stays marked.
-        if cache_conversation and breakpoint_message is not None:
+        if (
+            cache_conversation
+            and breakpoint_message is not None
+            and breakpoint_index != history_boundary
+        ):
             self._mark_cache_breakpoint(breakpoint_message)
 
         system_blocks = self._build_system_blocks(system_parts, stable_prefix_len)
@@ -1095,8 +1133,15 @@ class AnthropicClient(BaseLLMClient):
     def _mark_cache_breakpoint(
         # ast-grep-ignore: no-dict-any - MessageParam TypedDict incompatible with the dynamic content this inspects
         api_message: dict[str, Any],
+        ttl: str | None = None,
     ) -> None:
         """Put a breakpoint at the end of *api_message*, if it can carry one.
+
+        ``ttl`` is the breakpoint's lifetime; ``None`` is the API default of five
+        minutes. A block that already carries a breakpoint is left alone: the
+        position is already a read point, and the only caller that can collide
+        is the trailing breakpoint landing on the history boundary, where the
+        longer-lived entry is the one worth keeping.
 
         String content is left alone rather than wrapped into a one-element block
         list: a message that goes out as a bare string on one request and a list
@@ -1119,8 +1164,13 @@ class AnthropicClient(BaseLLMClient):
                 continue
             if block.get("type") in _THINKING_BLOCK_TYPES:
                 continue
+            if block.get("cache_control") is not None:
+                return
+            cache_control: dict[str, str] = {"type": "ephemeral"}
+            if ttl is not None:
+                cache_control["ttl"] = ttl
             # ast-grep-ignore: no-dict-any - block is a provider TypedDict at type level, a plain dict at runtime
-            cast("dict[str, Any]", block)["cache_control"] = {"type": "ephemeral"}
+            cast("dict[str, Any]", block)["cache_control"] = cache_control
             return
 
     @staticmethod
@@ -1333,6 +1383,7 @@ class AnthropicClient(BaseLLMClient):
         tool_choice: str | None,
         *,
         streaming: bool,
+        history_prefix_len: int | None = None,
         # ast-grep-ignore: no-dict-any - kwargs dict for client.messages.create(**params) requires heterogeneous values
     ) -> dict[str, Any]:
         """Convert a typed request into messages.create / messages.stream kwargs.
@@ -1356,11 +1407,30 @@ class AnthropicClient(BaseLLMClient):
             for message in messages
             if isinstance(message, ToolMessage) and message.activated_tools
         }
-        processed_messages = self._process_tool_messages(list(messages))
+        # Attachment processing can append an injection message per attachment,
+        # so the caller's index into `messages` is not an index into the
+        # processed list. Each message's processing depends only on itself, so
+        # processing the two sides separately yields the same concatenation and
+        # the translated boundary falls out as the length of the first side.
+        processed_boundary: int | None = None
+        if history_prefix_len is not None and 0 < history_prefix_len < len(messages):
+            processed_prefix = self._process_tool_messages(
+                list(messages[:history_prefix_len])
+            )
+            processed_messages = [
+                *processed_prefix,
+                *self._process_tool_messages(list(messages[history_prefix_len:])),
+            ]
+            processed_boundary = len(processed_prefix)
+        else:
+            processed_messages = self._process_tool_messages(list(messages))
         # Only the agent loop streams, and only the agent loop sends a next
         # request that extends this one; a non-streaming call is one-shot.
         system_blocks, api_messages = self._convert_messages_to_anthropic_format(
-            processed_messages, activations=activations, cache_conversation=streaming
+            processed_messages,
+            activations=activations,
+            cache_conversation=streaming,
+            history_prefix_len=processed_boundary,
         )
         params = self._build_request_params(
             api_messages, system_blocks, tools, tool_choice, streaming=streaming
@@ -1782,16 +1852,20 @@ class AnthropicClient(BaseLLMClient):
         messages: Sequence[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
+        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         """Generate streaming response using Anthropic API."""
         self._validate_user_input(messages)
-        return self._generate_response_stream(messages, tools, tool_choice)
+        return self._generate_response_stream(
+            messages, tools, tool_choice, history_prefix_len
+        )
 
     async def _generate_response_stream(
         self,
         messages: Sequence[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
+        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         """Internal async generator for streaming responses."""
         span = tracer.start_span("llm.provider.generate_stream")
@@ -1813,7 +1887,11 @@ class AnthropicClient(BaseLLMClient):
 
             async def stream_events() -> AsyncGenerator[LLMStreamEvent]:
                 params = self._assemble_request(
-                    messages, tools, tool_choice, streaming=True
+                    messages,
+                    tools,
+                    tool_choice,
+                    streaming=True,
+                    history_prefix_len=history_prefix_len,
                 )
 
                 # Check for VCR replay mode
