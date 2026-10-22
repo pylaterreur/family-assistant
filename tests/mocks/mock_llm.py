@@ -103,6 +103,8 @@ class RuleBasedMockLLMClient(BaseLLMClient, LLMInterface):
         """
         self.rules: list[Rule] = list(rules)
         self.structured_rules: list[StructuredRule] = list(structured_rules or [])
+        # One entry per streamed call, in order; see generate_response_stream.
+        self.history_prefix_lens: list[int | None] = []
         self.model = model_name  # For getattr(llm_client, "model", "unknown")
         # Optional injected gate: when provided, generate_response awaits this
         # event before producing a reply, letting a test hold a response "in
@@ -274,8 +276,15 @@ class RuleBasedMockLLMClient(BaseLLMClient, LLMInterface):
         messages: list[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
+        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
-        """Mock streaming implementation that yields events based on generate_response."""
+        """Mock streaming implementation that yields events based on generate_response.
+
+        ``history_prefix_len`` is recorded per call rather than acted on: it
+        shapes cache breakpoints, which no mock writes, but a test asserting
+        where the real boundary lands needs to see what the loop passed.
+        """
+        self.history_prefix_lens.append(history_prefix_len)
         # Validate user input before processing
         self._validate_user_input(messages)
 

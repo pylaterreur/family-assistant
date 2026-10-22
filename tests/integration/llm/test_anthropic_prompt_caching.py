@@ -2,8 +2,9 @@
 
 The unit tests pin which breakpoints the client sends. This checks that the API
 accepts them on the agent loop's real request shapes -- a one-hour breakpoint
-over tools and the stable system prompt, five-minute ones on the conversation,
-deferred tools surfaced by a ``tool_addition`` system message, under the
+over tools and the stable system prompt, a second one-hour breakpoint at the end
+of the settled history, a five-minute one on the turn's tail, deferred tools
+surfaced by a ``tool_addition`` system message, under the
 thinking-binding and tool-changes betas -- and that each lands in the TTL
 bucket it was meant for. Replaying thinking blocks is covered by
 ``test_anthropic_streaming_thinking_round_trip``.
@@ -284,3 +285,107 @@ async def test_mid_conversation_notice_keeps_history_cached(
     assert one_hour_prefix > MIN_CACHEABLE_TOKENS
     assert getattr(second, "diagnostics", None) is None
     assert (second.usage.cache_read_input_tokens or 0) > one_hour_prefix
+
+
+@pytest.mark.no_db
+@pytest.mark.llm_integration
+@pytest.mark.vcr(before_record_response=sanitize_response)
+@pytest.mark.usefixtures("require_cassette")
+async def test_settled_history_is_cached_for_an_hour(
+    llm_record_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The settled history lands in the one-hour bucket, and the next turn reads it.
+
+    Three breakpoints in one request -- tools and system prompt (1h), the end of
+    the settled history (1h), this turn's tail (5m) -- which the API accepts
+    only because the longer-lived ones come first. The API's own account of
+    the first turn then shows the hour-long write reaching past the system
+    prompt into the history, which is what keeps that history readable for a
+    reply arriving after the five-minute tail has expired. The next turn moves
+    the history marker forward by one turn: it reads the earlier history back
+    and puts only the new increment under the hour.
+
+    A one-shot call last measures the system prompt alone, since it carries only
+    that breakpoint.
+
+    Recorded cold. Re-recording within an hour of the previous recording finds
+    the entries warm, where they are read rather than written; change the
+    stable prompt to record cold again.
+    """
+    if llm_record_mode != "replay" and not os.getenv("ANTHROPIC_API_KEY"):
+        pytest.skip("Recording this test requires ANTHROPIC_API_KEY")
+
+    client = AnthropicClient(
+        api_key=os.getenv("ANTHROPIC_API_KEY", "test-anthropic-key"),
+        model=MODEL,
+        model_parameters={MODEL: {"output_config": {"effort": "low"}}},
+    )
+
+    responses: list[Message] = []
+    create: Callable[..., Awaitable[Message]] = client.client.messages.create
+
+    async def recording_create(**kwargs: Any) -> Message:  # noqa: ANN401 # forwards the SDK's untyped create() kwargs
+        response = await create(**kwargs)
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr(client.client.messages, "create", recording_create)
+
+    stable = "History breakpoint test.\n\n" + STABLE_SYSTEM_PROMPT
+    settled: list[LLMMessage] = [
+        SystemMessage(content=stable, stable_prefix_len=len(stable)),
+        UserMessage(content="Which circuit is room 12 on? Answer in one line."),
+        AssistantMessage(content="Room number 12 is on circuit 5."),
+    ]
+    turn = [*settled, UserMessage(content="And room 13? Answer in one line.")]
+    events = [
+        event
+        async for event in client.generate_response_stream(
+            turn, history_prefix_len=len(settled)
+        )
+    ]
+    done = next(e for e in events if e.type == "done")
+    assert done.metadata is not None
+    answer = "".join(e.content or "" for e in events if e.type == "content")
+
+    # The next turn: the previous one is now settled history.
+    settled = [
+        *turn,
+        AssistantMessage(
+            content=answer or "Room number 13 is on circuit 6.",
+            provider_metadata=done.metadata.get("provider_metadata"),
+        ),
+    ]
+    next_turn = [*settled, UserMessage(content="And room 14? Answer in one line.")]
+    events = [
+        event
+        async for event in client.generate_response_stream(
+            next_turn, history_prefix_len=len(settled)
+        )
+    ]
+    assert any(e.type == "done" for e in events)
+
+    await client.generate_response(next_turn)
+    await client.close()
+
+    first, second, one_shot = (response.usage for response in responses)
+    system_prefix = one_shot.cache_read_input_tokens or 0
+    assert system_prefix > MIN_CACHEABLE_TOKENS
+    assert one_shot.cache_creation_input_tokens == 0
+
+    assert first.cache_creation is not None
+    first_hour = first.cache_creation.ephemeral_1h_input_tokens
+    # Cold, both one-hour entries are written: the hour reaches past the system
+    # prompt into the history.
+    assert first_hour > system_prefix
+    # This turn's own tail is all that goes under five minutes.
+    assert 0 < first.cache_creation.ephemeral_5m_input_tokens < first_hour
+
+    assert second.cache_creation is not None
+    second_read = second.cache_read_input_tokens or 0
+    assert getattr(responses[1], "diagnostics", None) is None
+    # The earlier history is read back, not rewritten...
+    assert second_read >= first_hour
+    # ...and only the turn that just settled is new under the hour.
+    assert 0 < second.cache_creation.ephemeral_1h_input_tokens < second_read

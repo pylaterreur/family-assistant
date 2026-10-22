@@ -128,6 +128,7 @@ class MockLLMWithThoughtSignatures:
         messages: Sequence[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
+        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         """Streaming version - delegates to async generator."""
         return self._generate_response_stream(messages, tools, tool_choice)
@@ -221,6 +222,7 @@ class MockLLMWithThoughtSignaturesNoToolCalls:
         messages: Sequence[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
+        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         """Streaming version - delegates to async generator."""
         return self._generate_response_stream(messages, tools, tool_choice)

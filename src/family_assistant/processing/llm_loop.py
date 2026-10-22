@@ -272,6 +272,7 @@ class LLMStreamingLoop:
         allow_quiet_end: bool = False,
         completed_iterations: int = 0,
         context_length_compactor: ContextLengthCompactor | None = None,
+        history_prefix_len: int | None = None,
     ) -> AsyncIterator[tuple[LLMStreamEvent, LLMMessage | None]]:
         """Run a turn, attributing its telemetry to this profile.
 
@@ -283,6 +284,7 @@ class LLMStreamingLoop:
         inner = self._run_stream(
             db_context=db_context,
             messages=messages,
+            history_prefix_len=history_prefix_len,
             interface_type=interface_type,
             conversation_id=conversation_id,
             user_name=user_name,
@@ -352,6 +354,7 @@ class LLMStreamingLoop:
         allow_quiet_end: bool = False,
         completed_iterations: int = 0,
         context_length_compactor: ContextLengthCompactor | None = None,
+        history_prefix_len: int | None = None,
         # AsyncGenerator rather than AsyncIterator: run_stream closes this
         # deterministically, and only the generator protocol offers aclose().
     ) -> AsyncGenerator[tuple[LLMStreamEvent, LLMMessage | None]]:
@@ -735,6 +738,7 @@ class LLMStreamingLoop:
                     tool_choice_for_attempt: str,
                     content_for_attempt: list[str],
                     tool_calls_for_attempt: list[ToolCallItem],
+                    history_prefix_len_for_attempt: int | None,
                 ) -> AsyncGenerator[LLMStreamEvent]:
                     nonlocal done_provider_metadata, final_reasoning_info
                     nonlocal done_external_read
@@ -742,6 +746,7 @@ class LLMStreamingLoop:
                         messages=messages_for_attempt,
                         tools=tools_for_attempt,
                         tool_choice=tool_choice_for_attempt,
+                        history_prefix_len=history_prefix_len_for_attempt,
                     ):
                         # Yield content events as they come
                         if event.type == "content" and event.content:
@@ -815,6 +820,7 @@ class LLMStreamingLoop:
                     tool_choice_mode,
                     accumulated_content,
                     tool_calls_from_stream,
+                    history_prefix_len,
                 )
                 retry_empty_response = False
                 try:
@@ -848,6 +854,14 @@ class LLMStreamingLoop:
                     # adapters then stop offering it, so the loop must stop
                     # counting it as active or re-activating it records nothing.
                     activated_on_demand = activated_tool_names(messages)
+                    # It also resizes the history prefix, so the boundary the
+                    # caller measured no longer points at the end of it. The
+                    # rest of this turn goes without the long-lived breakpoint:
+                    # an emergency compaction has just rewritten the prefix the
+                    # breakpoint would have named, so there is nothing left to
+                    # read back, and a stale boundary would mark a block in the
+                    # middle of the turn.
+                    history_prefix_len = None
                     context_retry_attempted = True
                     continue
 
