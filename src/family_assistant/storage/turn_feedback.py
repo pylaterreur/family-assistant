@@ -9,8 +9,8 @@ turn_feedback_table = Table(
     "turn_feedback",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    # Not a foreign key: message_history has no unique turn key, and a turn
-    # moved into a thread keeps its turn_id, so the rating follows it.
+    # Not a foreign key: message_history has no unique turn key. Moving a
+    # turn into a thread re-keys its ratings to the copy's turn id.
     Column("turn_id", String(36), nullable=False, index=True),
     Column("user_id", String(255), nullable=False),
     Column("rating", String(8), nullable=False),

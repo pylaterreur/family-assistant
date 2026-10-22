@@ -71,6 +71,7 @@ from family_assistant.storage.message_history import (
 )
 from family_assistant.storage.repositories.base import BaseRepository
 from family_assistant.storage.tasks import TaskPriority
+from family_assistant.storage.turn_feedback import turn_feedback_table
 from family_assistant.storage.types import ConversationSummaryRow, MessageHistoryRow
 from family_assistant.storage.vector import delete_documents_by_source
 
@@ -2195,7 +2196,8 @@ class MessageHistoryRepository(BaseRepository):
         destination has already passed. The originals are then deleted, with
         the attachments recorded against them following their copies and the
         turn's search index record going with them -- the copy is indexed
-        afresh under its own turn id -- and a marker row, under the moved
+        afresh under its own turn id -- ratings of the turn are re-keyed to
+        the copy, and a marker row, under the moved
         turn's id, records in the source where the turn went. Atomic.
 
         Callers go through ``family_assistant.threads.boundary``.
@@ -2248,6 +2250,11 @@ class MessageHistoryRepository(BaseRepository):
                 raise missing
             await delete_documents_by_source(
                 txn, MESSAGE_HISTORY_SOURCE_TYPE, f"message_turn:{turn_id}"
+            )
+            await txn.execute(
+                update(turn_feedback_table)
+                .where(turn_feedback_table.c.turn_id == turn_id)
+                .values(turn_id=moved_turn_id)
             )
             result = await txn.execute(
                 insert(message_history_table)
@@ -2482,14 +2489,15 @@ class MessageHistoryRepository(BaseRepository):
     async def turn_has_reply_in_conversation(
         self, *, conversation_id: str, turn_id: str
     ) -> bool:
-        """Whether *turn_id* has an assistant row in *conversation_id* itself,
+        """Whether *turn_id* has a reply row in *conversation_id* itself,
         not in one of its delegated subconversations."""
         stmt = (
             select(message_history_table.c.internal_id)
             .where(
                 message_history_table.c.conversation_id == conversation_id,
                 message_history_table.c.turn_id == turn_id,
-                message_history_table.c.role == "assistant",
+                # A turn that ended in an error is shown as its reply.
+                message_history_table.c.role.in_(["assistant", "error"]),
                 message_history_table.c.subconversation_id.is_(None),
             )
             .limit(1)

@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from family_assistant.llm.messages import AssistantMessage, UserMessage
+from family_assistant.llm.messages import AssistantMessage, ErrorMessage, UserMessage
 from family_assistant.storage.database import Database
 from family_assistant.web.dependencies import get_current_user
 
@@ -121,3 +121,64 @@ async def test_rating_someone_elses_conversation_is_not_found(
     )
     assert response.status_code == 404
     assert await db.turn_feedback.get(turn_id=turn_id, user_id="someone_else") is None
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_ended_in_an_error_can_be_rated(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(db_engine)
+    conversation_id = str(uuid.uuid4())
+    turn_id = str(uuid.uuid4())
+    await db.message_history.add_message(
+        UserMessage.from_trusted_user(content="Book a table"),
+        interface_type="web",
+        conversation_id=conversation_id,
+        timestamp=datetime.now(UTC),
+        turn_id=turn_id,
+        user_id=OWNER,
+    )
+    await db.message_history.add_message(
+        ErrorMessage(content="Something went wrong."),
+        interface_type="web",
+        conversation_id=conversation_id,
+        timestamp=datetime.now(UTC),
+        turn_id=turn_id,
+        user_id=OWNER,
+    )
+
+    response = await api_test_client.put(
+        _feedback_url(conversation_id, turn_id), json={"rating": "down"}
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_moving_a_turn_carries_its_rating_to_the_copy(
+    api_test_client: AsyncClient, db_engine: AsyncEngine
+) -> None:
+    db = Database(db_engine)
+    conversation_id, turn_id = await _conversation_with_turn(db)
+    await api_test_client.put(
+        _feedback_url(conversation_id, turn_id), json={"rating": "up"}
+    )
+    destination_id = str(uuid.uuid4())
+
+    moved = await db.message_history.move_turn(
+        source_interface_type="web",
+        source_conversation_id=conversation_id,
+        turn_id=turn_id,
+        destination_conversation_id=destination_id,
+        destination_profile_id="default_assistant",
+        marker_content="Moved",
+        now=datetime.now(UTC),
+    )
+
+    copied_row = await db.message_history.get_row_by_internal_id(moved.copied_ids[0])
+    assert copied_row is not None
+    moved_turn_id = copied_row["turn_id"]
+    assert moved_turn_id is not None
+    assert await db.turn_feedback.get(turn_id=turn_id, user_id=OWNER) is None
+    carried = await db.turn_feedback.get(turn_id=moved_turn_id, user_id=OWNER)
+    assert carried is not None
+    assert carried.rating == "up"
