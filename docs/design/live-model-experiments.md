@@ -75,7 +75,9 @@ throws away the prompt cache. A delegated run is enrolled in its target profile'
 per delegation (its subconversation), and the tier a delegating model names counts as chosen. The
 arm is applied where a queued delegation's envelope is resolved, so it is part of the run's
 persisted authorization. A delegated reply is not shown to the person, so its rating is the one on
-the delegating turn, joined through `delegation_runs.source_turn_id`.
+the turn that delivered it. Only an inline run's delivering turn is recorded
+(`delegation_runs.source_turn_id`); a handed-off run is delivered on a wake turn the run does not
+record, so ratings are compared on inline runs and outcomes on all runs.
 
 An enrolled turn is not Auto-routed, so Auto shadow decisions are not collected on enrolled turns
 while an experiment runs. That is acceptable: both are evaluation tools and they should not stack.

@@ -1194,8 +1194,10 @@ WHERE mh.role IN ('assistant', 'error')
 GROUP BY 1;
 ```
 
-A delegated run's reply is not shown to the person, so its rating sits on the turn that delegated
-it. Compare those arms through `delegation_runs`:
+A delegated run's reply is not shown to the person, so its rating sits on the turn that delivered
+it: the delegating turn when the run finished inline, or a later wake turn when it was handed off.
+The wake turn is not recorded on the run, so the query below rates inline runs only and counts
+outcomes for all of them:
 
 ```sql
 SELECT mh.reasoning_info->>'experiment_arm' AS arm,
@@ -1205,7 +1207,8 @@ SELECT mh.reasoning_info->>'experiment_arm' AS arm,
        count(DISTINCT f.id) FILTER (WHERE f.rating = 'down') AS down
 FROM message_history mh
 JOIN delegation_runs dr ON dr.subconversation_id = mh.subconversation_id
-LEFT JOIN turn_feedback f ON f.turn_id = dr.source_turn_id
+LEFT JOIN turn_feedback f
+       ON f.turn_id = dr.source_turn_id AND dr.handed_off_at IS NULL
 WHERE mh.role IN ('assistant', 'error')
   AND mh.reasoning_info->>'experiment_id' = 'browser-argon-vs-sol-2026-10'
 GROUP BY 1;
