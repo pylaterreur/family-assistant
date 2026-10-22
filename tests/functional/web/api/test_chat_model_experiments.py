@@ -19,8 +19,10 @@ from family_assistant.config_models import ExperimentConfig
 from family_assistant.llm import LLMOutput
 from family_assistant.llm.experiments import assign_arm
 from family_assistant.llm.model_selection import (
+    ModelSelectionRequest,
     ModelTierEligibility,
     ModelTierOption,
+    ResolvedModelSelection,
 )
 from family_assistant.processing import ProcessingService
 from family_assistant.storage.database import Database
@@ -50,6 +52,7 @@ _ELIGIBILITY = ModelTierEligibility(
     ),
     auto=frozenset({"standard", "deep"}),
     delegation=(
+        ModelTierOption(id="frontier", label="Frontier"),
         ModelTierOption(id="argon", label="Argon"),
         ModelTierOption(id="opus", label="Opus"),
         ModelTierOption(id="fable", label="Fable"),
@@ -237,3 +240,73 @@ async def test_home_is_drawn_again_each_day(
         clock.advance(timedelta(days=1))
 
     assert served == set(ARMS)
+
+
+async def _resolve_delegated(
+    service: ProcessingService,
+    db_engine: AsyncEngine,
+    selection: ResolvedModelSelection,
+    subconversation_id: str,
+) -> ResolvedModelSelection:
+    return await service.resolve_model_selection_for_run(
+        selection,
+        db_context=Database(engine=db_engine),
+        interface_type="api",
+        conversation_id="exp-parent",
+        subconversation_id=subconversation_id,
+        trigger_content_parts=[{"type": "text", "text": "browse"}],
+        acting_user_id=None,
+    )
+
+
+@pytest.mark.parametrize("arm", ["argon", "opus"])
+async def test_a_delegated_run_is_drawn_per_delegation(
+    experiment_app: FastAPI, db_engine: AsyncEngine, arm: str
+) -> None:
+    """The arm goes into the envelope a queued run persists."""
+    service = cast("ProcessingService", experiment_app.state.processing_service)
+    subconversation_id = _conversation_on(arm)
+
+    resolved = await _resolve_delegated(
+        service,
+        db_engine,
+        ResolvedModelSelection.unselected("standard"),
+        subconversation_id,
+    )
+
+    assert resolved.tier == arm
+    assert resolved.source == "experiment"
+    assert resolved.experiment_id == EXPERIMENT
+    assert resolved.requested is None
+
+
+async def test_a_tier_a_delegating_model_names_is_covered_like_a_persons(
+    experiment_app: FastAPI, db_engine: AsyncEngine
+) -> None:
+    service = cast("ProcessingService", experiment_app.state.processing_service)
+    subconversation_id = _conversation_on("astra", FRONTIER_EXPERIMENT, FRONTIER_ARMS)
+
+    frontier = await _resolve_delegated(
+        service,
+        db_engine,
+        service.resolve_model_selection(
+            ModelSelectionRequest(tier="frontier", source="model")
+        ),
+        subconversation_id,
+    )
+    # No experiment names deep, and a chosen tier is not an unchosen turn.
+    deep = await _resolve_delegated(
+        service,
+        db_engine,
+        service.resolve_model_selection(
+            ModelSelectionRequest(tier="deep", source="model")
+        ),
+        subconversation_id,
+    )
+
+    assert frontier.tier == "astra"
+    assert frontier.experiment_id == FRONTIER_EXPERIMENT
+    # Only a person's choice is kept to be carried forward as sticky.
+    assert frontier.requested is None
+    assert deep.tier == "deep"
+    assert deep.experiment_id is None

@@ -1022,7 +1022,7 @@ request *is* the authorization. A model choosing it is not, which is why the shi
 `default_assistant` allows `standard`, `deep` and `frontier` but admits only `standard` and `deep`
 automatically.
 
-The shipped presets — `gpt_6_astra`, `gpt_6_sol`, `claude_opus_5_5`, `claude_fable_5_1`, `kimi_k3`
+The shipped presets — `gpt_6_astra`, `gpt_6_1_sol`, `claude_opus_5_5`, `claude_fable_5_1`, `kimi_k3`
 and `gemini_4_argon` — are listed once, in `default_profile_settings.delegation_model_tiers`, so a
 delegating model may pin any profile that has a tier to any of them without a confirmation ("run
 complex_tasks on Gemini 4 Argon"). A profile that names an inline model drops the inherited list,
@@ -1170,7 +1170,9 @@ experiments:
   `model_tier_requested`.
 - The arm is a hash of the experiment id and the conversation, so every turn of a conversation runs
   on the same arm and keeps its prompt cache. Home is drawn again each day in the profile's time
-  zone. Delegated runs and turns a person chose Auto for are not enrolled.
+  zone. A delegated run (for example `browser_profile` or `complex_tasks` reached through
+  `delegate_to_service`) is drawn per delegation, and a tier the delegating model names counts as
+  chosen, like a person's pick. Turns a person chose Auto for are not enrolled.
 - Enrolled replies record `model_tier_source: experiment`, `experiment_id` and `experiment_arm` in
   `message_history.reasoning_info`; the web and iOS badges show "Experiment" rather than the tier,
   so ratings are blind. An enrolled turn is not Auto-routed.
@@ -1188,6 +1190,27 @@ FROM message_history mh
 LEFT JOIN turn_feedback f ON f.turn_id = mh.turn_id
 WHERE mh.role IN ('assistant', 'error')
   AND mh.reasoning_info->>'experiment_id' = 'argon-vs-opus-2026-10'
+GROUP BY 1;
+```
+
+A delegated run's reply is not shown to the person, so its rating sits on the turn that delivered
+it: the delegating turn when the run finished inline, or a later wake turn when it was handed off.
+The wake turn is not recorded on the run, so the query below rates inline runs only. It counts
+outcomes for every run from the arm persisted on the run when it was queued, so a run that failed
+before it started is counted too. A thread's reply is shown to the person and rated where it
+appears, like any other turn, so thread runs are left to the query above:
+
+```sql
+SELECT dr.model_selection_json->>'tier' AS arm,
+       count(DISTINCT dr.delegation_id) AS runs,
+       count(DISTINCT dr.delegation_id) FILTER (WHERE dr.status = 'failed') AS failed,
+       count(DISTINCT f.id) FILTER (WHERE f.rating = 'up') AS up,
+       count(DISTINCT f.id) FILTER (WHERE f.rating = 'down') AS down
+FROM delegation_runs dr
+LEFT JOIN turn_feedback f
+       ON f.turn_id = dr.source_turn_id AND dr.handed_off_at IS NULL
+WHERE dr.run_kind = 'delegation'
+  AND dr.model_selection_json->>'experiment_id' = 'browser-argon-vs-sol-2026-10'
 GROUP BY 1;
 ```
 
@@ -4223,8 +4246,7 @@ Settings currently shipped in `defaults.yaml`:
 | ----------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `claude-opus-5`   | `thinking: {type: adaptive}`, `output_config: {effort: high}` | The recipe Opus 5 gets wherever a deployment names it; no shipped tier runs Opus 5 itself. Thinking on for the long tool loops it suits. See the comment in `defaults.yaml`.                                  |
 | `claude-opus-5-5` | `thinking: {type: adaptive}`, `output_config: {effort: high}` | The `deep` tier's primary, which `complex_tasks` runs on and the assistant and `engineer` reach by request. Restated rather than inherited from `claude-opus-5` because Opus 5.5 defaults to `medium` effort. |
-| `gpt-6-sol`       | `reasoning_effort: high`                                      | The `deep` tier's fallback, so it can afford to think longer.                                                                                                                                                 |
-| `gpt-5.6-terra`   | `reasoning_effort: medium`                                    | The fallback for `default_assistant` and `camera_analyst`, both of which answer interactively, where time-to-first-token is felt directly.                                                                    |
+| `gpt-6.1-sol`     | `reasoning_effort: high`                                      | The `deep` tier's fallback, so it can afford to think longer. The `browser` tier sets `medium` on its own entry.                                                                                              |
 
 `reasoning_effort` accepts `none`, `low`, `medium`, `high`, `xhigh` or `max` on GPT-6 and GPT-5.6
 models and defaults to `medium` when unset. Raising it trades latency and tokens for capability; it

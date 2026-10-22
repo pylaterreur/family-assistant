@@ -1782,6 +1782,46 @@ class TestLoadConfig:
             "operator_added": False,
         }
 
+    def test_experiment_on_a_shipped_profile_loads_beside_operator_profiles(
+        self, tmp_path: Path
+    ) -> None:
+        """Operator profiles merge by id, so the shipped ones still exist."""
+        defaults_file = tmp_path / "defaults.yaml"
+        defaults_file.write_text(
+            yaml.dump({
+                "model_tiers": {
+                    tier: {"chain": [{"provider": "openai", "model": tier}]}
+                    for tier in ("standard", "argon")
+                },
+                "service_profiles": [
+                    {"id": "default_assistant"},
+                    {"id": "coder"},
+                ],
+            })
+        )
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            yaml.dump({
+                "service_profiles": [{"id": "coder", "description": "Operator coder"}],
+                "experiments": [
+                    {
+                        "id": "exp",
+                        "profiles": ["default_assistant"],
+                        "arms": {"standard": 1, "argon": 1},
+                    }
+                ],
+            })
+        )
+
+        config = load_config(
+            defaults_file_path=str(defaults_file),
+            config_file_path=str(config_file),
+            prompts_file_path=str(tmp_path / "prompts.yaml"),
+            load_dotenv_file=False,
+        )
+
+        assert [e.profiles for e in config.experiments] == [["default_assistant"]]
+
     def test_reviewer_model_override_is_not_shadowed_by_shipped_retry(
         self, tmp_path: Path
     ) -> None:
