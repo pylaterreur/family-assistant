@@ -173,9 +173,7 @@ interactive work (reminders, confirmations, delegated runs, automations) ahead o
 ### reserved_task_worker_count
 
 Number of **reserved** workers, in addition to the general ones. A reserved worker runs interactive
-tasks only, so a burst of background work cannot delay a reminder or a confirmation. It also never
-runs a handler that parks waiting on another queued task (a delegated run waiting on a human
-confirmation), because holding one would occupy the capacity that has to run the task releasing it.
+tasks only, so a burst of background work cannot delay a reminder or a confirmation.
 
 | Property  | Value |
 | --------- | ----- |
@@ -184,18 +182,20 @@ confirmation), because holding one would occupy the capacity that has to run the
 | Sensitive | No    |
 | Example   | `2`   |
 
-**Capacity caveat:** a web thread's first turn still runs inside its worker, so one that asks for a
-human confirmation holds that worker until the decision arrives (up to its handler timeout). The
-default of two general workers and one reserved worker keeps the rest of the queue moving while it
-waits. Other delegated runs do not hold a worker; see `max_background_turns`.
+Background LLM turns -- delegated runs, a web thread's first turn, delegation follow-ups, scheduled
+callbacks and reminders, and memory reviews -- do not hold a worker while they run; see
+`max_background_turns`.
 
 ### max_background_turns
 
-How many delegated runs' turns may run at once. A delegated run's task only starts its turn and
-returns: the turn itself runs outside the task workers, so it neither occupies a worker nor is bound
-by a worker's handler timeout, and a turn cut off by a restart is resumed rather than failed. This
+How many background turns may run at once: delegated runs' turns, including a web thread's first
+turn, the follow-up turns that deliver a delegation's result, scheduled callbacks and reminders
+(including scripts' and automations' wakes), and memory reviews. None of them occupies a worker
+while it runs, and a turn cut off by a restart is resumed rather than failed. Delegated and
+follow-up turns run on budgets of their own rather than a worker's handler timeout; a callback or
+memory review still runs under its task's handler timeout, and is retried when it overruns. This
 bounds model and tool load. A run that finds every slot taken stays queued and tries again a few
-seconds later. See
+seconds later; a delivery is not held back, because its run was already admitted. See
 [docs/design/background-turns-off-the-task-worker.md](../design/background-turns-off-the-task-worker.md).
 
 | Property  | Value |

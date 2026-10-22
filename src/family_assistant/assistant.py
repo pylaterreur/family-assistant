@@ -3035,7 +3035,6 @@ class Assistant:
                     f"Task worker {worker.worker_id} appears stuck ({stuck_reason}), "
                     "cancelling and restarting..."
                 )
-                worker.mark_cancelled_as_stuck(stuck_reason)
                 worker_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await worker_task
@@ -3127,6 +3126,12 @@ class Assistant:
                 task.cancel()
             await asyncio.gather(*owned_tasks, return_exceptions=True)
             logger.info("Owned background tasks cancelled.")
+
+        # Turns no lease resumes -- callback and memory review tasks -- are
+        # stopped while the database is still up, so they can hand their
+        # tasks back to the queue.
+        if self.background_turns is not None:
+            await self.background_turns.cancel_all()
 
         # Only now that this process's workers are gone, so none of them can
         # claim a lease and be torn down with it.

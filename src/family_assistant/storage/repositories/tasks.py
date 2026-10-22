@@ -377,14 +377,11 @@ class TasksRepository(BaseRepository):
     ) -> bool:
         """Hand ``locked_by``'s claim on a task back to the queue, due at ``scheduled_at``.
 
-        For a claim whose worker is known to be gone before the stale-claim
-        cutoff says so -- its process stopped renewing a turn lease. A claim
-        some other worker has taken since (the stale-claim reclaim) is left
-        alone: that worker is still running it. The lost
-        attempt counts as a failed one, so work that keeps taking its process
-        down runs out of retries rather than looping; on its last attempt the
-        row is failed instead. Returns whether a claimed row was released; any
-        other row is left alone.
+        For a claim whose turn was stopped by its process shutting down, before
+        the stale-claim cutoff would notice. The task did not fail, so the
+        attempt is not counted against its retries. A claim some other worker
+        has taken since is left alone. Returns whether a claimed row was
+        released.
         """
         if scheduled_at.tzinfo is None:
             raise ValueError("scheduled_at must be timezone-aware")
@@ -396,14 +393,7 @@ class TasksRepository(BaseRepository):
                 tasks_table.c.locked_by == locked_by,
             )
             .values(
-                status=case(
-                    (
-                        tasks_table.c.retry_count >= tasks_table.c.max_retries,
-                        "failed",
-                    ),
-                    else_="pending",
-                ),
-                retry_count=tasks_table.c.retry_count + 1,
+                status="pending",
                 locked_by=None,
                 locked_at=None,
                 scheduled_at=scheduled_at.astimezone(UTC),
@@ -575,26 +565,13 @@ class TasksRepository(BaseRepository):
                     .values(
                         status="processing", locked_by=worker_id, locked_at=current_time
                     )
+                    # The claimed row itself: a worker can hold several claims
+                    # at once (turn tasks run on in the background), so "this
+                    # worker's newest claim" is not necessarily this one.
+                    .returning(tasks_table)
                 )
-
-                result = await txn.execute(update_stmt)
-                if result.rowcount > 0:
-                    # Successfully claimed a task, now fetch it
-                    fetch_stmt = (
-                        select(tasks_table)
-                        .where(
-                            tasks_table.c.locked_by == worker_id,
-                            tasks_table.c.status == "processing",
-                            tasks_table.c.task_type.in_(task_types),
-                        )
-                        .order_by(tasks_table.c.locked_at.desc())
-                        .limit(1)
-                    )
-                    task_row = await txn.fetch_one(fetch_stmt)
-                    if task_row:
-                        return cast("TaskDict", dict(task_row))
-
-                return None
+                task_row = (await txn.execute(update_stmt)).one_or_none()
+                return cast("TaskDict", task_row) if task_row else None
 
         return await self._db.atomic(_claim)
 

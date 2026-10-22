@@ -86,9 +86,6 @@ class TurnResumePayload(BaseModel):
     attempt: int = 0
     # The delegation a wake turn reports on, for the resumer that redelivers it.
     delegation_id: str | None = None
-    # The worker whose claim on the delivery task runs a wake turn, so the
-    # resumer releases that claim and never a later one.
-    claimed_by: str | None = None
     # Which of a delegated run's turns this is: the one answering its request,
     # or the one that follows its own delegations finishing.
     delegated_turn: Literal["request", "continuation"] | None = None
