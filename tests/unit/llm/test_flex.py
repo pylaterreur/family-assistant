@@ -47,6 +47,7 @@ class TierRecordingClient:
     ) -> None:
         self.model = "gemini-3.8-flash"
         self.tiers: list[ServiceTier] = []
+        self.history_prefix_lens: list[int | None] = []
         self._behaviour = behaviour
         self._stream_events = stream_events
         self._hold_flex = hold_flex
@@ -72,7 +73,9 @@ class TierRecordingClient:
         messages: Sequence[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
+        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
+        self.history_prefix_lens.append(history_prefix_len)
         tier = current_service_tier()
         self.tiers.append(tier)
         if tier == "flex" and self._hold_flex is not None:
@@ -369,3 +372,15 @@ async def test_closing_the_wrapper_closes_the_wrapped_client() -> None:
     await _flex(inner).close()
 
     assert inner.closed
+
+
+@pytest.mark.asyncio
+async def test_the_history_boundary_reaches_both_attempts() -> None:
+    inner = TierRecordingClient(_rate_limited_at_flex)
+
+    with running_as(Workload.BACKGROUND):
+        await _collect(
+            _flex(inner).generate_response_stream(MESSAGES, history_prefix_len=1)
+        )
+
+    assert inner.history_prefix_lens == [1, 1]

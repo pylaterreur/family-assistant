@@ -172,9 +172,12 @@ class FlexClient:
         messages: Sequence[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
+        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         if self._attempt_flex():
-            stream = self.inner.generate_response_stream(messages, tools, tool_choice)
+            stream = self.inner.generate_response_stream(
+                messages, tools, tool_choice, history_prefix_len
+            )
             try:
                 first = await self._first_flex_event(stream)
             except StopAsyncIteration:
@@ -194,7 +197,7 @@ class FlexClient:
                     yield event
                 return
         async for event in self.inner.generate_response_stream(
-            messages, tools, tool_choice
+            messages, tools, tool_choice, history_prefix_len
         ):
             yield event
 
