@@ -23,6 +23,8 @@ import {
   Loader2Icon,
   StickyNoteIcon,
   SquareIcon,
+  ThumbsDownIcon,
+  ThumbsUpIcon,
 } from 'lucide-react';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
@@ -53,7 +55,8 @@ import { useThreadsContext } from './threadsContext';
 import { useProfiles } from './profilesContext';
 import { ToolGroup } from './ToolGroup';
 import { TooltipIconButton } from './TooltipIconButton';
-import type { MessageReasoningInfo } from './types';
+import { useTurnFeedback } from './turnFeedback';
+import type { MessageReasoningInfo, TurnRating } from './types';
 
 const messageContentComponents = {
   Text: MarkdownText,
@@ -645,6 +648,7 @@ const AssistantMessage: React.FC = () => {
     moved_to_thread?: string;
     internal_id?: number;
     turn_id?: string;
+    feedback?: TurnRating;
   };
   if (custom.moved_to_thread) {
     return <MovedTurnMarker threadConversationId={custom.moved_to_thread} />;
@@ -755,6 +759,7 @@ const AssistantMessage: React.FC = () => {
                   internalId={custom.internal_id}
                   turnId={custom.turn_id}
                   isEcho={Boolean(echoedFromThread)}
+                  feedback={custom.feedback}
                 />
               )}
             </div>
@@ -807,9 +812,47 @@ const AssistantActionBar: React.FC<{
   internalId?: number;
   turnId?: string;
   isEcho: boolean;
-}> = ({ internalId, turnId, isEcho }) => {
+  feedback?: TurnRating;
+}> = ({ internalId, turnId, isEcho, feedback }) => {
   const aui = useAui();
   const homeActions = useHomeTurnActions();
+  const turnFeedback = useTurnFeedback();
+  // An echo's turn belongs to the thread it came from; it is rated there.
+  const canRate = turnFeedback !== null && turnId !== undefined && !isEcho;
+  const [askingWhy, setAskingWhy] = useState(false);
+  const [feedbackComment, setFeedbackComment] = useState('');
+  const [feedbackError, setFeedbackError] = useState(false);
+
+  const rate = async (rating: TurnRating | null, comment?: string): Promise<boolean> => {
+    if (!turnFeedback || !turnId) {
+      return false;
+    }
+    setFeedbackError(false);
+    try {
+      await turnFeedback.rate(turnId, rating, comment);
+    } catch {
+      setFeedbackError(true);
+      return false;
+    }
+    return true;
+  };
+
+  const toggleRating = async (rating: TurnRating) => {
+    if (feedback === rating) {
+      setAskingWhy(false);
+      await rate(null);
+      return;
+    }
+    const saved = await rate(rating);
+    setAskingWhy(saved && rating === 'down');
+    setFeedbackComment('');
+  };
+
+  const sendFeedbackComment = async () => {
+    if (await rate('down', feedbackComment.trim())) {
+      setAskingWhy(false);
+    }
+  };
   // Only an exchange the user started moves; an echo stays in Home.
   const canMove = homeActions !== null && !isEcho && homeActions.turnHasUserMessage(turnId);
   const target = () => ({ internalId, turnId, quote: aui.message().getCopyText() });
@@ -844,6 +887,43 @@ const AssistantActionBar: React.FC<{
           Couldn't copy response. Select the text and copy it manually.
         </p>
       )}
+      {feedbackError && (
+        <p role="alert" className="mt-2 text-sm text-destructive">
+          Couldn't save your feedback. Try again.
+        </p>
+      )}
+      {askingWhy && (
+        <form
+          className="mt-2 flex items-center gap-2"
+          data-testid="feedback-comment-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void sendFeedbackComment();
+          }}
+        >
+          <input
+            type="text"
+            value={feedbackComment}
+            onChange={(event) => setFeedbackComment(event.target.value)}
+            placeholder="What was wrong? (optional)"
+            aria-label="What was wrong with this response"
+            maxLength={2000}
+            className="h-8 min-w-0 flex-1 rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          <Button type="submit" size="sm" variant="secondary" className="h-8">
+            Send
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-8"
+            onClick={() => setAskingWhy(false)}
+          >
+            Skip
+          </Button>
+        </form>
+      )}
       <span role="status" className="sr-only">
         {copied ? 'Response copied to clipboard.' : ''}
       </span>
@@ -869,6 +949,44 @@ const AssistantActionBar: React.FC<{
             <CopyIcon size={12} aria-hidden="true" />
           )}
         </TooltipIconButton>
+        {canRate && (
+          <>
+            {/* @ts-expect-error - TooltipIconButton JSX component */}
+            <TooltipIconButton
+              tooltip={feedback === 'up' ? 'Rated good' : 'Good response'}
+              aria-label="Good response"
+              aria-pressed={feedback === 'up'}
+              size="icon"
+              variant="ghost"
+              className={`h-7 w-7 rounded-lg ${feedback === 'up' ? 'text-primary' : ''}`}
+              onClick={() => void toggleRating('up')}
+              data-testid="feedback-up"
+            >
+              <ThumbsUpIcon
+                size={12}
+                aria-hidden="true"
+                fill={feedback === 'up' ? 'currentColor' : 'none'}
+              />
+            </TooltipIconButton>
+            {/* @ts-expect-error - TooltipIconButton JSX component */}
+            <TooltipIconButton
+              tooltip={feedback === 'down' ? 'Rated bad' : 'Bad response'}
+              aria-label="Bad response"
+              aria-pressed={feedback === 'down'}
+              size="icon"
+              variant="ghost"
+              className={`h-7 w-7 rounded-lg ${feedback === 'down' ? 'text-destructive' : ''}`}
+              onClick={() => void toggleRating('down')}
+              data-testid="feedback-down"
+            >
+              <ThumbsDownIcon
+                size={12}
+                aria-hidden="true"
+                fill={feedback === 'down' ? 'currentColor' : 'none'}
+              />
+            </TooltipIconButton>
+          </>
+        )}
         {homeActions && (internalId !== undefined || turnId) && (
           <>
             {/* @ts-expect-error - TooltipIconButton JSX component */}

@@ -69,6 +69,10 @@ from family_assistant.storage.repositories.conversation_shares import Conversati
 from family_assistant.storage.repositories.conversation_threads import (
     ConversationThread,
 )
+from family_assistant.storage.repositories.turn_feedback import (
+    TurnFeedback,
+    TurnRating,
+)
 from family_assistant.storage.types import MessageHistoryRow
 from family_assistant.threads.home import viewer_for
 from family_assistant.threads.listing import ThreadSummary, summarize_threads
@@ -565,6 +569,13 @@ class ConversationMessage(BaseModel):
             "that thread's conversation id. Render it as 'Moved to <thread "
             "title>' rather than showing its content; the turn itself is now "
             "in the thread"
+        ),
+    )
+    feedback: TurnRating | None = Field(
+        None,
+        description=(
+            "The caller's thumbs up/down rating of the turn this message "
+            "belongs to, if they gave one. Every row of a rated turn carries it"
         ),
     )
     metadata: dict | None = Field(None, description="Additional message metadata")
@@ -3144,10 +3155,17 @@ async def revoke_conversation_share(
 
 def _serialize_conversation_messages(
     messages: list[MessageHistoryRow],
+    feedback_by_turn: Mapping[str, TurnFeedback] | None = None,
 ) -> list[ConversationMessage]:
     """Convert visible history rows to the public conversation message shape."""
     response_messages: list[ConversationMessage] = []
     for msg in messages:
+        turn_id = msg.get("turn_id")
+        feedback = (
+            feedback_by_turn.get(turn_id)
+            if feedback_by_turn is not None and turn_id is not None
+            else None
+        )
         if not all(key in msg for key in ["internal_id", "role", "timestamp"]):
             continue
 
@@ -3180,6 +3198,7 @@ def _serialize_conversation_messages(
                 reasoning_info=msg.get("reasoning_info"),
                 echoed_from_thread=msg.get("echoed_from_conversation_id"),
                 moved_to_thread=msg.get("moved_to_conversation_id"),
+                feedback=feedback.rating if feedback is not None else None,
                 metadata=None,
             )
         )
@@ -3287,7 +3306,11 @@ async def get_conversation_messages(
         acting_user_id=user_id,
     )
 
-    response_messages = _serialize_conversation_messages(messages)
+    feedback_by_turn = await db_context.turn_feedback.for_turns(
+        turn_ids={turn_id for msg in messages if (turn_id := msg.get("turn_id"))},
+        user_id=user_id,
+    )
+    response_messages = _serialize_conversation_messages(messages, feedback_by_turn)
 
     # Get total message count for the conversation
     total_message_count = (

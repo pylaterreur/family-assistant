@@ -112,7 +112,11 @@ export interface Message {
   echoed_from_thread?: string;
   /** On the Home marker left by a turn moved into a thread: that thread's conversation. */
   moved_to_thread?: string;
+  /** The user's thumbs up/down on the turn this message belongs to. */
+  feedback?: TurnRating;
 }
+
+export type TurnRating = 'up' | 'down';
 
 export interface MessageContent {
   type: 'text' | 'tool-call';
@@ -191,6 +195,7 @@ export interface BackendConversationMessage extends Record<string, unknown> {
   echoed_from_thread?: string | null;
   /** On the Home marker left by a turn moved into a thread: that thread's conversation. */
   moved_to_thread?: string | null;
+  feedback?: TurnRating | null;
 }
 
 export interface ActiveTurnInfo {

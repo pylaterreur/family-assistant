@@ -44,6 +44,7 @@ import {
   type HomeTurnTarget,
 } from './homeTurnActions';
 import { MoveToThreadDialog } from './MoveToThreadDialog';
+import { submitTurnFeedback, TurnFeedbackContext, type TurnFeedbackActions } from './turnFeedback';
 import { type ContinueAnchor, StartThreadDialog, threadProfiles } from './StartThreadDialog';
 import { ThreadBanner } from './ThreadBanner';
 import { ThreadsContext } from './threadsContext';
@@ -59,6 +60,7 @@ import {
   MessageContent,
   MessageReasoningInfo,
   ThreadSummary,
+  TurnRating,
 } from './types';
 import { useLiveMessageUpdates } from './useLiveMessageUpdates';
 import { useMarkRead } from './useMarkRead';
@@ -1646,6 +1648,7 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
               createdAt: new Date(msg.timestamp),
               status: { type: 'complete' },
               internalId: Number(msg.internal_id),
+              feedback: msg.feedback ?? undefined,
             });
             return;
           }
@@ -1775,6 +1778,7 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
               internalId: Number(msg.internal_id),
               echoed_from_thread: msg.echoed_from_thread ?? undefined,
               moved_to_thread: msg.moved_to_thread ?? undefined,
+              feedback: msg.feedback ?? undefined,
             });
             return;
           }
@@ -1843,6 +1847,7 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
             internalId: Number(msg.internal_id),
             echoed_from_thread: msg.echoed_from_thread ?? undefined,
             moved_to_thread: msg.moved_to_thread ?? undefined,
+            feedback: msg.feedback ?? undefined,
           });
         });
 
@@ -2624,6 +2629,35 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
       turnHasUserMessage: (turnId) => turnId !== undefined && userTurnIds.has(turnId),
     };
   }, [isHome, userTurnIdsKey]);
+  const turnFeedback = useMemo<TurnFeedbackActions>(
+    () => ({
+      rate: async (turnId, rating, comment) => {
+        const convId = conversationIdRef.current;
+        if (!convId) {
+          throw new Error('No conversation is open');
+        }
+        let previous: TurnRating | undefined;
+        setMessages((prev) =>
+          prev.map((msg) => {
+            if (msg.turnId !== turnId) {
+              return msg;
+            }
+            previous = msg.feedback;
+            return { ...msg, feedback: rating ?? undefined };
+          })
+        );
+        try {
+          await submitTurnFeedback(convId, turnId, rating, comment);
+        } catch (error) {
+          setMessages((prev) =>
+            prev.map((msg) => (msg.turnId === turnId ? { ...msg, feedback: previous } : msg))
+          );
+          throw error;
+        }
+      },
+    }),
+    []
+  );
   // A reply streamed here has no stored id yet; the server names it by turn.
   const resolveHomeMessageId = useCallback(async (target: HomeTurnTarget): Promise<number> => {
     if (target.internalId !== undefined) {
@@ -2714,6 +2748,7 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
           moved_to_thread: message.moved_to_thread,
           internal_id: message.internalId,
           turn_id: message.turnId,
+          feedback: message.feedback,
         },
       },
     };
@@ -3054,7 +3089,9 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
           <ToolConfirmationProvider value={{ pendingConfirmations, handleConfirmation }}>
             <ThreadsContext.Provider value={threadsContextValue}>
               <HomeTurnActionsContext.Provider value={homeTurnActions}>
-                <Thread />
+                <TurnFeedbackContext.Provider value={turnFeedback}>
+                  <Thread />
+                </TurnFeedbackContext.Provider>
               </HomeTurnActionsContext.Provider>
             </ThreadsContext.Provider>
           </ToolConfirmationProvider>

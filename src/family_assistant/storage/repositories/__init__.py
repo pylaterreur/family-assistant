@@ -27,6 +27,7 @@ from .schedule_automations import ScheduleAutomationsRepository
 from .scripts import ScriptsRepository
 from .taint_audit import TaintAuditEventsRepository
 from .tasks import TasksRepository
+from .turn_feedback import TurnFeedbackRepository
 from .vector import VectorRepository
 from .worker_tasks import WorkerTasksRepository
 
@@ -58,6 +59,7 @@ __all__ = [
     "ScriptsRepository",
     "TaintAuditEventsRepository",
     "TasksRepository",
+    "TurnFeedbackRepository",
     "VectorRepository",
     "WorkerTasksRepository",
 ]
