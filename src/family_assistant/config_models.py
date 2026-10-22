@@ -2466,14 +2466,15 @@ class AppConfig(BaseSettings):
     def validate_experiments(self) -> AppConfig:
         """Arms and tiers name configured tiers, and no turn is in two experiments.
 
-        Whether each arm is a tier its profiles can actually run on is checked
-        when the profiles are built, which is where their eligibility exists.
+        Whether each named profile exists, and each arm is a tier it can
+        actually run on, is checked when the profiles are built: the loader
+        validates intermediate configs whose ``service_profiles`` is only the
+        operator's list, before it merges in the shipped profiles by id.
         """
         ids = [experiment.id for experiment in self.experiments]
         if len(ids) != len(set(ids)):
             msg = f"Experiment ids must be unique: {', '.join(ids)}."
             raise ValueError(msg)
-        profile_ids = {profile.id for profile in self.service_profiles}
         # (profile, covered tier) -> experiment; ``None`` is "nobody chose".
         enrolled: dict[tuple[str, str | None], str] = {}
         for experiment in self.experiments:
@@ -2484,17 +2485,6 @@ class AppConfig(BaseSettings):
                 msg = (
                     f"Experiment '{experiment.id}' names tiers that are not "
                     f"model tiers: {', '.join(unknown_tiers)}."
-                )
-                raise ValueError(msg)
-            # Profiles may be supplied after the YAML (by tests, or a layered
-            # source); an empty list says nothing about which ids exist.
-            unknown_profiles = (
-                sorted(set(experiment.profiles) - profile_ids) if profile_ids else []
-            )
-            if unknown_profiles:
-                msg = (
-                    f"Experiment '{experiment.id}' names unknown profiles: "
-                    f"{', '.join(unknown_profiles)}."
                 )
                 raise ValueError(msg)
             remote = sorted(

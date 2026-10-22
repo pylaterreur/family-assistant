@@ -1277,6 +1277,15 @@ class Assistant:
         model_router = self._create_model_router()
         self._conversation_summarizer = self._create_conversation_summarizer()
         turn_relevance = self._create_turn_relevance()
+        profile_ids = {profile.id for profile in resolved_profiles}
+        for experiment in self.config.experiments:
+            unknown_profiles = sorted(set(experiment.profiles) - profile_ids)
+            if unknown_profiles:
+                msg = (
+                    f"Experiment '{experiment.id}' names unknown profiles: "
+                    f"{', '.join(unknown_profiles)}."
+                )
+                raise ValueError(msg)
         for profile_conf in resolved_profiles:
             await self._setup_processing_profile(
                 profile_conf,
