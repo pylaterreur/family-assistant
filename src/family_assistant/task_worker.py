@@ -138,6 +138,7 @@ if TYPE_CHECKING:
     )
     from family_assistant.storage.repositories.delegation_runs import DelegationRunDict
     from family_assistant.storage.repositories.scripts import ScriptRow
+    from family_assistant.storage.repositories.tasks import TasksRepository
     from family_assistant.storage.types import (
         MessageHistoryRow,
         TaskDict,
@@ -158,12 +159,17 @@ from family_assistant.indexing.tasks import (
     emit_document_ready_event,
 )
 from family_assistant.interfaces import ChatDeliveryError, HistoryBackedChatInterface
+from family_assistant.processing.background_turns import BackgroundTurnRunner
 from family_assistant.processing.quiet_turn import QUIET_END_TRIGGER_HINT
 from family_assistant.processing.types import ChatInteractionStatus, MidTurnUserInput
 from family_assistant.processing.utils import get_file_extension_from_mime_type
 from family_assistant.services.confirmation_service import ConfirmationService
 from family_assistant.services.deferred_tool_confirmation import (
     build_deferred_confirmation_callback,
+)
+from family_assistant.services.delegated_run_resumption import (
+    DELEGATED_RUN_RESUMER,
+    ResumedDelegatedTurn,
 )
 from family_assistant.services.delegation_delivery import (
     DELEGATION_DELIVERY_TASK_TYPE,
@@ -179,6 +185,7 @@ from family_assistant.services.tool_call_review import (
     build_delegation_review_trigger,
 )
 from family_assistant.services.turn_resumption import (
+    MAX_RESUME_ATTEMPTS,
     TurnLease,
     TurnLeaseRegistry,
     TurnResumePayload,
@@ -190,6 +197,7 @@ from family_assistant.storage.database import (
     DatabaseExecutor,
     DatabaseTransaction,
 )
+from family_assistant.storage.datetime_utils import normalize_datetime
 from family_assistant.storage.message_history import message_history_table
 from family_assistant.storage.tasks import (
     STALE_TASK_TIMEOUT_MINUTES,
@@ -481,11 +489,11 @@ def _turn_id_for_delegation_wake(
     return str(uuid.uuid5(_DELEGATION_WAKE_TURN_NAMESPACE, f"{name}:{stage}"))
 
 
-class _WakeTurnController:
-    """Lets a shutdown suspend a delegation wake turn at its next loop boundary.
+class _SuspendableTurnController:
+    """Lets a shutdown suspend a background turn at its next loop boundary.
 
-    A wake turn takes no steering input; this exists so the turn stops where a
-    resume can pick it up, rather than being cancelled mid-tool.
+    A background turn takes no steering input; this exists so the turn stops
+    where a resume can pick it up, rather than being cancelled mid-tool.
     """
 
     def __init__(self) -> None:
@@ -493,6 +501,10 @@ class _WakeTurnController:
 
     def request_suspend(self) -> None:
         self._suspend_requested = True
+
+    @property
+    def suspend_requested(self) -> bool:
+        return self._suspend_requested
 
     async def drain_pending_mid_turn_inputs(self) -> list[MidTurnUserInput]:
         return []
@@ -1043,6 +1055,12 @@ class DelegatedProfileRunPayload(TypedDict):
     # itself have all finished: the turn it runs is triggered by their results
     # rather than by the run's original request.
     continuation: NotRequired[bool]
+    # Set on the task that continues a turn cut off by its process going away
+    # (see ``delegated_run_resumption``).
+    resume: NotRequired[ResumedDelegatedTurn]
+
+
+DelegatedTurnKind = Literal["request", "continuation"]
 
 
 class DelegationRunCleanupPayload(TypedDict, total=False):
@@ -1332,6 +1350,8 @@ WORKER_STUCK_GRACE_SECONDS = 60.0
 # monitor treats it as stuck.
 WORKER_IDLE_STUCK_SECONDS = 600.0
 CONFIRMATION_CANCELLATION_CLEANUP_TIMEOUT = 5.0
+# How long a delegated run waits before trying again for a background turn slot.
+BACKGROUND_TURN_DEFER_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -2108,6 +2128,7 @@ class TaskWorker:
         thread_turn_runner: ThreadTurnRunner | None = None,
         turn_lease_registry: TurnLeaseRegistry | None = None,
         claim_renew_seconds: float = TASK_CLAIM_RENEW_SECONDS,
+        background_turns: BackgroundTurnRunner | None = None,
     ) -> None:
         """Initializes the TaskWorker with its dependencies.
 
@@ -2129,6 +2150,13 @@ class TaskWorker:
         # Leases the delegation wake turns this worker runs, so one cut off by
         # its process going away is resumed elsewhere.
         self.turn_lease_registry = turn_lease_registry
+        # Runs delegated turns outside this worker's handlers; shared by the
+        # whole pool so its concurrency bound is the process's.
+        self.background_turns = (
+            background_turns
+            if background_turns is not None
+            else BackgroundTurnRunner(lease_registry=turn_lease_registry)
+        )
         # Strong references to in-flight stream-hub publish tasks scheduled from
         # on_commit hooks, so the event loop doesn't garbage-collect them mid-flight.
         self._hub_publish_tasks: set[asyncio.Task[object]] = set()
@@ -2337,10 +2365,24 @@ class TaskWorker:
                 )
             return
 
-        if run["status"] == "running":
-            # A previous attempt marked the run running but did not finish (crash
-            # or handler timeout). The delegated turn has non-idempotent external
-            # side effects, so fail it rather than re-execute.
+        resume = payload.get("resume")
+        if (
+            run["status"] == "running"
+            and resume is None
+            and run["run_kind"] != "thread"
+        ):
+            # The run's turn holds a lease, which resumes it if it was cut off;
+            # this task is a stray retry of the one that launched it.
+            logger.info(
+                "Delegation run %s is already running; its turn lease owns it.",
+                delegation_id,
+            )
+            return
+        if run["status"] == "running" and resume is None:
+            # A thread's first turn runs inline and holds no lease of its own:
+            # a previous attempt marked the run running but did not finish. The
+            # turn has non-idempotent external side effects, so fail it rather
+            # than re-execute.
             logger.warning(
                 "Delegation run %s was already running on entry; a prior attempt "
                 "was interrupted. Failing without re-executing to avoid duplicate "
@@ -2438,11 +2480,39 @@ class TaskWorker:
             )
             return
 
-        started = await exec_context.db_context.delegation_runs.mark_running(
-            delegation_id,
-            clock.now(),
+        local_target = cast("ProcessingService", target_service)
+        if resume is not None:
+            await self._resume_delegated_turn(
+                exec_context, payload, run, local_target, resume
+            )
+            return
+        if not self.background_turns.has_capacity():
+            await self._defer_delegated_run(exec_context, payload, run)
+            return
+
+        kind: DelegatedTurnKind = (
+            "continuation" if payload.get("continuation") else "request"
         )
-        if started is None:
+        # A thread run's request was written into the thread under its own turn.
+        turn_id = (
+            run["turn_id"]
+            if kind == "request" and run["turn_id"] is not None
+            else str(uuid.uuid4())
+        )
+
+        async def _claim(
+            txn: DatabaseTransaction,
+        ) -> tuple[DelegationRunDict, TurnLease | None] | None:
+            started = await txn.delegation_runs.mark_running(delegation_id, clock.now())
+            if started is None:
+                return None
+            lease = await self._arm_delegated_turn_lease(
+                txn.tasks, started, local_target, turn_id, kind, attempt=0
+            )
+            return started, lease
+
+        claimed = await exec_context.db_context.atomic(_claim)
+        if claimed is None:
             # The conditional mark_running matched no row: the run is no longer
             # queued — the stale-run reaper failed it, or a sibling worker
             # claimed it first — so do not (re-)execute the delegated turn here.
@@ -2452,51 +2522,144 @@ class TaskWorker:
                 delegation_id,
             )
             return
+        started, lease = claimed
+        self._launch_delegated_turn(
+            exec_context,
+            started,
+            local_target,
+            turn_id=turn_id,
+            kind=kind,
+            lease=lease,
+            resume=False,
+        )
 
-        local_target = cast("ProcessingService", target_service)
+    async def _arm_delegated_turn_lease(
+        self,
+        tasks: TasksRepository,
+        run: DelegationRunDict,
+        local_target: ProcessingService,
+        turn_id: str,
+        kind: DelegatedTurnKind,
+        *,
+        attempt: int,
+    ) -> TurnLease | None:
+        """Arm the lease that resumes a delegated turn if its process goes away."""
+        registry = self.background_turns.lease_registry
+        if registry is None:
+            return None
+        return await registry.arm(
+            tasks,
+            TurnResumePayload(
+                resumer=DELEGATED_RUN_RESUMER,
+                interface_type=run["interface_type"],
+                conversation_id=run["conversation_id"],
+                turn_id=turn_id,
+                user_id=run["user_id"] or "",
+                user_name=run["user_name"] or "",
+                processing_profile_id=local_target.service_config.id,
+                attempt=attempt,
+                delegation_id=run["delegation_id"],
+                delegated_turn=kind,
+            ),
+        )
+
+    def _launch_delegated_turn(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        local_target: ProcessingService,
+        *,
+        turn_id: str,
+        kind: DelegatedTurnKind,
+        lease: TurnLease | None,
+        resume: bool,
+    ) -> None:
+        """Hand a claimed run's turn to the background turn runner."""
+        controller = _SuspendableTurnController()
+        self.background_turns.launch(
+            f"delegated-turn:{run['delegation_id']}:{turn_id}",
+            self._drive_delegated_turn(
+                exec_context,
+                run,
+                local_target,
+                turn_id=turn_id,
+                kind=kind,
+                controller=controller,
+                resume=resume,
+            ),
+            lease=lease,
+            database=exec_context.db_context,
+            request_suspend=controller.request_suspend,
+        )
+
+    def _remaining_turn_budget(self, run: DelegationRunDict, now: datetime) -> float:
+        """What is left of the run's turn budget, counted from when it started.
+
+        A resumed turn carries on against the budget its run started with
+        rather than getting a fresh one.
+        """
+        started_at = normalize_datetime(run["started_at"])
+        elapsed = (now - started_at).total_seconds() if started_at else 0.0
+        return self._delegated_turn_budget() - elapsed
+
+    async def _drive_delegated_turn(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        local_target: ProcessingService,
+        *,
+        turn_id: str,
+        kind: DelegatedTurnKind,
+        controller: _SuspendableTurnController,
+        resume: bool,
+    ) -> None:
+        """Run a delegated turn to its outcome, on the background turn runner.
+
+        Everything the turn can end in is recorded here: its result, a failure,
+        a timeout, or a stop. The one exception is a suspension for shutdown,
+        which leaves the run ``running`` for its lease to resume.
+        """
+        clock = exec_context.clock or self.clock
+        delegation_id = run["delegation_id"]
         confirmation_sources: set[int] = set()
-        if payload.get("continuation"):
+        if kind == "continuation":
             turn = self._run_delegation_continuation(
-                exec_context, started, local_target, confirmation_sources
+                exec_context,
+                run,
+                local_target,
+                confirmation_sources,
+                turn_id=turn_id,
+                controller=controller,
+                resume=resume,
             )
         else:
             turn = self._run_delegated_request(
-                exec_context, run, local_target, confirmation_sources
+                exec_context,
+                run,
+                local_target,
+                confirmation_sources,
+                turn_id=turn_id,
+                controller=controller,
+                resume=resume,
             )
-        turn_budget = self._delegated_turn_budget()
+        turn_budget = self._remaining_turn_budget(run, clock.now())
         deadline = asyncio.timeout(turn_budget)
         try:
             async with deadline:
                 result = await self._run_stoppable_delegated_turn(
                     exec_context, delegation_id, local_target, turn
                 )
-        except asyncio.CancelledError:
-            if self.stuck_cancellation_reason is not None:
-                await self._withdraw_stopped_turn_confirmations(
-                    exec_context, started, confirmation_sources
-                )
-                await self._fail_delegation_run(
-                    exec_context,
-                    delegation_id=delegation_id,
-                    error=_stuck_worker_error(self.stuck_cancellation_reason),
-                )
-            raise
         except Exception:
             if deadline.expired():
                 await self._withdraw_stopped_turn_confirmations(
-                    exec_context, started, confirmation_sources
+                    exec_context, run, confirmation_sources
                 )
                 await self._fail_timed_out_delegation_run(
                     exec_context,
                     delegation_id=delegation_id,
-                    budget_seconds=turn_budget,
+                    budget_seconds=self._delegated_turn_budget(),
                 )
                 return
-            # A cancellation from outside (shutdown, or the worker's handler
-            # timeout) is a CancelledError and is intentionally NOT caught here:
-            # it propagates so the task is retried, and the retry's "running"
-            # entry guard fails the run without re-executing. The stale-run
-            # reaper is the backstop if no retry occurs.
             error = traceback.format_exc()
             logger.exception(
                 "Delegated profile run %s raised during execution.", delegation_id
@@ -2509,11 +2672,151 @@ class TaskWorker:
             return
 
         if result is None:
+            if controller.suspend_requested:
+                logger.info(
+                    "Delegated turn of run %s was suspended for shutdown.",
+                    delegation_id,
+                )
+                return
             await self._withdraw_stopped_turn_confirmations(
-                exec_context, started, confirmation_sources
+                exec_context, run, confirmation_sources
             )
             return
-        await self._settle_delegated_turn(exec_context, started, result)
+        await self._settle_delegated_turn(exec_context, run, result)
+
+    async def _defer_delegated_run(
+        self,
+        exec_context: ToolExecutionContext,
+        payload: DelegatedProfileRunPayload,
+        run: DelegationRunDict,
+    ) -> None:
+        """Try the run again shortly, as a fresh task, while others finish.
+
+        A fresh task rather than a retry: waiting for room is not a failure,
+        and running out of retries would strand the run.
+        """
+        clock = exec_context.clock or self.clock
+        await exec_context.db_context.tasks.enqueue(
+            task_id=f"{DELEGATED_PROFILE_RUN_TASK_TYPE}_{uuid.uuid4().hex}",
+            task_type=DELEGATED_PROFILE_RUN_TASK_TYPE,
+            payload=cast("dict[str, object]", dict(payload)),
+            scheduled_at=clock.now() + timedelta(seconds=BACKGROUND_TURN_DEFER_SECONDS),
+            max_retries_override=1,
+            priority=exec_context.inherited_task_priority(),
+        )
+        logger.info(
+            "Delegation run %s is waiting for a background turn slot (%d running); "
+            "rescheduled.",
+            run["delegation_id"],
+            self.background_turns.running,
+        )
+
+    async def _resume_delegated_turn(
+        self,
+        exec_context: ToolExecutionContext,
+        payload: DelegatedProfileRunPayload,
+        run: DelegationRunDict,
+        local_target: ProcessingService,
+        resumed: ResumedDelegatedTurn,
+    ) -> None:
+        """Continue a delegated turn whose process went away partway through."""
+        clock = exec_context.clock or self.clock
+        delegation_id = run["delegation_id"]
+        turn_id = resumed["turn_id"]
+        if run["status"] != "running":
+            logger.info(
+                "Not resuming turn %s of delegation %s: the run is %s.",
+                turn_id,
+                delegation_id,
+                run["status"],
+            )
+            return
+        if resumed["attempt"] > MAX_RESUME_ATTEMPTS:
+            await self._fail_delegation_run(
+                exec_context,
+                delegation_id=delegation_id,
+                error=(
+                    "The delegated run was interrupted by a restart "
+                    f"{resumed['attempt']} times and was not resumed again. It "
+                    "was not re-run from the start, because that could repeat "
+                    "actions it had already taken."
+                ),
+            )
+            return
+        if self._remaining_turn_budget(run, clock.now()) <= 0:
+            await self._fail_timed_out_delegation_run(
+                exec_context,
+                delegation_id=delegation_id,
+                budget_seconds=self._delegated_turn_budget(),
+            )
+            return
+        history = exec_context.db_context.message_history
+        if await history.has_terminal_reply_for_turn(turn_id):
+            # The turn finished; only settling the run was cut off.
+            await self._settle_finished_turn(exec_context, run, turn_id)
+            return
+        if not self.background_turns.has_capacity():
+            await self._defer_delegated_run(exec_context, payload, run)
+            return
+        # A request turn cut off before it saved its prompt has done nothing
+        # yet, so it starts afresh under the same turn id.
+        resume = resumed["kind"] == "continuation" or (
+            await history.get_first_row_by_turn_id(turn_id, role="user") is not None
+        )
+        lease = await self._arm_delegated_turn_lease(
+            exec_context.db_context.tasks,
+            run,
+            local_target,
+            turn_id,
+            resumed["kind"],
+            attempt=resumed["attempt"],
+        )
+        logger.info(
+            "Resuming turn %s of delegation %s (attempt %d).",
+            turn_id,
+            delegation_id,
+            resumed["attempt"],
+        )
+        self._launch_delegated_turn(
+            exec_context,
+            run,
+            local_target,
+            turn_id=turn_id,
+            kind=resumed["kind"],
+            lease=lease,
+            resume=resume,
+        )
+
+    async def _settle_finished_turn(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        turn_id: str,
+    ) -> None:
+        """Settle a run whose turn finished before its process went away."""
+        reply = await exec_context.db_context.message_history.get_undelivered_terminal_reply(
+            turn_id
+        )
+        if reply is None:
+            await self._fail_delegation_run(
+                exec_context,
+                delegation_id=run["delegation_id"],
+                error=(
+                    "The delegated run finished, but the assistant restarted "
+                    "before its result was recorded, and the result could not "
+                    "be recovered."
+                ),
+            )
+            return
+        await self._settle_delegated_turn(
+            exec_context,
+            run,
+            ChatInteractionResult(
+                status=ChatInteractionStatus.SUCCESS,
+                text_reply=reply["content"] or "",
+                assistant_message_internal_id=reply["internal_id"],
+            ),
+        )
 
     async def _run_stoppable_delegated_turn(
         self,
@@ -2605,6 +2908,10 @@ class TaskWorker:
         run: DelegationRunDict,
         local_target: ProcessingService,
         confirmation_sources: set[int],
+        *,
+        turn_id: str,
+        controller: _SuspendableTurnController,
+        resume: bool,
     ) -> ChatInteractionResult:
         """Run a delegation's first turn, on the request it was created with."""
         content_parts = cast(
@@ -2634,8 +2941,10 @@ class TaskWorker:
             subconversation_id=run["subconversation_id"],
             # A thread run's request was written into the thread when it was
             # started, under the turn it runs as.
-            turn_id=run["turn_id"],
+            turn_id=turn_id,
             reuse_existing_user_row=run["run_kind"] == "thread",
+            mid_turn_input_provider=controller,
+            resume=resume,
             initial_taint_sources=_taint_sources_from_delegation_run(run),
             tool_call_review_trigger=await _delegation_run_review_trigger(
                 exec_context,
@@ -2768,23 +3077,93 @@ class TaskWorker:
         run: DelegationRunDict,
         local_target: ProcessingService,
         confirmation_sources: set[int],
+        *,
+        turn_id: str,
+        controller: _SuspendableTurnController,
+        resume: bool,
     ) -> ChatInteractionResult:
         """Run the turn that follows a run's own delegations finishing.
 
         Their results go into the run's history as internal data rows and are
         marked delivered in the same transaction, before the turn starts: once
         the rows exist the results have reached the run, and a turn that then
-        fails must not have them delivered a second time somewhere else.
+        fails must not have them delivered a second time somewhere else. A
+        resumed turn finds those rows already written under its turn.
         """
-        clock = exec_context.clock or self.clock
-        children = [
-            child
-            for child in await exec_context.db_context.delegation_runs.list_undelivered_children(
-                run
+        if resume:
+            children: list[DelegationRunDict] = []
+            data_ids = [
+                row["internal_id"]
+                for row in await exec_context.db_context.message_history.get_rows_by_turn_id(
+                    turn_id
+                )
+                if row["role"] == "user" and row["is_internal"]
+            ]
+        else:
+            children = [
+                child
+                for child in await exec_context.db_context.delegation_runs.list_undelivered_children(
+                    run
+                )
+                if child["status"] in TERMINAL_DELEGATION_STATUSES
+            ]
+            data_ids = await self._record_continuation_results(
+                exec_context, run, local_target, children, turn_id
             )
-            if child["status"] in TERMINAL_DELEGATION_STATUSES
+        trigger_attachments = [
+            attachment
+            for child in children
+            for attachment in self._delegation_notification_attachments(child) or []
         ]
-        turn_id = str(uuid.uuid4())
+        return await local_target.handle_chat_interaction(
+            db_context=exec_context.db_context,
+            interface_type=run["interface_type"],
+            conversation_id=run["conversation_id"],
+            trigger_content_parts=[
+                {"type": "text", "text": _delegation_continuation_text(children)}
+            ],
+            trigger_interface_message_id=None,
+            user_name=run["user_name"] or exec_context.user_name,
+            user_id=run["user_id"],
+            replied_to_interface_id=None,
+            chat_interface=self._chat_interface_for_interface(
+                exec_context, run["interface_type"]
+            ),
+            chat_interfaces=exec_context.chat_interfaces,
+            confirmation_ui_managers=exec_context.confirmation_ui_managers,
+            request_confirmation_callback=self._build_delegation_confirmation_callback(
+                exec_context, run, confirmation_sources
+            ),
+            trigger_attachments=trigger_attachments or None,
+            subconversation_id=run["subconversation_id"],
+            thread_root_id=data_ids[0] if data_ids else None,
+            trigger_is_internal=True,
+            pinned_history_message_ids=data_ids,
+            trigger_role="system",
+            turn_id=turn_id,
+            mid_turn_input_provider=controller,
+            resume=resume,
+            initial_taint_sources=_taint_sources_from_delegation_run(run),
+            tool_call_review_trigger=await _delegation_run_review_trigger(
+                exec_context,
+                run,
+                trigger_type="delegation_completion",
+                active_request_role="system",
+                payload_present=True,
+            ),
+            model_selection=_frozen_model_selection(run, local_target),
+        )
+
+    async def _record_continuation_results(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        local_target: ProcessingService,
+        children: list[DelegationRunDict],
+        turn_id: str,
+    ) -> list[int]:
+        """Write finished children's results into the run's history, delivered."""
+        clock = exec_context.clock or self.clock
         child_taints = [
             await delegation_run_result_taint_metadata(exec_context.db_context, child)
             for child in children
@@ -2824,48 +3203,7 @@ class TaskWorker:
                 data_ids.append(data_id)
             return data_ids
 
-        data_ids = await exec_context.db_context.atomic(_record_results)
-        trigger_attachments = [
-            attachment
-            for child in children
-            for attachment in self._delegation_notification_attachments(child) or []
-        ]
-        return await local_target.handle_chat_interaction(
-            db_context=exec_context.db_context,
-            interface_type=run["interface_type"],
-            conversation_id=run["conversation_id"],
-            trigger_content_parts=[
-                {"type": "text", "text": _delegation_continuation_text(children)}
-            ],
-            trigger_interface_message_id=None,
-            user_name=run["user_name"] or exec_context.user_name,
-            user_id=run["user_id"],
-            replied_to_interface_id=None,
-            chat_interface=self._chat_interface_for_interface(
-                exec_context, run["interface_type"]
-            ),
-            chat_interfaces=exec_context.chat_interfaces,
-            confirmation_ui_managers=exec_context.confirmation_ui_managers,
-            request_confirmation_callback=self._build_delegation_confirmation_callback(
-                exec_context, run, confirmation_sources
-            ),
-            trigger_attachments=trigger_attachments or None,
-            subconversation_id=run["subconversation_id"],
-            thread_root_id=data_ids[0] if data_ids else None,
-            trigger_is_internal=True,
-            pinned_history_message_ids=data_ids,
-            trigger_role="system",
-            turn_id=turn_id,
-            initial_taint_sources=_taint_sources_from_delegation_run(run),
-            tool_call_review_trigger=await _delegation_run_review_trigger(
-                exec_context,
-                run,
-                trigger_type="delegation_completion",
-                active_request_role="system",
-                payload_present=True,
-            ),
-            model_selection=_frozen_model_selection(run, local_target),
-        )
+        return await exec_context.db_context.atomic(_record_results)
 
     async def _settle_delegated_turn(
         self,
@@ -4786,7 +5124,7 @@ class TaskWorker:
         lease = await self._arm_wake_turn_lease(
             exec_context, run, source_service, wake_turn_id
         )
-        controller = _WakeTurnController()
+        controller = _SuspendableTurnController()
         try:
             if existing_data_row is not None:
                 logger.info(
@@ -4949,7 +5287,7 @@ class TaskWorker:
         self,
         exec_context: ToolExecutionContext,
         lease: TurnLease | None,
-        controller: _WakeTurnController,
+        controller: _SuspendableTurnController,
     ) -> None:
         """Renew the lease while the turn runs; a shutdown suspends the turn."""
         registry = self.turn_lease_registry

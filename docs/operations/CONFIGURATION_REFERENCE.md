@@ -184,12 +184,26 @@ confirmation), because holding one would occupy the capacity that has to run the
 | Sensitive | No    |
 | Example   | `2`   |
 
-**Capacity caveat:** a delegated run that asks for a human confirmation holds its worker until the
-decision arrives (up to its handler timeout), and its approval resumes that same handler rather than
-queueing separate work. So a pool of one general worker and no reserved worker does not deadlock,
-but everything else in the queue waits behind the pending decision for as long as it takes. The
-default of two general workers and one reserved worker keeps the rest of the queue moving while a
-run is parked.
+**Capacity caveat:** a web thread's first turn still runs inside its worker, so one that asks for a
+human confirmation holds that worker until the decision arrives (up to its handler timeout). The
+default of two general workers and one reserved worker keeps the rest of the queue moving while it
+waits. Other delegated runs do not hold a worker; see `max_background_turns`.
+
+### max_background_turns
+
+How many delegated runs' turns may run at once. A delegated run's task only starts its turn and
+returns: the turn itself runs outside the task workers, so it neither occupies a worker nor is bound
+by a worker's handler timeout, and a turn cut off by a restart is resumed rather than failed. This
+bounds model and tool load. A run that finds every slot taken stays queued and tries again a few
+seconds later. See
+[docs/design/background-turns-off-the-task-worker.md](../design/background-turns-off-the-task-worker.md).
+
+| Property  | Value |
+| --------- | ----- |
+| Required  | No    |
+| Default   | `4`   |
+| Sensitive | No    |
+| Example   | `6`   |
 
 ### Restarts and in-progress turns
 

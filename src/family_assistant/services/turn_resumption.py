@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -89,6 +89,9 @@ class TurnResumePayload(BaseModel):
     # The worker whose claim on the delivery task runs a wake turn, so the
     # resumer releases that claim and never a later one.
     claimed_by: str | None = None
+    # Which of a delegated run's turns this is: the one answering its request,
+    # or the one that follows its own delegations finishing.
+    delegated_turn: Literal["request", "continuation"] | None = None
 
     def next_attempt(self) -> TurnResumePayload:
         return self.model_copy(update={"attempt": self.attempt + 1})
@@ -121,6 +124,20 @@ class TurnResumer(Protocol):
         that pushes replies out (a chat bot) sends it if it was not delivered.
         """
         ...
+
+
+class SelfDecidingTurnResumer(Protocol):
+    """Relaunches turns whose own records, not history alone, say what is left.
+
+    A delegated run's turn lives in its run's subconversation, where the
+    history-based decision does not apply: the main conversation moving on
+    does not supersede it, and its run's status -- not a terminal reply --
+    says whether it finished. A resumer like this gets the due lease as is.
+    """
+
+    async def resume_interrupted(
+        self, payload: TurnResumePayload, registry: TurnLeaseRegistry
+    ) -> None: ...
 
 
 class ResumeDecision(Enum):
@@ -164,6 +181,7 @@ class TurnLeaseRegistry:
         self._max_resume_attempts = max_resume_attempts
         self._tracked: dict[str, _TrackedTurn] = {}
         self._resumers: dict[str, TurnResumer] = {}
+        self._self_deciding_resumers: dict[str, SelfDecidingTurnResumer] = {}
         self._release_tasks: set[asyncio.Task[None]] = set()
         self._suspending = False
 
@@ -173,6 +191,11 @@ class TurnLeaseRegistry:
 
     def register_resumer(self, name: str, resumer: TurnResumer) -> None:
         self._resumers[name] = resumer
+
+    def register_self_deciding_resumer(
+        self, name: str, resumer: SelfDecidingTurnResumer
+    ) -> None:
+        self._self_deciding_resumers[name] = resumer
 
     async def arm(
         self, tasks: TasksRepository, payload: TurnResumePayload
@@ -238,6 +261,16 @@ class TurnLeaseRegistry:
             return False
         del self._tracked[turn_id]
         return True
+
+    def abandon(self, lease: TurnLease) -> None:
+        """Stop renewing a lease without deleting it, so it comes due.
+
+        For a turn whose task ended without recording an outcome: once the
+        lease expires, its resumer decides from durable state what is left.
+        """
+        entry = self._tracked.get(lease.payload.turn_id)
+        if entry is not None and entry.lease is lease:
+            self._untrack(entry)
 
     async def release(self, lease: TurnLease) -> None:
         """Delete the lease of a turn that has ended, ahead of its task ending.
@@ -392,6 +425,11 @@ class TurnLeaseRegistry:
                 "Lease for turn %s came due while the turn was still running; re-armed",
                 payload.turn_id,
             )
+            return
+
+        self_deciding = self._self_deciding_resumers.get(payload.resumer)
+        if self_deciding is not None:
+            await self_deciding.resume_interrupted(payload, self)
             return
 
         decision = await self.decide(db, payload)

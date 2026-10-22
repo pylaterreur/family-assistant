@@ -37,7 +37,7 @@ from family_assistant.threads.boundary import (
 from family_assistant.tools.types import ToolExecutionContext
 from family_assistant.utils.clock import SystemClock
 from family_assistant.web.thread_turns import WebThreadTurnRunner
-from tests.helpers import wait_for_condition
+from tests.helpers import run_delegated_profile_run, wait_for_condition
 from tests.mocks.mock_llm import LLMOutput, RuleBasedMockLLMClient
 from tests.mocks.recording_chat_interface import RecordingChatInterface
 
@@ -152,7 +152,8 @@ class QueuedThread:
     hub: ConversationStreamHub
 
     async def run_worker(self) -> None:
-        await self.worker.handle_delegated_profile_run(
+        await run_delegated_profile_run(
+            self.worker,
             self.context,
             {
                 "delegation_id": self.delegation_id,
