@@ -2199,6 +2199,13 @@ class TaskWorker:
                 advance_request = await self._process_task(
                     Database(engine=engine), task, wake_up_event
                 )
+            except asyncio.CancelledError:
+                # Stopped by shutdown: hand the task back now rather than
+                # leaving its claim to go stale. Its retry resumes the turn.
+                await Database(engine=engine).tasks.release_claim(
+                    task["task_id"], self.clock.now(), locked_by=self.worker_id
+                )
+                raise
             finally:
                 renewer.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

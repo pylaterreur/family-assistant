@@ -881,3 +881,41 @@ async def test_a_turn_task_runs_off_the_worker_that_claimed_it(
         await worker.background_turns.wait_idle()
         await cleanup_task_worker(worker_task, shutdown_event)
         await _dispose_worker_engine(worker, db_engine)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_task_stopped_by_shutdown_goes_back_to_the_queue(
+    db_engine: AsyncEngine, shutdown_event: asyncio.Event
+) -> None:
+    """Cancelling a turn task hands its claim back instead of leaving it to go stale."""
+    turn_started = asyncio.Event()
+
+    async def endless_turn(
+        exec_context: ToolExecutionContext, payload: TaskPayload
+    ) -> None:
+        turn_started.set()
+        await asyncio.Event().wait()
+
+    worker = _make_worker(db_engine, shutdown_event)
+    worker.register_task_handler("llm_callback", endless_turn)
+    worker_task = asyncio.create_task(worker.run())
+    try:
+        db_context = Database(engine=db_engine)
+        await db_context.tasks.enqueue(
+            task_id="turn-task",
+            task_type="llm_callback",
+            payload={"interface_type": "web", "conversation_id": "conv-1"},
+            priority=TaskPriority.INTERACTIVE,
+        )
+        await asyncio.wait_for(turn_started.wait(), timeout=10.0)
+        await cleanup_task_worker(worker_task, shutdown_event)
+
+        await worker.background_turns.cancel_all()
+
+        [task] = await db_context.tasks.get_all(task_type="llm_callback")
+        assert task["status"] == "pending"
+        assert task["locked_by"] is None
+        assert task["retry_count"] == 1
+    finally:
+        await worker.background_turns.cancel_all()
+        await _dispose_worker_engine(worker, db_engine)
