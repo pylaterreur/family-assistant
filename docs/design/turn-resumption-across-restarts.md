@@ -102,11 +102,22 @@ at durable state:
 | State of the turn                                                                 | Outcome                                                                    |
 | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | Already has a terminal reply (it finished after the heartbeat lapsed)             | Nothing to do                                                              |
-| Something newer has happened in the conversation (a new prompt, a delivered wake) | Not resumed: continuing would interleave with it                           |
+| Something newer has happened in the conversation (a new prompt, a delivered wake) | Closed with an "interrupted" marker in place: continuing would interleave  |
+| No trigger row, but rows of its own and no terminal reply                         | Closed with an "interrupted" marker in place                               |
 | A durable confirmation from the turn is still pending                             | Not resumed: the deferred-confirmation path already owns what happens next |
 | Still live in this process (its heartbeat lapsed but the turn is running)         | Lease re-armed, nothing else                                               |
 | Has already been resumed `MAX_RESUME_ATTEMPTS` times                              | Closed with an "interrupted" marker, so that a crash loop ends             |
 | Otherwise                                                                         | Relaunched                                                                 |
+
+A turn closed "in place" gets its marker stamped with its own last activity, so it reads as the end
+of that turn rather than as news after the turns that followed, and it is recorded rather than
+delivered. When the resumer cannot launch the turn because another turn is already running in the
+conversation, the handler re-arms the lease one attempt further on; when it comes due, the newer
+turn has usually moved the conversation past this one, and the attempt cap ends it otherwise. So
+every exit but a pending confirmation leaves the turn either with a lease or with a terminal row. A
+turn left open for its confirmation, or by any path that misses this, stops counting as running in
+the history window once it has been quiet for `OPEN_TURN_MAX_QUIET`
+(`processing/history_window.py`), so it cannot pin the window verbatim.
 
 The handler then hands the relaunch to the resumer registered for the turn's interface. The handler
 returns as soon as the turn has been launched. It does not run the turn itself, so a long turn is

@@ -258,6 +258,58 @@ async def test_an_unfinished_turn_is_left_out_of_an_event(
     assert "Unfinished answer, now finished" in texts(recorder.requests[1])
 
 
+@pytest.mark.asyncio
+async def test_an_abandoned_turn_stops_counting_as_open(
+    db_engine: AsyncEngine, mock_clock: MockClock
+) -> None:
+    """A turn that never got a terminal row is held open only while it could
+    still be running; then the next event decides it like any other."""
+    db = Database(db_engine)
+    abandoned = str(uuid.uuid4())
+
+    async def add(message: LLMMessage) -> None:
+        await db.message_history.add_message(
+            message,
+            interface_type="telegram",
+            conversation_id=CONVERSATION_ID,
+            timestamp=mock_clock.now(),
+            turn_id=abandoned,
+            processing_profile_id=PROFILE_ID,
+        )
+
+    await add(user_message("Abandoned request"))
+    await add(
+        AssistantMessage(
+            tool_calls=[
+                ToolCallItem(
+                    id="call",
+                    type="function",
+                    function=ToolCallFunction(name="lookup", arguments="{}"),
+                )
+            ]
+        )
+    )
+    await add(ToolMessage(tool_call_id="call", name="lookup", content="x" * 20_000))
+    mock_clock.advance(timedelta(minutes=1))
+    recorder = Recorder()
+    service = make_service(
+        mock_clock, recorder, budget_chars=8_000, tools=HISTORY_TOOLS
+    )
+    await run_turn(service, db, "Meanwhile")
+    first = await db.history_compaction.latest(SCOPE)
+    assert first is not None
+    assert abandoned in first.open_turn_keys
+
+    mock_clock.advance(timedelta(minutes=45))
+    await run_turn(service, db, "Much later")
+
+    event = await db.history_compaction.latest(SCOPE)
+    assert event is not None
+    assert abandoned not in event.open_turn_keys
+    assert "x" * 20_000 in texts(recorder.requests[0])
+    assert "x" * 20_000 not in texts(recorder.requests[1])
+
+
 class _RejectsOnceIfLong(RuleBasedMockLLMClient):
     """Rejects the first request whose history is over a size, as a provider would."""
 

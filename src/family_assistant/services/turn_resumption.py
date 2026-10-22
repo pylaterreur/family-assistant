@@ -450,7 +450,11 @@ class TurnLeaseRegistry:
         if decision is ResumeDecision.FINISHED and payload.resumer in self._resumers:
             await self._resumers[payload.resumer].deliver_pending_reply(payload)
             return
+        if decision in {ResumeDecision.SUPERSEDED, ResumeDecision.UNKNOWN_TURN}:
+            await _close_abandoned_turn(db, payload)
+            return
         if decision is not ResumeDecision.RESUME:
+            # A turn awaiting confirmation stays open for the user's answer.
             return
 
         try:
@@ -460,14 +464,39 @@ class TurnLeaseRegistry:
                 await persist_interrupted_marker(db, payload)
             raise
         if not launched:
+            # Another turn is running in the conversation. Come back once it
+            # has had time to move the conversation past this one; the attempt
+            # count bounds how often, should it never do so.
+            await self.arm(db.tasks, payload.next_attempt())
             logger.info(
-                "Not resuming turn %s: conversation %s already has a running turn",
+                "Not resuming turn %s yet: conversation %s already has a running turn",
                 payload.turn_id,
                 payload.conversation_id,
             )
 
 
-async def persist_interrupted_marker(db: Database, payload: TurnResumePayload) -> None:
+async def _close_abandoned_turn(db: Database, payload: TurnResumePayload) -> None:
+    """Close a turn the conversation has moved on from, where it stands.
+
+    Nothing will run the turn again. Its marker is recorded rather than
+    delivered, and stamped with the turn's own last activity so it reads as
+    the end of that turn rather than as news after the later ones.
+    """
+    rows = await db.message_history.get_rows_by_turn_id(payload.turn_id)
+    if not rows or await db.message_history.has_terminal_reply_for_turn(
+        payload.turn_id
+    ):
+        return
+    last_activity = max(row["timestamp"] for row in rows)
+    # SQLite round-trips drop the zone; stored timestamps are UTC.
+    if last_activity.tzinfo is None:
+        last_activity = last_activity.replace(tzinfo=UTC)
+    await persist_interrupted_marker(db, payload, timestamp=last_activity)
+
+
+async def persist_interrupted_marker(
+    db: Database, payload: TurnResumePayload, *, timestamp: datetime | None = None
+) -> None:
     """Close a turn that will not be resumed, so it doesn't read as still pending."""
     turn_rows = await db.message_history.get_by_turn_id(payload.turn_id)
     await db.message_history.add_message(
@@ -479,7 +508,7 @@ async def persist_interrupted_marker(db: Database, payload: TurnResumePayload) -
         ),
         interface_type=payload.interface_type,
         conversation_id=payload.conversation_id,
-        timestamp=datetime.now(UTC),
+        timestamp=timestamp if timestamp is not None else datetime.now(UTC),
         turn_id=payload.turn_id,
         user_id=payload.user_id,
         processing_profile_id=payload.processing_profile_id,

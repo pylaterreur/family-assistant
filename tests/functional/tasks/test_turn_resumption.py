@@ -528,3 +528,106 @@ async def test_exhausted_turn_hands_its_marker_to_the_resumer(
     )
 
     assert (resumer.calls, resumer.deliveries) == ([], [payload])
+
+
+async def test_handler_closes_a_superseded_turn_where_it_stands(
+    db_engine: AsyncEngine,
+) -> None:
+    """A turn the conversation moved past gets its marker, stamped at the end
+    of the turn rather than after the turns that followed it."""
+    registry = TurnLeaseRegistry()
+    resumer = _RecordingResumer()
+    registry.register_resumer("fake", resumer)
+    db = Database(db_engine)
+    conversation_id, turn_id = _ids()
+    await _seed_interrupted_turn(db, conversation_id, turn_id)
+    (*_, last_row) = await db.message_history.get_rows_by_turn_id(turn_id)
+    await _add_row(
+        db,
+        _user("never mind, something else"),
+        conversation_id=conversation_id,
+        turn_id=str(uuid.uuid4()),
+    )
+
+    await registry.handle_resume_task(
+        _exec_context(db),
+        _payload(conversation_id, turn_id).model_dump(mode="json"),
+    )
+
+    *_, marker = await db.message_history.get_rows_by_turn_id(turn_id)
+    assert marker["content"] == INTERRUPTED_TURN_MARKER
+    assert _as_utc(marker["timestamp"]) == _as_utc(last_row["timestamp"])
+    assert await db.message_history.has_terminal_reply_for_turn(turn_id)
+    assert (resumer.calls, resumer.deliveries) == ([], [])
+
+
+async def test_handler_closes_an_unknown_turn_that_left_rows(
+    db_engine: AsyncEngine,
+) -> None:
+    registry = TurnLeaseRegistry()
+    registry.register_resumer("fake", _RecordingResumer())
+    db = Database(db_engine)
+    conversation_id, turn_id = _ids()
+    await _add_row(
+        db,
+        AssistantMessage(
+            content="",
+            tool_calls=[
+                ToolCallItem(
+                    id="call_1",
+                    type="function",
+                    function=ToolCallFunction(name="list_notes", arguments="{}"),
+                )
+            ],
+        ),
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+    )
+
+    await registry.handle_resume_task(
+        _exec_context(db),
+        _payload(conversation_id, turn_id).model_dump(mode="json"),
+    )
+
+    assert await db.message_history.has_terminal_reply_for_turn(turn_id)
+
+
+async def test_handler_writes_nothing_for_an_unknown_turn_without_rows(
+    db_engine: AsyncEngine,
+) -> None:
+    registry = TurnLeaseRegistry()
+    registry.register_resumer("fake", _RecordingResumer())
+    db = Database(db_engine)
+    conversation_id, turn_id = _ids()
+
+    await registry.handle_resume_task(
+        _exec_context(db),
+        _payload(conversation_id, turn_id).model_dump(mode="json"),
+    )
+
+    assert await db.message_history.get_rows_by_turn_id(turn_id) == []
+
+
+async def test_handler_rearms_a_turn_it_could_not_launch(
+    db_engine: AsyncEngine,
+) -> None:
+    """Another turn running in the conversation defers the resume rather than
+    dropping it, one attempt further on."""
+    registry = TurnLeaseRegistry()
+    resumer = _RecordingResumer(launched=False)
+    registry.register_resumer("fake", resumer)
+    db = Database(db_engine)
+    conversation_id, turn_id = _ids()
+    await _seed_interrupted_turn(db, conversation_id, turn_id)
+    payload = _payload(conversation_id, turn_id)
+
+    await registry.handle_resume_task(
+        _exec_context(db), payload.model_dump(mode="json")
+    )
+
+    (lease,) = await _leases(db)
+    assert lease["status"] == "pending"
+    assert TurnResumePayload.model_validate(lease["payload"]) == (
+        payload.next_attempt()
+    )
+    assert resumer.calls == [payload]
