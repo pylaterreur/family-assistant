@@ -80,11 +80,55 @@ async def test_a_budget_event_reduces_older_tool_calls_to_stubs(
     assert "Request 0" in text
     assert "Answer 0" in text
     assert "[Called lookup 3 times" in text
-    assert "get_message_history retrieves" in text
+    assert "get_message_history(turn_id=" in text
     assert "r" * 2_000 not in text
     event = await db.history_compaction.latest(SCOPE)
     assert event is not None
     assert event.reason == "budget"
+
+
+@pytest.mark.asyncio
+async def test_a_compacted_turn_keeps_the_outcome_of_each_state_changing_call(
+    db_engine: AsyncEngine, mock_clock: MockClock
+) -> None:
+    db = Database(db_engine)
+    await seed_turn(
+        db,
+        mock_clock,
+        "Remind me about the plumber",
+        "Reminder set.",
+        tool_calls=1,
+        tool_name="schedule_reminder",
+        tool_result="Reminder task_42 scheduled for Fri 15:00\n" + "detail " * 600,
+    )
+    await seed_turn(
+        db,
+        mock_clock,
+        "Look things up",
+        "Found them.",
+        tool_calls=3,
+        tool_result="r" * 2_000,
+    )
+    recorder = Recorder()
+    tools = [
+        *HISTORY_TOOLS,
+        *(
+            registration
+            for registration in LOCAL_TOOL_REGISTRATIONS
+            if registration.name == "schedule_reminder"
+        ),
+    ]
+    await run_turn(
+        make_service(mock_clock, recorder, budget_chars=8_000, tools=tools),
+        db,
+        "Next",
+    )
+
+    text = texts(recorder.requests[0])
+    assert "Reminder set." in text
+    assert "[Called schedule_reminder (call " in text
+    assert "Reminder task_42 scheduled for Fri 15:00 detail" in text
+    assert "detail " * 600 not in text
 
 
 @pytest.mark.asyncio

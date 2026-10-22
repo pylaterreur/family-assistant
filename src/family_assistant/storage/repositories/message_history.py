@@ -358,6 +358,10 @@ class MessageHistoryQuery:
     subconversation_id: str | None = None
     limit: int = _DEFAULT_MESSAGE_HISTORY_LIMIT
     include_context: int = 0
+    # Exact lookups: a row matches if it carries any of these ids.
+    message_ids: tuple[int, ...] = ()
+    turn_ids: tuple[str, ...] = ()
+    tool_call_ids: tuple[str, ...] = ()
     interface_type: str | None = None
     current_conversation_id: str | None = None
     current_user_id: str | None = None
@@ -396,6 +400,8 @@ class MessageHistorySummary(TypedDict):
     has_error: bool
     has_attachments: bool
     attachment_count: int
+    content_offset: NotRequired[int]
+    content_length: NotRequired[int]
     context: NotRequired[list["MessageHistorySummary"]]
 
 
@@ -556,14 +562,25 @@ class MessageHistoryRepository(BaseRepository):
         """Query message history with structured filters and conservative access scope."""
         limit = min(max(query.limit, 1), _MAX_MESSAGE_HISTORY_LIMIT)
         conditions = self._build_history_query_conditions(query)
+        # A lookup by id reads a turn or a call in the order it happened; a
+        # search wants the newest matches first.
+        by_id = bool(query.message_ids or query.turn_ids or query.tool_call_ids)
+        order = (
+            (
+                message_history_table.c.timestamp.asc(),
+                message_history_table.c.internal_id.asc(),
+            )
+            if by_id
+            else (
+                message_history_table.c.timestamp.desc(),
+                message_history_table.c.internal_id.desc(),
+            )
+        )
 
         stmt = (
             select(message_history_table)
             .where(*conditions)
-            .order_by(
-                message_history_table.c.timestamp.desc(),
-                message_history_table.c.internal_id.desc(),
-            )
+            .order_by(*order)
             .limit(limit)
         )
 
@@ -985,6 +1002,25 @@ class MessageHistoryRepository(BaseRepository):
                     message_history_table.c.interface_type == query.interface_type
                 )
 
+        id_conditions: list[ColumnElement[bool]] = []
+        if query.message_ids:
+            id_conditions.append(
+                message_history_table.c.internal_id.in_(query.message_ids)
+            )
+        if query.turn_ids:
+            id_conditions.append(message_history_table.c.turn_id.in_(query.turn_ids))
+        if query.tool_call_ids:
+            id_conditions.append(
+                message_history_table.c.tool_call_id.in_(query.tool_call_ids)
+            )
+            id_conditions.extend(
+                sa_cast(message_history_table.c.tool_calls, String).contains(
+                    f'"id": {json.dumps(tool_call_id)}'
+                )
+                for tool_call_id in query.tool_call_ids
+            )
+        if id_conditions:
+            conditions.append(or_(*id_conditions))
         if query.roles:
             conditions.append(message_history_table.c.role.in_(query.roles))
         if query.tool_names:

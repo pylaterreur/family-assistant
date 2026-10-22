@@ -32,11 +32,17 @@ if TYPE_CHECKING:
     from family_assistant.embeddings import EmbeddingGenerator
     from family_assistant.storage.repositories.message_history import (
         MessageHistoryQuery,
+        MessageHistorySummary,
     )
     from family_assistant.storage.types import MessageHistoryRow
     from family_assistant.tools.types import ToolDefinition, ToolExecutionContext
 
 logger = logging.getLogger(__name__)
+
+# How much of each row's content one get_message_history call returns, so
+# recovering one detail does not put a whole large row back into the prompt.
+DEFAULT_HISTORY_CONTENT_CHARS = 4_000
+MAX_HISTORY_CONTENT_CHARS = 20_000
 
 
 # Tool Definitions
@@ -82,7 +88,9 @@ COMMUNICATION_TOOLS_DEFINITION: list[ToolDefinition] = [
             "name": "get_message_history",
             "description": (
                 "Structured and semantic lookup against past conversation history. Use structured mode for exact filters like dates, roles, tools, attachments, or errors; semantic mode for fuzzy recall; and hybrid mode when both are useful. "
-                "Returns compact message summaries (each with a stable message_id, timestamp, role, content, and optional neighboring context), or an empty list when nothing matches. "
+                "When you already know a turn_id, tool_call_ids or message_ids (an earlier turn's compacted note names them), pass them to read exactly those rows, oldest first, instead of searching. "
+                "Returns compact message summaries (each with a stable message_id, turn_id, timestamp, role, content, and optional neighboring context), or an empty list when nothing matches. "
+                "Each content is cut to max_content_chars starting at content_offset; a cut row reports content_length, so read further with a larger content_offset. A result too large to keep inline was saved as an attachment, which read_text_attachment can page through or grep. "
                 "Semantic recall lags the conversation by a couple of minutes because a turn is indexed once it has finished, so use structured mode to look up something said in the last few exchanges."
             ),
             "parameters": {
@@ -101,6 +109,20 @@ COMMUNICATION_TOOLS_DEFINITION: list[ToolDefinition] = [
                     "conversation_id": {
                         "type": "string",
                         "description": "Optional conversation filter. Narrows results to one conversation.",
+                    },
+                    "turn_id": {
+                        "type": "string",
+                        "description": "Optional exact lookup: every row of this turn.",
+                    },
+                    "tool_call_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional exact lookup: the calls with these ids and their results.",
+                    },
+                    "message_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "Optional exact lookup: the rows with these message_ids.",
                     },
                     "scope": {
                         "type": "string",
@@ -158,6 +180,16 @@ COMMUNICATION_TOOLS_DEFINITION: list[ToolDefinition] = [
                         "type": "integer",
                         "description": "Optional number of neighboring messages per side to include for each result. Default is 0, maximum is 10.",
                         "default": 0,
+                    },
+                    "content_offset": {
+                        "type": "integer",
+                        "description": "Optional character offset to start each row's content at, for reading further into a long row. Default is 0.",
+                        "default": 0,
+                    },
+                    "max_content_chars": {
+                        "type": "integer",
+                        "description": f"Optional maximum characters of content per row. Default is {DEFAULT_HISTORY_CONTENT_CHARS}, maximum is {MAX_HISTORY_CONTENT_CHARS}.",
+                        "default": DEFAULT_HISTORY_CONTENT_CHARS,
                     },
                 },
                 "required": [],
@@ -247,6 +279,11 @@ async def get_message_history_tool(
     subconversation_id: str | None = None,
     limit: int = 20,
     include_context: int = 0,
+    turn_id: str | None = None,
+    tool_call_ids: list[str] | None = None,
+    message_ids: list[int] | None = None,
+    content_offset: int = 0,
+    max_content_chars: int = DEFAULT_HISTORY_CONTENT_CHARS,
 ) -> ToolResult:
     """
     Query persisted message history with structured filters and optional semantic search.
@@ -268,6 +305,11 @@ async def get_message_history_tool(
         subconversation_id: Optional subconversation filter; defaults to current value.
         limit: Maximum number of results.
         include_context: Number of neighboring messages per side to include.
+        turn_id: Optional exact lookup of one turn's rows.
+        tool_call_ids: Optional exact lookup of calls and their results.
+        message_ids: Optional exact lookup of rows by message id.
+        content_offset: Character offset each row's content starts at.
+        max_content_chars: Maximum characters of content returned per row.
 
     Returns:
         Structured tool result containing compact message history results.
@@ -307,6 +349,9 @@ async def get_message_history_tool(
             subconversation_id=effective_subconversation_id,
             limit=limit,
             include_context=include_context,
+            message_ids=tuple(message_ids or ()),
+            turn_ids=(turn_id,) if turn_id else (),
+            tool_call_ids=tuple(tool_call_ids or ()),
             interface_type=exec_context.interface_type,
             current_conversation_id=exec_context.conversation_id,
             current_user_id=exec_context.user_id,
@@ -328,10 +373,14 @@ async def get_message_history_tool(
             "scope": scope,
             "query": query,
             "result_count": len(rows),
-            "results": await db_context.message_history.hydrate_history_results(
-                rows,
-                include_context=include_context,
-                access_query=history_query,
+            "results": _bound_history_content(
+                await db_context.message_history.hydrate_history_results(
+                    rows,
+                    include_context=include_context,
+                    access_query=history_query,
+                ),
+                offset=max(content_offset, 0),
+                limit=min(max(max_content_chars, 1), MAX_HISTORY_CONTENT_CHARS),
             ),
         }
         return ToolResult(data=data)
@@ -360,6 +409,25 @@ async def get_message_history_tool(
                 "results": [],
             }
         )
+
+
+def _bound_history_content(
+    results: list[MessageHistorySummary], *, offset: int, limit: int
+) -> list[MessageHistorySummary]:
+    """Each result's content cut to ``limit`` characters from ``offset``.
+
+    A row that was cut reports its full ``content_length``, so the model can
+    read on with a larger offset.
+    """
+    for result in results:
+        content = result["content"]
+        if content is not None and (offset > 0 or len(content) > limit):
+            result["content"] = content[offset : offset + limit]
+            result["content_offset"] = offset
+            result["content_length"] = len(content)
+        if "context" in result:
+            _bound_history_content(result["context"], offset=offset, limit=limit)
+    return results
 
 
 async def _execute_message_history_query(

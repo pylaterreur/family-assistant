@@ -11,7 +11,7 @@ their inputs, so a replay is byte-identical without persisting any text.
 
 from __future__ import annotations
 
-from collections import Counter
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -31,6 +31,7 @@ from family_assistant.llm.tool_call import ToolCallFunction, ToolCallItem
 from family_assistant.processing.message_time import with_sent_at
 from family_assistant.security.taint import introduced_taint_metadata
 from family_assistant.storage.history_compaction import TurnDecision, TurnMode
+from family_assistant.tools.metadata import ToolTag
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
@@ -48,6 +49,27 @@ HISTORY_TOOL_NAME = "get_message_history"
 # attachment_ids reaches a model that reads media; read_text_attachment decodes
 # text and get_attachment_info returns metadata, so neither recovers an image.
 MEDIA_TOOL_NAMES = frozenset({"delegate_to_service"})
+
+# A call to a tool with any of these tags, and not READ_ONLY, did something a
+# later turn must not do again, so a compacted turn keeps its outcome.
+CONSEQUENTIAL_TOOL_TAGS = frozenset({
+    ToolTag.STATE_CHANGING,
+    ToolTag.STATE_PERSISTING,
+    ToolTag.EXTERNAL_COMM,
+    ToolTag.DESTRUCTIVE,
+    ToolTag.DELEGATION,
+    ToolTag.EXECUTABLE_PERSISTENCE,
+})
+# How much of a consequential call's arguments and result its line keeps.
+_ARGUMENTS_CHARS = 200
+_OUTCOME_CHARS = 300
+
+
+def is_consequential(tags: Collection[ToolTag]) -> bool:
+    """Whether a tool with *tags* changes something outside the conversation."""
+    return ToolTag.READ_ONLY not in tags and not CONSEQUENTIAL_TOOL_TAGS.isdisjoint(
+        tags
+    )
 
 
 class CompactionReason(StrEnum):
@@ -75,6 +97,8 @@ class CompactionCapabilities:
 
     history_tool: bool
     media_tool: bool
+    consequential_tools: frozenset[str] = frozenset()
+    """Tools whose calls keep one outcome line each when compacted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +247,36 @@ def _one_line(text: str | None) -> str:
     )
 
 
+def _clipped(text: str, limit: int) -> str:
+    flattened = " ".join(text.split())
+    return flattened if len(flattened) <= limit else f"{flattened[: limit - 1]}…"
+
+
+def _lookup(turn_id: str | None, call_ids: Sequence[str]) -> str:
+    """The ``get_message_history`` call that retrieves exactly these rows."""
+    if turn_id is not None:
+        return f'{HISTORY_TOOL_NAME}(turn_id="{turn_id}")'
+    return f"{HISTORY_TOOL_NAME}(tool_call_ids={json.dumps(list(call_ids))})"
+
+
+def _outcome_line(call: ToolCallItem, result: ToolMessage | None) -> str:
+    arguments = call.function.arguments
+    arguments_text = _clipped(
+        arguments if isinstance(arguments, str) else json.dumps(arguments),
+        _ARGUMENTS_CHARS,
+    )
+    if result is None:
+        outcome = "no result was recorded"
+    else:
+        outcome = _clipped(result.content, _OUTCOME_CHARS) or "(empty result)"
+        if result.error_traceback:
+            outcome = f"failed: {outcome}"
+    return (
+        f"[Called {call.function.name} (call {call.id}) with {arguments_text}: "
+        f"{outcome}]"
+    )
+
+
 def _attachment_reference(attachment_id: str | None) -> TextContentPart:
     return TextContentPart(
         type="text",
@@ -283,27 +337,35 @@ def can_compact(
 
 
 def render_compacted_turn(
-    rows: Sequence[MessageWithMetadata], timezone: ZoneInfo
+    rows: Sequence[MessageWithMetadata],
+    timezone: ZoneInfo,
+    consequential_tools: Collection[str] = frozenset(),
 ) -> list[LLMMessage]:
     """A turn reduced to what the user said, stubs, and the final answer.
 
-    Each tool is named once in a one-line stub pointing at
-    ``get_message_history``; attachments become references by id; errors are
-    one line. A tool call that activated on-demand tools keeps its call and a
-    stub result carrying the activation, so compacting a turn never changes the
-    tool set (``family_assistant.llm.deferred_tools``). No provider replay
-    state survives, so every adapter renders the turn from these messages.
+    The stub opens with the exact ``get_message_history`` lookup that recovers
+    the turn's calls and results. Reads are grouped, one line per tool. A call
+    to one of ``consequential_tools`` keeps a line of its own with its call id,
+    arguments and outcome, so a later turn can see the action already happened
+    without looking it up. Attachments become references by id; errors are one
+    line. A tool call that activated on-demand tools keeps its call and a stub
+    result carrying the activation, so compacting a turn never changes the tool
+    set (``family_assistant.llm.deferred_tools``). No provider replay state
+    survives, so every adapter renders the turn from these messages.
 
     The answer carries the taint every dropped row introduced, so a compacted
     turn taints the window exactly as long, and as much, as the verbatim turn.
     """
     rendered: list[LLMMessage] = []
-    tool_counts: Counter[str] = Counter()
+    read_calls: dict[str, list[str]] = {}
+    consequential_calls: list[ToolCallItem] = []
     activating: list[tuple[ToolCallItem, ToolMessage]] = []
     calls_by_id: dict[str, ToolCallItem] = {}
+    results_by_id: dict[str, ToolMessage] = {}
     answer: str | None = None
     errors: list[str] = []
     started_at = rows[0].timestamp if rows else None
+    turn_id = next((row.turn_id for row in rows if row.turn_id is not None), None)
     for row in rows:
         message = row.message
         if isinstance(message, UserMessage):
@@ -319,11 +381,17 @@ def render_compacted_turn(
             rendered.append(message)
         elif isinstance(message, AssistantMessage):
             for tool_call in message.tool_calls or ():
-                tool_counts[tool_call.function.name] += 1
                 calls_by_id[tool_call.id] = tool_call
+                if tool_call.function.name in consequential_tools:
+                    consequential_calls.append(tool_call)
+                else:
+                    read_calls.setdefault(tool_call.function.name, []).append(
+                        tool_call.id
+                    )
             if message.content:
                 answer = message.content
         elif isinstance(message, ToolMessage):
+            results_by_id[message.tool_call_id] = message
             call = calls_by_id.get(message.tool_call_id)
             if message.activated_tools and call is not None:
                 activating.append((call, message))
@@ -347,21 +415,31 @@ def render_compacted_turn(
             ToolMessage(
                 tool_call_id=result.tool_call_id,
                 name=result.name,
-                content="[Result not shown here; get_message_history retrieves it]",
+                content=(
+                    "[Result not shown here; "
+                    f"{_lookup(None, [result.tool_call_id])} retrieves it]"
+                ),
                 activated_tools=result.activated_tools,
             ),
         ))
 
-    when = (
-        f" at {started_at.astimezone(timezone).strftime('%Y-%m-%d %H:%M')}"
-        if started_at is not None
-        else ""
+    lines: list[str] = []
+    if calls_by_id:
+        when = (
+            f" at {started_at.astimezone(timezone).strftime('%Y-%m-%d %H:%M')}"
+            if started_at is not None
+            else ""
+        )
+        lines.append(
+            f"[Tool calls{when} compacted; "
+            f"{_lookup(turn_id, list(calls_by_id))} retrieves the calls and results]"
+        )
+    for name, call_ids in read_calls.items():
+        count = f" {len(call_ids)} times" if len(call_ids) > 1 else ""
+        lines.append(f"[Called {name}{count}]")
+    lines.extend(
+        _outcome_line(call, results_by_id.get(call.id)) for call in consequential_calls
     )
-    lines = [
-        f"[Called {name}{f' {count} times' if count > 1 else ''}{when}; "
-        f"{HISTORY_TOOL_NAME} retrieves the calls and results]"
-        for name, count in tool_counts.items()
-    ]
     lines.extend(errors)
     if answer:
         lines.append(answer)

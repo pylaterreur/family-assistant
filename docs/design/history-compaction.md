@@ -72,14 +72,19 @@ compaction events the history window makes no edits to the prompt, only appends.
   budget, so the next one is many turns away. Provider caches live for minutes, so after an idle gap
   the cache is already cold and compacting there costs almost nothing extra.
 - **Compacted rendering.** A compacted turn keeps what the user said and the assistant's final
-  answer, and reduces each tool call to a one-line stub that names the tool and says the detail is
-  retrievable with `get_message_history`. Old attachments become references (id, type, filename)
-  instead of bytes. Errors render as one line. A turn that still does not fit is dropped whole,
-  oldest first. Stubs matter: a model that sees "09:12 asked about two plumber quotes" will look it
-  up when asked "and the other one?"; a model that sees nothing will guess. Compaction only produces
-  references the profile can follow: a tool stub needs `get_message_history`, an attachment
-  reference needs a tool that reads attachments. For a profile without them (such as `council`),
-  those turns are kept verbatim or dropped whole.
+  answer, and reduces its tool calls to stubs that open with the exact `get_message_history` lookup
+  (by turn id, or by call ids for a row outside any turn) that recovers them, so recovery is a
+  lookup rather than a search. Reads are grouped, one line per tool. A call to a tool tagged as
+  changing state, communicating or delegating (and not read-only) keeps its own line with call id,
+  clipped arguments and clipped outcome, so a later turn sees that the action already happened and
+  does not repeat it. `get_message_history` reads a long row in ranges, and a result too large to
+  keep inline is already an attachment that `read_text_attachment` pages through or greps. Old
+  attachments become references (id, type, filename) instead of bytes. Errors render as one line. A
+  turn that still does not fit is dropped whole, oldest first. Stubs matter: a model that sees
+  "09:12 asked about two plumber quotes" will look it up when asked "and the other one?"; a model
+  that sees nothing will guess. Compaction only produces references the profile can follow: a tool
+  stub needs `get_message_history`, an attachment reference needs a tool that reads attachments. For
+  a profile without them (such as `council`), those turns are kept verbatim or dropped whole.
 - **Provider constraints at an event.** On Claude, every thinking block after the first changed
   message loses its binding, in kept turns and in the active turn alike; the compaction strips them
   (text and tool calls stay) rather than leaving the API to drop them, so `prefix_binding_mismatch`

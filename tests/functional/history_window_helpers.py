@@ -98,6 +98,7 @@ async def seed_turn(
     *,
     tool_calls: int = 0,
     tool_result: str = "result",
+    tool_name: str = "lookup",
     interface_type: str = "telegram",
     profile_id: str = PROFILE_ID,
     thread_root_id: int | None = None,
@@ -128,7 +129,7 @@ async def seed_turn(
                     ToolCallItem(
                         id=call_id,
                         type="function",
-                        function=ToolCallFunction(name="lookup", arguments="{}"),
+                        function=ToolCallFunction(name=tool_name, arguments="{}"),
                     )
                 ],
             ),
@@ -136,7 +137,7 @@ async def seed_turn(
             **common,
         )
         await db.message_history.add_message(
-            ToolMessage(tool_call_id=call_id, name="lookup", content=tool_result),
+            ToolMessage(tool_call_id=call_id, name=tool_name, content=tool_result),
             timestamp=mock_clock.now(),
             **common,
         )

@@ -247,7 +247,10 @@ def test_a_compacted_turn_keeps_the_request_stubs_and_answer() -> None:
     final = rendered[-1]
     assert isinstance(final, AssistantMessage)
     assert final.content is not None
-    assert "[Called web_fetch at 2026-10-05 12:00; get_message_history" in final.content
+    assert final.content.startswith(
+        '[Tool calls at 2026-10-05 12:00 compacted; get_message_history(turn_id="t")'
+    )
+    assert "[Called web_fetch]" in final.content
     assert final.content.endswith("Here is what I found.")
     user = rendered[0]
     assert isinstance(user, UserMessage)
@@ -288,6 +291,112 @@ def test_compacting_a_turn_does_not_reduce_its_taint() -> None:
     assert {source.source_id for source in verbatim.sources} <= {
         source.source_id for source in compacted.sources
     }
+
+
+def _write_turn(*, turn_id: str | None = "t") -> list[MessageWithMetadata]:
+    rows = [
+        _row(0, UserMessage(content="Remind me about the plumber, and check notes")),
+        _row(
+            1,
+            AssistantMessage(
+                tool_calls=[
+                    ToolCallItem(
+                        id=call_id,
+                        type="function",
+                        function=ToolCallFunction(name=name, arguments=arguments),
+                    )
+                    for call_id, name, arguments in (
+                        ("r1", "search_notes", '{"query": "plumber"}'),
+                        ("r2", "search_notes", '{"query": "quote"}'),
+                        ("w1", "schedule_reminder", '{"message": "Call plumber"}'),
+                        ("w2", "send_message_to_user", '{"target_chat_id": "9"}'),
+                    )
+                ],
+            ),
+        ),
+        _row(2, ToolMessage(tool_call_id="r1", name="search_notes", content="a")),
+        _row(3, ToolMessage(tool_call_id="r2", name="search_notes", content="b")),
+        _row(
+            4,
+            ToolMessage(
+                tool_call_id="w1",
+                name="schedule_reminder",
+                content="Reminder task_42 scheduled for Fri 15:00\nmore detail",
+            ),
+        ),
+        _row(
+            5,
+            ToolMessage(
+                tool_call_id="w2",
+                name="send_message_to_user",
+                content="Error: Could not send",
+                error_traceback="Traceback ...",
+            ),
+        ),
+        _row(6, AssistantMessage(content="Reminder set.")),
+    ]
+    if turn_id is None:
+        return [
+            MessageWithMetadata(
+                message=row.message,
+                internal_id=row.internal_id,
+                interface_message_id=None,
+                timestamp=row.timestamp,
+                conversation_id=row.conversation_id,
+                interface_type=row.interface_type,
+            )
+            for row in rows
+        ]
+    return rows
+
+
+def _compacted_text(rows: list[MessageWithMetadata]) -> str:
+    rendered = render_compacted_turn(
+        rows,
+        ZoneInfo("UTC"),
+        frozenset({"schedule_reminder", "send_message_to_user"}),
+    )
+    final = rendered[-1]
+    assert isinstance(final, AssistantMessage)
+    assert final.content is not None
+    return final.content
+
+
+def test_a_compacted_turn_keeps_each_consequential_outcome() -> None:
+    lines = _compacted_text(_write_turn()).splitlines()
+
+    assert lines == [
+        '[Tool calls at 2026-10-05 12:00 compacted; get_message_history(turn_id="t") '
+        "retrieves the calls and results]",
+        "[Called search_notes 2 times]",
+        '[Called schedule_reminder (call w1) with {"message": "Call plumber"}: '
+        "Reminder task_42 scheduled for Fri 15:00 more detail]",
+        '[Called send_message_to_user (call w2) with {"target_chat_id": "9"}: '
+        "failed: Error: Could not send]",
+        "Reminder set.",
+    ]
+
+
+def test_a_compacted_turn_without_a_turn_id_names_its_calls() -> None:
+    text = _compacted_text(_write_turn(turn_id=None))
+
+    assert (
+        'get_message_history(tool_call_ids=["r1", "r2", "w1", "w2"]) retrieves' in text
+    )
+
+
+def test_a_consequential_outcome_line_is_bounded() -> None:
+    rows = _write_turn()
+    rows[4] = _row(
+        4,
+        ToolMessage(tool_call_id="w1", name="schedule_reminder", content="y" * 5_000),
+    )
+
+    line = next(
+        line for line in _compacted_text(rows).splitlines() if "(call w1)" in line
+    )
+
+    assert len(line) < 600
 
 
 def test_an_image_turn_compacts_only_where_a_model_can_look_again() -> None:

@@ -43,6 +43,7 @@ from family_assistant.processing.history_compaction import (
     HISTORY_TOOL_NAME,
     MEDIA_TOOL_NAMES,
     CompactionCapabilities,
+    is_consequential,
     without_bound_thinking,
 )
 from family_assistant.processing.history_window import (
@@ -1255,6 +1256,7 @@ class ProcessingService:
     async def _compaction_capabilities(self) -> CompactionCapabilities:
         """Which references this profile can follow, for compacted turns."""
         from family_assistant.tools.infrastructure import (  # noqa: PLC0415
+            ToolDescriptorProvider,
             get_tool_definitions_for_advertisement,
         )
 
@@ -1264,9 +1266,19 @@ class ProcessingService:
         names = {
             definition.get("function", {}).get("name") for definition in advertised
         }
+        descriptors = (
+            await self.tools_provider.get_tool_descriptors()
+            if isinstance(self.tools_provider, ToolDescriptorProvider)
+            else []
+        )
         return CompactionCapabilities(
             history_tool=HISTORY_TOOL_NAME in names,
             media_tool=not names.isdisjoint(MEDIA_TOOL_NAMES),
+            consequential_tools=frozenset(
+                descriptor.name
+                for descriptor in descriptors
+                if is_consequential(descriptor.tags)
+            ),
         )
 
     async def _window_references(

@@ -270,6 +270,17 @@ class HistoryWindowLoader:
         self._capabilities = capabilities
         self._relevance = relevance
 
+    def _capabilities_once(self) -> Callable[[], Awaitable[CompactionCapabilities]]:
+        """The profile's capabilities, read at most once per load and only if needed."""
+        cached: list[CompactionCapabilities] = []
+
+        async def capabilities() -> CompactionCapabilities:
+            if not cached:
+                cached.append(await self._capabilities())
+            return cached[0]
+
+        return capabilities
+
     async def _render_verbatim(
         self, turn: HistoryTurn, strip_through: int | None
     ) -> list[LLMMessage]:
@@ -281,10 +292,17 @@ class HistoryWindowLoader:
         ])
 
     async def _render_turn(
-        self, turn: HistoryTurn, decision: TurnDecision
+        self,
+        turn: HistoryTurn,
+        decision: TurnDecision,
+        capabilities: Callable[[], Awaitable[CompactionCapabilities]],
     ) -> list[LLMMessage]:
         if decision.mode is TurnMode.COMPACTED:
-            return render_compacted_turn(turn.rows, self._timezone)
+            return render_compacted_turn(
+                turn.rows,
+                self._timezone,
+                (await capabilities()).consequential_tools,
+            )
         return await self._render_verbatim(turn, decision.strip_through)
 
     async def load(
@@ -320,6 +338,7 @@ class HistoryWindowLoader:
         turn's own load will, and decides the same window.
         """
         history = db.message_history
+        capabilities = self._capabilities_once()
         event = await db.history_compaction.latest(scope)
         boundary = event.boundary_internal_id if event is not None else 0
         decided = event.decisions if event is not None else {}
@@ -406,7 +425,9 @@ class HistoryWindowLoader:
             )
         for entry in window:
             if entry.decision is not None:
-                entry.rendered = await self._render_turn(entry.turn, entry.decision)
+                entry.rendered = await self._render_turn(
+                    entry.turn, entry.decision, capabilities
+                )
 
         reason = context_length_target and CompactionReason.CONTEXT_LENGTH
         reason = reason or self._trigger(
@@ -437,6 +458,7 @@ class HistoryWindowLoader:
             plan = await self._compact(
                 db,
                 window,
+                capabilities=await capabilities(),
                 scope=scope,
                 limits=limits,
                 now=now,
@@ -466,7 +488,9 @@ class HistoryWindowLoader:
                 else:
                     entry.decision = plan.decisions.get(entry.turn.key)
                 if entry.decision is not None:
-                    entry.rendered = await self._render_turn(entry.turn, entry.decision)
+                    entry.rendered = await self._render_turn(
+                        entry.turn, entry.decision, capabilities
+                    )
             if plan.changed:
                 active_strip_through = new_boundary
             compaction = reason
@@ -543,6 +567,7 @@ class HistoryWindowLoader:
         db: Database,
         window: Sequence[_WindowTurn],
         *,
+        capabilities: CompactionCapabilities,
         scope: HistoryScope,
         limits: HistoryLimits,
         now: datetime,
@@ -553,7 +578,6 @@ class HistoryWindowLoader:
         target_chars: int,
         record: bool,
     ) -> CompactionPlan:
-        capabilities = await self._capabilities()
         candidates: list[CompactionCandidate] = []
         for entry in window:
             if entry.open:
@@ -565,7 +589,13 @@ class HistoryWindowLoader:
                 else await self._render_verbatim(entry.turn, None)
             )
             compacted_size = (
-                messages_size(render_compacted_turn(entry.turn.rows, self._timezone))
+                messages_size(
+                    render_compacted_turn(
+                        entry.turn.rows,
+                        self._timezone,
+                        capabilities.consequential_tools,
+                    )
+                )
                 if can_compact(entry.turn.rows, capabilities)
                 else None
             )

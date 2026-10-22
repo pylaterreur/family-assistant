@@ -446,6 +446,165 @@ async def test_get_message_history_tool_returns_structured_json(
     assert data["results"][0]["content"] == "The passports are in the blue folder"
 
 
+async def _store_tool_turn(
+    db: Database,
+    *,
+    conversation_id: str,
+    user_id: str,
+    turn_id: str,
+    call_id: str,
+    result: str,
+    timestamp: datetime,
+) -> None:
+    await _store_user_message(
+        db,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        content="Remind me to call the plumber",
+        timestamp=timestamp,
+        turn_id=turn_id,
+    )
+    for offset, message in enumerate(
+        (
+            AssistantMessage(
+                tool_calls=[
+                    ToolCallItem(
+                        id=call_id,
+                        type="function",
+                        function=ToolCallFunction(
+                            name="schedule_reminder",
+                            arguments={"message": "Call the plumber"},
+                        ),
+                    )
+                ],
+            ),
+            ToolMessage(tool_call_id=call_id, name="schedule_reminder", content=result),
+            AssistantMessage(content="Done."),
+        ),
+        start=1,
+    ):
+        await db.message_history.add_message(
+            message,
+            interface_type="test",
+            conversation_id=conversation_id,
+            timestamp=timestamp + timedelta(seconds=offset),
+            turn_id=turn_id,
+            user_id=user_id,
+            processing_profile_id="default",
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_message_history_tool_looks_up_a_turn_and_a_call_by_id(
+    db_engine: AsyncEngine,
+) -> None:
+    """A turn id returns the turn in order; a call id returns its call and result."""
+    db = Database(engine=db_engine)
+    now = datetime.now(UTC)
+    await _store_tool_turn(
+        db,
+        conversation_id="current",
+        user_id="user-a",
+        turn_id="turn-1",
+        call_id="call-1",
+        result="Reminder task_42 scheduled",
+        timestamp=now - timedelta(minutes=5),
+    )
+    await _store_tool_turn(
+        db,
+        conversation_id="current",
+        user_id="user-a",
+        turn_id="turn-2",
+        call_id="call-2",
+        result="Reminder task_43 scheduled",
+        timestamp=now,
+    )
+    context = _build_exec_context(db)
+
+    by_turn = await get_message_history_tool(exec_context=context, turn_id="turn-1")
+    by_call = await get_message_history_tool(
+        exec_context=context, tool_call_ids=["call-2"]
+    )
+
+    turn_rows = cast("dict[str, Any]", by_turn.data)["results"]
+    assert [row["role"] for row in turn_rows] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert {row["turn_id"] for row in turn_rows} == {"turn-1"}
+    call_rows = cast("dict[str, Any]", by_call.data)["results"]
+    assert [row["role"] for row in call_rows] == ["assistant", "tool"]
+    assert call_rows[1]["content"] == "Reminder task_43 scheduled"
+    message_id = call_rows[1]["message_id"]
+    by_message = await get_message_history_tool(
+        exec_context=context, message_ids=[message_id]
+    )
+    assert [
+        row["message_id"] for row in cast("dict[str, Any]", by_message.data)["results"]
+    ] == [message_id]
+
+
+@pytest.mark.asyncio
+async def test_get_message_history_lookup_by_id_keeps_the_access_scope(
+    db_engine: AsyncEngine,
+) -> None:
+    """Knowing another user's turn or call id does not reveal its rows."""
+    db = Database(engine=db_engine)
+    await _store_tool_turn(
+        db,
+        conversation_id="other-user",
+        user_id="user-b",
+        turn_id="turn-b",
+        call_id="call-b",
+        result="Reminder task_99 scheduled",
+        timestamp=datetime.now(UTC),
+    )
+    context = _build_exec_context(db)
+
+    by_turn = await get_message_history_tool(exec_context=context, turn_id="turn-b")
+    by_call = await get_message_history_tool(
+        exec_context=context, tool_call_ids=["call-b"]
+    )
+
+    assert cast("dict[str, Any]", by_turn.data)["results"] == []
+    assert cast("dict[str, Any]", by_call.data)["results"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_message_history_tool_reads_a_long_row_in_ranges(
+    db_engine: AsyncEngine,
+) -> None:
+    """A long row comes back cut, with its length, and reads on from an offset."""
+    db = Database(engine=db_engine)
+    content = "".join(f"line {index:04d}\n" for index in range(1_000))
+    await _store_user_message(
+        db,
+        conversation_id="current",
+        user_id="user-a",
+        content=content,
+        timestamp=datetime.now(UTC),
+        turn_id="turn-long",
+    )
+    context = _build_exec_context(db)
+
+    first = await get_message_history_tool(exec_context=context, turn_id="turn-long")
+    later = await get_message_history_tool(
+        exec_context=context,
+        turn_id="turn-long",
+        content_offset=5_000,
+        max_content_chars=20,
+    )
+
+    first_row = cast("dict[str, Any]", first.data)["results"][0]
+    assert first_row["content"] == content[:4_000]
+    assert first_row["content_length"] == len(content)
+    later_row = cast("dict[str, Any]", later.data)["results"][0]
+    assert later_row["content"] == content[5_000:5_020]
+    assert later_row["content_offset"] == 5_000
+
+
 @pytest.mark.asyncio
 async def test_get_message_history_tool_merges_returned_row_taint(
     db_engine: AsyncEngine,
