@@ -1186,7 +1186,7 @@ SELECT mh.reasoning_info->>'experiment_arm' AS arm,
        count(DISTINCT f.id) FILTER (WHERE f.rating = 'down') AS down
 FROM message_history mh
 LEFT JOIN turn_feedback f ON f.turn_id = mh.turn_id
-WHERE mh.role = 'assistant'
+WHERE mh.role IN ('assistant', 'error')
   AND mh.reasoning_info->>'experiment_id' = 'argon-vs-opus-2026-10'
 GROUP BY 1;
 ```
