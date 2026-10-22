@@ -8,7 +8,10 @@ from unittest.mock import patch
 
 import pytest
 from anthropic.types import (
+    CacheCreation,
+    Message,
     RawContentBlockDeltaEvent,
+    RawMessageStartEvent,
     TextBlockParam,
     TextDelta,
     Usage,
@@ -312,25 +315,49 @@ class TestAnthropicPromptCacheBreakpoint:
             }
         ]
 
-    def test_hoisted_mid_conversation_system_message_lands_past_the_breakpoint(
+    def test_a_later_system_message_leaves_the_system_value_untouched(
         self,
     ) -> None:
-        """Per-turn system triggers must not end up inside the cached block."""
+        """The history's cache entry must survive a notice arriving or leaving.
+
+        ``system`` precedes the history in the cache key, so a notice hoisted
+        into it would rewrite the cache for every message before it.
+        """
         stable = "You are a helpful assistant."
-        system_value = self._convert([
+        before: list[LLMMessage] = [
             SystemMessage(content=stable, stable_prefix_len=len(stable)),
             UserMessage(content="hi"),
-            SystemMessage(content="System: Reminder triggered at 10:00:00"),
+            AssistantMessage(content="hello"),
+        ]
+
+        with_notice = self._convert([
+            *before,
+            SystemMessage(content="Delegation finished."),
+            UserMessage(content="and?"),
         ])
 
-        assert isinstance(system_value, list)
-        assert system_value[0]["text"] == stable
-        assert system_value[0].get("cache_control") == {
-            "type": "ephemeral",
-            "ttl": "1h",
+        assert with_notice == self._convert(before)
+
+    def test_a_later_system_message_is_a_labelled_user_block_where_it_occurred(
+        self,
+    ) -> None:
+        client = AnthropicClient(api_key="test", model="claude-sonnet-4-6")
+        _, api_messages = client._convert_messages_to_anthropic_format(
+            [
+                SystemMessage(content="You are helpful."),
+                UserMessage(content="hi"),
+                AssistantMessage(content="hello"),
+                SystemMessage(content="Delegation finished."),
+            ],
+            cache_conversation=False,
+        )
+
+        assert api_messages[-1] == {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "[System notice]\nDelegation finished."}
+            ],
         }
-        assert "Reminder triggered" in system_value[1]["text"]
-        assert "cache_control" not in system_value[1]
 
     def test_no_system_messages_yields_none(self) -> None:
         assert self._convert([UserMessage(content="hi")]) is None
@@ -381,6 +408,22 @@ class TestAnthropicCacheUsageReporting:
         assert "cached_prompt_tokens" not in info
         assert "cache_write_tokens" not in info
         assert info.get("total_tokens") == 120
+
+    def test_one_hour_cache_writes_are_reported_apart(self) -> None:
+        """Billed at 2x the input price, against 1.25x for five-minute writes."""
+        usage = Usage(
+            input_tokens=100,
+            output_tokens=20,
+            cache_creation_input_tokens=5000,
+            cache_creation=CacheCreation(
+                ephemeral_1h_input_tokens=4200, ephemeral_5m_input_tokens=800
+            ),
+        )
+
+        info = AnthropicClient._reasoning_info_from_usage(usage)
+
+        assert info.get("cache_write_tokens") == 5000
+        assert info.get("cache_write_1h_tokens") == 4200
 
     def test_reported_zero_cache_tokens_are_preserved(self) -> None:
         """Anthropic always reports these fields, so 0 is a known miss."""
@@ -713,3 +756,167 @@ class TestDeferredTools:
         assert all("defer_loading" not in tool for tool in params["tools"])
         assert all(message["role"] != "system" for message in params["messages"])
         assert "extra_headers" not in params
+
+
+@pytest.mark.no_db
+class TestCacheDiagnostics:
+    """Each agent-loop request asks the API where its prompt diverged."""
+
+    def _client(self) -> AnthropicClient:
+        return AnthropicClient(api_key="test", model="claude-opus-5-5")
+
+    def _turn(self, response_id: str | None) -> AssistantMessage:
+        metadata: dict[str, object] = {"provider": "anthropic", "thinking_blocks": []}
+        if response_id is not None:
+            metadata["response_id"] = response_id
+        return AssistantMessage(content="Nothing today.", provider_metadata=metadata)
+
+    def _previous_message_id(self, messages: list[LLMMessage]) -> object:
+        params = self._client()._assemble_request(messages, None, None, streaming=True)
+        return params["extra_body"]["diagnostics"]["previous_message_id"]
+
+    def test_names_the_response_behind_the_newest_assistant_turn(self) -> None:
+        assert (
+            self._previous_message_id([
+                UserMessage(content="What is on my calendar?"),
+                self._turn("msg_old"),
+                UserMessage(content="And tomorrow?"),
+                self._turn("msg_new"),
+                UserMessage(content="Thanks"),
+            ])
+            == "msg_new"
+        )
+
+    def test_opts_in_without_a_predecessor_at_the_start(self) -> None:
+        """The fingerprint the next request compares against is stored only
+        for a request that carried the object."""
+        assert self._previous_message_id([UserMessage(content="Hello")]) is None
+
+    def test_does_not_reach_past_a_turn_another_provider_served(self) -> None:
+        """An older Anthropic turn is not the request this one extends."""
+        assert (
+            self._previous_message_id([
+                UserMessage(content="Hello"),
+                self._turn("msg_old"),
+                UserMessage(content="Again"),
+                AssistantMessage(content="Hi from Gemini"),
+                UserMessage(content="Thanks"),
+            ])
+            is None
+        )
+
+    def test_one_shot_requests_do_not_ask(self) -> None:
+        params = self._client()._assemble_request(
+            [UserMessage(content="Summarize this.")], None, None, streaming=False
+        )
+
+        assert "extra_body" not in params
+
+    @staticmethod
+    def _message(diagnostics: object) -> Message:
+        """A response as the SDK parses it, with the field it does not model."""
+        return Message.model_validate({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-5-5",
+            "content": [],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 1},
+            "diagnostics": diagnostics,
+        })
+
+    def test_records_where_the_prompt_diverged(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        info = AnthropicClient._reasoning_info_from_usage(
+            Usage(input_tokens=10, output_tokens=1)
+        )
+
+        self._client()._record_cache_diagnosis(
+            info,
+            self._message({
+                "cache_miss_reason": {
+                    "type": "system_changed",
+                    "cache_missed_input_tokens": 41850,
+                }
+            }),
+        )
+
+        assert info.get("cache_miss_reason") == "system_changed"
+        assert info.get("cache_missed_input_tokens") == 41850
+        assert "system_changed" in caplog.text
+
+    def test_no_divergence_records_nothing(self) -> None:
+        info = AnthropicClient._reasoning_info_from_usage(
+            Usage(input_tokens=10, output_tokens=1)
+        )
+
+        self._client()._record_cache_diagnosis(info, self._message(None))
+
+        assert "cache_miss_reason" not in info
+
+    def test_a_comparison_still_running_is_recorded_as_pending(self) -> None:
+        info = AnthropicClient._reasoning_info_from_usage(
+            Usage(input_tokens=10, output_tokens=1)
+        )
+
+        self._client()._record_cache_diagnosis(
+            info, self._message({"cache_miss_reason": None})
+        )
+
+        assert info.get("cache_miss_reason") == "pending"
+
+    async def test_a_streamed_turn_carries_its_diagnosis_and_its_response_id(
+        self,
+    ) -> None:
+        """The diagnosis arrives on message_start; the id is what the next
+        request will name."""
+        started = self._message({
+            "cache_miss_reason": {
+                "type": "messages_changed",
+                "cache_missed_input_tokens": 900,
+            }
+        })
+
+        class FakeStream:
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, *_exc: object) -> None:
+                return None
+
+            async def __aiter__(self) -> "AsyncGenerator[object]":
+                yield RawMessageStartEvent(type="message_start", message=started)
+
+            async def get_final_message(self) -> Message:
+                return started
+
+        client = self._client()
+
+        async def no_vcr_replay(_params: dict[str, object]) -> None:
+            return None
+
+        with (
+            patch.object(client, "_maybe_parse_vcr_stream", new=no_vcr_replay),
+            patch.object(
+                client.client.messages, "stream", new=lambda **_kwargs: FakeStream()
+            ),
+        ):
+            events = [
+                event
+                async for event in client.generate_response_stream([
+                    UserMessage(content="Hello")
+                ])
+            ]
+
+        done = events[-1].metadata
+        assert done is not None
+        assert done.get("provider_metadata") == {
+            "provider": "anthropic",
+            "thinking_blocks": [],
+            "response_id": "msg_1",
+        }
+        reasoning_info = done.get("reasoning_info")
+        assert reasoning_info is not None
+        assert reasoning_info.get("cache_miss_reason") == "messages_changed"

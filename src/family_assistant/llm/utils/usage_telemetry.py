@@ -36,3 +36,12 @@ def set_usage_span_attributes(
             "gen_ai.usage.cache_write_input_tokens",
             reasoning_info["cache_write_tokens"],
         )
+    if "cache_write_1h_tokens" in reasoning_info:
+        span.set_attribute(
+            "gen_ai.usage.cache_write_1h_input_tokens",
+            reasoning_info["cache_write_1h_tokens"],
+        )
+    if "cache_miss_reason" in reasoning_info:
+        span.set_attribute(
+            "gen_ai.usage.cache_miss_reason", reasoning_info["cache_miss_reason"]
+        )

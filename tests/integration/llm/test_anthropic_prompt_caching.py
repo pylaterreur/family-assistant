@@ -38,6 +38,9 @@ if TYPE_CHECKING:
 CASSETTE = Path(
     "tests/cassettes/llm/test_agent_loop_cache_breakpoints_ttls.yaml",
 )
+NOTICE_CASSETTE = Path(
+    "tests/cassettes/llm/test_mid_conversation_notice_keeps_history_cached.yaml",
+)
 
 MODEL = "claude-opus-5-5"
 
@@ -86,11 +89,12 @@ TOOLS: list[ToolDefinition] = [
 
 
 @pytest.fixture
-def require_cassette(llm_record_mode: str) -> None:
+def require_cassette(llm_record_mode: str, request: pytest.FixtureRequest) -> None:
     """Name the missing recording instead of failing on a downstream assertion."""
-    if llm_record_mode == "replay" and not CASSETTE.exists():
+    cassette = Path("tests/cassettes/llm") / f"{request.node.name}.yaml"
+    if llm_record_mode == "replay" and not cassette.exists():
         pytest.fail(
-            f"Cassette missing at {CASSETTE}. Record with LLM_RECORD_MODE=record."
+            f"Cassette missing at {cassette}. Record with LLM_RECORD_MODE=record."
         )
 
 
@@ -211,3 +215,72 @@ async def test_agent_loop_cache_breakpoints_ttls(
     assert second.cache_creation is not None
     assert second.cache_creation.ephemeral_1h_input_tokens == 0
     assert _cached_tokens(second) > _cached_tokens(first)
+
+
+@pytest.mark.no_db
+@pytest.mark.llm_integration
+@pytest.mark.vcr(before_record_response=sanitize_response)
+@pytest.mark.usefixtures("require_cassette")
+async def test_mid_conversation_notice_keeps_history_cached(
+    llm_record_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A system notice arriving mid-conversation leaves the history cached.
+
+    The second turn adds a notice and a new question to the first. Rendered in
+    place, the notice extends the first request instead of editing its
+    ``system``, so the API reports no divergence and reads the whole first
+    request back -- past the one-hour system prefix, into the history.
+    Diagnostics are asked for on every agent-loop request, so the API's own
+    comparison is what is asserted.
+    """
+    if llm_record_mode != "replay" and not os.getenv("ANTHROPIC_API_KEY"):
+        pytest.skip("Recording this test requires ANTHROPIC_API_KEY")
+
+    client = AnthropicClient(
+        api_key=os.getenv("ANTHROPIC_API_KEY", "test-anthropic-key"),
+        model=MODEL,
+        model_parameters={MODEL: {"output_config": {"effort": "low"}}},
+    )
+
+    responses: list[Message] = []
+    create: Callable[..., Awaitable[Message]] = client.client.messages.create
+
+    async def recording_create(**kwargs: Any) -> Message:  # noqa: ANN401 # forwards the SDK's untyped create() kwargs
+        response = await create(**kwargs)
+        responses.append(response)
+        return response
+
+    monkeypatch.setattr(client.client.messages, "create", recording_create)
+
+    stable = "Notice test.\n\n" + STABLE_SYSTEM_PROMPT
+    history: list[LLMMessage] = [
+        SystemMessage(content=stable, stable_prefix_len=len(stable)),
+        UserMessage(content="Which circuit is room 12 on? Answer in one line."),
+    ]
+    events = [event async for event in client.generate_response_stream(history)]
+    done = next(e for e in events if e.type == "done")
+    assert done.metadata is not None
+    first_info = done.metadata.get("reasoning_info")
+    assert first_info is not None
+    answer = "".join(e.content or "" for e in events if e.type == "content")
+
+    history += [
+        AssistantMessage(
+            content=answer or "Circuit 5.",
+            provider_metadata=done.metadata.get("provider_metadata"),
+        ),
+        SystemMessage(content="Delegation 7 finished: the hallway bulb was replaced."),
+        UserMessage(content="And room 13? Answer in one line."),
+    ]
+    events = [event async for event in client.generate_response_stream(history)]
+    assert any(e.type == "done" for e in events)
+    await client.close()
+
+    assert len(responses) == 2
+    second = responses[1]
+    one_hour_prefix = first_info.get("cache_write_1h_tokens")
+    assert one_hour_prefix is not None
+    assert one_hour_prefix > MIN_CACHEABLE_TOKENS
+    assert getattr(second, "diagnostics", None) is None
+    assert (second.usage.cache_read_input_tokens or 0) > one_hour_prefix

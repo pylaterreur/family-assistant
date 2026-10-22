@@ -138,6 +138,22 @@ def test_anthropic_prompt_buckets_are_taken_as_already_disjoint() -> None:
     assert buckets["cache_write"] == 50
 
 
+def test_one_hour_cache_writes_are_their_own_tier_carved_out_of_cache_write() -> None:
+    """Anthropic bills one-hour writes at 2x and default ones at 1.25x."""
+    usage: MessageReasoningInfo = {
+        "prompt_tokens": 100,
+        "cached_prompt_tokens": 900,
+        "cache_write_tokens": 5000,
+        "cache_write_1h_tokens": 4200,
+    }
+
+    buckets = normalized_token_buckets(usage, "anthropic")
+
+    assert buckets["cache_write_1h"] == 4200
+    assert buckets["cache_write"] == 800
+    assert sum(buckets.values()) == 100 + 900 + 5000
+
+
 def test_openai_prompt_buckets_are_split_out_of_the_reported_total() -> None:
     """OpenAI reports the whole prompt, with the cache numbers as subsets of it."""
     usage: MessageReasoningInfo = {
@@ -333,6 +349,33 @@ def test_successful_call_counts_tokens_against_the_active_profile(
         _sample(
             "family_assistant_llm_calls_total",
             {**labels, "outcome": "success", "error_type": ""},
+        )
+        == 1
+    )
+
+
+def test_a_diagnosed_cache_miss_is_counted_by_reason(profile: str) -> None:
+    telemetry = _telemetry(provider="anthropic", model="claude-test")
+    telemetry.record_usage({
+        "prompt_tokens": 100,
+        "cache_miss_reason": "system_changed",
+        "cache_missed_input_tokens": 40_000,
+    })
+
+    telemetry.finish_success(response=None)
+
+    assert (
+        _sample(
+            "family_assistant_llm_cache_misses_total",
+            {
+                "profile": profile,
+                "tier": "none",
+                "provider": "anthropic",
+                "model": "claude-test",
+                "resolved_model": "claude-test",
+                "operation": "chat",
+                "reason": "system_changed",
+            },
         )
         == 1
     )

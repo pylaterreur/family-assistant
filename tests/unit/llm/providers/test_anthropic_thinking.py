@@ -391,7 +391,10 @@ async def test_production_stream_loop_emits_thinking_delta() -> None:
     assert [event.type for event in events] == ["thinking", "done"]
     assert events[0].content == "Checking the arithmetic"
     assert events[1].metadata is not None
-    assert events[1].metadata.get("provider_metadata") == _thinking_metadata()
+    assert events[1].metadata.get("provider_metadata") == {
+        **_thinking_metadata(),
+        "response_id": "msg_fake",
+    }
 
 
 _SHIPPED_THINKING_PARAMS: dict[str, dict[str, object]] = {

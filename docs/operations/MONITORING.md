@@ -256,6 +256,7 @@ Every LLM metric carries the same five labels:
 | --------------------------------------------------- | --------- | ----------------------- |
 | `family_assistant_llm_tokens_total`                 | Counter   | `kind`                  |
 | `family_assistant_llm_calls_total`                  | Counter   | `outcome`, `error_type` |
+| `family_assistant_llm_cache_misses_total`           | Counter   | `reason`                |
 | `family_assistant_llm_call_duration_seconds`        | Histogram | `outcome`               |
 | `family_assistant_llm_time_to_first_output_seconds` | Histogram | —                       |
 
@@ -268,7 +269,8 @@ buckets or subsets, and that correction is applied before export rather than in 
 | `input_uncached` | Prompt tokens neither read from nor written to the prompt cache         |
 | `input_image`    | Uncached prompt tokens that were image rather than text, where reported |
 | `cache_read`     | Prompt tokens served from the prompt cache                              |
-| `cache_write`    | Prompt tokens written into the prompt cache                             |
+| `cache_write`    | Prompt tokens written into the prompt cache at its default lifetime     |
+| `cache_write_1h` | Prompt tokens written into the prompt cache with a one-hour lifetime    |
 | `output`         | Generated tokens, excluding reasoning                                   |
 | `output_image`   | Generated tokens that were image rather than text, where reported       |
 | `reasoning`      | Reasoning / thinking tokens                                             |
@@ -283,9 +285,20 @@ sum to the prompt. Those tokens are therefore priced as cached rather than as ca
 no provider here prices the two apart today.
 
 The buckets are **billing tiers**, which is what makes cost a single join against a price table on
-`(model, kind)`. A price table that omits `tool_use`, `input_image` or `output_image` will silently
-drop that spend from the join, so give every bucket a price — including the ones a given model never
-emits.
+`(model, kind)`. A price table that omits `tool_use`, `input_image`, `output_image` or
+`cache_write_1h` will silently drop that spend from the join, so give every bucket a price —
+including the ones a given model never emits.
+
+Anthropic's `cache_write_1h` is billed at 2× the input price and `cache_write` at 1.25×.
+
+`family_assistant_llm_cache_misses_total` counts calls whose prompt diverged from the previous call
+in the same conversation, labelled with where the provider says it diverged — `system_changed`,
+`tools_changed`, `messages_changed`, `model_changed` — or why no comparison was made
+(`previous_message_not_found`, `unavailable`, `pending`). Only Anthropic's streamed calls report it
+today. A call with no divergence is not counted, so compare against
+`family_assistant_llm_calls_total` for a rate. Some divergences are expected — the final iteration
+of a turn drops the tool list — so watch for a new reason appearing or a familiar one becoming
+common; each divergence is also logged as a warning naming the reason.
 
 `family_assistant_llm_time_to_first_output_seconds` is only observed for streamed calls, where it is
 the latency the user actually feels.
@@ -309,10 +322,10 @@ navigated away mid-turn is not a failure.
 
 ### Jev filtering
 
-| Metric                                         | Type      | Labels                                 |
-| ---------------------------------------------- | --------- | -------------------------------------- |
-| `family_assistant_jev_filter_decisions_total`  | Counter   | `surface`, `mode`, `outcome`, `change` |
-| `family_assistant_jev_filter_latency_seconds`  | Histogram | `surface`, `outcome`                   |
+| Metric                                        | Type      | Labels                                 |
+| --------------------------------------------- | --------- | -------------------------------------- |
+| `family_assistant_jev_filter_decisions_total` | Counter   | `surface`, `mode`, `outcome`, `change` |
+| `family_assistant_jev_filter_latency_seconds` | Histogram | `surface`, `outcome`                   |
 
 One run of [Jev as a search filter](CONFIGURATION_REFERENCE.md#typesafe-jev). `outcome` is
 `decided`, `timeout` or `error`. `change` compares the set Jev keeps with what the surface's own
@@ -403,8 +416,14 @@ comparable across providers:
 ```promql
 sum by (model) (rate(family_assistant_llm_tokens_total{kind="cache_read"}[1h]))
   / sum by (model) (
-      rate(family_assistant_llm_tokens_total{kind=~"input_uncached|input_image|cache_read|cache_write"}[1h])
+      rate(family_assistant_llm_tokens_total{kind=~"input_uncached|input_image|cache_read|cache_write|cache_write_1h"}[1h])
     )
+```
+
+Which part of the prompt is breaking the cache, per profile:
+
+```promql
+sum by (profile, reason) (rate(family_assistant_llm_cache_misses_total[1h]))
 ```
 
 Whether a profile is being served by its configured model or by a fallback:

@@ -110,6 +110,20 @@ class MessageReasoningInfo(TypedDict, total=False):
     reasoning_tokens: int
     cached_prompt_tokens: int
     cache_write_tokens: int
+    cache_write_1h_tokens: int
+    """The part of ``cache_write_tokens`` written with a one-hour lifetime,
+    where the provider reports the split. Anthropic bills these at twice the
+    input price against 1.25x for the default five minutes, so the two cannot
+    share a price."""
+    cache_miss_reason: str
+    """Where this request's prompt diverged from the previous request in the
+    conversation, as the provider diagnosed it (Anthropic: ``system_changed``,
+    ``tools_changed``, ``messages_changed``, ``model_changed``, or a reason no
+    comparison was made). Absent when the provider found no divergence or was
+    not asked."""
+    cache_missed_input_tokens: int
+    """The provider's estimate of the prompt tokens after that divergence --
+    how much cacheable prefix the change cost."""
     tool_use_tokens: int
     """Tokens the provider spent running a server-side tool on its own -- code
     execution, search grounding. Reported by Gemini apart from the prompt and

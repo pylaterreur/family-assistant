@@ -75,6 +75,40 @@ produces — needs no split and is emitted as a single cacheable block. Only whe
 at all does the client send the plain string as before, so requests that cannot benefit keep their
 existing wire format (and existing VCR cassettes keep matching).
 
+### System messages after the first
+
+Only the system messages that open the conversation go into the top-level `system`. One that arrives
+later — a delegation completion, a callback trigger, a system row a compacted turn kept — is
+rendered where it occurred, as a user text block labelled `[System notice]`. `system` precedes the
+whole message history in the cache key, so hoisting a later notice there kept the tools and stable
+instructions cached (they sit before the one-hour breakpoint) but rewrote the history's cache entry
+every time a notice appeared or dropped out.
+
+The native mid-conversation `system` role is not used because its placement rules depend on what
+follows the message (it must follow a user turn and be last or precede an assistant turn), so the
+same message would change shape between one request and the next — itself a prefix change, and one
+that invalidates later thinking blocks. A labelled user block is valid in every position on every
+model.
+
+### Detecting a broken prefix
+
+Two mechanisms, one before deploy and one after:
+
+- **A property test** (`TestAnthropicPrefixStability`) generates conversations and extensions of
+  them in the shapes the agent loop produces — tool rounds, new user turns, system notices — and
+  asserts the earlier request, with `cache_control` stripped, is a prefix of the later one: same
+  `tools`, same `system`, and its messages reappearing as a block-level prefix. A conversion that
+  rewrites earlier output fails it without anyone having to think of the case.
+- **Anthropic cache diagnostics** on every streamed request. The client sends
+  `diagnostics.previous_message_id` naming the response that produced the conversation's newest
+  assistant turn (kept as `response_id` in that turn's provider metadata), and the API reports where
+  the two prompts diverged: `system_changed`, `tools_changed`, `messages_changed`, `model_changed`,
+  or why it could not compare. The reason lands in `reasoning_info.cache_miss_reason`, in the
+  `family_assistant_llm_cache_misses_total{reason}` counter, and — for an actual divergence — in a
+  warning log. Some divergences are expected (the final iteration drops the tool list; a historical
+  delegation wake is rewritten on the next turn); what the counter is for is noticing a new one, or
+  a familiar one becoming common.
+
 ### Loop stability
 
 The iteration counter is gone — it was informational and cost a full prefix invalidation per tool
@@ -90,7 +124,10 @@ costs nothing extra.
 
 `MessageReasoningInfo` gained `cached_prompt_tokens` and `cache_write_tokens`, populated by all
 three providers and surfaced as `gen_ai.usage.cached_input_tokens` /
-`gen_ai.usage.cache_write_input_tokens` span attributes.
+`gen_ai.usage.cache_write_input_tokens` span attributes. Anthropic also reports how much of the
+write was at the one-hour lifetime (`usage.cache_creation.ephemeral_1h_input_tokens`), recorded as
+`cache_write_1h_tokens` — a subset of `cache_write_tokens` — and exported as its own
+`cache_write_1h` token bucket, because it is billed at 2× the input price rather than 1.25×.
 
 Two providers reported nothing at all on the streaming path — which is the path the processing loop
 uses, so the profiles that matter most were unmeasurable:
@@ -132,6 +169,23 @@ Streaming usage is exported to the span in `RetryingLLMClient.generate_response_
 per provider, because providers report it in the `done` event's metadata and the OpenAI client has
 no span of its own. Doing it at the retry layer is what makes `gen_ai.usage.*` present for every
 provider instead of only the ones that instrument themselves.
+
+## Deliberate simplifications
+
+- **An interrupted turn that activated a deferred tool rewrites the cache once.** The
+  `tool_addition` system message that surfaces the tool may only precede an assistant turn or end
+  the request. When a user message lands directly on the tool results instead of the model's reply,
+  the addition moves past it, so the request diverges from the one before at that point. Only an
+  interrupted turn produces this shape, and the cost is one rewrite of the conversation's cache
+  entry; the property test models the loop's ordinary shape and leaves this one out.
+- **System notices lose the operator role.** Rendered as a labelled user block rather than a native
+  mid-conversation `system` message, a notice reads to the model as context from the harness rather
+  than as an operator instruction. Before this change it was in `system`; nothing in the notices
+  requires operator authority, and the placement rules of the native role would make it change shape
+  between requests.
+- **Diagnostics compare against the newest assistant turn only.** If that turn was served by another
+  provider, or predates response ids being stored, the request opts in without a predecessor and the
+  first divergence after it goes unreported.
 
 ## Deferred
 
