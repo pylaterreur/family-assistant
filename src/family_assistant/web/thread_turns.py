@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, cast
 
 from family_assistant.storage.database import Database
-from family_assistant.threads.turns import ThreadTurnOutcome
+from family_assistant.threads.turns import StartedThreadTurn, ThreadTurnOutcome
 from family_assistant.web.conversation_stream_hub import (
     ConversationStreamHub,
     ConversationTurnRunningError,
@@ -53,7 +53,7 @@ class WebThreadTurnRunner:
     def handles(self, run: DelegationRunDict) -> bool:
         return run["interface_type"] == "web"
 
-    async def run_first_turn(
+    async def start_first_turn(
         self,
         run: DelegationRunDict,
         *,
@@ -61,7 +61,8 @@ class WebThreadTurnRunner:
         model_selection: ResolvedModelSelection,
         tool_call_review_trigger: TriggerReviewInput | None,
         claim: Callable[[], Awaitable[bool]],
-    ) -> ThreadTurnOutcome | None:
+        resume: bool,
+    ) -> StartedThreadTurn | None:
         state = self._app_state
         hub: ConversationStreamHub = state.conversation_stream_hub
         conversation_id = run["conversation_id"]
@@ -138,22 +139,49 @@ class WebThreadTurnRunner:
             mid_turn_controller=controller,
             model_selection=model_selection,
             on_orphan_cancel=None,
+            # The worker holds the turn's lease, on the task that settles the
+            # run, so the run is settled before the lease is let go.
             lease_registry=None,
             lease=None,
+            resume=resume,
             tool_call_review_trigger=tool_call_review_trigger,
         )
+
+        def request_suspend() -> None:
+            # Flag the record before the controller, so a producer that halts
+            # on the controller's interrupt already sees itself as suspended.
+            record = hub.get_turn(conversation_id, turn_id)
+            if record is not None:
+                record.suspended = True
+            controller.request_suspend()
+
+        async def outcome() -> ThreadTurnOutcome | None:
+            return await self._outcome(db, hub, producer, conversation_id, turn_id)
+
+        return StartedThreadTurn(request_suspend=request_suspend, outcome=outcome)
+
+    async def _outcome(
+        self,
+        db: Database,
+        hub: ConversationStreamHub,
+        producer: asyncio.Task[None],
+        conversation_id: str,
+        turn_id: str,
+    ) -> ThreadTurnOutcome | None:
         # Waited on rather than awaited: Stop cancels the producer, and that
-        # cancellation must end the turn, not propagate into the worker as if
-        # the worker itself were being shut down.
+        # cancellation must end the turn, not propagate into the waiter as if
+        # it were itself being cancelled.
         try:
             await asyncio.wait([producer])
         except asyncio.CancelledError:
-            # The worker itself is being cancelled -- a timeout or shutdown --
+            # The waiter itself is being cancelled -- a timeout or shutdown --
             # so the turn must not outlive the run it belongs to.
             producer.cancel()
             await asyncio.wait([producer])
             raise
         record = hub.get_turn(conversation_id, turn_id)
+        if record is not None and record.suspended:
+            return None
         # The stream reports a provider error or a refusal as an event and still
         # ends the turn complete, so completion alone is not success.
         if record is not None and (

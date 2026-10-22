@@ -3035,7 +3035,6 @@ class Assistant:
                     f"Task worker {worker.worker_id} appears stuck ({stuck_reason}), "
                     "cancelling and restarting..."
                 )
-                worker.mark_cancelled_as_stuck(stuck_reason)
                 worker_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await worker_task

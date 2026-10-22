@@ -144,7 +144,7 @@ if TYPE_CHECKING:
         TaskDict,
     )
     from family_assistant.telegram.protocols import ConfirmationUIManager
-    from family_assistant.threads.turns import ThreadTurnRunner
+    from family_assistant.threads.turns import StartedThreadTurn, ThreadTurnRunner
     from family_assistant.tools.authenticated_sites import AuthenticatedRunSettlement
     from family_assistant.tools.infrastructure import ToolsProvider
     from family_assistant.web.conversation_stream_hub import ConversationStreamHub
@@ -172,9 +172,8 @@ from family_assistant.services.delegated_run_resumption import (
     ResumedDelegatedTurn,
 )
 from family_assistant.services.delegation_delivery import (
-    DELEGATION_DELIVERY_TASK_TYPE,
-    DELEGATION_DELIVERY_TIMEOUT_SECONDS,
     DELEGATION_WAKE_RESUMER,
+    DELEGATION_WAKE_TURN_BUDGET_SECONDS,
     DelegationDeliveryPayload,
     queue_delegation_delivery,
 )
@@ -295,15 +294,6 @@ def _model_selection_from_delegation_run(
     if persisted is None:
         return None
     return ResolvedModelSelection.from_json(persisted)
-
-
-def _stuck_worker_error(reason: str) -> str:
-    """The failure recorded for a delegated run whose worker was restarted."""
-    return (
-        "The delegated run was stopped because the task worker running it "
-        f"stopped responding ({reason}) and was restarted. It was not retried, "
-        "because re-running it could repeat actions it had already taken."
-    )
 
 
 def _delegated_run_timeout_error(budget_seconds: float) -> str:
@@ -1220,10 +1210,6 @@ class ConfirmationNotificationError(RuntimeError):
     """Raised when a confirmation result notification cannot be delivered."""
 
 
-THREAD_TURN_DEFER_SECONDS = 5.0
-"""How long a thread run waits before trying again when its thread is busy."""
-
-
 class DelegationNotificationError(RuntimeError):
     """Raised when a terminal delegation notification cannot be delivered.
 
@@ -1354,84 +1340,21 @@ CONFIRMATION_CANCELLATION_CLEANUP_TIMEOUT = 5.0
 BACKGROUND_TURN_DEFER_SECONDS = 15.0
 
 
-@dataclass(frozen=True)
-class TaskHandlerBudget:
-    """What a task type needs beyond the default handler budget.
-
-    ``parks_on_queued_work`` marks a handler that can spend most of its budget
-    waiting for another task on the same queue to run. Such a handler needs the
-    longer timeout *because* it parks, so the two facts are declared together:
-    the timeout override and the reserved workers' exclusion are both derived
-    from this table, and a future parking handler gets them both at once.
-    """
-
-    timeout: float
-    parks_on_queued_work: bool = False
-
+# A delegated run's turn may take this long before the run is failed as timed
+# out: deep-tier work such as an engineer investigation routinely runs well past
+# ten minutes. The turn runs on the background turn runner, not in a task
+# handler, so no handler timeout applies to it.
+DELEGATED_RUN_TURN_BUDGET_SECONDS = 1800.0
 
 # Task types whose handler needs more than ``handler_timeout`` (TASK_HANDLER_TIMEOUT).
-# A delegated profile run can park waiting on a human confirmation far longer than
-# 300s; raising its timeout is safe because a pool of workers keeps servicing the
-# queue (the confirmation approval enqueues a separate task that a sibling worker
-# runs), so the parked run is unblocked rather than starving other background work.
-#
-# Note: ``delegated_profile_run`` is registered on a feature branch and may not exist
-# on every deployment yet. Listing it here is forward-compatible and harmless: the
-# entry only applies when a task of that type is actually processed.
-#
-# A delegated run's turn gets ``DELEGATED_RUN_TURN_BUDGET_SECONDS``: deep-tier
-# work such as an engineer investigation routinely runs well past ten minutes.
-# The handler budget adds ``DELEGATED_RUN_SETTLE_SECONDS`` on top, so the run's
-# own deadline expires first and the run is failed as timed out, rather than the
-# worker cancelling it mid-turn and leaving it ``running`` for a retry to fail as
-# interrupted.
 #
 # A memory review runs up to two curator turns -- the review and one re-run
 # against a store somebody changed under it -- each of which may take several
-# tool-calling iterations. It parks on nothing, so the budget is model latency
-# rather than waiting, but two turns can outlast the 300s default on a slow
+# tool-calling iterations. Two turns can outlast the 300s default on a slow
 # provider, and a review cut off midway leaves its conversation due for ever.
-#
-# A delegation delivery can run the delegating profile's whole follow-up turn,
-# so it gets a budget of its own (see ``delegation_delivery``).
-DELEGATED_RUN_TURN_BUDGET_SECONDS = 1800.0
-DELEGATED_RUN_SETTLE_SECONDS = 120.0
-DEFAULT_TASK_HANDLER_BUDGETS: dict[str, TaskHandlerBudget] = {
-    "delegated_profile_run": TaskHandlerBudget(
-        timeout=DELEGATED_RUN_TURN_BUDGET_SECONDS + DELEGATED_RUN_SETTLE_SECONDS,
-        parks_on_queued_work=True,
-    ),
-    MEMORY_REVIEW_TASK_TYPE: TaskHandlerBudget(timeout=600),
-    DELEGATION_DELIVERY_TASK_TYPE: TaskHandlerBudget(
-        timeout=DELEGATION_DELIVERY_TIMEOUT_SECONDS
-    ),
+DEFAULT_TASK_HANDLER_TIMEOUT_OVERRIDES: dict[str, float] = {
+    MEMORY_REVIEW_TASK_TYPE: 600,
 }
-
-
-def handler_timeouts_from_budgets(
-    budgets: Mapping[str, TaskHandlerBudget],
-) -> dict[str, float]:
-    """Per-task-type handler timeouts declared by ``budgets``."""
-    return {task_type: budget.timeout for task_type, budget in budgets.items()}
-
-
-def parking_task_types_from_budgets(
-    budgets: Mapping[str, TaskHandlerBudget],
-) -> frozenset[str]:
-    """Task types whose handler can park on another task of the same queue."""
-    return frozenset(
-        task_type
-        for task_type, budget in budgets.items()
-        if budget.parks_on_queued_work
-    )
-
-
-DEFAULT_TASK_HANDLER_TIMEOUT_OVERRIDES: dict[str, float] = (
-    handler_timeouts_from_budgets(DEFAULT_TASK_HANDLER_BUDGETS)
-)
-PARKING_TASK_TYPES: frozenset[str] = parking_task_types_from_budgets(
-    DEFAULT_TASK_HANDLER_BUDGETS
-)
 
 # --- Events for coordination (can remain module-level) ---
 # Note: shutdown_event removed - each TaskWorker instance now has its own
@@ -2142,6 +2065,7 @@ class TaskWorker:
         turn_lease_registry: TurnLeaseRegistry | None = None,
         claim_renew_seconds: float = TASK_CLAIM_RENEW_SECONDS,
         background_turns: BackgroundTurnRunner | None = None,
+        delegated_turn_budget: float = DELEGATED_RUN_TURN_BUDGET_SECONDS,
     ) -> None:
         """Initializes the TaskWorker with its dependencies.
 
@@ -2163,13 +2087,14 @@ class TaskWorker:
         # Leases the delegation wake turns this worker runs, so one cut off by
         # its process going away is resumed elsewhere.
         self.turn_lease_registry = turn_lease_registry
-        # Runs delegated turns outside this worker's handlers; shared by the
+        # Runs background turns outside this worker's handlers; shared by the
         # whole pool so its concurrency bound is the process's.
         self.background_turns = (
             background_turns
             if background_turns is not None
             else BackgroundTurnRunner(lease_registry=turn_lease_registry)
         )
+        self.delegated_turn_budget = delegated_turn_budget
         # Strong references to in-flight stream-hub publish tasks scheduled from
         # on_commit hooks, so the event loop doesn't garbage-collect them mid-flight.
         self._hub_publish_tasks: set[asyncio.Task[object]] = set()
@@ -2193,8 +2118,7 @@ class TaskWorker:
         self.engine = engine  # Store the engine for database operations
         self.handler_timeout = handler_timeout  # Store timeout per instance
         # Per-task-type timeout overrides; falls back to handler_timeout when a
-        # task type is not present. Defaults give confirmation-gated delegated runs
-        # a longer budget (see DEFAULT_TASK_HANDLER_TIMEOUT_OVERRIDES).
+        # task type is not present (see DEFAULT_TASK_HANDLER_TIMEOUT_OVERRIDES).
         self.handler_timeout_overrides: dict[str, float] = (
             dict(DEFAULT_TASK_HANDLER_TIMEOUT_OVERRIDES)
             if handler_timeout_overrides is None
@@ -2217,9 +2141,6 @@ class TaskWorker:
         # which is what the health monitor judges a busy worker against.
         self.current_task_id: str | None = None
         self.current_task_deadline: datetime | None = None
-        # Why the health monitor cancelled this worker, so a handler being
-        # cancelled can record that instead of being left half-done.
-        self.stuck_cancellation_reason: str | None = None
         logger.info(f"TaskWorker instance {self.worker_id} created.")
 
     def _update_last_activity(self) -> None:
@@ -2249,10 +2170,6 @@ class TaskWorker:
         if idle > WORKER_IDLE_STUCK_SECONDS:
             return f"no activity for {idle:.0f}s"
         return None
-
-    def mark_cancelled_as_stuck(self, reason: str) -> None:
-        """Record why the health monitor is about to cancel this worker."""
-        self.stuck_cancellation_reason = reason
 
     async def _renew_claim_while_running(self, task_id: str) -> None:
         """Refresh this worker's claim on ``task_id`` until cancelled."""
@@ -2286,13 +2203,8 @@ class TaskWorker:
         return self.handler_timeout_overrides.get(task_type, self.handler_timeout)
 
     def _delegated_turn_budget(self) -> float:
-        """How long a delegated run's turn may take before it is failed as timed out.
-
-        The handler timeout less a margin for recording the failure, so a
-        worker given a shorter handler timeout gets a shorter turn budget too.
-        """
-        handler_timeout = self._timeout_for_task_type(DELEGATED_PROFILE_RUN_TASK_TYPE)
-        return handler_timeout - min(DELEGATED_RUN_SETTLE_SECONDS, handler_timeout / 4)
+        """How long a delegated run's turn may take before it is failed as timed out."""
+        return self.delegated_turn_budget
 
     async def _fail_timed_out_delegation_run(
         self,
@@ -2334,18 +2246,8 @@ class TaskWorker:
         return self.task_handlers
 
     def dequeued_task_types(self) -> list[str]:
-        """The task types this worker claims from the queue.
-
-        The registered handlers, minus the ones that park on queued work when
-        this worker is reserved.
-        """
-        if self.min_priority is None:
-            return list(self.task_handlers)
-        return [
-            task_type
-            for task_type in self.task_handlers
-            if task_type not in PARKING_TASK_TYPES
-        ]
+        """The task types this worker claims from the queue."""
+        return list(self.task_handlers)
 
     async def handle_delegated_profile_run(
         self,
@@ -2357,7 +2259,6 @@ class TaskWorker:
         if not delegation_id:
             raise ValueError("delegated_profile_run payload missing delegation_id")
 
-        clock = exec_context.clock or self.clock
         run = await exec_context.db_context.delegation_runs.get_by_delegation_id(
             delegation_id
         )
@@ -2379,36 +2280,12 @@ class TaskWorker:
             return
 
         resume = payload.get("resume")
-        if (
-            run["status"] == "running"
-            and resume is None
-            and run["run_kind"] != "thread"
-        ):
+        if run["status"] == "running" and resume is None:
             # The run's turn holds a lease, which resumes it if it was cut off;
             # this task is a stray retry of the one that launched it.
             logger.info(
                 "Delegation run %s is already running; its turn lease owns it.",
                 delegation_id,
-            )
-            return
-        if run["status"] == "running" and resume is None:
-            # A thread's first turn runs inline and holds no lease of its own:
-            # a previous attempt marked the run running but did not finish. The
-            # turn has non-idempotent external side effects, so fail it rather
-            # than re-execute.
-            logger.warning(
-                "Delegation run %s was already running on entry; a prior attempt "
-                "was interrupted. Failing without re-executing to avoid duplicate "
-                "side effects.",
-                delegation_id,
-            )
-            await self._fail_delegation_run(
-                exec_context,
-                delegation_id=delegation_id,
-                error=(
-                    "The delegated run was interrupted before completion and "
-                    "cannot be safely retried."
-                ),
             )
             return
 
@@ -2482,17 +2359,6 @@ class TaskWorker:
                 )
             return
 
-        if (
-            run["run_kind"] == "thread"
-            and not payload.get("continuation")
-            and self.thread_turn_runner is not None
-            and self.thread_turn_runner.handles(run)
-        ):
-            await self._run_thread_first_turn(
-                exec_context, run, cast("ProcessingService", target_service)
-            )
-            return
-
         local_target = cast("ProcessingService", target_service)
         if resume is not None:
             await self._resume_delegated_turn(
@@ -2501,6 +2367,11 @@ class TaskWorker:
             return
         if not self.background_turns.has_capacity():
             await self._defer_delegated_run(exec_context, payload, run)
+            return
+        if not payload.get("continuation") and self._runs_on_thread_surface(run):
+            await self._start_thread_first_turn(
+                exec_context, payload, run, local_target, resumed=None
+            )
             return
 
         kind: DelegatedTurnKind = (
@@ -2512,19 +2383,9 @@ class TaskWorker:
             if kind == "request" and run["turn_id"] is not None
             else str(uuid.uuid4())
         )
-
-        async def _claim(
-            txn: DatabaseTransaction,
-        ) -> tuple[DelegationRunDict, TurnLease | None] | None:
-            started = await txn.delegation_runs.mark_running(delegation_id, clock.now())
-            if started is None:
-                return None
-            lease = await self._arm_delegated_turn_lease(
-                txn.tasks, started, local_target, turn_id, kind, attempt=0
-            )
-            return started, lease
-
-        claimed = await exec_context.db_context.atomic(_claim)
+        claimed = await self._claim_delegated_run(
+            exec_context, run, local_target, turn_id, kind
+        )
         if claimed is None:
             # The conditional mark_running matched no row: the run is no longer
             # queued — the stale-run reaper failed it, or a sibling worker
@@ -2544,6 +2405,43 @@ class TaskWorker:
             kind=kind,
             lease=lease,
             resume=False,
+        )
+
+    async def _claim_delegated_run(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        local_target: ProcessingService,
+        turn_id: str,
+        kind: DelegatedTurnKind,
+    ) -> tuple[DelegationRunDict, TurnLease | None] | None:
+        """Mark a queued run running and arm its turn's lease, together.
+
+        None when the run was no longer queued.
+        """
+        clock = exec_context.clock or self.clock
+
+        async def _claim(
+            txn: DatabaseTransaction,
+        ) -> tuple[DelegationRunDict, TurnLease | None] | None:
+            started = await txn.delegation_runs.mark_running(
+                run["delegation_id"], clock.now()
+            )
+            if started is None:
+                return None
+            lease = await self._arm_delegated_turn_lease(
+                txn.tasks, started, local_target, turn_id, kind, attempt=0
+            )
+            return started, lease
+
+        return await exec_context.db_context.atomic(_claim)
+
+    def _runs_on_thread_surface(self, run: DelegationRunDict) -> bool:
+        """Whether ``run``'s first turn runs live in its thread."""
+        return (
+            run["run_kind"] == "thread"
+            and self.thread_turn_runner is not None
+            and self.thread_turn_runner.handles(run)
         )
 
     async def _arm_delegated_turn_lease(
@@ -2771,6 +2669,11 @@ class TaskWorker:
         if not self.background_turns.has_capacity():
             await self._defer_delegated_run(exec_context, payload, run)
             return
+        if resumed["kind"] == "request" and self._runs_on_thread_surface(run):
+            await self._start_thread_first_turn(
+                exec_context, payload, run, local_target, resumed=resumed
+            )
+            return
         # A turn cut off before it saved its input -- a request's prompt, a
         # continuation's children's results -- has done nothing yet, so it
         # starts afresh under the same turn id.
@@ -2964,67 +2867,109 @@ class TaskWorker:
             model_selection=_frozen_model_selection(run, local_target),
         )
 
-    async def _run_thread_first_turn(
+    async def _start_thread_first_turn(
         self,
         exec_context: ToolExecutionContext,
+        payload: DelegatedProfileRunPayload,
         run: DelegationRunDict,
         target: ProcessingService,
+        *,
+        resumed: ResumedDelegatedTurn | None,
     ) -> None:
-        """Hand a thread's first turn to the surface its user watches it on.
+        """Start a thread's first turn on the surface its user watches it on.
 
         The run is claimed only once the turn is registered there, so a turn the
         user sent into the thread first -- which absorbs the queued run -- and
-        this one never both run. A turn already in progress in the thread leaves
-        the run queued, and the task retries it.
+        this one never both run. The claim arms the turn's lease, and a
+        background turn waits for the turn and settles the run, so this returns
+        while the turn runs. A turn already in progress in the thread leaves the
+        run as it was, to be tried again shortly.
         """
         assert self.thread_turn_runner is not None
-        clock = exec_context.clock or self.clock
         delegation_id = run["delegation_id"]
+        turn_id = run["turn_id"]
+        if turn_id is None:
+            raise ValueError(f"Thread run {delegation_id} has no turn id to run as.")
         # Filled by claim(), which the runner calls once the turn is visible.
-        claimed: list[DelegationRunDict] = []
+        claimed: list[tuple[DelegationRunDict, TurnLease | None]] = []
 
         async def claim() -> bool:
-            started = await exec_context.db_context.delegation_runs.mark_running(
-                delegation_id, clock.now()
+            if resumed is not None:
+                lease = await self._arm_delegated_turn_lease(
+                    exec_context.db_context.tasks,
+                    run,
+                    target,
+                    turn_id,
+                    "request",
+                    attempt=resumed["attempt"],
+                )
+                claimed.append((run, lease))
+                return True
+            started = await self._claim_delegated_run(
+                exec_context, run, target, turn_id, "request"
             )
             if started is not None:
                 claimed.append(started)
             return started is not None
 
-        review_trigger = await _delegation_run_review_trigger(
-            exec_context,
+        started_turn = await self.thread_turn_runner.start_first_turn(
             run,
-            trigger_type="delegation_request",
-            active_request_role="user",
-            payload_present=False,
+            target=target,
+            model_selection=_frozen_model_selection(run, target),
+            tool_call_review_trigger=await _delegation_run_review_trigger(
+                exec_context,
+                run,
+                trigger_type="delegation_request",
+                active_request_role="user",
+                payload_present=False,
+            ),
+            claim=claim,
+            resume=resumed is not None,
         )
-        turn_budget = self._delegated_turn_budget()
-        deadline = asyncio.timeout(turn_budget)
+        if started_turn is None:
+            current = (
+                await exec_context.db_context.delegation_runs.get_by_delegation_id(
+                    delegation_id
+                )
+            )
+            if resumed is not None or (
+                current is not None and current["status"] == "queued"
+            ):
+                logger.info(
+                    "Thread run %s is waiting for the turn in progress in its "
+                    "conversation.",
+                    delegation_id,
+                )
+                await self._defer_delegated_run(exec_context, payload, run)
+            return
+        claimed_run, lease = claimed[0]
+        self.background_turns.launch(
+            f"thread-first-turn:{delegation_id}",
+            self._settle_thread_first_turn(exec_context, claimed_run, started_turn),
+            lease=lease,
+            database=exec_context.db_context,
+            request_suspend=started_turn.request_suspend,
+        )
+
+    async def _settle_thread_first_turn(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        started_turn: StartedThreadTurn,
+    ) -> None:
+        """Wait for a thread's first turn, then settle its run."""
+        clock = exec_context.clock or self.clock
+        delegation_id = run["delegation_id"]
+        deadline = asyncio.timeout(self._remaining_turn_budget(run, clock.now()))
         try:
             async with deadline:
-                outcome = await self.thread_turn_runner.run_first_turn(
-                    run,
-                    target=target,
-                    model_selection=_frozen_model_selection(run, target),
-                    tool_call_review_trigger=review_trigger,
-                    claim=claim,
-                )
-        except asyncio.CancelledError:
-            if claimed and self.stuck_cancellation_reason is not None:
-                await self._fail_delegation_run(
-                    exec_context,
-                    delegation_id=delegation_id,
-                    error=_stuck_worker_error(self.stuck_cancellation_reason),
-                )
-            raise
+                outcome = await started_turn.outcome()
         except Exception:
-            if not claimed:
-                raise
             if deadline.expired():
                 await self._fail_timed_out_delegation_run(
                     exec_context,
                     delegation_id=delegation_id,
-                    budget_seconds=turn_budget,
+                    budget_seconds=self._delegated_turn_budget(),
                 )
                 return
             logger.exception("Thread run %s raised during its turn.", delegation_id)
@@ -3033,40 +2978,11 @@ class TaskWorker:
             )
             return
         if outcome is None:
-            if claimed:
-                return
-            current = (
-                await exec_context.db_context.delegation_runs.get_by_delegation_id(
-                    delegation_id
-                )
-            )
-            if current is not None and current["status"] == "queued":
-                # Rescheduled as a fresh task rather than retried: the turn in
-                # the way can outlast the run's bounded retries, and running out
-                # of them would strand the run queued.
-                await exec_context.db_context.tasks.enqueue(
-                    task_id=f"{DELEGATED_PROFILE_RUN_TASK_TYPE}_{uuid.uuid4().hex}",
-                    task_type=DELEGATED_PROFILE_RUN_TASK_TYPE,
-                    payload={
-                        "delegation_id": delegation_id,
-                        "interface_type": run["interface_type"],
-                        "conversation_id": run["conversation_id"],
-                        "user_name": run["user_name"] or "",
-                    },
-                    scheduled_at=clock.now()
-                    + timedelta(seconds=THREAD_TURN_DEFER_SECONDS),
-                    max_retries_override=1,
-                    priority=exec_context.inherited_task_priority(),
-                )
-                logger.info(
-                    "Thread run %s is waiting for the turn in progress in its "
-                    "conversation; rescheduled.",
-                    delegation_id,
-                )
+            # Suspended by a shutdown: the lease hands the turn on.
             return
         await self._settle_delegated_turn(
             exec_context,
-            claimed[0],
+            run,
             ChatInteractionResult(
                 status=ChatInteractionStatus.SUCCESS,
                 text_reply=outcome.reply_text,
@@ -4249,9 +4165,10 @@ class TaskWorker:
         """Deliver a terminal run's result, unless it already has been.
 
         A transient failure raises, so the task retries; once its retries are
-        spent, the hourly cleanup queues the run again. A delivery cut off
-        partway -- by this task's timeout or by its process going away --
-        resumes the wake turn it was running rather than starting it again
+        spent, the hourly cleanup queues the run again. A delivery that wakes
+        the delegating profile launches that turn on the background turn
+        runner and returns; a wake turn cut off by its process going away is
+        resumed by the delivery its lease queues, rather than started again
         (see :meth:`_wake_source_profile_for_delegation`).
         """
         delegation_id = payload["delegation_id"]
@@ -4272,7 +4189,10 @@ class TaskWorker:
             logger.info("Delegation %s was already delivered.", delegation_id)
             return
         await self._deliver_terminal_delegation(
-            exec_context, run, force=payload["force"]
+            exec_context,
+            run,
+            force=payload["force"],
+            wake_attempt=payload.get("wake_attempt", 0),
         )
 
     async def _deliver_terminal_delegation(
@@ -4281,6 +4201,8 @@ class TaskWorker:
         run: DelegationRunDict,
         *,
         force: bool,
+        wake_attempt: int = 0,
+        wake_inline: bool = False,
     ) -> None:
         """Deliver a terminal run, advancing stages while failures are permanent.
 
@@ -4298,6 +4220,11 @@ class TaskWorker:
         thread, where the user reads it, so it is recorded as delivered without
         waking its source. Every path that ends a run comes through here, which
         is what keeps the hourly cleanup from waking Home for one.
+
+        A delivery that has to wake the delegating profile launches the rest of
+        itself on the background turn runner, with ``wake_inline`` set, and
+        returns: the wake turn is a whole LLM turn and does not belong in a task
+        handler. From there a failure is the hourly cleanup's to retry.
         """
         if run["run_kind"] == "thread":
             if run["notified_at"] is None:
@@ -4314,7 +4241,13 @@ class TaskWorker:
             return
         while True:
             try:
-                await self._notify_delegation_if_needed(exec_context, run, force=force)
+                await self._notify_delegation_if_needed(
+                    exec_context,
+                    run,
+                    force=force,
+                    wake_attempt=wake_attempt,
+                    wake_inline=wake_inline,
+                )
                 return
             except DelegationNotificationError as failure:
                 next_run = await self._record_delegation_notify_failure(
@@ -4323,6 +4256,47 @@ class TaskWorker:
                 if next_run is None:
                     raise
                 run = next_run
+
+    def _launch_wake_delivery(
+        self,
+        exec_context: ToolExecutionContext,
+        run: DelegationRunDict,
+        *,
+        force: bool,
+        wake_attempt: int,
+    ) -> None:
+        """Run a delivery that wakes the delegating profile as a background turn.
+
+        The body is the delivery itself, re-entered with the wake run inline, so
+        a wake that fails falls back and advances stages exactly as it would in
+        the task. A failure that escapes it is left to the hourly cleanup, which
+        queues every unnotified terminal run again.
+        """
+
+        async def deliver() -> None:
+            try:
+                await self._deliver_terminal_delegation(
+                    exec_context,
+                    run,
+                    force=force,
+                    wake_attempt=wake_attempt,
+                    wake_inline=True,
+                )
+            except Exception:
+                logger.exception(
+                    "Delivery of delegation %s failed; the hourly cleanup will "
+                    "queue it again.",
+                    run["delegation_id"],
+                )
+
+        # The wake turn arms and tracks its own lease once it starts.
+        self.background_turns.launch(
+            f"delegation-wake:{run['delegation_id']}",
+            deliver(),
+            lease=None,
+            database=exec_context.db_context,
+            request_suspend=lambda: None,
+        )
 
     async def _record_delegation_notify_failure(
         self,
@@ -4870,6 +4844,8 @@ class TaskWorker:
         run: DelegationRunDict,
         *,
         force: bool = False,
+        wake_attempt: int = 0,
+        wake_inline: bool = True,
     ) -> None:
         """Record and deliver a terminal delegation notification when needed.
 
@@ -4908,6 +4884,11 @@ class TaskWorker:
         # At canned_pending the model has already been asked and its answer was
         # refused too, so only the short standard notice is left to try.
         if source_service is not None and stage != "canned_pending":
+            if not wake_inline:
+                self._launch_wake_delivery(
+                    exec_context, run, force=force, wake_attempt=wake_attempt
+                )
+                return
             try:
                 await self._wake_source_profile_for_delegation(
                     exec_context,
@@ -4915,6 +4896,7 @@ class TaskWorker:
                     source_service,
                     clock,
                     stage=stage,
+                    attempt=wake_attempt,
                 )
                 return
             except DelegationNotificationError as wake_failure:
@@ -5057,6 +5039,7 @@ class TaskWorker:
         source_service: ProcessingService,
         clock: Clock,
         stage: DelegationNotifyStage = "initial",
+        attempt: int = 0,
     ) -> int | None:
         """Wake the delegating profile with a terminal delegation result.
 
@@ -5130,7 +5113,7 @@ class TaskWorker:
         )
         resume = existing_data_row is not None
         lease = await self._arm_wake_turn_lease(
-            exec_context, run, source_service, wake_turn_id
+            exec_context, run, source_service, wake_turn_id, attempt=attempt
         )
         controller = _SuspendableTurnController()
         try:
@@ -5160,46 +5143,49 @@ class TaskWorker:
             self._track_wake_turn_lease(exec_context, lease, controller)
 
             # Phase 2: Run the LLM turn untransacted.
-            result = await source_service.handle_chat_interaction(
-                db_context=exec_context.db_context,
-                interface_type=run["interface_type"],
-                conversation_id=run["conversation_id"],
-                trigger_content_parts=[{"type": "text", "text": trigger_text}],
-                trigger_interface_message_id=None,
-                user_name=run["user_name"] or exec_context.user_name,
-                user_id=run["user_id"],
-                replied_to_interface_id=None,
-                chat_interface=chat_interface,
-                chat_interfaces=exec_context.chat_interfaces,
-                confirmation_ui_managers=exec_context.confirmation_ui_managers,
-                request_confirmation_callback=build_deferred_confirmation_callback(
-                    target_user_id=run["user_id"],
-                    source_prefix=("From a completed delegated task — approve to run:"),
-                    missing_owner_message=lambda tool_name: (
-                        "This delegated task has no recorded owner, so the "
-                        f"confirm-gated tool '{tool_name}' cannot be approved and "
-                        "was not run."
+            async with asyncio.timeout(DELEGATION_WAKE_TURN_BUDGET_SECONDS):
+                result = await source_service.handle_chat_interaction(
+                    db_context=exec_context.db_context,
+                    interface_type=run["interface_type"],
+                    conversation_id=run["conversation_id"],
+                    trigger_content_parts=[{"type": "text", "text": trigger_text}],
+                    trigger_interface_message_id=None,
+                    user_name=run["user_name"] or exec_context.user_name,
+                    user_id=run["user_id"],
+                    replied_to_interface_id=None,
+                    chat_interface=chat_interface,
+                    chat_interfaces=exec_context.chat_interfaces,
+                    confirmation_ui_managers=exec_context.confirmation_ui_managers,
+                    request_confirmation_callback=build_deferred_confirmation_callback(
+                        target_user_id=run["user_id"],
+                        source_prefix=(
+                            "From a completed delegated task — approve to run:"
+                        ),
+                        missing_owner_message=lambda tool_name: (
+                            "This delegated task has no recorded owner, so the "
+                            f"confirm-gated tool '{tool_name}' cannot be approved and "
+                            "was not run."
+                        ),
                     ),
-                ),
-                trigger_attachments=self._delegation_notification_attachments(run),
-                subconversation_id=source_subconversation_id,
-                thread_root_id=data_message_internal_id,
-                trigger_is_internal=True,
-                pinned_history_message_ids=[data_message_internal_id],
-                trigger_role="system",
-                turn_id=wake_turn_id,
-                mid_turn_input_provider=controller,
-                model_selection=model_selection,
-                resume=resume,
-                initial_taint_sources=_taint_sources_from_delegation_run(run),
-                tool_call_review_trigger=await _delegation_run_review_trigger(
-                    exec_context,
-                    run,
-                    trigger_type="delegation_completion",
-                    active_request_role="system",
-                    payload_present=True,
-                ),
-            )
+                    trigger_attachments=self._delegation_notification_attachments(run),
+                    subconversation_id=source_subconversation_id,
+                    thread_root_id=data_message_internal_id,
+                    trigger_is_internal=True,
+                    pinned_history_message_ids=[data_message_internal_id],
+                    trigger_role="system",
+                    turn_id=wake_turn_id,
+                    mid_turn_input_provider=controller,
+                    model_selection=model_selection,
+                    resume=resume,
+                    initial_taint_sources=_taint_sources_from_delegation_run(run),
+                    tool_call_review_trigger=await _delegation_run_review_trigger(
+                        exec_context,
+                        run,
+                        trigger_type="delegation_completion",
+                        active_request_role="system",
+                        payload_present=True,
+                    ),
+                )
 
             # Phase 3: deliver, then record the delivery and mark notified
             # atomically.
@@ -5263,18 +5249,19 @@ class TaskWorker:
         run: DelegationRunDict,
         source_service: ProcessingService,
         wake_turn_id: str,
+        *,
+        attempt: int,
     ) -> TurnLease | None:
         """Arm the lease that resumes this wake turn if its process goes away.
 
         Armed before the turn writes anything, like every other turn's lease.
-        The attempt is the delivery task's: a lost attempt counts against its
-        retries (see ``TasksRepository.release_claim``), so a turn that keeps
-        taking its process down is closed off rather than resumed for ever.
+        ``attempt`` counts the interruptions the turn has already had, so one
+        that keeps taking its process down is closed off rather than resumed
+        for ever.
         """
         registry = self.turn_lease_registry
         if registry is None:
             return None
-        attempt = exec_context.task_attempt
         return await registry.arm(
             exec_context.db_context.tasks,
             TurnResumePayload(
@@ -5285,9 +5272,8 @@ class TaskWorker:
                 user_id=run["user_id"] or "",
                 user_name=run["user_name"] or exec_context.user_name,
                 processing_profile_id=source_service.service_config.id,
-                attempt=attempt.retry_count if attempt is not None else 0,
+                attempt=attempt,
                 delegation_id=run["delegation_id"],
-                claimed_by=self.worker_id,
             ),
         )
 
@@ -6793,7 +6779,6 @@ class TaskWorker:
         # registering it too means enqueue notifications still reach it.
         if wake_up_event is None:
             wake_up_event = asyncio.Event()
-        self.stuck_cancellation_reason = None
         register_worker_wake_event(wake_up_event)
         try:
             await self._run_loop(wake_up_event)

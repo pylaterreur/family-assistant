@@ -69,14 +69,13 @@ from family_assistant.storage.delegation_runs import (
 from family_assistant.storage.repositories.tasks import TasksRepository
 from family_assistant.storage.tasks import TaskPriority
 from family_assistant.task_worker import (
+    DELEGATED_RUN_TURN_BUDGET_SECONDS,
     DelegatedProfileRunPayload,
-    DelegationNotificationError,
     TaskWorker,
 )
 from family_assistant.tools.confirmation import render_generic_tool_confirmation
 from family_assistant.tools.metadata import ToolDescriptor
 from family_assistant.tools.services import (
-    DELEGATED_PROFILE_RUN_TASK_TYPE,
     delegate_to_service_tool,
     get_delegation_status_tool,
     list_delegations_tool,
@@ -836,7 +835,7 @@ def _build_worker(
     processing_service: ProcessingService,
     chat_interface: ChatInterface,
     confirmation_ui_managers: dict[str, ConfirmationUIManager] | None = None,
-    handler_timeout_overrides: dict[str, float] | None = None,
+    delegated_turn_budget: float = DELEGATED_RUN_TURN_BUDGET_SECONDS,
 ) -> TaskWorker:
     return TaskWorker(
         processing_service=processing_service,
@@ -846,7 +845,7 @@ def _build_worker(
         embedding_generator=MockEmbeddingGenerator(),
         engine=db_engine,
         confirmation_ui_managers=confirmation_ui_managers,
-        handler_timeout_overrides=handler_timeout_overrides,
+        delegated_turn_budget=delegated_turn_budget,
     )
 
 
@@ -1282,8 +1281,8 @@ async def test_failed_delivery_is_not_recorded_as_notified(
 
     ChatInterface.send_message raises ChatDeliveryError when delivery fails
     (Bot API error, network, ...). A transient one must leave the terminal run
-    at notified_at NULL so it is retried, and no notification row may be
-    written for a message that was never delivered. The delegated turn's own
+    at notified_at NULL so a later pass retries it, and no notification row may
+    be written for a message that was never delivered. The delegated turn's own
     history is durable either way -- it happened.
     """
     target_service = FakeDelegatableService()
@@ -1307,15 +1306,16 @@ async def test_failed_delivery_is_not_recorded_as_notified(
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    with pytest.raises(DelegationNotificationError):
-        await run_delegated_profile_run(
-            worker,
-            _tool_context(db_context, processing_service, chat_interface),
-            _payload("delegation_send_fails"),
-        )
-        await deliver_queued_delegations(
-            worker, _tool_context(db_context, processing_service, chat_interface)
-        )
+    # The delivery wakes the source profile on the background turn runner, so
+    # the failure is logged there and left for the cleanup rather than raised.
+    await run_delegated_profile_run(
+        worker,
+        _tool_context(db_context, processing_service, chat_interface),
+        _payload("delegation_send_fails"),
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     assert len(chat_interface.sent) == 1
     db_context = Database(engine=db_engine)
@@ -1439,7 +1439,7 @@ async def test_source_wake_retry_resumes_at_delivery_without_rerunning_the_turn(
 
     The wake turn's tools commit as they run, so re-running generation would
     repeat their side effects. Both the wake delivery and the fallback fail on
-    the first attempt, which is what leaves the task to be retried with
+    the first attempt, which is what leaves the run to be delivered again with
     notified_at still NULL.
     """
     target_service = FakeDelegatableService()
@@ -1468,24 +1468,28 @@ async def test_source_wake_retry_resumes_at_delivery_without_rerunning_the_turn(
         cast("ProcessingService", processing_service),
         chat_interface,
     )
-    with pytest.raises(Exception, match="delegation_source_wake_retry"):
-        await run_delegated_profile_run(
-            worker,
-            _tool_context(
-                Database(engine=db_engine),
-                cast("ProcessingService", processing_service),
-                chat_interface,
-            ),
-            _payload("delegation_source_wake_retry"),
-        )
-        await deliver_queued_delegations(
-            worker,
-            _tool_context(
-                Database(engine=db_engine),
-                cast("ProcessingService", processing_service),
-                chat_interface,
-            ),
-        )
+    await run_delegated_profile_run(
+        worker,
+        _tool_context(
+            Database(engine=db_engine),
+            cast("ProcessingService", processing_service),
+            chat_interface,
+        ),
+        _payload("delegation_source_wake_retry"),
+    )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            Database(engine=db_engine),
+            cast("ProcessingService", processing_service),
+            chat_interface,
+        ),
+    )
+    run = await Database(engine=db_engine).delegation_runs.get_by_delegation_id(
+        "delegation_source_wake_retry"
+    )
+    assert run is not None
+    assert run["notified_at"] is None
 
     await run_delegated_profile_run(
         worker,
@@ -2119,11 +2123,7 @@ class _NeverFinishingService(FakeDelegatableService):
 async def test_a_run_that_outlasts_its_budget_is_failed_as_timed_out(
     db_engine: AsyncEngine,
 ) -> None:
-    """The run's own deadline fails it as timed out, before the worker cancels it.
-
-    Left to the worker's handler timeout, the run would stay ``running`` and the
-    retry would fail it as interrupted, which says nothing about why.
-    """
+    """A turn that runs past the run's budget fails the run as timed out."""
     target_service = _NeverFinishingService()
     processing_service = _source_processing_service(target_service)
     chat_interface = ScriptedChatInterface(otherwise="external_message_id")
@@ -2137,7 +2137,7 @@ async def test_a_run_that_outlasts_its_budget_is_failed_as_timed_out(
         db_engine,
         processing_service,
         chat_interface,
-        handler_timeout_overrides={DELEGATED_PROFILE_RUN_TASK_TYPE: 0.4},
+        delegated_turn_budget=0.4,
     )
     await run_delegated_profile_run(
         worker,

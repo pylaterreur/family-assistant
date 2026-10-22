@@ -372,45 +372,6 @@ class TasksRepository(BaseRepository):
         )
         return (await self._db.execute(stmt)).rowcount > 0
 
-    async def release_claim(
-        self, task_id: str, scheduled_at: datetime, *, locked_by: str
-    ) -> bool:
-        """Hand ``locked_by``'s claim on a task back to the queue, due at ``scheduled_at``.
-
-        For a claim whose worker is known to be gone before the stale-claim
-        cutoff says so -- its process stopped renewing a turn lease. A claim
-        some other worker has taken since (the stale-claim reclaim) is left
-        alone: that worker is still running it. The lost
-        attempt counts as a failed one, so work that keeps taking its process
-        down runs out of retries rather than looping; on its last attempt the
-        row is failed instead. Returns whether a claimed row was released; any
-        other row is left alone.
-        """
-        if scheduled_at.tzinfo is None:
-            raise ValueError("scheduled_at must be timezone-aware")
-        stmt = (
-            update(tasks_table)
-            .where(
-                tasks_table.c.task_id == task_id,
-                tasks_table.c.status == "processing",
-                tasks_table.c.locked_by == locked_by,
-            )
-            .values(
-                status=case(
-                    (
-                        tasks_table.c.retry_count >= tasks_table.c.max_retries,
-                        "failed",
-                    ),
-                    else_="pending",
-                ),
-                retry_count=tasks_table.c.retry_count + 1,
-                locked_by=None,
-                locked_at=None,
-                scheduled_at=scheduled_at.astimezone(UTC),
-            )
-        )
-        return (await self._db.execute(stmt)).rowcount > 0
-
     async def reschedule_pending(
         self, task_ids: Sequence[str], scheduled_at: datetime
     ) -> int:

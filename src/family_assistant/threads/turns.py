@@ -33,14 +33,26 @@ class ThreadTurnOutcome:
     error: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class StartedThreadTurn:
+    """A thread's first turn, running where its user can watch it."""
+
+    # Stops the turn at its next loop boundary so another process can resume
+    # it; the turn's lease calls this on a graceful shutdown.
+    request_suspend: Callable[[], None]
+    # Waits for the turn to end. None means it was suspended rather than
+    # finished. Cancelling the wait cancels the turn.
+    outcome: Callable[[], Awaitable[ThreadTurnOutcome | None]]
+
+
 class ThreadTurnRunner(Protocol):
-    """Runs a thread run's first turn live in its conversation."""
+    """Starts a thread run's first turn live in its conversation."""
 
     def handles(self, run: DelegationRunDict) -> bool:
         """Whether this runner serves the surface ``run``'s thread lives on."""
         ...
 
-    async def run_first_turn(
+    async def start_first_turn(
         self,
         run: DelegationRunDict,
         *,
@@ -48,15 +60,17 @@ class ThreadTurnRunner(Protocol):
         model_selection: ResolvedModelSelection,
         tool_call_review_trigger: TriggerReviewInput | None,
         claim: Callable[[], Awaitable[bool]],
-    ) -> ThreadTurnOutcome | None:
-        """Run the turn, or return None if it could not start.
+        resume: bool,
+    ) -> StartedThreadTurn | None:
+        """Start the turn, or return None if it could not start.
 
         ``tool_call_review_trigger`` is the request the run was started for, as
         the tool-call reviewer judges the turn's actions against it.
 
-        ``claim`` marks the run running; it is called once the turn is
+        ``claim`` takes the run for this turn; it is called once the turn is
         registered where its user can see it, and the turn runs only if it
         succeeds. None means either the conversation already had a turn in
-        progress or the claim failed -- the run was no longer queued.
+        progress or the claim failed. ``resume`` continues a turn an earlier
+        process was running, from the rows it persisted.
         """
         ...

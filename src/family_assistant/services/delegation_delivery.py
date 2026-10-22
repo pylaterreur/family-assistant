@@ -10,23 +10,22 @@ delivery already pending or running owns the work, so queuing again leaves it
 alone; a finished one is replaced, because a run that is queued for delivery
 again was not delivered by it.
 
-A wake turn holds a turn lease (see ``turn_resumption``). When its process
-goes away mid-turn the lease comes due, and :class:`DelegationWakeResumer`
-hands the delivery task back to the queue, whose next run resumes the turn
-from the rows it already persisted.
+The delivery task does not host the wake turn: it launches the turn on the
+background turn runner and returns (see
+docs/design/background-turns-off-the-task-worker.md). The turn holds a turn
+lease (see ``turn_resumption``). When its process goes away mid-turn the lease
+comes due, and :class:`DelegationWakeResumer` queues the delivery again, which
+resumes the turn from the rows it already persisted.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from family_assistant.storage.tasks import TaskAlreadyExistsError, TaskPriority
-from family_assistant.utils.clock import Clock, SystemClock
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from family_assistant.services.turn_resumption import (
         TurnLeaseRegistry,
         TurnResumePayload,
@@ -39,10 +38,9 @@ logger = logging.getLogger(__name__)
 DELEGATION_DELIVERY_TASK_TYPE = "delegation_delivery"
 DELEGATION_WAKE_RESUMER = "delegation_wake"
 
-# The wake turn's budget. Under the stale-claim cutoff (15 minutes), so a live
-# delivery is never reclaimed out from under itself into a second, concurrent
-# wake turn. A delivery cut off by it is retried, and the retry resumes the turn.
-DELEGATION_DELIVERY_TIMEOUT_SECONDS = 600.0
+# The wake turn's own budget. A turn that runs out of it is delivered the way a
+# failed wake is: the standard completion notice goes instead.
+DELEGATION_WAKE_TURN_BUDGET_SECONDS = 600.0
 
 
 class DelegationDeliveryPayload(TypedDict):
@@ -52,6 +50,9 @@ class DelegationDeliveryPayload(TypedDict):
     # Deliver even if the caller never handed the run off (see
     # ``TaskWorker._notify_delegation_if_needed``).
     force: bool
+    # Set when the delivery resumes a wake turn its lease handed on: how many
+    # times that turn has been interrupted, so resumption stays bounded.
+    wake_attempt: NotRequired[int]
 
 
 def delegation_delivery_task_id(delegation_id: str) -> str:
@@ -59,7 +60,11 @@ def delegation_delivery_task_id(delegation_id: str) -> str:
 
 
 async def queue_delegation_delivery(
-    tasks: TasksRepository, delegation_id: str, *, force: bool
+    tasks: TasksRepository,
+    delegation_id: str,
+    *,
+    force: bool,
+    wake_attempt: int | None = None,
 ) -> None:
     """Make sure a delivery of ``delegation_id`` is pending or running."""
     task_id = delegation_delivery_task_id(delegation_id)
@@ -67,6 +72,8 @@ async def queue_delegation_delivery(
         "delegation_id": delegation_id,
         "force": force,
     }
+    if wake_attempt is not None:
+        payload["wake_attempt"] = wake_attempt
     await tasks.delete_finished(task_id)
     if await _enqueue_delivery(tasks, task_id, payload):
         return
@@ -97,61 +104,36 @@ async def _enqueue_delivery(
     return True
 
 
-async def redeliver_now(
-    tasks: TasksRepository, delegation_id: str, *, now: datetime, claimed_by: str
-) -> None:
-    """Run the delegation's delivery as soon as a worker is free.
-
-    ``claimed_by``'s claim is released: this is called once the process that
-    holds it stopped renewing its turn lease. A finished delivery is queued
-    again, forced -- a wake turn exists only because its delivery was due. A
-    delivery another worker has claimed since is left to it.
-    """
-    task_id = delegation_delivery_task_id(delegation_id)
-    if await tasks.release_claim(task_id, now, locked_by=claimed_by):
-        return
-    if await tasks.reschedule_pending([task_id], now):
-        return
-    await queue_delegation_delivery(tasks, delegation_id, force=True)
-
-
 class DelegationWakeResumer:
-    """Resumes interrupted delegation wake turns through their delivery task."""
+    """Resumes interrupted delegation wake turns through a fresh delivery."""
 
-    def __init__(self, database: Database, clock: Clock | None = None) -> None:
+    def __init__(self, database: Database) -> None:
         self._database = database
-        self._clock = clock or SystemClock()
 
     async def resume(
         self, payload: TurnResumePayload, registry: TurnLeaseRegistry
     ) -> bool:
-        del registry  # The delivery task arms the resumed turn's lease itself.
-        delegation_id, claimed_by = self._claim(payload)
-        await redeliver_now(
+        del registry  # The delivery arms the resumed turn's lease itself.
+        # A wake turn exists only because its delivery was due, so the delivery
+        # that resumes it is forced.
+        await queue_delegation_delivery(
             self._database.tasks,
-            delegation_id,
-            now=self._clock.now(),
-            claimed_by=claimed_by,
+            self._delegation_id(payload),
+            force=True,
+            wake_attempt=payload.attempt + 1,
         )
         return True
 
     async def deliver_pending_reply(self, payload: TurnResumePayload) -> None:
-        delegation_id, claimed_by = self._claim(payload)
-        tasks = self._database.tasks
-        await tasks.release_claim(
-            delegation_delivery_task_id(delegation_id),
-            self._clock.now(),
-            locked_by=claimed_by,
+        # The turn has its final reply and only sending it is left.
+        await queue_delegation_delivery(
+            self._database.tasks, self._delegation_id(payload), force=True
         )
-        # Releasing the last attempt fails the row, but the turn has its final
-        # reply and only sending it is left, so a fresh delivery takes over.
-        await queue_delegation_delivery(tasks, delegation_id, force=True)
 
     @staticmethod
-    def _claim(payload: TurnResumePayload) -> tuple[str, str]:
-        if payload.delegation_id is None or payload.claimed_by is None:
+    def _delegation_id(payload: TurnResumePayload) -> str:
+        if payload.delegation_id is None:
             raise ValueError(
-                f"Delegation wake turn {payload.turn_id} has no delegation id "
-                "or claiming worker"
+                f"Delegation wake turn {payload.turn_id} has no delegation id"
             )
-        return payload.delegation_id, payload.claimed_by
+        return payload.delegation_id

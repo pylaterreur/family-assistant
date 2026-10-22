@@ -441,7 +441,8 @@ async def deliver_queued_delegations(
     """Run the delegation deliveries the worker queued, as its queue would.
 
     Terminal runs are delivered by a task of their own, so a test that drives a
-    handler directly runs the deliveries it queued with this. Each one is
+    handler directly runs the deliveries it queued with this, waiting for any
+    wake turn a delivery launched on the background turn runner. Each one is
     marked done once it succeeds. A failure propagates and leaves it pending,
     the way a retry would find it -- or, with ``exhaust_failures``, marks it
     failed and moves on, as once its retries are spent, which leaves the run
@@ -454,6 +455,7 @@ async def deliver_queued_delegations(
         payload = cast("DelegationDeliveryPayload", task["payload"])
         try:
             await worker.handle_delegation_delivery(exec_context, payload)
+            await worker.background_turns.wait_idle()
         except Exception:
             if not exhaust_failures:
                 raise

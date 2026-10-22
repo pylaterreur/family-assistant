@@ -1,6 +1,6 @@
 # Background LLM turns off the task worker
 
-**Status:** Approved 2026-10-21 (M0 through M3). M0 implemented.
+**Status:** Approved 2026-10-21 (M0 through M3). M0 through M2 implemented.
 
 ## Summary
 
@@ -136,6 +136,12 @@ After this, task workers only run short handlers, so the clocks can be simplifie
   web and wake turns already accept: a call whose result was never committed. It is bounded by
   `MAX_RESUME_ATTEMPTS`, and it is better than today, where *every* interruption fails the run.
 - **No cross-process runner.** FA is a single process, and the lease and resume handle restarts.
+- **A wake delivery that fails after it is launched is left to the hourly cleanup.** Inside the
+  task, a transient failure was retried by the task queue within minutes. Once the delivery runs as
+  a background turn there is no task left to retry, and a wake that fails transiently already falls
+  back to the standard notice, so only a notice that also fails waits for the cleanup's next pass.
+- **Deliveries are not held back by the concurrency cap.** A delivery belongs to a run that was
+  admitted already, and making it wait would hold back the result rather than bound new work.
 
 ## Work plan
 
