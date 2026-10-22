@@ -829,18 +829,28 @@ const AssistantActionBar: React.FC<{
   const [feedbackComment, setFeedbackComment] = useState('');
   const [feedbackError, setFeedbackError] = useState(false);
 
-  const rate = async (rating: TurnRating | null, comment?: string): Promise<boolean> => {
+  // A slower earlier request must not reopen or close the form after a newer
+  // press has settled what the user sees.
+  const rateRequestRef = useRef(0);
+  const rate = async (
+    rating: TurnRating | null,
+    comment?: string
+  ): Promise<'saved' | 'failed' | 'superseded'> => {
     if (!turnFeedback || !turnId) {
-      return false;
+      return 'failed';
     }
+    const request = ++rateRequestRef.current;
     setFeedbackError(false);
     try {
       await turnFeedback.rate(turnId, rating, comment);
     } catch {
+      if (request !== rateRequestRef.current) {
+        return 'superseded';
+      }
       setFeedbackError(true);
-      return false;
+      return 'failed';
     }
-    return true;
+    return request === rateRequestRef.current ? 'saved' : 'superseded';
   };
 
   const toggleRating = async (rating: TurnRating) => {
@@ -849,13 +859,16 @@ const AssistantActionBar: React.FC<{
       await rate(null);
       return;
     }
-    const saved = await rate(rating);
-    setAskingWhy(saved && rating === 'down');
+    const outcome = await rate(rating);
+    if (outcome === 'superseded') {
+      return;
+    }
+    setAskingWhy(outcome === 'saved' && rating === 'down');
     setFeedbackComment('');
   };
 
   const sendFeedbackComment = async () => {
-    if (await rate('down', feedbackComment.trim())) {
+    if ((await rate('down', feedbackComment.trim())) === 'saved') {
       setAskingWhy(false);
     }
   };
