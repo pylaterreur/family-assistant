@@ -649,6 +649,7 @@ const AssistantMessage: React.FC = () => {
     internal_id?: number;
     turn_id?: string;
     feedback?: TurnRating;
+    unrateable?: boolean;
   };
   if (custom.moved_to_thread) {
     return <MovedTurnMarker threadConversationId={custom.moved_to_thread} />;
@@ -759,6 +760,7 @@ const AssistantMessage: React.FC = () => {
                 turnId={custom.turn_id}
                 isEcho={Boolean(echoedFromThread)}
                 feedback={custom.feedback}
+                unrateable={Boolean(custom.unrateable)}
                 canCopy={hasCopyableContent}
               />
             </div>
@@ -812,13 +814,14 @@ const AssistantActionBar: React.FC<{
   turnId?: string;
   isEcho: boolean;
   feedback?: TurnRating;
+  unrateable: boolean;
   canCopy: boolean;
-}> = ({ internalId, turnId, isEcho, feedback, canCopy }) => {
+}> = ({ internalId, turnId, isEcho, feedback, unrateable, canCopy }) => {
   const aui = useAui();
   const homeActions = useHomeTurnActions();
   const turnFeedback = useTurnFeedback();
   // An echo's turn belongs to the thread it came from; it is rated there.
-  const canRate = turnFeedback !== null && turnId !== undefined && !isEcho;
+  const canRate = turnFeedback !== null && turnId !== undefined && !isEcho && !unrateable;
   const [askingWhy, setAskingWhy] = useState(false);
   const [feedbackComment, setFeedbackComment] = useState('');
   const [feedbackError, setFeedbackError] = useState(false);

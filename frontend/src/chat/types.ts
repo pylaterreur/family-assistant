@@ -114,6 +114,8 @@ export interface Message {
   moved_to_thread?: string;
   /** The user's thumbs up/down on the turn this message belongs to. */
   feedback?: TurnRating;
+  /** A marker made here with no stored reply behind it, so nothing to rate. */
+  unrateable?: boolean;
 }
 
 export type TurnRating = 'up' | 'down';
