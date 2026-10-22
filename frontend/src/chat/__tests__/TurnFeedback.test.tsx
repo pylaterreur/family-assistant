@@ -14,7 +14,10 @@ interface FeedbackServer {
   failNext: boolean;
 }
 
-function serveConversation(feedback: 'up' | 'down' | null = null): FeedbackServer {
+function serveConversation(
+  feedback: 'up' | 'down' | null = null,
+  reasoningInfo: Record<string, string> | null = null
+): FeedbackServer {
   const state: FeedbackServer = { writes: [], failNext: false };
   const rows = [
     {
@@ -32,6 +35,7 @@ function serveConversation(feedback: 'up' | 'down' | null = null): FeedbackServe
       content: REPLY,
       timestamp: '2026-10-22T09:00:01Z',
       feedback,
+      reasoning_info: reasoningInfo,
     },
   ];
   const record = async (method: string, turnId: string, request: Request) => {
@@ -162,5 +166,33 @@ describe('rating a reply', () => {
     await user.click(up);
     expect(await reply.findByRole('alert')).toHaveTextContent("Couldn't save your feedback");
     expect(up).toHaveAttribute('aria-pressed', 'false');
+  });
+});
+
+describe('a reply from a live model experiment', () => {
+  beforeEach(() => {
+    resetLocalStorageMock();
+    vi.clearAllMocks();
+    window.history.replaceState(null, '', `/chat?conversation_id=${CONVERSATION}`);
+  });
+
+  afterEach(() => {
+    window.history.replaceState(null, '', '/');
+  });
+
+  it('hides which model answered so the rating is blind', async () => {
+    serveConversation(null, {
+      model: 'gemini-4-argon',
+      model_tier: 'gemini_4_argon',
+      model_tier_source: 'experiment',
+      experiment_id: 'argon-vs-opus',
+      experiment_arm: 'gemini_4_argon',
+    });
+    const reply = await openReply();
+
+    const badge = reply.getByTestId('model-tier-badge');
+    expect(badge).toHaveTextContent('Experiment');
+    expect(badge.getAttribute('title')).not.toMatch(/argon/i);
+    expect(reply.queryByText(/argon/i)).not.toBeInTheDocument();
   });
 });

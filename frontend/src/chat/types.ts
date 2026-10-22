@@ -75,13 +75,14 @@ export interface ChatAppProps {
 /**
  * What is known about the LLM call that produced a message: the serving model
  * and, where the profile offers a choice of them, the model tier it ran at.
- * `model_tier_source` says who chose that tier — the user, the Auto router
- * (`model`), or the profile default.
+ * `model_tier_source` says who chose that tier — the user, another profile
+ * (`model`), the Auto router (`auto`), a live experiment, or the profile
+ * default. An experiment's tier is not shown, so ratings stay blind.
  */
 export interface MessageReasoningInfo {
   model?: string | null;
   model_tier?: string | null;
-  model_tier_source?: 'user' | 'model' | 'default' | null;
+  model_tier_source?: 'user' | 'model' | 'auto' | 'experiment' | 'default' | null;
   model_tier_requested?: string | null;
 }
 

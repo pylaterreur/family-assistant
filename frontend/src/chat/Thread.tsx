@@ -660,9 +660,11 @@ const AssistantMessage: React.FC = () => {
   const profile = profileId ? profilesById[profileId] : null;
   const reasoningInfo = echoedFromThread ? undefined : custom.reasoning_info;
   const tierId = reasoningInfo?.model_tier;
+  // A live experiment's arm stays hidden so the user's rating is blind.
+  const isExperiment = reasoningInfo?.model_tier_source === 'experiment';
   // The label comes from the configured tiers; an id with no configured label
   // (a tier removed since the turn ran) still names what served the turn.
-  const tierLabel = tierId ? (tierLabels[tierId] ?? tierId) : null;
+  const tierLabel = isExperiment ? 'Experiment' : tierId ? (tierLabels[tierId] ?? tierId) : null;
   const hasCopyableContent = hasCopyableAssistantContent(message?.content);
 
   return (
@@ -719,7 +721,11 @@ const AssistantMessage: React.FC = () => {
                 className="text-[10px] px-1.5 py-0 mb-1 ml-1 font-normal"
                 data-testid="model-tier-badge"
                 title={
-                  reasoningInfo?.model ? `${tierLabel} · ${reasoningInfo.model}` : `${tierLabel}`
+                  isExperiment
+                    ? 'Part of a model comparison; which model answered is hidden'
+                    : reasoningInfo?.model
+                      ? `${tierLabel} · ${reasoningInfo.model}`
+                      : `${tierLabel}`
                 }
               >
                 {tierLabel}

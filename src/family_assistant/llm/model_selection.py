@@ -49,11 +49,12 @@ __all__ = [
     "stamp_model_selection",
 ]
 
-type SelectionSource = Literal["user", "model", "default", "auto"]
+type SelectionSource = Literal["user", "model", "default", "auto", "experiment"]
 """Who chose the tier. ``"user"`` is an authenticated person's own selection,
 ``"model"`` a selection composed by a model (a delegation argument), ``"auto"``
-the routing classifier's, and ``"default"`` no selection at all -- the profile's
-configured tier.
+the routing classifier's, ``"experiment"`` a live experiment's random
+assignment, and ``"default"`` no selection at all -- the profile's configured
+tier.
 
 ``"auto"`` and ``"model"`` are separate sources: both are selections a model
 made rather than a person, but "the router chose Deep" and "another profile
@@ -284,6 +285,10 @@ class ResolvedModelSelection:
     on the reply for shadow evaluation; not part of a persisted envelope,
     which records a decision rather than how it was weighed."""
 
+    experiment_id: str | None = None
+    """The live experiment that assigned this tier, on an ``experiment``-sourced
+    envelope. The arm is the tier itself."""
+
     frozen: bool = False
     """Whether this envelope is settled, so Auto must not revisit it.
 
@@ -321,6 +326,7 @@ class ResolvedModelSelection:
             "routing_outcome": self.routing_outcome,
             "routing_would_choose": self.routing_would_choose,
             "classifier_model": self.classifier_model,
+            "experiment_id": self.experiment_id,
         }
 
     @classmethod
@@ -370,6 +376,10 @@ class ResolvedModelSelection:
         ):
             msg = "Persisted model selection has a non-string routing field."
             raise ValueError(msg)
+        experiment_id = data.get("experiment_id")
+        if not (experiment_id is None or isinstance(experiment_id, str)):
+            msg = "Persisted model selection has a non-string experiment id."
+            raise ValueError(msg)
         return cls(
             tier=tier,
             requested=requested,
@@ -379,6 +389,7 @@ class ResolvedModelSelection:
             routing_outcome=cast("RoutingOutcome | None", outcome),
             routing_would_choose=would_choose,
             classifier_model=classifier_model,
+            experiment_id=experiment_id,
             frozen=True,
         )
 
@@ -470,6 +481,10 @@ def stamp_model_selection(
         # classifier can no longer be identified is a decision that cannot be
         # attributed to the model that made it once the traces have expired.
         reasoning["model_tier_classifier_model"] = selection.classifier_model
+    if selection.experiment_id is not None:
+        reasoning["experiment_id"] = selection.experiment_id
+        if selection.tier is not None:
+            reasoning["experiment_arm"] = selection.tier
     return reasoning
 
 
@@ -490,6 +505,7 @@ def model_selection_from_reasoning(
         "routing_outcome": reasoning.get("model_tier_routing_outcome"),
         "routing_would_choose": reasoning.get("model_tier_would_choose"),
         "classifier_model": reasoning.get("model_tier_classifier_model"),
+        "experiment_id": reasoning.get("experiment_id"),
     })
 
 
@@ -514,6 +530,10 @@ def _eligible_tiers(
         # Choosing Auto authorizes the automatic range once; it never reaches
         # the delegation presets, which are not capability levels.
         return tuple(option.id for option in eligibility.auto_options)
+    if source == "experiment":
+        # An operator put the arms in config, and startup checked each is a
+        # tier the profile can run on; presets are the usual arms.
+        return tuple(option.id for option in eligibility.runnable)
     # A "default"-sourced request naming a tier is only coherent when it names
     # the default; anything else is a selection claiming to be no selection.
     return () if eligibility.default_tier is None else (eligibility.default_tier,)

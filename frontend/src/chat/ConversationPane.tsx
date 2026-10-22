@@ -1844,6 +1844,7 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
             createdAt: new Date(msg.timestamp),
             attachments: attachments.length > 0 ? attachments : undefined,
             status: msg.role === 'assistant' ? { type: 'complete' } : undefined,
+            reasoning_info: msg.reasoning_info ?? undefined,
             internalId: Number(msg.internal_id),
             echoed_from_thread: msg.echoed_from_thread ?? undefined,
             moved_to_thread: msg.moved_to_thread ?? undefined,

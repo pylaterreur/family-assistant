@@ -1124,6 +1124,49 @@ Shipped: `default_assistant` is `auto` over `standard` and `deep`, with `mode: s
 routes yet. `frontier` stays outside the automatic range — a classifier false positive there has
 asymmetric cost, so reaching Max remains a person's explicit choice.
 
+#### Live model experiments: `experiments`
+
+Compares tiers on real use: a turn that nobody chose a tier for (no explicit choice, no sticky
+choice carried from earlier in the conversation) is randomly assigned one arm of the experiment its
+profile is enrolled in.
+
+```yaml
+experiments:
+  - id: argon-vs-opus-2026-10
+    profiles: [default_assistant]
+    arms:              # tier id -> relative weight
+      claude_opus_5_5: 1
+      gemini_4_argon: 1
+    enabled: true
+```
+
+- Each arm must be a configured tier the profile can run on (`allowed_model_tiers` or
+  `delegation_model_tiers`); startup fails otherwise. A profile may be in one enabled experiment.
+- The arm is a hash of the experiment id and the conversation, so every turn of a conversation runs
+  on the same arm and keeps its prompt cache. Home is drawn again each day in the profile's time
+  zone. Delegated runs are not enrolled.
+- Enrolled replies record `model_tier_source: experiment`, `experiment_id` and `experiment_arm` in
+  `message_history.reasoning_info`; the web and iOS badges show "Experiment" rather than the tier,
+  so ratings are blind. An enrolled turn is not Auto-routed.
+- Assignment is not stored. Changing a running experiment's arms or weights reshuffles
+  conversations, so start a new `id` instead.
+
+Compare arms by joining per-turn ratings (`turn_feedback`) to the replies:
+
+```sql
+SELECT mh.reasoning_info->>'experiment_arm' AS arm,
+       count(DISTINCT mh.turn_id) AS turns,
+       count(DISTINCT f.id) FILTER (WHERE f.rating = 'up') AS up,
+       count(DISTINCT f.id) FILTER (WHERE f.rating = 'down') AS down
+FROM message_history mh
+LEFT JOIN turn_feedback f ON f.turn_id = mh.turn_id
+WHERE mh.role = 'assistant'
+  AND mh.reasoning_info->>'experiment_id' = 'argon-vs-opus-2026-10'
+GROUP BY 1;
+```
+
+See [docs/design/live-model-experiments.md](../design/live-model-experiments.md).
+
 #### Precedence against `retry_config` / `llm_model` / `provider`
 
 A profile names **either** a tier **or** an inline model, never both:

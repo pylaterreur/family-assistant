@@ -310,6 +310,33 @@ class ModelRoutingConfig(BaseModel):
     """How many recent messages of the conversation the classifier sees."""
 
 
+class ExperimentConfig(BaseModel):
+    """A live model experiment: turns nobody chose a tier for are randomly
+    assigned one of the arms, and the assignment is recorded on each reply.
+
+    See docs/design/live-model-experiments.md.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    """Recorded on every enrolled reply. Start a new id rather than editing a
+    running experiment's arms: assignment is re-derived from the id, so
+    changing the arms reshuffles conversations already under way."""
+    profiles: list[str] = Field(min_length=1)
+    arms: dict[str, int] = Field(min_length=2)
+    """Model tier id -> relative weight."""
+    enabled: bool = True
+
+    @field_validator("arms")
+    @classmethod
+    def validate_weights_are_positive(cls, v: dict[str, int]) -> dict[str, int]:
+        if any(weight <= 0 for weight in v.values()):
+            msg = "Experiment arm weights must be positive integers."
+            raise ValueError(msg)
+        return v
+
+
 class ConversationSummaryConfig(BaseModel):
     """Generated one-line summaries shown in the web and iOS conversation lists.
 
@@ -2305,6 +2332,9 @@ class AppConfig(BaseSettings):
     model_routing: ModelRoutingConfig = Field(default_factory=ModelRoutingConfig)
     typesafe: TypeSafeConfig = Field(default_factory=TypeSafeConfig)
 
+    # Live model experiments; see docs/design/live-model-experiments.md.
+    experiments: list[ExperimentConfig] = Field(default_factory=list)
+
     conversation_summaries: ConversationSummaryConfig = Field(
         default_factory=ConversationSummaryConfig
     )
@@ -2421,6 +2451,61 @@ class AppConfig(BaseSettings):
             )
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def validate_experiments(self) -> AppConfig:
+        """Arms name configured tiers, and a profile is in one experiment.
+
+        Whether each arm is a tier its profiles can actually run on is checked
+        when the profiles are built, which is where their eligibility exists.
+        """
+        ids = [experiment.id for experiment in self.experiments]
+        if len(ids) != len(set(ids)):
+            msg = f"Experiment ids must be unique: {', '.join(ids)}."
+            raise ValueError(msg)
+        profile_ids = {profile.id for profile in self.service_profiles}
+        enrolled: dict[str, str] = {}
+        for experiment in self.experiments:
+            unknown_tiers = sorted(set(experiment.arms) - set(self.model_tiers))
+            if unknown_tiers:
+                msg = (
+                    f"Experiment '{experiment.id}' has arms that are not model "
+                    f"tiers: {', '.join(unknown_tiers)}."
+                )
+                raise ValueError(msg)
+            # Profiles may be supplied after the YAML (by tests, or a layered
+            # source); an empty list says nothing about which ids exist.
+            unknown_profiles = (
+                sorted(set(experiment.profiles) - profile_ids) if profile_ids else []
+            )
+            if unknown_profiles:
+                msg = (
+                    f"Experiment '{experiment.id}' names unknown profiles: "
+                    f"{', '.join(unknown_profiles)}."
+                )
+                raise ValueError(msg)
+            if not experiment.enabled:
+                continue
+            for profile_id in experiment.profiles:
+                if profile_id in enrolled:
+                    msg = (
+                        f"Profile '{profile_id}' is in two enabled experiments: "
+                        f"'{enrolled[profile_id]}' and '{experiment.id}'."
+                    )
+                    raise ValueError(msg)
+                enrolled[profile_id] = experiment.id
+        return self
+
+    def experiment_for_profile(self, profile_id: str) -> ExperimentConfig | None:
+        """The enabled experiment *profile_id* is enrolled in, if any."""
+        return next(
+            (
+                experiment
+                for experiment in self.experiments
+                if experiment.enabled and profile_id in experiment.profiles
+            ),
+            None,
+        )
 
     @model_validator(mode="after")
     def validate_model_tier_slash_commands_are_unique(self) -> AppConfig:

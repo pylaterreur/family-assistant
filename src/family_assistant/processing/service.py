@@ -14,6 +14,7 @@ from opentelemetry.trace import StatusCode
 
 from family_assistant.llm import LLMInterface, LLMStreamEvent
 from family_assistant.llm.call_context import CallAttribution, attributed_call
+from family_assistant.llm.experiments import assign_arm
 from family_assistant.llm.messages import (
     AssistantMessage,
     ContentPartDict,
@@ -578,6 +579,37 @@ class ProcessingService:
             )
             return None
 
+    async def _experiment_selection(
+        self,
+        db_context: Database,
+        *,
+        conversation_id: str,
+        subconversation_id: str | None,
+    ) -> ResolvedModelSelection | None:
+        """The arm of a live experiment this turn is assigned to, if enrolled.
+
+        Only asked about a turn nobody chose a tier for, explicitly or by a
+        sticky choice: a person's choice always wins. Delegated runs are not
+        enrolled. The arm is drawn per conversation so its turns share one
+        model and its prompt cache; Home never ends, so it is drawn per day.
+        """
+        experiment = self.app_config.experiment_for_profile(self.service_config.id)
+        if (
+            experiment is None
+            or subconversation_id is not None
+            or self.service_config.tier_eligibility.default_tier is None
+        ):
+            return None
+        unit = conversation_id
+        if await db_context.conversation_threads.is_home(conversation_id):
+            today = self.clock.now().astimezone(self.service_config.timezone).date()
+            unit = f"{conversation_id}:{today.isoformat()}"
+        arm = assign_arm(experiment.id, unit, experiment.arms)
+        admitted = self.resolve_model_selection(
+            ModelSelectionRequest(tier=arm, source="experiment")
+        )
+        return replace(admitted, experiment_id=experiment.id)
+
     def _run_binding(
         self, selection: ResolvedModelSelection | None
     ) -> tuple[ResolvedModelSelection, LLMInterface]:
@@ -651,6 +683,11 @@ class ProcessingService:
         ):
             selection = (
                 await self.conversation_model_selection(
+                    db_context,
+                    conversation_id=conversation_id,
+                    subconversation_id=subconversation_id,
+                )
+                or await self._experiment_selection(
                     db_context,
                     conversation_id=conversation_id,
                     subconversation_id=subconversation_id,

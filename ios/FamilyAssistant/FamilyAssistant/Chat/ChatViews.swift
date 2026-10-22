@@ -624,6 +624,10 @@ struct MessageBubble: View {
         guard !isUser, message.toolCalls.isEmpty, let tier = message.modelTier else {
             return nil
         }
+        // A live experiment's arm stays hidden so ratings of it are blind.
+        if message.modelTierSource == "experiment" {
+            return "Experiment"
+        }
         return modelTierLabels[tier] ?? tier
     }
 

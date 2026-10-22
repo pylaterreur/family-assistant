@@ -159,8 +159,8 @@ class MessageReasoningInfo(TypedDict, total=False):
     """The model tier this call ran at. Absent on a profile pinned to an inline
     model, which has no tier to name."""
     model_tier_source: str
-    """Who chose that tier: ``user``, ``model``, or ``default`` for the
-    profile's own. What was resolved and who asked for it are separate
+    """Who chose that tier: ``user``, ``model``, ``auto``, ``experiment``, or
+    ``default`` for the profile's own. What was resolved and who asked for it are separate
     questions -- the same models can be reached by either."""
     model_tier_requested: str
     """The tier that was actually asked for, where one was. Absent when nobody
@@ -185,6 +185,11 @@ class MessageReasoningInfo(TypedDict, total=False):
     only on the trace span because the evaluation dataset is this column and
     traces expire: a decision whose classifier is unidentifiable cannot be
     re-judged after the classifier has been changed."""
+    experiment_id: str
+    """The live experiment that assigned this row's tier, when
+    ``model_tier_source`` is ``experiment``."""
+    experiment_arm: str
+    """The experiment arm this row ran on: the tier the experiment chose."""
 
 
 # Re-export content part types and helpers for backward compatibility
