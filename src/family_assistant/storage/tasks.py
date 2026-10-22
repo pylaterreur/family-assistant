@@ -27,6 +27,12 @@ from family_assistant.storage.base import metadata
 
 logger = logging.getLogger(__name__)
 
+# How long a claim may go unrenewed before dequeue treats its worker as dead and
+# reclaims the task. A worker renews its claim while the handler runs (see
+# ``TaskWorker``), so this bounds how long a crashed worker's task waits, not how
+# long a handler may run; it must comfortably exceed the renewal interval.
+STALE_TASK_TIMEOUT_MINUTES = 15
+
 # Module state for task notifications
 _task_event: Event | None = None
 

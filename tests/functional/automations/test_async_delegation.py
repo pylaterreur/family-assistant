@@ -2171,6 +2171,55 @@ async def test_a_run_that_outlasts_its_budget_is_failed_as_timed_out(
 
 
 @pytest.mark.asyncio
+async def test_a_run_whose_worker_is_restarted_as_stuck_is_failed_with_the_reason(
+    db_engine: AsyncEngine,
+) -> None:
+    """The health monitor restarting the worker fails the run, saying why.
+
+    Left ``running``, the run would wait out the stale-claim cutoff and then be
+    failed as "interrupted", which says nothing about what happened.
+    """
+    target_service = _NeverFinishingService()
+    processing_service = _source_processing_service(target_service)
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
+
+    clock = SystemClock()
+    db_context = Database(engine=db_engine)
+    await _create_run(db_context, delegation_id="delegation_stuck")
+    await db_context.delegation_runs.mark_handed_off("delegation_stuck", clock.now())
+
+    worker = _build_worker(db_engine, processing_service, chat_interface)
+    handler = asyncio.create_task(
+        worker.handle_delegated_profile_run(
+            _tool_context(db_context, processing_service, chat_interface),
+            _payload("delegation_stuck"),
+        )
+    )
+    await wait_for_condition(
+        lambda: len(target_service.calls) == 1,
+        timeout=10.0,
+        description="the delegated turn to start",
+    )
+    worker.mark_cancelled_as_stuck("task t1 is 75s past its handler timeout")
+    handler.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handler
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
+
+    assert len(chat_interface.sent) == 1
+    run = await Database(engine=db_engine).delegation_runs.get_by_delegation_id(
+        "delegation_stuck"
+    )
+    assert run is not None
+    assert run["status"] == "failed"
+    assert run["error"] is not None
+    assert "stopped responding" in run["error"]
+    assert "75s past its handler timeout" in run["error"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["queued", "running"])
 async def test_reaper_fails_and_notifies_stale_run(
     db_engine: AsyncEngine,

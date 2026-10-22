@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncGenerator
+from datetime import timedelta
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -34,14 +35,21 @@ from family_assistant.assistant import Assistant
 from family_assistant.config_models import AppConfig
 from family_assistant.embeddings import MockEmbeddingGenerator
 from family_assistant.storage.database import Database
+from family_assistant.storage.datetime_utils import normalize_datetime
 from family_assistant.storage.tasks import (
+    STALE_TASK_TIMEOUT_MINUTES,
     TaskPriority,
     register_worker_wake_event,
     tasks_table,
     unregister_worker_wake_event,
 )
-from family_assistant.task_worker import PARKING_TASK_TYPES, TaskWorker
+from family_assistant.task_worker import (
+    PARKING_TASK_TYPES,
+    WORKER_STUCK_GRACE_SECONDS,
+    TaskWorker,
+)
 from family_assistant.tools.types import ToolExecutionContext
+from family_assistant.utils.clock import MockClock
 from tests.conftest import cleanup_task_worker
 from tests.helpers import wait_for_condition, wait_for_tasks_to_complete
 from tests.mocks.idle_processing_service import make_idle_processing_service
@@ -826,3 +834,154 @@ async def test_health_monitor_restarts_a_reserved_worker_as_reserved(
             await cleanup_task_worker(task, shutdown_event)
         for worker in workers:
             await _dispose_worker_engine(worker, db_engine)
+
+
+@pytest.mark.asyncio
+async def test_a_long_budget_handler_is_neither_restarted_nor_reclaimed(
+    db_engine: AsyncEngine, shutdown_event: asyncio.Event
+) -> None:
+    """A handler within its own budget outlives the idle watchdog and stale cutoff.
+
+    Twenty minutes into a 32-minute budget is past both the idle threshold and
+    the stale-claim cutoff, so neither may treat the worker as stuck or let a
+    sibling take its task over.
+    """
+    clock = MockClock()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def long_handler(
+        exec_context: ToolExecutionContext,
+        payload: TaskPayload,
+    ) -> None:
+        started.set()
+        await release.wait()
+
+    worker = _make_worker(
+        db_engine,
+        shutdown_event,
+        clock=clock,
+        handler_timeout_overrides={"long": 1920.0},
+        claim_renew_seconds=0.05,
+    )
+    worker.register_task_handler("long", long_handler)
+    assistant = Assistant.__new__(Assistant)
+    assistant.task_workers = [worker]
+    assistant.task_worker_tasks = [asyncio.create_task(worker.run())]
+    original_task = assistant.task_worker_tasks[0]
+    tasks = Database(engine=db_engine).tasks
+
+    try:
+        await tasks.enqueue(
+            task_id="long-task",
+            task_type="long",
+            payload={},
+            max_retries_override=0,
+            priority=TaskPriority.BACKGROUND,
+        )
+        await asyncio.wait_for(started.wait(), timeout=10.0)
+
+        clock.advance(timedelta(minutes=20))
+        renewed_at = clock.now()
+
+        async def claim_renewed() -> bool:
+            rows = await Database(engine=db_engine).fetch_all(
+                select(tasks_table.c.locked_at).where(
+                    tasks_table.c.task_id == "long-task"
+                )
+            )
+            locked_at = normalize_datetime(rows[0]["locked_at"])
+            return locked_at is not None and locked_at >= renewed_at
+
+        await wait_for_condition(
+            claim_renewed, timeout=5.0, description="the claim to be renewed"
+        )
+
+        assert worker.stuck_reason() is None
+        await assistant._check_and_restart_workers()
+        assert assistant.task_worker_tasks[0] is original_task
+        assert not original_task.done()
+        assert (
+            await tasks.dequeue(
+                worker_id="sibling", task_types=["long"], current_time=clock.now()
+            )
+            is None
+        )
+
+        release.set()
+        await wait_for_tasks_to_complete(
+            engine=db_engine, task_ids={"long-task"}, timeout_seconds=10.0
+        )
+        assert await _task_status(db_engine, "long-task") == "done"
+    finally:
+        release.set()
+        shutdown_event.set()
+        for task in assistant.task_worker_tasks:
+            await cleanup_task_worker(task, shutdown_event)
+        await _dispose_worker_engine(worker, db_engine)
+
+
+@pytest.mark.asyncio
+async def test_a_worker_past_its_task_deadline_is_restarted(
+    db_engine: AsyncEngine, shutdown_event: asyncio.Event
+) -> None:
+    """A handler running past its own timeout means its worker is stuck."""
+    clock = MockClock()
+    started = asyncio.Event()
+
+    async def hanging_handler(
+        exec_context: ToolExecutionContext,
+        payload: TaskPayload,
+    ) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    worker = _make_worker(
+        db_engine,
+        shutdown_event,
+        clock=clock,
+        handler_timeout_overrides={"hang": 1920.0},
+    )
+    worker.register_task_handler("hang", hanging_handler)
+    assistant = Assistant.__new__(Assistant)
+    assistant.task_workers = [worker]
+    assistant.task_worker_tasks = [asyncio.create_task(worker.run())]
+    original_task = assistant.task_worker_tasks[0]
+
+    try:
+        await Database(engine=db_engine).tasks.enqueue(
+            task_id="hang-task",
+            task_type="hang",
+            payload={},
+            max_retries_override=0,
+            priority=TaskPriority.BACKGROUND,
+        )
+        await asyncio.wait_for(started.wait(), timeout=10.0)
+
+        clock.advance(timedelta(seconds=1920 + WORKER_STUCK_GRACE_SECONDS + 1))
+        reason = worker.stuck_reason()
+        assert reason is not None
+        assert "hang-task" in reason
+
+        await assistant._check_and_restart_workers()
+        assert original_task.done()
+        assert assistant.task_worker_tasks[0] is not original_task
+        assert worker.current_task_deadline is None
+    finally:
+        shutdown_event.set()
+        for task in assistant.task_worker_tasks:
+            await cleanup_task_worker(task, shutdown_event)
+        await _dispose_worker_engine(worker, db_engine)
+
+
+def test_a_claim_renewal_interval_near_the_stale_cutoff_is_refused() -> None:
+    """Renewals must fit several times into the stale-claim cutoff."""
+    with pytest.raises(ValueError, match="stale-claim cutoff"):
+        TaskWorker(
+            processing_service=make_idle_processing_service(),
+            chat_interface=RecordingChatInterface(),
+            calendar_config={},
+            timezone=ZoneInfo("UTC"),
+            embedding_generator=MockEmbeddingGenerator(),
+            claim_renew_seconds=STALE_TASK_TIMEOUT_MINUTES * 60 / 2,
+        )

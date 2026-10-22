@@ -379,6 +379,36 @@ async def test_a_first_turn_that_outlasts_its_budget_fails_the_run_as_timed_out(
 
 
 @pytest.mark.asyncio
+async def test_a_first_turn_whose_worker_is_restarted_as_stuck_fails_with_the_reason(
+    queued_thread: QueuedThread,
+) -> None:
+    """The health monitor restarting the worker fails the claimed run, saying why."""
+    worker_run = asyncio.create_task(queued_thread.run_worker())
+
+    async def claimed() -> bool:
+        [row] = await queued_thread.db.fetch_all(
+            select(delegation_runs_table.c.status).where(
+                delegation_runs_table.c.run_kind == "thread"
+            )
+        )
+        return row["status"] == "running"
+
+    await wait_for_condition(claimed, timeout=10.0, description="the run's claim")
+    queued_thread.worker.mark_cancelled_as_stuck("task t1 is 75s past its timeout")
+    worker_run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await worker_run
+
+    [run] = await queued_thread.db.fetch_all(
+        select(delegation_runs_table.c.status, delegation_runs_table.c.error).where(
+            delegation_runs_table.c.run_kind == "thread"
+        )
+    )
+    assert run["status"] == "failed"
+    assert "stopped responding" in run["error"]
+
+
+@pytest.mark.asyncio
 async def test_the_first_turn_is_reviewed_against_the_threads_request(
     queued_thread: QueuedThread, monkeypatch: pytest.MonkeyPatch
 ) -> None:

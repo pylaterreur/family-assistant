@@ -9,7 +9,7 @@ capacity that has to run the task releasing it.
 from family_assistant.services.delegation_delivery import (
     DELEGATION_DELIVERY_TASK_TYPE,
 )
-from family_assistant.storage.repositories.tasks import STALE_TASK_TIMEOUT_MINUTES
+from family_assistant.storage.tasks import STALE_TASK_TIMEOUT_MINUTES
 from family_assistant.task_worker import (
     DEFAULT_TASK_HANDLER_BUDGETS,
     DEFAULT_TASK_HANDLER_TIMEOUT_OVERRIDES,
