@@ -57,11 +57,13 @@ compaction events the history window makes no edits to the prompt, only appends.
 
 - Each compaction event decides, for every turn up to that event, whether it renders verbatim,
   compacted, or not at all; the kept-verbatim turns need not be contiguous. Every event acts only on
-  completed turns: the active turn, including a resumed one, is always sent whole. Turns after the
-  latest event render verbatim. **Anything that removes or re-renders an earlier turn happens only
-  at a compaction event**, and that includes the age cap: turns that age out between events leave at
-  the next one. The decision is recorded with the event, and the compacted rendering is derived
-  deterministically from stored rows, so replays are byte-identical without persisting a summary.
+  completed turns: the active turn, including a resumed one, is always sent whole, and so is an
+  unfinished turn that may still be running. One that has been quiet for half an hour was abandoned
+  without a terminal row, and is decided like any finished turn. Turns after the latest event render
+  verbatim. **Anything that removes or re-renders an earlier turn happens only at a compaction
+  event**, and that includes the age cap: turns that age out between events leave at the next one.
+  The decision is recorded with the event, and the compacted rendering is derived deterministically
+  from stored rows, so replays are byte-identical without persisting a summary.
 - **Events, with hysteresis.** A compaction event runs at the start of a model turn, whether a user
   message or a system wake such as a delegation completion triggered it (never inside a tool round),
   whenever the window has to change: the whole rendered window, compacted turns included, passes the

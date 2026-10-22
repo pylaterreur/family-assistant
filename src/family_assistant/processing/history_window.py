@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from family_assistant.llm.messages import (
@@ -51,7 +52,7 @@ from family_assistant.storage.history_compaction import TurnDecision, TurnMode
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Sequence
-    from datetime import datetime, timedelta
+    from datetime import datetime
     from zoneinfo import ZoneInfo
 
     from family_assistant.llm.messages import MessageWithMetadata
@@ -74,6 +75,13 @@ IMAGE_CHAR_COST = 4_000
 # read of a long conversation, before any event has been recorded for it.
 WINDOW_ROW_LIMIT = 2_000
 
+# How long an unfinished turn may go without a new row and still count as
+# running. A running turn writes a row with every model call and tool result;
+# one quiet for longer was abandoned without a terminal row, and is decided
+# like any finished turn rather than pinned verbatim in the window until the
+# age cap. Misjudging a live turn this way only compacts it early.
+OPEN_TURN_MAX_QUIET = timedelta(minutes=30)
+
 
 @dataclass(frozen=True, slots=True)
 class HistoryLimits:
@@ -85,6 +93,7 @@ class HistoryLimits:
     # The first message after this much quiet is a compaction event: provider
     # caches have expired by then, so changing the prefix costs nothing extra.
     idle_gap: timedelta | None = None
+    open_turn_max_quiet: timedelta = OPEN_TURN_MAX_QUIET
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +110,10 @@ class HistoryTurn:
     @property
     def first_internal_id(self) -> int:
         return min(int(row.internal_id) for row in self.rows)
+
+    @property
+    def last_internal_id(self) -> int:
+        return max(int(row.internal_id) for row in self.rows)
 
     @property
     def is_complete(self) -> bool:
@@ -385,9 +398,10 @@ class HistoryWindowLoader:
                     explicit=explicit,
                     # An event decides only completed turns; one that has not
                     # finished could be compacted or dropped before its last
-                    # rows are written. Past the age cap it is abandoned.
+                    # rows are written. Quiet for long enough, it was abandoned.
                     open=not turn.is_complete
-                    and turn.last_activity >= now - limits.max_age,
+                    and turn.last_activity
+                    >= now - min(limits.max_age, limits.open_turn_max_quiet),
                 )
             )
         for entry in window:
@@ -487,7 +501,12 @@ class HistoryWindowLoader:
             )
         if turn.first_internal_id > boundary:
             return VERBATIM
-        return decided.get(turn.key)
+        decision = decided.get(turn.key)
+        # A turn the event dropped while it looked abandoned, and that has
+        # written rows since, is not the turn the event decided on.
+        if decision is None and turn.last_internal_id > boundary:
+            return VERBATIM
+        return decision
 
     @staticmethod
     def _trigger(
