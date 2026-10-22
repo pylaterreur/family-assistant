@@ -1,12 +1,12 @@
-"""A delegation's follow-up turn runs in a delivery task of its own.
+"""A delegation's follow-up turn is launched by a delivery task of its own.
 
 The turn that tells the user about a finished delegation -- the delegating
 profile's wake turn -- can do real work: it calls tools, and under
-commit-as-you-go every tool's effect is durable the moment it happens. These
-tests cover what happens when that turn is cut off partway: by its task's
-timeout, or by its process going away. Either way the next attempt continues
-the turn from the rows it already persisted, so a tool that already ran does
-not run again.
+commit-as-you-go every tool's effect is durable the moment it happens. The
+delivery task launches it on the background turn runner rather than hosting
+it. These tests cover what happens when that turn is cut off partway, by its
+process going away: the next delivery continues the turn from the rows it
+already persisted, so a tool that already ran does not run again.
 """
 
 import asyncio
@@ -38,9 +38,9 @@ from family_assistant.services.delegation_delivery import (
     DelegationWakeResumer,
     delegation_delivery_task_id,
     queue_delegation_delivery,
-    redeliver_now,
 )
 from family_assistant.services.turn_resumption import (
+    MAX_RESUME_ATTEMPTS,
     TURN_RESUME_TASK_TYPE,
     TurnLeaseRegistry,
     TurnResumePayload,
@@ -287,21 +287,14 @@ async def _wake_turn_roles(db_engine: AsyncEngine) -> list[str]:
     return [row["role"] for row in rows]
 
 
-async def _cut_off(task: asyncio.Task[None]) -> None:
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
 @pytest.mark.asyncio
 async def test_a_cut_off_delivery_resumes_without_repeating_its_tools(
     db_engine: AsyncEngine,
 ) -> None:
-    """The retry continues the wake turn instead of running it again.
+    """The next delivery continues the wake turn instead of running it again.
 
     The first attempt saves the result to a note and is cut off before its
-    reply, as the poll handler's timeout cut off the turn this was found on.
-    The retry sees the tool round it already did and only replies.
+    reply. The next one sees the tool round it already did and only replies.
     """
     llm = _WakeTurnLLM()
     service = await _source_service(llm)
@@ -310,13 +303,13 @@ async def test_a_cut_off_delivery_resumes_without_repeating_its_tools(
     delegation_id = await _finished_run(db_engine)
 
     llm.hold()
-    first_attempt = asyncio.create_task(
-        worker.handle_delegation_delivery(
-            _context(db_engine, service, chat_interface), _payload(delegation_id)
-        )
+    # The handler launches the wake turn and returns while it runs.
+    await worker.handle_delegation_delivery(
+        _context(db_engine, service, chat_interface), _payload(delegation_id)
     )
     await asyncio.wait_for(llm.reply_requested.wait(), timeout=30)
-    await _cut_off(first_attempt)
+    assert worker.background_turns.running == 1
+    await worker.background_turns.cancel_all()
 
     assert await _note_content(db_engine) == NOTE_LINE
     assert chat_interface.sent == []
@@ -330,6 +323,7 @@ async def test_a_cut_off_delivery_resumes_without_repeating_its_tools(
     await worker.handle_delegation_delivery(
         _context(db_engine, service, chat_interface), _payload(delegation_id)
     )
+    await worker.background_turns.wait_idle()
 
     assert await _note_content(db_engine) == NOTE_LINE
     assert [message.text for message in chat_interface.sent] == [FINAL_REPLY]
@@ -383,16 +377,17 @@ async def test_a_turn_cut_off_before_its_trigger_resumes_from_its_data_row(
     monkeypatch.setattr(
         service, "handle_chat_interaction", cut_off_before_the_turn_starts
     )
-    with pytest.raises(asyncio.CancelledError):
-        await worker.handle_delegation_delivery(
-            _context(db_engine, service, chat_interface), _payload(delegation_id)
-        )
+    await worker.handle_delegation_delivery(
+        _context(db_engine, service, chat_interface), _payload(delegation_id)
+    )
+    await worker.background_turns.wait_idle()
     assert await _wake_turn_roles(db_engine) == ["user"]
 
     monkeypatch.setattr(service, "handle_chat_interaction", run_turn)
     await worker.handle_delegation_delivery(
         _context(db_engine, service, chat_interface), _payload(delegation_id)
     )
+    await worker.background_turns.wait_idle()
 
     assert await _wake_turn_roles(db_engine) == [
         "user",
@@ -411,8 +406,8 @@ async def test_a_turn_suspended_by_a_shutdown_is_resumed_through_its_lease(
     """A rollout mid-turn hands the delivery to another process promptly.
 
     The shutdown suspends the wake turn and hands its lease off; the process
-    that picks up the lease releases the dead claim on the delivery task, and
-    the delivery that follows finishes the turn without redoing its tools.
+    that picks up the lease queues the delivery again, and that delivery
+    finishes the turn without redoing its tools.
     """
     llm = _WakeTurnLLM()
     service = await _source_service(llm)
@@ -422,22 +417,18 @@ async def test_a_turn_suspended_by_a_shutdown_is_resumed_through_its_lease(
     dying_worker = _worker(db_engine, service, chat_interface, dying_registry)
     delegation_id = await _finished_run(db_engine)
     await queue_delegation_delivery(db.tasks, delegation_id, force=False)
-    claimed = await db.tasks.dequeue(
-        worker_id=dying_worker.worker_id,
-        task_types=[DELEGATION_DELIVERY_TASK_TYPE],
-        current_time=SystemClock().now(),
-    )
-    assert claimed is not None
 
     llm.hold()
-    running = asyncio.create_task(
-        dying_worker.handle_delegation_delivery(
-            _context(db_engine, service, chat_interface), _payload(delegation_id)
-        )
+    await dying_worker.handle_delegation_delivery(
+        _context(db_engine, service, chat_interface), _payload(delegation_id)
+    )
+    # The delivery task is done once its handler has launched the turn.
+    await db.tasks.update_status(
+        task_id=delegation_delivery_task_id(delegation_id), status="done"
     )
     await asyncio.wait_for(llm.reply_requested.wait(), timeout=30)
     await dying_registry.suspend_all(grace_seconds=0.1, teardown_seconds=5.0)
-    assert running.done()
+    assert dying_worker.background_turns.running == 0
     assert await dying_registry.hand_off(db) == 1
 
     leases = await db.tasks.get_all(task_type=TURN_RESUME_TASK_TYPE, status="pending")
@@ -459,7 +450,11 @@ async def test_a_turn_suspended_by_a_shutdown_is_resumed_through_its_lease(
     )
     assert delivery is not None
     assert delivery["status"] == "pending"
-    assert delivery["retry_count"] == 1
+    assert delivery["payload"] == {
+        "delegation_id": delegation_id,
+        "force": True,
+        "wake_attempt": 1,
+    }
 
     llm.hold_reply.set()
     assert (
@@ -522,40 +517,6 @@ async def test_a_finished_delivery_is_queued_again_when_the_run_still_needs_one(
 
 
 @pytest.mark.asyncio
-async def test_a_late_lease_leaves_a_newer_claim_on_the_delivery_alone(
-    db_engine: AsyncEngine,
-) -> None:
-    """A lease that comes due after the stale-claim reclaim releases nothing.
-
-    The reclaiming worker is running the delivery; handing its claim back to
-    the queue would let a third worker resume the same turn alongside it.
-    """
-    db = Database(engine=db_engine)
-    delegation_id = await _finished_run(db_engine)
-    task_id = delegation_delivery_task_id(delegation_id)
-    await queue_delegation_delivery(db.tasks, delegation_id, force=False)
-    assert await db.tasks.dequeue(
-        worker_id="reclaiming-worker",
-        task_types=[DELEGATION_DELIVERY_TASK_TYPE],
-        current_time=SystemClock().now(),
-    )
-
-    await redeliver_now(
-        db.tasks, delegation_id, now=SystemClock().now(), claimed_by="dead-worker"
-    )
-
-    delivery = await db.fetch_one(
-        select(tasks_table).where(tasks_table.c.task_id == task_id)
-    )
-    assert delivery is not None
-    assert (delivery["status"], delivery["locked_by"], delivery["retry_count"]) == (
-        "processing",
-        "reclaiming-worker",
-        0,
-    )
-
-
-@pytest.mark.asyncio
 async def test_a_delivery_finishing_while_it_is_queued_again_is_replaced(
     db_engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
@@ -601,26 +562,16 @@ async def test_a_delivery_finishing_while_it_is_queued_again_is_replaced(
 async def test_a_turn_out_of_attempts_still_gets_its_final_reply_delivered(
     db_engine: AsyncEngine,
 ) -> None:
-    """Releasing the last attempt fails the delivery; the reply still goes out.
+    """A turn that has used up its resumes still gets its final reply sent.
 
-    A turn that has used up its resumes is closed with an interrupted marker,
-    and sending that marker is a delivery of its own.
+    It is closed with an interrupted marker, and sending that marker is a
+    delivery of its own.
     """
     db = Database(engine=db_engine)
     delegation_id = await _finished_run(db_engine)
     task_id = delegation_delivery_task_id(delegation_id)
     await queue_delegation_delivery(db.tasks, delegation_id, force=False)
-    assert await db.tasks.dequeue(
-        worker_id="dead-worker",
-        task_types=[DELEGATION_DELIVERY_TASK_TYPE],
-        current_time=SystemClock().now(),
-    )
-    await db.execute(
-        tasks_table
-        .update()
-        .where(tasks_table.c.task_id == task_id)
-        .values(retry_count=tasks_table.c.max_retries)
-    )
+    await db.tasks.update_status(task_id=task_id, status="done")
 
     await DelegationWakeResumer(db).deliver_pending_reply(
         TurnResumePayload(
@@ -632,7 +583,7 @@ async def test_a_turn_out_of_attempts_still_gets_its_final_reply_delivered(
             user_name=USER_NAME,
             processing_profile_id=SOURCE_PROFILE,
             delegation_id=delegation_id,
-            claimed_by="dead-worker",
+            attempt=MAX_RESUME_ATTEMPTS,
         )
     )
 

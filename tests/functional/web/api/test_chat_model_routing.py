@@ -61,7 +61,7 @@ from family_assistant.task_worker import (
 from family_assistant.tools.services import delegate_to_service_tool
 from family_assistant.tools.types import ToolExecutionContext
 from family_assistant.utils.clock import SystemClock
-from tests.helpers import deliver_queued_delegations
+from tests.helpers import deliver_queued_delegations, run_delegated_profile_run
 from tests.mocks.mock_llm import (  # pylint: disable=no-name-in-module
     RuleBasedMockLLMClient,
 )
@@ -658,7 +658,8 @@ async def test_a_delegation_completion_wake_is_not_routed(
     context = _worker_context(
         db_engine, source, chat_interface, conversation_id=conversation_id
     )
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         context,
         DelegatedProfileRunPayload(
             delegation_id=delegation_id,

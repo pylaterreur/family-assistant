@@ -45,6 +45,7 @@ from tests.functional.automations.test_delegation_reconciliation import (
     _observation,
     _reconcile_payload,
 )
+from tests.helpers import run_delegated_profile_run
 from tests.mocks.recording_chat_interface import RecordingChatInterface
 
 if TYPE_CHECKING:
@@ -284,7 +285,7 @@ async def test_a_queued_run_is_never_started_once_cancelled(
     assert result.text is not None
     assert "Cancelled delegation 'delegation_queued'" in result.text
     worker = _build_worker(db_engine, processing_service, chat_interface)
-    await worker.handle_delegated_profile_run(context, _payload("delegation_queued"))
+    await run_delegated_profile_run(worker, context, _payload("delegation_queued"))
     assert target.calls == []
     assert chat_interface.sent == []
 
@@ -308,7 +309,7 @@ async def test_cancelling_a_running_turn_stops_it_partway(
     context = _tool_context(db_context, processing_service, chat_interface)
     worker = _build_worker(db_engine, processing_service, chat_interface)
     handler = asyncio.create_task(
-        worker.handle_delegated_profile_run(context, _payload("delegation_running"))
+        run_delegated_profile_run(worker, context, _payload("delegation_running"))
     )
     await asyncio.wait_for(target.waiting.wait(), timeout=10)
 
@@ -359,7 +360,7 @@ async def test_a_stopped_turn_withdraws_the_confirmation_it_was_waiting_on(
         confirmation_ui_managers,
     )
     handler = asyncio.create_task(
-        worker.handle_delegated_profile_run(context, _payload("delegation_confirming"))
+        run_delegated_profile_run(worker, context, _payload("delegation_confirming"))
     )
     await asyncio.wait_for(confirmation_manager.asked.wait(), timeout=10)
     assert len(await confirmations.list_pending_for_user(user_id=RUN_USER_ID)) == 1

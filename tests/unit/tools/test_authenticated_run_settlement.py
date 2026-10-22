@@ -43,6 +43,7 @@ from family_assistant.tools.browser_backend import (
 )
 from family_assistant.tools.types import ToolExecutionContext
 from family_assistant.utils.clock import SystemClock
+from tests.helpers import run_delegated_profile_run
 from tests.mocks.recording_chat_interface import RecordingChatInterface
 
 if TYPE_CHECKING:
@@ -306,7 +307,8 @@ async def test_the_envelope_is_published_with_the_terminal_run_row(
                 exec_context, {"running_timeout_seconds": 60.0}
             )
             return
-        await worker.handle_delegated_profile_run(
+        await run_delegated_profile_run(
+            worker,
             exec_context,
             {
                 "delegation_id": delegation_id,
@@ -317,8 +319,9 @@ async def test_the_envelope_is_published_with_the_terminal_run_row(
         )
 
     if failure in {"session_read", "persistence"}:
-        with pytest.raises((BrowserBackendError, OSError)):
-            await execute()
+        # The turn's settlement raised, so it recorded no outcome: the run
+        # stays running for its lease to come due and settle it again.
+        await execute()
         run = await db.delegation_runs.get_by_delegation_id(delegation_id)
         assert run is not None
         assert run["status"] == "running"

@@ -69,14 +69,13 @@ from family_assistant.storage.delegation_runs import (
 from family_assistant.storage.repositories.tasks import TasksRepository
 from family_assistant.storage.tasks import TaskPriority
 from family_assistant.task_worker import (
+    DELEGATED_RUN_TURN_BUDGET_SECONDS,
     DelegatedProfileRunPayload,
-    DelegationNotificationError,
     TaskWorker,
 )
 from family_assistant.tools.confirmation import render_generic_tool_confirmation
 from family_assistant.tools.metadata import ToolDescriptor
 from family_assistant.tools.services import (
-    DELEGATED_PROFILE_RUN_TASK_TYPE,
     delegate_to_service_tool,
     get_delegation_status_tool,
     list_delegations_tool,
@@ -87,7 +86,11 @@ from family_assistant.tools.types import (
     ToolExecutionContext,
 )
 from family_assistant.utils.clock import SystemClock
-from tests.helpers import deliver_queued_delegations, wait_for_condition
+from tests.helpers import (
+    deliver_queued_delegations,
+    run_delegated_profile_run,
+    wait_for_condition,
+)
 from tests.mocks.recording_chat_interface import ScriptedChatInterface
 
 if TYPE_CHECKING:
@@ -116,6 +119,8 @@ class FakeDelegationCall(TypedDict):
     subconversation_id: object
     tool_call_review_trigger: TriggerReviewInput
     model_selection: ResolvedModelSelection | None
+    turn_id: str | None
+    resume: bool
 
 
 class FakeConfirmationRequest(TypedDict):
@@ -586,7 +591,8 @@ async def test_voice_delegation_delivers_direct_notice_without_waking_chat(
         embedding_generator=MockEmbeddingGenerator(),
         engine=db_engine,
     )
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         context,
         {
             "delegation_id": result.data["delegation_id"],
@@ -675,7 +681,8 @@ async def test_delegate_to_service_background_reference_and_completion_notificat
     )
 
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         {
             "delegation_id": delegation_id,
@@ -828,7 +835,7 @@ def _build_worker(
     processing_service: ProcessingService,
     chat_interface: ChatInterface,
     confirmation_ui_managers: dict[str, ConfirmationUIManager] | None = None,
-    handler_timeout_overrides: dict[str, float] | None = None,
+    delegated_turn_budget: float = DELEGATED_RUN_TURN_BUDGET_SECONDS,
 ) -> TaskWorker:
     return TaskWorker(
         processing_service=processing_service,
@@ -838,7 +845,7 @@ def _build_worker(
         embedding_generator=MockEmbeddingGenerator(),
         engine=db_engine,
         confirmation_ui_managers=confirmation_ui_managers,
-        handler_timeout_overrides=handler_timeout_overrides,
+        delegated_turn_budget=delegated_turn_budget,
     )
 
 
@@ -877,7 +884,8 @@ async def test_the_worker_runs_a_queued_delegation_at_its_persisted_tier(
     )
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(Database(engine=db_engine), processing_service, chat_interface),
         _payload("delegation_tiered"),
     )
@@ -911,7 +919,8 @@ async def test_a_run_queued_before_tiers_existed_still_runs(
     await _create_run(Database(engine=db_engine), delegation_id="delegation_untiered")
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(Database(engine=db_engine), processing_service, chat_interface),
         _payload("delegation_untiered"),
     )
@@ -999,7 +1008,8 @@ async def test_a_malformed_persisted_envelope_fails_the_run(
     )
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(Database(engine=db_engine), processing_service, chat_interface),
         _payload("delegation_malformed"),
     )
@@ -1028,7 +1038,8 @@ async def test_worker_does_not_notify_when_caller_did_not_hand_off(
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _payload("delegation_no_handoff"),
     )
@@ -1076,7 +1087,8 @@ async def test_terminal_run_renotifies_when_not_yet_notified(
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _payload("delegation_renotify"),
     )
@@ -1176,8 +1188,8 @@ async def test_finishing_a_run_queues_its_delivery_rather_than_delivering_inline
         db_context, cast("ProcessingService", processing_service), chat_interface
     )
 
-    await worker.handle_delegated_profile_run(
-        context, _payload("delegation_queued_delivery")
+    await run_delegated_profile_run(
+        worker, context, _payload("delegation_queued_delivery")
     )
 
     assert len(target_service.calls) == 1
@@ -1223,7 +1235,8 @@ async def test_notification_uses_delegated_result_taint_not_trusted_parent(
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _payload("delegation_tainted_result"),
     )
@@ -1268,8 +1281,8 @@ async def test_failed_delivery_is_not_recorded_as_notified(
 
     ChatInterface.send_message raises ChatDeliveryError when delivery fails
     (Bot API error, network, ...). A transient one must leave the terminal run
-    at notified_at NULL so it is retried, and no notification row may be
-    written for a message that was never delivered. The delegated turn's own
+    at notified_at NULL so a later pass retries it, and no notification row may
+    be written for a message that was never delivered. The delegated turn's own
     history is durable either way -- it happened.
     """
     target_service = FakeDelegatableService()
@@ -1293,14 +1306,16 @@ async def test_failed_delivery_is_not_recorded_as_notified(
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    with pytest.raises(DelegationNotificationError):
-        await worker.handle_delegated_profile_run(
-            _tool_context(db_context, processing_service, chat_interface),
-            _payload("delegation_send_fails"),
-        )
-        await deliver_queued_delegations(
-            worker, _tool_context(db_context, processing_service, chat_interface)
-        )
+    # The delivery wakes the source profile on the background turn runner, so
+    # the failure is logged there and left for the cleanup rather than raised.
+    await run_delegated_profile_run(
+        worker,
+        _tool_context(db_context, processing_service, chat_interface),
+        _payload("delegation_send_fails"),
+    )
+    await deliver_queued_delegations(
+        worker, _tool_context(db_context, processing_service, chat_interface)
+    )
 
     assert len(chat_interface.sent) == 1
     db_context = Database(engine=db_engine)
@@ -1354,7 +1369,8 @@ async def test_source_wake_delivery_failure_falls_back_without_recording_deliver
         chat_interface,
     )
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             db_context,
             cast("ProcessingService", processing_service),
@@ -1423,7 +1439,7 @@ async def test_source_wake_retry_resumes_at_delivery_without_rerunning_the_turn(
 
     The wake turn's tools commit as they run, so re-running generation would
     repeat their side effects. Both the wake delivery and the fallback fail on
-    the first attempt, which is what leaves the task to be retried with
+    the first attempt, which is what leaves the run to be delivered again with
     notified_at still NULL.
     """
     target_service = FakeDelegatableService()
@@ -1452,25 +1468,31 @@ async def test_source_wake_retry_resumes_at_delivery_without_rerunning_the_turn(
         cast("ProcessingService", processing_service),
         chat_interface,
     )
-    with pytest.raises(Exception, match="delegation_source_wake_retry"):
-        await worker.handle_delegated_profile_run(
-            _tool_context(
-                Database(engine=db_engine),
-                cast("ProcessingService", processing_service),
-                chat_interface,
-            ),
-            _payload("delegation_source_wake_retry"),
-        )
-        await deliver_queued_delegations(
-            worker,
-            _tool_context(
-                Database(engine=db_engine),
-                cast("ProcessingService", processing_service),
-                chat_interface,
-            ),
-        )
+    await run_delegated_profile_run(
+        worker,
+        _tool_context(
+            Database(engine=db_engine),
+            cast("ProcessingService", processing_service),
+            chat_interface,
+        ),
+        _payload("delegation_source_wake_retry"),
+    )
+    await deliver_queued_delegations(
+        worker,
+        _tool_context(
+            Database(engine=db_engine),
+            cast("ProcessingService", processing_service),
+            chat_interface,
+        ),
+    )
+    run = await Database(engine=db_engine).delegation_runs.get_by_delegation_id(
+        "delegation_source_wake_retry"
+    )
+    assert run is not None
+    assert run["notified_at"] is None
 
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             Database(engine=db_engine),
             cast("ProcessingService", processing_service),
@@ -1545,7 +1567,8 @@ async def test_source_wake_error_result_falls_back_to_direct_notification(
         chat_interface,
     )
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             db_context,
             cast("ProcessingService", processing_service),
@@ -1622,7 +1645,8 @@ async def test_worker_commits_delegated_attachments_before_notification(
         cast("ChatInterface", chat_interface),
     )
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             db_context,
             processing_service,
@@ -1688,7 +1712,8 @@ async def test_source_wake_preserves_delegated_attachments(
         cast("ChatInterface", chat_interface),
     )
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             db_context,
             cast("ProcessingService", processing_service),
@@ -1769,7 +1794,8 @@ async def test_source_wake_creates_history_row_for_attachment_only_web_response(
         chat_interface,
     )
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             db_context,
             cast("ProcessingService", processing_service),
@@ -1871,7 +1897,8 @@ async def test_source_wake_publishes_history_backed_nested_response_to_main_hist
         chat_interface,
     )
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             db_context,
             cast("ProcessingService", processing_service),
@@ -1946,7 +1973,8 @@ async def test_source_wake_publishes_non_history_nested_response_to_main_thread(
         chat_interface,
     )
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             db_context,
             cast("ProcessingService", processing_service),
@@ -2028,7 +2056,8 @@ async def test_source_wake_sends_text_for_attachment_only_non_history_response(
         cast("ChatInterface", chat_interface),
     )
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             db_context,
             cast("ProcessingService", processing_service),
@@ -2081,42 +2110,6 @@ async def test_source_wake_sends_text_for_attachment_only_non_history_response(
     assert run["result_message_internal_id"] == persisted_row["internal_id"]
 
 
-@pytest.mark.asyncio
-async def test_running_run_is_failed_not_reexecuted(db_engine: AsyncEngine) -> None:
-    """A run found 'running' on entry was interrupted; fail it, don't re-run (C6)."""
-    target_service = FakeDelegatableService()
-    processing_service = _source_processing_service(target_service)
-    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
-
-    clock = SystemClock()
-    db_context = Database(engine=db_engine)
-    await _create_run(db_context, delegation_id="delegation_interrupted")
-    await db_context.delegation_runs.mark_handed_off(
-        "delegation_interrupted", clock.now()
-    )
-    await db_context.delegation_runs.mark_running("delegation_interrupted", clock.now())
-
-    worker = _build_worker(db_engine, processing_service, chat_interface)
-    db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
-        _tool_context(db_context, processing_service, chat_interface),
-        _payload("delegation_interrupted"),
-    )
-    await deliver_queued_delegations(
-        worker, _tool_context(db_context, processing_service, chat_interface)
-    )
-
-    assert target_service.calls == []
-    assert len(chat_interface.sent) == 1
-    db_context = Database(engine=db_engine)
-    run = await db_context.delegation_runs.get_by_delegation_id(
-        "delegation_interrupted"
-    )
-    assert run is not None
-    assert run["status"] == "failed"
-    assert run["error"] is not None
-
-
 class _NeverFinishingService(FakeDelegatableService):
     """A target whose turn runs until it is cancelled."""
 
@@ -2130,11 +2123,7 @@ class _NeverFinishingService(FakeDelegatableService):
 async def test_a_run_that_outlasts_its_budget_is_failed_as_timed_out(
     db_engine: AsyncEngine,
 ) -> None:
-    """The run's own deadline fails it as timed out, before the worker cancels it.
-
-    Left to the worker's handler timeout, the run would stay ``running`` and the
-    retry would fail it as interrupted, which says nothing about why.
-    """
+    """A turn that runs past the run's budget fails the run as timed out."""
     target_service = _NeverFinishingService()
     processing_service = _source_processing_service(target_service)
     chat_interface = ScriptedChatInterface(otherwise="external_message_id")
@@ -2148,9 +2137,10 @@ async def test_a_run_that_outlasts_its_budget_is_failed_as_timed_out(
         db_engine,
         processing_service,
         chat_interface,
-        handler_timeout_overrides={DELEGATED_PROFILE_RUN_TASK_TYPE: 0.4},
+        delegated_turn_budget=0.4,
     )
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _payload("delegation_slow"),
     )
@@ -2168,55 +2158,6 @@ async def test_a_run_that_outlasts_its_budget_is_failed_as_timed_out(
     assert run["local_failure_kind"] == "timeout"
     assert run["error"] is not None
     assert "timed out" in run["error"]
-
-
-@pytest.mark.asyncio
-async def test_a_run_whose_worker_is_restarted_as_stuck_is_failed_with_the_reason(
-    db_engine: AsyncEngine,
-) -> None:
-    """The health monitor restarting the worker fails the run, saying why.
-
-    Left ``running``, the run would wait out the stale-claim cutoff and then be
-    failed as "interrupted", which says nothing about what happened.
-    """
-    target_service = _NeverFinishingService()
-    processing_service = _source_processing_service(target_service)
-    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
-
-    clock = SystemClock()
-    db_context = Database(engine=db_engine)
-    await _create_run(db_context, delegation_id="delegation_stuck")
-    await db_context.delegation_runs.mark_handed_off("delegation_stuck", clock.now())
-
-    worker = _build_worker(db_engine, processing_service, chat_interface)
-    handler = asyncio.create_task(
-        worker.handle_delegated_profile_run(
-            _tool_context(db_context, processing_service, chat_interface),
-            _payload("delegation_stuck"),
-        )
-    )
-    await wait_for_condition(
-        lambda: len(target_service.calls) == 1,
-        timeout=10.0,
-        description="the delegated turn to start",
-    )
-    worker.mark_cancelled_as_stuck("task t1 is 75s past its handler timeout")
-    handler.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await handler
-    await deliver_queued_delegations(
-        worker, _tool_context(db_context, processing_service, chat_interface)
-    )
-
-    assert len(chat_interface.sent) == 1
-    run = await Database(engine=db_engine).delegation_runs.get_by_delegation_id(
-        "delegation_stuck"
-    )
-    assert run is not None
-    assert run["status"] == "failed"
-    assert run["error"] is not None
-    assert "stopped responding" in run["error"]
-    assert "75s past its handler timeout" in run["error"]
 
 
 @pytest.mark.asyncio
@@ -2410,9 +2351,8 @@ async def _delegate_with_fast_completion(
             queued_runs, description="the run delegate_to_service queued"
         )
         delegation_id = runs[0]["delegation_id"]
-        await _build_worker(
-            db_engine, processing_service, chat_interface
-        ).handle_delegated_profile_run(
+        await run_delegated_profile_run(
+            _build_worker(db_engine, processing_service, chat_interface),
             _tool_context(
                 Database(engine=db_engine), processing_service, chat_interface
             ),
@@ -2887,7 +2827,8 @@ async def test_api_delegation_completion_stored_in_history(
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _payload("delegation_api"),
     )
@@ -2960,7 +2901,8 @@ async def test_web_delegation_can_request_confirmation(db_engine: AsyncEngine) -
         db_engine, processing_service, chat_interface, confirmation_ui_managers
     )
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             db_context,
             processing_service,
@@ -3082,7 +3024,8 @@ async def test_source_wake_can_request_durable_confirmation(
         db_engine, cast("ProcessingService", processing_service), chat_interface
     )
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             db_context,
             cast("ProcessingService", processing_service),
@@ -3322,7 +3265,8 @@ async def test_pollable_delegation_submits_and_enqueues_poll(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -3361,7 +3305,8 @@ async def test_pollable_delegation_retry_reattaches_without_duplicate_submit(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -3373,7 +3318,8 @@ async def test_pollable_delegation_retry_reattaches_without_duplicate_submit(
     assert stored_id is not None
 
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -3415,7 +3361,8 @@ async def test_pollable_delegation_retry_resubmits_when_id_unknown(
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -3445,7 +3392,8 @@ async def test_pollable_delegation_transient_submit_error_recovers_via_poll(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -3477,7 +3425,8 @@ async def test_pollable_delegation_deterministic_submit_error_fails_fast(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -3639,7 +3588,8 @@ async def test_pollable_delegation_polls_to_completion(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -3715,7 +3665,8 @@ async def test_a_pollable_submit_carries_the_parent_taint_as_sources_and_state(
         "delegation_taint_carried", SystemClock().now()
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(Database(engine=db_engine), processing_service, chat_interface),
         _payload("delegation_taint_carried"),
     )
@@ -3755,7 +3706,8 @@ async def test_a_pollable_submit_carries_the_runs_frozen_tier(
         "delegation_tier_carried", SystemClock().now()
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(Database(engine=db_engine), processing_service, chat_interface),
         _payload("delegation_tier_carried"),
     )
@@ -3795,7 +3747,8 @@ async def test_a_pollable_run_that_persists_no_history_is_tainted_conservatively
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -4009,7 +3962,8 @@ async def test_deep_research_delegation_polls_to_completion_and_notifies(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -4108,7 +4062,8 @@ async def test_coder_list_environment_delivers_result(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -4178,7 +4133,8 @@ async def test_pollable_delegation_synchronous_remote_completes_on_submit(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -4211,7 +4167,8 @@ async def test_reap_stale_awaiting_remote_cancels_and_fails(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -4262,7 +4219,8 @@ async def test_late_poll_past_cap_delivers_terminal_result(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -4309,7 +4267,8 @@ async def test_late_poll_past_cap_cancels_when_still_pending(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -4357,7 +4316,8 @@ async def test_pollable_delegation_poll_transient_error_reschedules(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -4402,7 +4362,8 @@ async def test_pollable_delegation_poll_permanent_error_fails_fast(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -4445,7 +4406,8 @@ async def test_pollable_delegation_poll_not_found_resubmits(
     )
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -4503,7 +4465,8 @@ async def test_pollable_delegation_recovers_when_submit_never_landed(
     worker = _build_worker(db_engine, processing_service, chat_interface)
     # Submit fails transiently -> awaiting_remote (NULL id) + poll enqueued.
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _delegation_payload(delegation_id),
     )
@@ -4569,7 +4532,8 @@ async def test_resume_delegation_reuses_prior_subconversation(
     first_delegation_id = cast("str", first_result.data["delegation_id"])
 
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _payload(first_delegation_id),
     )
@@ -4596,7 +4560,8 @@ async def test_resume_delegation_reuses_prior_subconversation(
     assert resumed_run is not None
     assert resumed_run["subconversation_id"] == first_subconversation_id
 
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _payload(resume_delegation_id),
     )
@@ -5039,7 +5004,8 @@ async def test_tainted_delegation_propagates_the_users_request_to_the_run(
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         {
             "delegation_id": delegation_id,
@@ -5160,7 +5126,8 @@ async def test_nested_worker_run_delegation_propagates_no_composed_goal(
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         _payload(delegation_id),
     )
@@ -5273,7 +5240,8 @@ async def test_steering_sent_after_enqueue_is_not_the_originating_request(
 
     worker = _build_worker(db_engine, processing_service, chat_interface)
     db_context = Database(engine=db_engine)
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(db_context, processing_service, chat_interface),
         {
             "delegation_id": delegation_id,
@@ -5414,7 +5382,8 @@ async def test_background_authenticated_outcome_survives_generic_worker_prose(
     worker = _build_worker(
         db_engine, cast("ProcessingService", processing_service), chat_interface
     )
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             db, cast("ProcessingService", processing_service), chat_interface
         ),

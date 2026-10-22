@@ -25,10 +25,16 @@ from family_assistant.config_models import AppConfig, ConversationThreadsConfig
 from family_assistant.embeddings import MockEmbeddingGenerator
 from family_assistant.llm import ToolCallFunction, ToolCallItem
 from family_assistant.processing import ProcessingService
+from family_assistant.services.delegated_run_resumption import DELEGATED_RUN_RESUMER
+from family_assistant.services.turn_resumption import (
+    TURN_RESUME_TASK_TYPE,
+    TurnLeaseRegistry,
+    TurnResumePayload,
+)
 from family_assistant.storage import delegation_runs_table, tasks_table
 from family_assistant.storage.database import Database
 from family_assistant.storage.tasks import TaskPriority
-from family_assistant.task_worker import TaskWorker
+from family_assistant.task_worker import DelegatedProfileRunPayload, TaskWorker
 from family_assistant.threads.boundary import (
     AssistantRequest,
     BoundaryDestination,
@@ -37,12 +43,12 @@ from family_assistant.threads.boundary import (
 from family_assistant.tools.types import ToolExecutionContext
 from family_assistant.utils.clock import SystemClock
 from family_assistant.web.thread_turns import WebThreadTurnRunner
-from tests.helpers import wait_for_condition
+from tests.helpers import run_delegated_profile_run, wait_for_condition
 from tests.mocks.mock_llm import LLMOutput, RuleBasedMockLLMClient
 from tests.mocks.recording_chat_interface import RecordingChatInterface
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
     from fastapi import FastAPI
     from httpx import AsyncClient
@@ -150,17 +156,20 @@ class QueuedThread:
     worker: TaskWorker
     context: ToolExecutionContext
     hub: ConversationStreamHub
+    # Another worker on the same app, as a process of its own would have.
+    make_worker: Callable[[TurnLeaseRegistry | None], TaskWorker]
+
+    @property
+    def payload(self) -> DelegatedProfileRunPayload:
+        return {
+            "delegation_id": self.delegation_id,
+            "interface_type": "web",
+            "conversation_id": THREAD,
+            "user_name": "Test User",
+        }
 
     async def run_worker(self) -> None:
-        await self.worker.handle_delegated_profile_run(
-            self.context,
-            {
-                "delegation_id": self.delegation_id,
-                "interface_type": "web",
-                "conversation_id": THREAD,
-                "user_name": "Test User",
-            },
-        )
+        await run_delegated_profile_run(self.worker, self.context, self.payload)
 
 
 @pytest.fixture
@@ -196,16 +205,21 @@ async def queued_thread(
     db = Database(engine=db_engine)
     home = (await api_test_client.get("/api/v1/chat/home")).json()["conversation_id"]
     delegation_id, turn_id = await _create_thread_run(db, home, target_service)
-    worker = TaskWorker(
-        processing_service=api_test_processing_service,
-        chat_interface=RecordingChatInterface(),
-        calendar_config={},
-        timezone=ZoneInfo("UTC"),
-        embedding_generator=MockEmbeddingGenerator(),
-        engine=db_engine,
-        stream_hub=app_fixture.state.conversation_stream_hub,
-        thread_turn_runner=WebThreadTurnRunner(app_fixture.state),
-    )
+
+    def make_worker(lease_registry: TurnLeaseRegistry | None = None) -> TaskWorker:
+        return TaskWorker(
+            processing_service=api_test_processing_service,
+            chat_interface=RecordingChatInterface(),
+            calendar_config={},
+            timezone=ZoneInfo("UTC"),
+            embedding_generator=MockEmbeddingGenerator(),
+            engine=db_engine,
+            stream_hub=app_fixture.state.conversation_stream_hub,
+            thread_turn_runner=WebThreadTurnRunner(app_fixture.state),
+            turn_lease_registry=lease_registry,
+        )
+
+    worker = make_worker()
     context = ToolExecutionContext(
         interface_type="web",
         conversation_id=THREAD,
@@ -234,6 +248,7 @@ async def queued_thread(
         worker=worker,
         context=context,
         hub=app_fixture.state.conversation_stream_hub,
+        make_worker=make_worker,
     )
 
 
@@ -363,7 +378,7 @@ async def test_a_first_turn_that_errors_fails_the_run(
 async def test_a_first_turn_that_outlasts_its_budget_fails_the_run_as_timed_out(
     queued_thread: QueuedThread,
 ) -> None:
-    queued_thread.worker.handler_timeout_overrides["delegated_profile_run"] = 1.0
+    queued_thread.worker.delegated_turn_budget = 1.0
 
     await queued_thread.run_worker()
 
@@ -379,33 +394,59 @@ async def test_a_first_turn_that_outlasts_its_budget_fails_the_run_as_timed_out(
 
 
 @pytest.mark.asyncio
-async def test_a_first_turn_whose_worker_is_restarted_as_stuck_fails_with_the_reason(
+async def test_a_first_turn_cut_off_by_a_restart_finishes_in_the_thread(
     queued_thread: QueuedThread,
+    api_test_processing_service: ProcessingService,
 ) -> None:
-    """The health monitor restarting the worker fails the claimed run, saying why."""
-    worker_run = asyncio.create_task(queued_thread.run_worker())
+    """The turn's lease hands it on, and the next process finishes it in place."""
+    # A finished thread turn looks up Home's profile to echo into.
+    queued_thread.target_service.processing_services_registry = {
+        TARGET: queued_thread.target_service,
+        "default_assistant": api_test_processing_service,
+    }
+    dying_registry = TurnLeaseRegistry()
+    dying = queued_thread.make_worker(dying_registry)
+    gate = _EnteredGate()
+    queued_thread.target_llm.response_gate = gate
 
-    async def claimed() -> bool:
-        [row] = await queued_thread.db.fetch_all(
-            select(delegation_runs_table.c.status).where(
-                delegation_runs_table.c.run_kind == "thread"
-            )
-        )
-        return row["status"] == "running"
+    await dying.handle_delegated_profile_run(
+        queued_thread.context, queued_thread.payload
+    )
+    await asyncio.wait_for(gate.entered.wait(), timeout=30)
+    await dying_registry.suspend_all(grace_seconds=0.1, teardown_seconds=5.0)
+    await dying.background_turns.wait_idle()
+    assert await dying_registry.hand_off(queued_thread.db) == 1
+    # The next process starts with a stream hub of its own.
+    await queued_thread.hub.discard_turn(THREAD, queued_thread.turn_id)
 
-    await wait_for_condition(claimed, timeout=10.0, description="the run's claim")
-    queued_thread.worker.mark_cancelled_as_stuck("task t1 is 75s past its timeout")
-    worker_run.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await worker_run
+    [lease] = await queued_thread.db.tasks.get_all(
+        status="pending", task_type=TURN_RESUME_TASK_TYPE
+    )
+    handed_on = TurnResumePayload.model_validate(lease["payload"])
+    assert handed_on.resumer == DELEGATED_RUN_RESUMER
+    # What the delegated_run resumer queues; run here rather than through the
+    # queue, which the app's own workers also serve.
+    resumption: DelegatedProfileRunPayload = {
+        **queued_thread.payload,
+        "resume": {
+            "turn_id": handed_on.turn_id,
+            "kind": "request",
+            "attempt": handed_on.attempt + 1,
+        },
+    }
+    worker = queued_thread.make_worker(TurnLeaseRegistry())
+    gate.set()
+    await run_delegated_profile_run(worker, queued_thread.context, resumption)
 
     [run] = await queued_thread.db.fetch_all(
-        select(delegation_runs_table.c.status, delegation_runs_table.c.error).where(
-            delegation_runs_table.c.run_kind == "thread"
-        )
+        select(
+            delegation_runs_table.c.status, delegation_runs_table.c.result_text
+        ).where(delegation_runs_table.c.run_kind == "thread")
     )
-    assert run["status"] == "failed"
-    assert "stopped responding" in run["error"]
+    assert (run["status"], run["result_text"]) == ("completed", THREAD_REPLY)
+    record = queued_thread.hub.get_turn(THREAD, queued_thread.turn_id)
+    assert record is not None
+    assert record.status == "complete"
 
 
 @pytest.mark.asyncio
@@ -517,19 +558,17 @@ async def test_the_first_turn_gets_the_attachments_it_was_started_with(
 
 
 @pytest.mark.asyncio
-async def test_cancelling_the_worker_stops_the_turn(
+async def test_cancelling_the_background_turn_stops_the_thread_turn(
     queued_thread: QueuedThread,
 ) -> None:
-    # The run reads as running once claimed, a step before the turn itself
-    # starts; cancelling in between abandons a turn that never began. Wait
-    # for the model call so the cancellation lands on a turn in progress.
     gate = _EnteredGate()
     queued_thread.target_llm.response_gate = gate
-    handler = asyncio.create_task(queued_thread.run_worker())
+    await queued_thread.worker.handle_delegated_profile_run(
+        queued_thread.context, queued_thread.payload
+    )
 
     await asyncio.wait_for(gate.entered.wait(), timeout=30)
-    handler.cancel()
-    await asyncio.wait([handler])
+    await queued_thread.worker.background_turns.cancel_all()
 
     record = queued_thread.hub.get_turn(THREAD, queued_thread.turn_id)
     assert record is not None

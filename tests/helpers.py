@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from family_assistant.services.delegation_delivery import (
         DelegationDeliveryPayload,
     )
-    from family_assistant.task_worker import TaskWorker
+    from family_assistant.task_worker import DelegatedProfileRunPayload, TaskWorker
     from family_assistant.tools.types import ToolExecutionContext
 
 T = TypeVar("T")
@@ -441,7 +441,8 @@ async def deliver_queued_delegations(
     """Run the delegation deliveries the worker queued, as its queue would.
 
     Terminal runs are delivered by a task of their own, so a test that drives a
-    handler directly runs the deliveries it queued with this. Each one is
+    handler directly runs the deliveries it queued with this, waiting for any
+    wake turn a delivery launched on the background turn runner. Each one is
     marked done once it succeeds. A failure propagates and leaves it pending,
     the way a retry would find it -- or, with ``exhaust_failures``, marks it
     failed and moves on, as once its retries are spent, which leaves the run
@@ -454,6 +455,7 @@ async def deliver_queued_delegations(
         payload = cast("DelegationDeliveryPayload", task["payload"])
         try:
             await worker.handle_delegation_delivery(exec_context, payload)
+            await worker.background_turns.wait_idle()
         except Exception:
             if not exhaust_failures:
                 raise
@@ -465,3 +467,18 @@ async def deliver_queued_delegations(
             task_id=task["task_id"], status="done"
         )
     return len(pending)
+
+
+async def run_delegated_profile_run(
+    worker: "TaskWorker",
+    exec_context: "ToolExecutionContext",
+    payload: "DelegatedProfileRunPayload",
+) -> None:
+    """Run a ``delegated_profile_run`` handler and the turn it launches.
+
+    The handler hands a local run's turn to the background turn runner and
+    returns; a test that drives the handler directly waits for that turn here,
+    as the queue would leave it to finish on its own.
+    """
+    await worker.handle_delegated_profile_run(exec_context, payload)
+    await worker.background_turns.wait_idle()

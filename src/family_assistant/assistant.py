@@ -118,6 +118,7 @@ from family_assistant.processing import (
     ProcessingService,
     ProcessingServiceConfig,
 )
+from family_assistant.processing.background_turns import BackgroundTurnRunner
 from family_assistant.processing.delegation_turns import RunningDelegationTurns
 from family_assistant.processing.history_relevance import (
     JevTurnRelevance,
@@ -213,6 +214,10 @@ from family_assistant.web.mcp_adapter.config import require_authentication_for_a
 from family_assistant.web.thread_turns import WebThreadTurnRunner
 from family_assistant.web.web_confirmation_ui_manager import WebConfirmationUIManager
 
+from .services.delegated_run_resumption import (
+    DELEGATED_RUN_RESUMER,
+    DelegatedRunResumer,
+)
 from .services.delegation_delivery import (
     DELEGATION_DELIVERY_TASK_TYPE,
     DELEGATION_WAKE_RESUMER,
@@ -633,6 +638,7 @@ class Assistant:
         self.embedding_generator: EmbeddingGenerator | None = None
         self.processing_services_registry: dict[str, DelegatableService] = {}
         self.delegation_turns = RunningDelegationTurns()
+        self.background_turns: BackgroundTurnRunner | None = None
         # One client per tier, shared by every profile that may run on it: a
         # tier's client is configured from the tier alone, so per-profile copies
         # would be identical objects multiplied by the profile count.
@@ -2336,6 +2342,13 @@ class Assistant:
         self._turn_lease_registry().register_resumer(
             DELEGATION_WAKE_RESUMER, DelegationWakeResumer(self._database())
         )
+        self._turn_lease_registry().register_self_deciding_resumer(
+            DELEGATED_RUN_RESUMER, DelegatedRunResumer(self._database())
+        )
+        self.background_turns = BackgroundTurnRunner(
+            max_concurrent=self.config.max_background_turns,
+            lease_registry=self._turn_lease_registry(),
+        )
         worker_count = self.config.task_worker_count
         reserved_worker_count = self.config.reserved_task_worker_count
         worker_lanes: list[TaskPriority | None] = [None] * worker_count + [
@@ -2872,6 +2885,7 @@ class Assistant:
             # run in the worker itself.
             thread_turn_runner=WebThreadTurnRunner(self.fastapi_app.state),
             turn_lease_registry=self._turn_lease_registry(),
+            background_turns=self.background_turns,
         )
         worker.register_task_handler("log_message", task_wrapper_handle_log_message)
         if self.document_indexer:
@@ -3034,7 +3048,6 @@ class Assistant:
                     f"Task worker {worker.worker_id} appears stuck ({stuck_reason}), "
                     "cancelling and restarting..."
                 )
-                worker.mark_cancelled_as_stuck(stuck_reason)
                 worker_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await worker_task
@@ -3126,6 +3139,12 @@ class Assistant:
                 task.cancel()
             await asyncio.gather(*owned_tasks, return_exceptions=True)
             logger.info("Owned background tasks cancelled.")
+
+        # Turns no lease resumes -- callback and memory review tasks -- are
+        # stopped while the database is still up, so they can hand their
+        # tasks back to the queue.
+        if self.background_turns is not None:
+            await self.background_turns.cancel_all()
 
         # Only now that this process's workers are gone, so none of them can
         # claim a lease and be torn down with it.

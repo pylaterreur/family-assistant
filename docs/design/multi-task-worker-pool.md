@@ -42,12 +42,13 @@ confirmation waiters/managers, etc.). Their `run()` tasks are tracked in
 
 The workers are no longer interchangeable. A **general** worker picks up any queued task, as
 described above; a **reserved** worker (`AppConfig.reserved_task_worker_count`, **default 1**) takes
-only interactive work, and only the part of it that cannot park on another queued task, so a burst
-of background work cannot delay a reminder or the confirmation that releases a parked delegated run.
-Both kinds come from the same builder and differ only by a minimum priority, which keeps the
+only interactive work, so a burst of background work cannot delay a reminder or a confirmation. Both
+kinds come from the same builder and differ only by a minimum priority, which keeps the
 health-monitor restart below unchanged. See
-[task-queue-priority-lanes.md](task-queue-priority-lanes.md) for the lanes and for why the
-reservation excludes parking handlers.
+[task-queue-priority-lanes.md](task-queue-priority-lanes.md) for the lanes. The reservation once
+also excluded handlers that park on another queued task; nothing parks a worker since background
+turns moved off the task worker (see
+[background-turns-off-the-task-worker.md](background-turns-off-the-task-worker.md)).
 
 ### Dedicated engine per worker
 

@@ -62,6 +62,8 @@ categorize_files() {
                 # targeted run cannot reformat what the mirror exists to keep
                 # byte-identical.
                 *.agents/skills/*/references/current-models.md) ;;
+                # The gh-stack skill is vendored from github/gh-stack verbatim.
+                *.agents/skills/gh-stack/*) ;;
                 *.md) MARKDOWN_FILES+=("$arg") ;;
                 *.sh|*.bash) OTHER_FILES+=("$arg") ;;
                 *) OTHER_FILES+=("$arg") ;;
@@ -86,11 +88,12 @@ if [ $# -eq 0 ]; then
         while IFS= read -r -d '' file; do
             MARKDOWN_FILES+=("$file")
         done < <(git ls-files -z -- "*.md" ":(exclude).claude/*" \
-            ":(exclude).agents/skills/*/references/current-models.md")
+            ":(exclude).agents/skills/*/references/current-models.md" \
+            ":(exclude).agents/skills/gh-stack/*")
     else
         while IFS= read -r -d '' file; do
             MARKDOWN_FILES+=("$file")
-        done < <(find . -name "*.md" -not -path "./.venv/*" -not -path "./venv/*" -not -path "./.git/*" -not -path "*/node_modules/*" -not -path "./scratch/*" -not -path "./.claude/*" -not -path "*/build/*" -not -path "./.agents/skills/*/references/current-models.md" -print0 2>/dev/null)
+        done < <(find . -name "*.md" -not -path "./.venv/*" -not -path "./venv/*" -not -path "./.git/*" -not -path "*/node_modules/*" -not -path "./scratch/*" -not -path "./.claude/*" -not -path "*/build/*" -not -path "./.agents/skills/*/references/current-models.md" -not -path "./.agents/skills/gh-stack/*" -print0 2>/dev/null)
     fi
 else
     categorize_files "$@"

@@ -26,7 +26,7 @@ from family_assistant.storage.database import Database
 from family_assistant.storage.delegation_runs import delegation_runs_table
 from family_assistant.task_worker import DelegationRunCleanupPayload, TaskWorker
 from family_assistant.utils.clock import SystemClock
-from tests.helpers import deliver_queued_delegations
+from tests.helpers import deliver_queued_delegations, run_delegated_profile_run
 from tests.mocks.recording_chat_interface import ScriptedChatInterface
 
 from .test_async_delegation import (
@@ -430,7 +430,8 @@ async def test_a_permanent_failure_on_the_finishing_task_fails_forward_immediate
     worker = _worker(
         db_engine, cast("ProcessingService", processing_service), chat_interface
     )
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             Database(engine=db_engine),
             cast("ProcessingService", processing_service),
@@ -541,7 +542,8 @@ async def test_a_given_up_run_is_not_redelivered_by_a_task_retry(
     worker = _worker(
         db_engine, cast("ProcessingService", processing_service), chat_interface
     )
-    await worker.handle_delegated_profile_run(
+    await run_delegated_profile_run(
+        worker,
         _tool_context(
             Database(engine=db_engine),
             cast("ProcessingService", processing_service),
