@@ -12,10 +12,12 @@ const REPLY = 'Spaghetti bolognese tonight.';
 interface FeedbackServer {
   writes: { method: string; turnId: string; body: Record<string, unknown> | null }[];
   failNext: boolean;
+  /** Holds the next write's response until it resolves. */
+  holdNext: Promise<void> | null;
 }
 
 function serveConversation(feedback: 'up' | 'down' | null = null): FeedbackServer {
-  const state: FeedbackServer = { writes: [], failNext: false };
+  const state: FeedbackServer = { writes: [], failNext: false, holdNext: null };
   const rows = [
     {
       internal_id: 1,
@@ -37,6 +39,11 @@ function serveConversation(feedback: 'up' | 'down' | null = null): FeedbackServe
   const record = async (method: string, turnId: string, request: Request) => {
     const body = method === 'PUT' ? ((await request.json()) as Record<string, unknown>) : null;
     state.writes.push({ method, turnId, body });
+    const hold = state.holdNext;
+    state.holdNext = null;
+    if (hold) {
+      await hold;
+    }
     if (state.failNext) {
       state.failNext = false;
       return HttpResponse.json({ detail: 'nope' }, { status: 500 });
@@ -162,5 +169,26 @@ describe('rating a reply', () => {
     await user.click(up);
     expect(await reply.findByRole('alert')).toHaveTextContent("Couldn't save your feedback");
     expect(up).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('keeps a slower earlier thumbs down from reopening the comment form', async () => {
+    const state = serveConversation();
+    let release = () => {};
+    state.holdNext = new Promise((resolve) => {
+      release = resolve;
+    });
+    const user = userEvent.setup();
+    const reply = await openReply();
+
+    await user.click(reply.getByRole('button', { name: 'Bad response' }));
+    const up = reply.getByRole('button', { name: 'Good response' });
+    await user.click(up);
+    await waitFor(() => expect(state.writes).toHaveLength(2));
+    release();
+
+    await waitFor(() => expect(up).toHaveAttribute('aria-pressed', 'true'));
+    // Let the held request's completion run before checking it changed nothing.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reply.queryByTestId('feedback-comment-form')).not.toBeInTheDocument();
   });
 });
