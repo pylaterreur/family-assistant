@@ -193,6 +193,7 @@ function buildUnconfirmedReplyError(conversationId: string, turnId: string): Mes
     ],
     createdAt: new Date(),
     status: { type: 'complete' },
+    unrateable: true,
   };
 }
 
@@ -2764,6 +2765,7 @@ export const ConversationPane: React.FC<ConversationPaneProps> = ({
           internal_id: message.internalId,
           turn_id: message.turnId,
           feedback: message.feedback,
+          unrateable: message.unrateable,
         },
       },
     };

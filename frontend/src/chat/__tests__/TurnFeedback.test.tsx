@@ -194,8 +194,9 @@ describe('rating a reply', () => {
 
     await waitFor(() => expect(state.writes).toHaveLength(2));
     expect(state.writes.map((write) => write.body?.rating)).toEqual(['down', 'up']);
-    // Let the earlier request's completion run before checking it changed nothing.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The thumbs up is sent only after the thumbs down settles, and the thumbs
+    // down's completion is queued on that same settlement first, so by the
+    // time the second write reaches the server the stale completion has run.
     expect(reply.queryByTestId('feedback-comment-form')).not.toBeInTheDocument();
     expect(up).toHaveAttribute('aria-pressed', 'true');
   });
