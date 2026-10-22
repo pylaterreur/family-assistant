@@ -10917,6 +10917,7 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(assistant.status, .failed, "the optimistic bubble takes the failed styling")
         XCTAssertNotNil(model.failedSend(for: assistant), "a retry affordance is recorded on the bubble")
         XCTAssertNil(model.errorMessage, "no modal is raised on the send path")
+        XCTAssertFalse(model.canRate(assistant), "the server holds no reply for this turn to rate")
 
         let inline = try await waitForSpooledReports(
             component: "Chat.inlineErrorPresented",
@@ -12608,6 +12609,222 @@ final class ChatViewModelTests: XCTestCase {
             model.modelTierChoice,
             "The server continues it on the default; sending the old tier would be refused."
         )
+    }
+
+    func testOpeningAConversationAnExperimentServesRestoresTheChosenTier() async {
+        respondWithReply(
+            conversationID: "web_conv_experiment_on_deep",
+            reasoningInfo: #"{"model_tier":"standard","model_tier_source":"experiment","model_tier_requested":"deep"}"#
+        )
+        let model = makeViewModel(conversationID: "web_conv_tier_elsewhere")
+        model.profiles = [Self.tieredProfile()]
+
+        await model.selectConversation("web_conv_experiment_on_deep")
+
+        XCTAssertEqual(
+            model.modelTierChoice,
+            "deep",
+            "An experiment served the turn on its own arm, but the server still continues the person's choice."
+        )
+    }
+
+    func testAnExperimentsAssignmentIsNotRestoredAsAChoice() async {
+        respondWithReply(
+            conversationID: "web_conv_experiment_unchosen",
+            reasoningInfo: #"{"model_tier":"deep","model_tier_source":"experiment"}"#
+        )
+        let model = makeViewModel(conversationID: "web_conv_tier_elsewhere")
+        model.profiles = [Self.tieredProfile()]
+
+        await model.selectConversation("web_conv_experiment_unchosen")
+
+        XCTAssertNil(model.modelTierChoice, "Nobody chose this tier; an assignment never becomes sticky.")
+    }
+
+    func testRatingAReplySavesItAndShowsItAtOnce() async throws {
+        let requests = AtomicStringList()
+        respondWithReply(conversationID: "web_conv_rated", feedback: "up") { request in
+            requests.append("\(request.httpMethod ?? "") \(String(decoding: request.bodyData, as: UTF8.self))")
+            return .json(#"{"turn_id":"turn_rated","rating":"down","comment":"Wrong date"}"#)
+        }
+        let model = makeViewModel(conversationID: "web_conv_tier_elsewhere")
+        await model.selectConversation("web_conv_rated")
+        let reply = try XCTUnwrap(model.messages.first { $0.role == .assistant })
+        XCTAssertEqual(reply.feedback, .up, "A rating saved earlier is shown on reopening.")
+        XCTAssertTrue(model.canRate(reply))
+
+        let outcome = await model.rateTurn("turn_rated", rating: .down, comment: "Wrong date")
+
+        XCTAssertEqual(outcome, .saved)
+        XCTAssertEqual(model.messages.filter { $0.turnID == "turn_rated" }.map(\.feedback), [.down, .down])
+        let body = try XCTUnwrap(requests.values.first)
+        XCTAssertTrue(body.hasPrefix("PUT "), body)
+        XCTAssertTrue(body.contains(#""rating":"down""#), body)
+        XCTAssertTrue(body.contains(#""comment":"Wrong date""#), body)
+    }
+
+    func testWithdrawingARatingDeletesIt() async {
+        let methods = AtomicStringList()
+        respondWithReply(conversationID: "web_conv_withdrawn", feedback: "up") { request in
+            methods.append(request.httpMethod ?? "")
+            return .json("", statusCode: 204)
+        }
+        let model = makeViewModel(conversationID: "web_conv_tier_elsewhere")
+        await model.selectConversation("web_conv_withdrawn")
+
+        let outcome = await model.rateTurn("turn_rated", rating: nil)
+
+        XCTAssertEqual(outcome, .saved)
+        XCTAssertEqual(methods.values, ["DELETE"])
+        XCTAssertNil(model.messages.first { $0.role == .assistant }?.feedback)
+    }
+
+    func testARatingTheServerRefusesIsRolledBack() async {
+        respondWithReply(conversationID: "web_conv_refused", feedback: "up") { _ in
+            .json(#"{"detail":"boom"}"#, statusCode: 500)
+        }
+        let model = makeViewModel(conversationID: "web_conv_tier_elsewhere")
+        await model.selectConversation("web_conv_refused")
+
+        let outcome = await model.rateTurn("turn_rated", rating: .down)
+
+        XCTAssertEqual(outcome, .failed)
+        XCTAssertEqual(
+            model.messages.first { $0.role == .assistant }?.feedback,
+            .up,
+            "The rating the server still holds is the one shown."
+        )
+    }
+
+    func testRatingsForATurnAreSentInTheOrderTheyWereMade() async {
+        let requests = AtomicStringList()
+        respondWithReply(conversationID: "web_conv_rerated") { request in
+            requests.append("\(request.httpMethod ?? "") \(String(decoding: request.bodyData, as: UTF8.self))")
+            return request.httpMethod == "DELETE"
+                ? .json("", statusCode: 204)
+                : .json(#"{"turn_id":"turn_rated","rating":"up","comment":null}"#)
+        }
+        let model = makeViewModel(conversationID: "web_conv_tier_elsewhere")
+        await model.selectConversation("web_conv_rerated")
+
+        let first = Task { await model.rateTurn("turn_rated", rating: .up) }
+        let second = Task { await model.rateTurn("turn_rated", rating: .down) }
+        let third = Task { await model.rateTurn("turn_rated", rating: nil) }
+        let outcomes = [await first.value, await second.value, await third.value]
+
+        XCTAssertEqual(outcomes, [.superseded, .superseded, .saved])
+        XCTAssertEqual(requests.values.last, "DELETE ", "The last choice is the last write the server sees.")
+        XCTAssertFalse(
+            requests.values.contains { $0.contains(#""rating":"down""#) },
+            "A choice replaced before it was sent is not sent."
+        )
+        XCTAssertNil(model.messages.first { $0.role == .assistant }?.feedback)
+    }
+
+    func testATurnThatEndedOnAToolCallIsRatedOnItsToolGroup() async throws {
+        ChatMockBackendURLProtocol.respond { request in
+            switch request.url?.path ?? "" {
+            case "/api/v1/chat/conversations/web_conv_tool_only/messages":
+                return .json(
+                    """
+                    {
+                      "conversation_id":"web_conv_tool_only",
+                      "messages":[
+                        {"internal_id":1,"turn_id":"turn_a","role":"user","content":"Add milk",
+                         "timestamp":"2026-10-16T12:00:00Z"},
+                        {"internal_id":2,"turn_id":"turn_a","role":"assistant","content":"",
+                         "timestamp":"2026-10-16T12:00:01Z",
+                         "tool_calls":[{"id":"call_a","type":"function",
+                           "function":{"name":"add_note","arguments":"{}"}}]},
+                        {"internal_id":3,"turn_id":"turn_a","role":"tool","content":"Saved",
+                         "tool_call_id":"call_a","timestamp":"2026-10-16T12:00:02Z"},
+                        {"internal_id":4,"turn_id":"turn_b","role":"user","content":"And eggs",
+                         "timestamp":"2026-10-16T12:01:00Z"},
+                        {"internal_id":5,"turn_id":"turn_b","role":"assistant","content":"",
+                         "timestamp":"2026-10-16T12:01:01Z",
+                         "tool_calls":[{"id":"call_b","type":"function",
+                           "function":{"name":"add_note","arguments":"{}"}}]},
+                        {"internal_id":6,"turn_id":"turn_b","role":"tool","content":"Saved",
+                         "tool_call_id":"call_b","timestamp":"2026-10-16T12:01:02Z"},
+                        {"internal_id":7,"turn_id":"turn_b","role":"assistant","content":"Added eggs.",
+                         "timestamp":"2026-10-16T12:01:03Z"}
+                      ],
+                      "count":7,
+                      "total_messages":7,
+                      "has_more_before":false,
+                      "has_more_after":false
+                    }
+                    """
+                )
+            default:
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+            }
+        }
+        let model = makeViewModel(conversationID: "web_conv_tier_elsewhere")
+        await model.selectConversation("web_conv_tool_only")
+        let bubbles = model.groupedMessages.filter { $0.role == .assistant }
+
+        let toolOnly = try XCTUnwrap(bubbles.first { $0.turnID == "turn_a" })
+        XCTAssertTrue(model.canRate(toolOnly), "A turn that ended on a tool call is rated on that call's group.")
+        let rated = bubbles.filter { $0.turnID == "turn_b" }.map { model.canRate($0) }
+        XCTAssertEqual(rated, [false, true], "A turn with a final reply is rated once, on the reply.")
+    }
+
+    func testAnEchoedThreadOutcomeIsNotRatedInHome() async throws {
+        respondWithReply(
+            conversationID: "web_conv_echo",
+            extraReplyFields: #","echoed_from_thread":"web_conv_thread""#
+        )
+        let model = makeViewModel(conversationID: "web_conv_tier_elsewhere")
+        await model.selectConversation("web_conv_echo")
+
+        let echo = try XCTUnwrap(model.messages.first { $0.role == .assistant })
+        XCTAssertEqual(echo.echoedFromThread, "web_conv_thread")
+        XCTAssertFalse(model.canRate(echo), "The echoed turn belongs to its thread and is rated there.")
+    }
+
+    /// A conversation of one exchange, turn `turn_rated`, whose reply carries
+    /// `reasoningInfo` and `feedback`; `onFeedback` answers the turn's feedback
+    /// route.
+    private func respondWithReply(
+        conversationID: String,
+        reasoningInfo: String = "null",
+        feedback: String? = nil,
+        extraReplyFields: String = "",
+        onFeedback: @escaping @Sendable (URLRequest) -> ChatMockResponse = { _ in
+            .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+        }
+    ) {
+        let feedbackJSON = feedback.map { "\"\($0)\"" } ?? "null"
+        ChatMockBackendURLProtocol.respond { request in
+            switch request.url?.path ?? "" {
+            case "/api/v1/chat/conversations/\(conversationID)/messages":
+                return .json(
+                    """
+                    {
+                      "conversation_id":"\(conversationID)",
+                      "messages":[
+                        {"internal_id":1,"turn_id":"turn_rated","role":"user","content":"Hi",
+                         "timestamp":"2026-10-16T12:00:00Z",
+                         "processing_profile_id":"default_assistant","feedback":\(feedbackJSON)},
+                        {"internal_id":2,"turn_id":"turn_rated","role":"assistant","content":"Reply",
+                         "timestamp":"2026-10-16T12:00:01Z",
+                         "processing_profile_id":"default_assistant",
+                         "reasoning_info":\(reasoningInfo),"feedback":\(feedbackJSON)\(extraReplyFields)}
+                      ],
+                      "count":2,
+                      "total_messages":2,
+                      "has_more_before":false,
+                      "has_more_after":false
+                    }
+                    """
+                )
+            case "/api/v1/chat/conversations/\(conversationID)/turns/turn_rated/feedback":
+                return onFeedback(request)
+            default:
+                return .json(#"{"detail":"unexpected"}"#, statusCode: 404)
+            }
+        }
     }
 
     func testIntelligenceControlIsUnavailableWhileATurnRuns() async throws {

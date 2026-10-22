@@ -302,6 +302,12 @@ final class ChatViewModel {
     }
 
     @ObservationIgnored private let apiClient: ChatAPIClient
+    @ObservationIgnored private var feedbackRequestByTurnID: [String: Int] = [:]
+    // The last write sent for each turn, which the next one waits behind.
+    @ObservationIgnored private var feedbackWriteByTurnID: [String: Task<TurnFeedbackOutcome, Never>] = [:]
+    // The rating the server last took for each turn rated here: what a
+    // refused write restores. The outer optional is whether it is known.
+    @ObservationIgnored private var confirmedFeedbackByTurnID: [String: ChatTurnRating?] = [:]
     // Injectable so tests can observe the diagnostic breadcrumbs emitted on a
     // stream drop without going through the shared singleton.
     @ObservationIgnored private let errorReporter: ErrorReporter
@@ -1266,14 +1272,29 @@ final class ChatViewModel {
         // A tier the profile no longer offers is not restored: the server
         // already continues such a conversation on the default, and naming the
         // tier on the next send would be refused.
-        guard let latest, latest.modelTierSource == "user",
-              let tier = latest.modelTier, tier != defaultModelTierID,
+        guard let latest, let tier = Self.chosenModelTier(of: latest),
+              tier != defaultModelTierID,
               availableModelTiers.contains(where: { $0.id == tier })
         else {
             return
         }
         modelTierChoice = tier
         namesModelTier = true
+    }
+
+    /// The tier the person chose for the turn `message` ended, if they chose
+    /// one. A live experiment covering their chosen tier serves the turn on its
+    /// own arm, but keeps the choice as the requested tier, which the server
+    /// goes on continuing.
+    nonisolated static func chosenModelTier(of message: ChatMessage) -> String? {
+        switch message.modelTierSource {
+        case "user":
+            message.modelTier
+        case "experiment":
+            message.modelTierRequested
+        default:
+            nil
+        }
     }
 
     func startNewConversation(preservingDraft: Bool = false) {
@@ -2074,6 +2095,82 @@ final class ChatViewModel {
             homeIsAtRest: isAtRest,
             runningTurnIDs: knownRunningTurnIDs.union(activeTurnIdentity.map { [$0.turnID] } ?? [])
         )
+    }
+
+    /// Whether `message` offers thumbs up and down: the last bubble of a
+    /// finished turn, whether that is the reply's text or, for a turn that
+    /// ended on a tool call, its tool group. An echoed thread outcome is rated
+    /// in its thread, and a bubble the server holds no row for (a send it
+    /// never accepted, a reply still being reconciled) has nothing to rate.
+    func canRate(_ message: ChatMessage) -> Bool {
+        guard message.role == .assistant, ReadMarkerGate.persistedID(of: message.id) != nil,
+              message.echoedFromThread == nil, message.movedToThread == nil,
+              message.status != .running, !message.isLoading,
+              let turnID = message.turnID, conversationID != nil,
+              !knownRunningTurnIDs.contains(turnID), activeTurnIdentity?.turnID != turnID,
+              let last = messages.last(where: { $0.turnID == turnID && $0.role == .assistant })
+        else {
+            return false
+        }
+        // A tool group's bubble is named after its first step, so the turn's
+        // last step is found among its calls.
+        return last.id == message.id
+            || last.toolCalls.last.map { lastCall in message.toolCalls.contains { $0.id == lastCall.id } } ?? false
+    }
+
+    /// Record the user's rating of `turnID`, or withdraw it with nil. It is
+    /// shown at once on every message of the turn. Writes for a turn go out in
+    /// the order they were made, and one a newer choice replaced before it was
+    /// sent is skipped. If the latest is refused, the rating the server last
+    /// took is shown again.
+    func rateTurn(_ turnID: String, rating: ChatTurnRating?, comment: String? = nil) async -> TurnFeedbackOutcome {
+        guard let conversationID else {
+            return .failed
+        }
+        let request = (feedbackRequestByTurnID[turnID] ?? 0) + 1
+        feedbackRequestByTurnID[turnID] = request
+        if confirmedFeedbackByTurnID[turnID] == nil {
+            confirmedFeedbackByTurnID[turnID] = .some(messages.first { $0.turnID == turnID }?.feedback)
+        }
+        setFeedback(rating, onTurn: turnID)
+
+        let earlier = feedbackWriteByTurnID[turnID]
+        let write = Task { [apiClient] () -> TurnFeedbackOutcome in
+            await earlier?.value
+            guard self.feedbackRequestByTurnID[turnID] == request else {
+                return .superseded
+            }
+            do {
+                try await apiClient.setTurnFeedback(
+                    conversationID: conversationID,
+                    turnID: turnID,
+                    rating: rating,
+                    comment: comment
+                )
+            } catch {
+                return .failed
+            }
+            self.confirmedFeedbackByTurnID[turnID] = .some(rating)
+            return .saved
+        }
+        feedbackWriteByTurnID[turnID] = write
+        let outcome = await write.value
+        guard feedbackRequestByTurnID[turnID] == request else {
+            // A newer choice owns what is shown, and its outcome is reported.
+            return .superseded
+        }
+        feedbackWriteByTurnID[turnID] = nil
+        if outcome == .failed, self.conversationID == conversationID,
+           let confirmed = confirmedFeedbackByTurnID[turnID] {
+            setFeedback(confirmed, onTurn: turnID)
+        }
+        return outcome
+    }
+
+    private func setFeedback(_ rating: ChatTurnRating?, onTurn turnID: String) {
+        for index in messages.indices where messages[index].turnID == turnID {
+            messages[index].feedback = rating
+        }
     }
 
     /// The text a bubble showed for a saved message, for a thread's "Started
@@ -5848,8 +5945,10 @@ final class ChatViewModel {
                 turnID: backend.turnID,
                 modelTier: backend.reasoningInfo?.modelTier,
                 modelTierSource: backend.reasoningInfo?.modelTierSource,
+                modelTierRequested: backend.reasoningInfo?.modelTierRequested,
                 echoedFromThread: backend.echoedFromThread,
-                movedToThread: backend.movedToThread
+                movedToThread: backend.movedToThread,
+                feedback: backend.feedback
             )
         }
         return rendered
