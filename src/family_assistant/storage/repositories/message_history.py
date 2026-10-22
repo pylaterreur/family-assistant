@@ -2479,6 +2479,23 @@ class MessageHistoryRepository(BaseRepository):
         rows = await self._db.fetch_all(stmt)
         return any(not row["tool_calls"] for row in rows)
 
+    async def turn_has_reply_in_conversation(
+        self, *, conversation_id: str, turn_id: str
+    ) -> bool:
+        """Whether *turn_id* has an assistant row in *conversation_id* itself,
+        not in one of its delegated subconversations."""
+        stmt = (
+            select(message_history_table.c.internal_id)
+            .where(
+                message_history_table.c.conversation_id == conversation_id,
+                message_history_table.c.turn_id == turn_id,
+                message_history_table.c.role == "assistant",
+                message_history_table.c.subconversation_id.is_(None),
+            )
+            .limit(1)
+        )
+        return await self._db.fetch_one(stmt) is not None
+
     async def get_assistant_reasoning_infos_for_turn(
         self, turn_id: str
     ) -> list[MessageReasoningInfo]:
