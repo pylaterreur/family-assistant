@@ -50,6 +50,7 @@ class _JSONResponseClient(BaseLLMClient):
         messages: Sequence[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
+        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         del messages, tools, tool_choice
         raise NotImplementedError
