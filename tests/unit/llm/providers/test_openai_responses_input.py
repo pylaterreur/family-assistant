@@ -370,7 +370,7 @@ async def test_responses_stream_failures_carry_typed_metadata(
 ) -> None:
     """A failed Responses turn must classify like a Chat Completions one.
 
-    Without this metadata `_map_stream_error_to_exception` can only raise a bare
+    Without this metadata `stream_error_to_exception` can only raise a bare
     RuntimeError, collapsing a rate limit and a bad request into one shape.
     """
     client = OpenAIClient(api_key="test-key", model="gpt-5.6-sol")

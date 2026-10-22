@@ -20,6 +20,7 @@ from family_assistant.llm.call_context import (
     reset_processing_profile,
     set_model_selection,
     set_processing_profile,
+    with_service_tier,
 )
 from family_assistant.llm.model_selection import ResolvedModelSelection
 from family_assistant.llm.providers.google_genai_client import GoogleGenAIClient
@@ -335,6 +336,7 @@ def test_successful_call_counts_tokens_against_the_active_profile(
         "model": "claude-test",
         "resolved_model": "claude-test-20260101",
         "operation": "chat",
+        "service_tier": "standard",
     }
     assert (
         _sample(
@@ -351,6 +353,66 @@ def test_successful_call_counts_tokens_against_the_active_profile(
             {**labels, "outcome": "success", "error_type": ""},
         )
         == 1
+    )
+
+
+def test_a_flex_attempt_is_labelled_with_the_tier_it_requested(
+    profile: str,
+) -> None:
+    with with_service_tier("flex"):
+        telemetry = _telemetry(provider="google", model="gemini-flex-test")
+    telemetry.record_usage({"prompt_tokens": 10, "completion_tokens": 2})
+
+    telemetry.finish_success(response=None)
+
+    assert (
+        _sample(
+            "family_assistant_llm_calls_total",
+            {
+                "profile": profile,
+                "tier": "none",
+                "provider": "google",
+                "model": "gemini-flex-test",
+                "resolved_model": "gemini-flex-test",
+                "operation": "chat",
+                "service_tier": "flex",
+                "outcome": "success",
+                "error_type": "",
+            },
+        )
+        == 1
+    )
+
+
+def test_the_tier_the_provider_served_outranks_the_one_requested(
+    profile: str,
+) -> None:
+    """A Flex request the provider ran at Standard was billed at Standard."""
+    with with_service_tier("flex"):
+        telemetry = _telemetry(provider="openai", model="gpt-flex-test")
+    telemetry.record_usage({
+        "prompt_tokens": 10,
+        "completion_tokens": 2,
+        "service_tier": "standard",
+    })
+
+    telemetry.finish_success(response=None)
+
+    assert (
+        _sample(
+            "family_assistant_llm_tokens_total",
+            {
+                "profile": profile,
+                "tier": "none",
+                "provider": "openai",
+                "model": "gpt-flex-test",
+                "resolved_model": "gpt-flex-test",
+                "operation": "chat",
+                "service_tier": "standard",
+                "kind": "output",
+            },
+        )
+        == 2
     )
 
 
@@ -374,6 +436,7 @@ def test_a_diagnosed_cache_miss_is_counted_by_reason(profile: str) -> None:
                 "model": "claude-test",
                 "resolved_model": "claude-test",
                 "operation": "chat",
+                "service_tier": "standard",
                 "reason": "system_changed",
             },
         )
@@ -395,6 +458,7 @@ def test_failed_call_still_counts_the_tokens_it_burned(profile: str) -> None:
         "model": "gpt-test",
         "resolved_model": "gpt-test",
         "operation": "chat",
+        "service_tier": "standard",
     }
     assert (
         _sample(
@@ -420,6 +484,7 @@ def test_call_outside_a_turn_is_labelled_unattributed_rather_than_dropped() -> N
         "model": "gpt-oneshot",
         "resolved_model": "gpt-oneshot",
         "operation": "chat",
+        "service_tier": "standard",
     }
     before = _sample(
         "family_assistant_llm_calls_total",
@@ -461,6 +526,7 @@ def test_the_resolved_tier_labels_the_call_and_lands_in_the_usage(
                 "model": "gpt-sol",
                 "resolved_model": "gpt-sol",
                 "operation": "chat",
+                "service_tier": "standard",
                 "outcome": "success",
                 "error_type": "",
             },
@@ -566,6 +632,7 @@ def test_the_profile_is_captured_when_the_call_starts(profile: str) -> None:
         "model": "gemini-test",
         "resolved_model": "gemini-test",
         "operation": "chat",
+        "service_tier": "standard",
         "outcome": "success",
         "error_type": "",
     }
@@ -594,6 +661,7 @@ def test_an_abandoned_streamed_call_still_records_an_outcome(profile: str) -> No
         "model": "gemini-abandoned",
         "resolved_model": "gemini-abandoned",
         "operation": "chat",
+        "service_tier": "standard",
     }
     assert (
         _sample(
@@ -624,6 +692,7 @@ def test_abandoning_a_call_that_already_finished_counts_it_once(profile: str) ->
         "model": "gpt-once",
         "resolved_model": "gpt-once",
         "operation": "chat",
+        "service_tier": "standard",
     }
     assert (
         _sample(
@@ -834,6 +903,7 @@ async def test_a_committed_run_is_counted_even_if_its_usage_cannot_be_read() -> 
                 "model": "models/deep-research-preview-04-2026",
                 "resolved_model": "models/deep-research-preview-04-2026",
                 "operation": "deep_research",
+                "service_tier": "standard",
                 "outcome": "success",
                 "error_type": "",
             },
@@ -892,6 +962,7 @@ def test_a_cancelled_structured_call_still_records_an_outcome(profile: str) -> N
         "model": "claude-structured",
         "resolved_model": "claude-structured",
         "operation": "chat",
+        "service_tier": "standard",
     }
     assert (
         _sample(
@@ -929,6 +1000,7 @@ async def test_video_generation_is_counted_like_any_other_provider_request(
                 "model": "veo-test",
                 "resolved_model": "veo-test",
                 "operation": "video",
+                "service_tier": "standard",
                 "outcome": "success",
                 "error_type": "",
             },
@@ -963,6 +1035,7 @@ async def test_a_request_rejected_before_the_provider_is_not_counted(
                     "model": "omni-test",
                     "resolved_model": "omni-test",
                     "operation": "video",
+                    "service_tier": "standard",
                     "outcome": outcome,
                     "error_type": "VideoGenerationError" if outcome == "error" else "",
                 },
@@ -998,6 +1071,7 @@ async def test_the_served_model_is_recorded_where_the_provider_reports_it(
                 "model": "gemini-3-pro-image",
                 "resolved_model": "gemini-3-pro-image-2026-01-01",
                 "operation": "image",
+                "service_tier": "standard",
                 "outcome": "success",
                 "error_type": "",
             },

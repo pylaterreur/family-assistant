@@ -958,6 +958,7 @@ service_profiles:
 | `chain[].provider`       | Optional; auto-detected from the model name when omitted.                   |
 | `chain[].model`          | Required on every entry.                                                    |
 | `chain[].llm_parameters` | Request parameters for **this entry only**, overlaid on the global map.     |
+| `chain[].flex`           | Send this entry's background calls at the Flex price class. Default false.  |
 | `label`                  | User-facing name for the tier.                                              |
 | `description`            | One line on when the tier is worth its cost.                                |
 | `slash_command`          | Per-message chat command that runs one request on this tier.                |
@@ -993,6 +994,32 @@ or with the bot's own commands (`/start`, `/interrupt`): a chat surface dispatch
 by looking it up, so a collision means one of the two silently never runs — and against a built-in
 it is always the configured one that loses. Compared case-insensitively, since Telegram treats
 `/Deep` and `/deep` as one command. Shipped: `/deep` and `/max`.
+
+#### Flex: `chain[].flex`
+
+`flex: true` sends the entry's **background** calls at the provider's Flex price class — about half
+the token price, in exchange for queueing and occasional capacity rejections. A call is background
+when it runs inside a task nobody waits on: scheduled automations and callbacks, event listener
+wakes, reminders, email intake, memory review, conversation-list summaries, document, email and note
+indexing, and script execution. Chat turns, resumed turns, delegated runs and confirmed actions are
+interactive and never use Flex.
+
+A Flex attempt that is rate limited, unavailable, times out, or has not started responding within
+120 seconds is made again at Standard on the **same model**; only a failure at Standard reaches the
+chain's fallback. After a capacity failure the entry stops attempting Flex for ten minutes. Neither
+number is configurable.
+
+Flex is available on Google (Gemini Developer API) and OpenAI-compatible providers, including
+OpenRouter for models that list a Flex endpoint. On OpenRouter, a model with no Flex endpoint is
+served at Standard prices regardless. Setting `flex` on an Anthropic entry, an Interactions API
+agent model, an Antigravity profile's tier, or an entry whose `llm_parameters` already set
+`service_tier` is a startup error. `flex` also works on a profile's `retry_config` entries. Leave it
+off where the caller has a shorter deadline of its own than the Flex wait — conversation summaries
+give up after 20 seconds, so a queued Flex call there fails the summary instead of falling back.
+
+Shipped: on the `standard` tier's Gemini entry. Each call's metrics carry a `service_tier` label —
+the tier the provider reported serving, where it reports one, otherwise the tier requested — and
+message history records the served tier in `reasoning_info.service_tier`.
 
 #### Eligibility: `model_tier`, `allowed_model_tiers`, `auto_model_tiers`, `delegation_model_tiers`
 

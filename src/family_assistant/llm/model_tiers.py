@@ -104,6 +104,8 @@ def resolve_entry_client_config(
     }
     if entry.provider:
         client_config["provider"] = entry.provider
+    if entry.flex:
+        client_config["flex"] = True
     return client_config
 
 
@@ -379,6 +381,8 @@ def _reject_non_reasoning_model_tier(
         )
     elif entry.llm_parameters:
         problem = "its entry sets llm_parameters, which the agent does not accept"
+    elif entry.flex:
+        problem = "its entry sets flex, a price class the agent does not accept"
     if problem is not None:
         msg = (
             f"Profile '{profile_id}' runs the Antigravity managed agent and can "

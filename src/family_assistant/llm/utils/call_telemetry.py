@@ -181,6 +181,7 @@ class LLMCallTelemetry:
             "llm.request.attachment_chars": self._attachment_chars,
             "llm.request.tool_count": len(tools) if tools else 0,
             "llm.request.tool_choice": tool_choice or "",
+            "llm.request.service_tier": self.attribution.service_tier,
         })
         selection = self.attribution.model_selection
         if selection is not None:

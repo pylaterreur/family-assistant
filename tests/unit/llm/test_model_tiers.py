@@ -320,6 +320,9 @@ REASONING_TIERS = {
             )
         ]
     ),
+    "flexed": ModelTierConfig(
+        chain=[RetryModelConfig(provider="google", model="gemini-4-argon", flex=True)]
+    ),
 }
 
 
@@ -352,6 +355,7 @@ def test_an_antigravity_profile_runs_on_its_agent_not_its_tier() -> None:
         ("with_fallback", "has a fallback"),
         ("anthropic", "provider 'anthropic'"),
         ("tuned", "sets llm_parameters"),
+        ("flexed", "sets flex"),
     ],
 )
 def test_an_antigravity_profile_refuses_a_tier_that_is_not_one_google_model(

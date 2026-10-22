@@ -284,6 +284,7 @@ async def test_a_call_is_counted_with_its_tokens_under_the_active_profile() -> N
         "model": "jev-test",
         "resolved_model": "jev-1.13.0",
         "operation": "classify",
+        "service_tier": "standard",
     }
     assert (
         _sample(
@@ -324,6 +325,7 @@ async def test_a_failed_call_is_counted_as_an_error() -> None:
                 "model": "jev-test",
                 "resolved_model": "jev-test",
                 "operation": "classify",
+                "service_tier": "standard",
                 "outcome": "error",
                 "error_type": "TypeSafeError",
             },

@@ -15,6 +15,7 @@ from google import genai
 from google.genai import types
 from openai import AsyncOpenAI
 
+from family_assistant.llm.call_context import with_service_tier
 from family_assistant.llm.factory import LLMClientFactory
 from family_assistant.llm.messages import UserMessage
 from family_assistant.llm.providers.anthropic_client import AnthropicClient
@@ -267,3 +268,88 @@ def test_anthropic_base_url_reaches_the_sdk_client() -> None:
 
     assert str(client.client.base_url).rstrip("/") == "https://anthropic.example.test"
     assert "base_url" not in client.default_kwargs
+
+
+async def test_a_flex_attempt_reaches_the_gemini_request() -> None:
+    requests: list[dict[str, object]] = []
+    client = _gemini_client({}, requests)
+
+    with with_service_tier("flex"):
+        await client.generate_response([UserMessage(content="hi")])
+
+    assert requests[0]["serviceTier"] == "flex"
+
+
+async def test_a_standard_gemini_request_names_no_service_tier() -> None:
+    requests: list[dict[str, object]] = []
+    client = _gemini_client({}, requests)
+
+    await client.generate_response([UserMessage(content="hi")])
+
+    assert "serviceTier" not in requests[0]
+
+
+async def test_a_flex_attempt_reaches_the_openai_compatible_request() -> None:
+    requests: list[dict[str, object]] = []
+    client = _openai_chat_client("openrouter/google/gemini-3.8-flash", {}, requests)
+
+    with with_service_tier("flex"):
+        await client.generate_response([UserMessage(content="hi")])
+
+    assert requests[0]["service_tier"] == "flex"
+
+
+async def test_a_standard_openai_compatible_request_names_no_service_tier() -> None:
+    requests: list[dict[str, object]] = []
+    client = _openai_chat_client("openrouter/google/gemini-3.8-flash", {}, requests)
+
+    await client.generate_response([UserMessage(content="hi")])
+
+    assert "service_tier" not in requests[0]
+
+
+async def test_the_tier_gemini_served_is_recorded_with_the_usage() -> None:
+    requests: list[dict[str, object]] = []
+    client = _gemini_client({}, requests)
+    client.client = genai.Client(
+        api_key="test-key",
+        http_options=types.HttpOptions(
+            httpx_async_client=httpx.AsyncClient(
+                transport=_recording_transport(
+                    {
+                        **_GEMINI_REPLY,
+                        "usageMetadata": {
+                            "promptTokenCount": 3,
+                            "candidatesTokenCount": 1,
+                            "trafficType": "ON_DEMAND_FLEX",
+                        },
+                    },
+                    requests,
+                )
+            )
+        ),
+    )
+
+    output = await client.generate_response([UserMessage(content="hi")])
+
+    assert output.reasoning_info is not None
+    assert output.reasoning_info.get("service_tier") == "flex"
+
+
+async def test_openai_default_tier_is_recorded_as_standard() -> None:
+    requests: list[dict[str, object]] = []
+    client = _openai_chat_client("openrouter/google/gemini-3.8-flash", {}, requests)
+    client.client = AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+        http_client=httpx.AsyncClient(
+            transport=_recording_transport(
+                {**_CHAT_COMPLETION_REPLY, "service_tier": "default"}, requests
+            )
+        ),
+    )
+
+    output = await client.generate_response([UserMessage(content="hi")])
+
+    assert output.reasoning_info is not None
+    assert output.reasoning_info.get("service_tier") == "standard"

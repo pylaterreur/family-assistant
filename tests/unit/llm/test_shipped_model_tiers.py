@@ -18,6 +18,7 @@ from family_assistant.config_models import AppConfig
 from family_assistant.llm.factory import LLMClientFactory
 from family_assistant.llm.model_selection import ModelTierEligibility
 from family_assistant.llm.model_tiers import (
+    resolve_entry_client_config,
     resolve_entry_model_parameters,
     resolve_profile_llm_model,
     resolve_tier_client_config,
@@ -92,6 +93,7 @@ def test_standard_tier_profiles_keep_the_gemini_sonnet_chain(
                 "provider": "google",
                 "model": "gemini-3.8-flash",
                 "model_parameters": shipped_config.llm_parameters,
+                "flex": True,
             },
             "fallback": {
                 "provider": "anthropic",
@@ -150,6 +152,7 @@ def test_a_profile_inheriting_the_default_tier_keeps_the_default_chain(
                 "provider": "google",
                 "model": "gemini-3.8-flash",
                 "model_parameters": shipped_config.llm_parameters,
+                "flex": True,
             },
             "fallback": {
                 "provider": "anthropic",
@@ -328,3 +331,21 @@ def test_browser_tier_runs_sol_with_a_sonnet_fallback_at_medium_effort(
         "thinking": {"type": "adaptive"},
         "output_config": {"effort": "medium"},
     }
+
+
+def test_every_shipped_flex_entry_is_one_its_client_can_honour(
+    shipped_config: AppConfig,
+) -> None:
+    """The startup check, over every tier, including ones no profile reaches."""
+    flex_entries = [
+        (tier_id, entry)
+        for tier_id, tier in shipped_config.model_tiers.items()
+        for entry in tier.chain
+        if entry.flex
+    ]
+
+    assert flex_entries, "the shipped configuration enables Flex somewhere"
+    for _tier_id, entry in flex_entries:
+        LLMClientFactory.validate_flex_config(
+            resolve_entry_client_config(entry, shipped_config.llm_parameters)
+        )

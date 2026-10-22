@@ -57,6 +57,7 @@ from family_assistant.llm.antigravity_egress import (
     EgressResolver,
     github_git_instruction,
 )
+from family_assistant.llm.call_context import current_service_tier
 from family_assistant.llm.connections import ConnectionKey, ProviderConnections
 from family_assistant.llm.deferred_tools import resolve_deferred_tools
 from family_assistant.llm.google_types import (
@@ -579,6 +580,16 @@ def _http_options_for_base_url(base_url: str) -> types.HttpOptions:
     )
 
 
+# Gemini reports the capacity a request was served from as its usage's traffic
+# type; these are the price classes those name.
+_SERVED_SERVICE_TIERS: dict[object, str] = {
+    types.TrafficType.ON_DEMAND: "standard",
+    types.TrafficType.ON_DEMAND_FLEX: "flex",
+    types.TrafficType.ON_DEMAND_PRIORITY: "priority",
+    types.TrafficType.PROVISIONED_THROUGHPUT: "provisioned",
+}
+
+
 async def _close_genai_client(client: genai.Client) -> None:
     """Release a shared SDK client's async connection pool."""
     await client.aio.aclose()
@@ -753,8 +764,13 @@ class GoogleGenAIClient(BaseLLMClient):
         Every generateContent path starts here, so a parameter configured in
         ``llm_parameters`` reaches chat, streaming and structured output alike.
         Callers then set the fields the client owns (tools, response format).
+        The price class is the in-flight call's, not the client's: one client
+        serves interactive and background calls alike.
         """
-        return types.GenerateContentConfig.model_validate(self._generation_fields)
+        config = types.GenerateContentConfig.model_validate(self._generation_fields)
+        if current_service_tier() == "flex":
+            config.service_tier = types.ServiceTier.FLEX
+        return config
 
     def _extract_text_response(self, response: object) -> str | None:
         """Extract text content from a GenerateContent response."""
@@ -1823,6 +1839,9 @@ class GoogleGenAIClient(BaseLLMClient):
             )
             if image_tokens is not None:
                 reasoning_info[key] = image_tokens  # pyright: ignore[reportGeneralTypeIssues] - key is a literal from the tuple above
+        served_tier = _SERVED_SERVICE_TIERS.get(getattr(usage, "traffic_type", None))
+        if served_tier is not None:
+            reasoning_info["service_tier"] = served_tier
         return reasoning_info
 
     @staticmethod

@@ -41,6 +41,7 @@ from family_assistant.llm import (
     UserMessageDict,
     describe_attachment_for_fallback,
 )
+from family_assistant.llm.call_context import current_service_tier
 from family_assistant.llm.connections import ConnectionKey, ProviderConnections
 from family_assistant.llm.deferred_tools import resolve_deferred_tools
 from family_assistant.llm.messages import (
@@ -98,6 +99,21 @@ def _sdk_params(method: Callable[..., object]) -> frozenset[str]:
 _CHAT_COMPLETIONS_PARAMS = _sdk_params(AsyncCompletions.create)
 _CHAT_PARSE_PARAMS = _sdk_params(AsyncCompletions.parse)
 _RESPONSES_PARAMS = _sdk_params(AsyncResponses.create)
+
+
+def _stamp_served_service_tier(
+    reasoning_info: MessageReasoningInfo | None, service_tier: object
+) -> MessageReasoningInfo | None:
+    """Record the price class OpenAI says it served a response at.
+
+    OpenAI calls Standard ``default``; it is recorded under the name the rest of
+    the application uses for it.
+    """
+    if reasoning_info is not None and isinstance(service_tier, str) and service_tier:
+        reasoning_info["service_tier"] = (
+            "standard" if service_tier == "default" else service_tier
+        )
+    return reasoning_info
 
 
 def _with_extra_body(
@@ -341,13 +357,17 @@ class OpenAIClient(BaseLLMClient):
         Control keys steer this client rather than the request, so they are
         filtered here -- at the single accessor every request-building path
         already goes through -- instead of being popped at each call site,
-        where one missed spot would send an unknown field to the API.
+        where one missed spot would send an unknown field to the API. The
+        in-flight call's price class is added here for the same reason.
         """
-        return {
+        params = {
             key: value
             for key, value in self._resolve_model_parameters(model).items()
             if key not in _CONTROL_PARAMS
         }
+        if current_service_tier() == "flex":
+            params["service_tier"] = "flex"
+        return params
 
     def _uses_responses_api(self) -> bool:
         """Return whether this model should be driven through the Responses API.
@@ -485,7 +505,7 @@ class OpenAIClient(BaseLLMClient):
     ) -> LLMStreamEvent:
         """Build a stream error event carrying the metadata consumers rely on.
 
-        Without `error_type`/`provider`/`model`, `_map_stream_error_to_exception`
+        Without `error_type`/`provider`/`model`, `stream_error_to_exception`
         can only produce a bare ``RuntimeError``, losing the distinction between
         a rate limit and a bad request. The Chat Completions path has always
         attached this; the Responses path did not, which stopped mattering only
@@ -882,7 +902,9 @@ class OpenAIClient(BaseLLMClient):
         cache_write = OpenAIClient._cache_write_tokens(usage)
         if cache_write is not None:
             reasoning_info["cache_write_tokens"] = cache_write
-        return reasoning_info
+        return _stamp_served_service_tier(
+            reasoning_info, getattr(response, "service_tier", None)
+        )
 
     @staticmethod
     def _responses_tool_calls(response: Response) -> list[ToolCallItem] | None:
@@ -1067,7 +1089,10 @@ class OpenAIClient(BaseLLMClient):
             ]
 
         # Extract usage information
-        reasoning_info = self._reasoning_info_from_chat_usage(response.usage)
+        reasoning_info = _stamp_served_service_tier(
+            self._reasoning_info_from_chat_usage(response.usage),
+            response.service_tier,
+        )
 
         telemetry.record_response_metadata(
             resolved_model=response.model,
@@ -1592,6 +1617,10 @@ class OpenAIClient(BaseLLMClient):
                 reasoning_tokens = getattr(completion_details, "reasoning_tokens", None)
                 if reasoning_tokens is not None:
                     stream_reasoning_info["reasoning_tokens"] = reasoning_tokens
+                _stamp_served_service_tier(
+                    stream_reasoning_info,
+                    getattr(last_chunk_with_usage, "service_tier", None),
+                )
                 metadata["reasoning_info"] = stream_reasoning_info
 
             if telemetry.resolved_model:
@@ -1790,6 +1819,9 @@ class OpenAIClient(BaseLLMClient):
                         cache_write = self._cache_write_tokens(usage)
                         if cache_write is not None:
                             responses_reasoning_info["cache_write_tokens"] = cache_write
+                        _stamp_served_service_tier(
+                            responses_reasoning_info, response.get("service_tier")
+                        )
                         metadata["reasoning_info"] = responses_reasoning_info
                     output = response.get("output")
                     if isinstance(output, list):
