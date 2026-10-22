@@ -15,7 +15,7 @@ by remembering to count it.
 **Token accounting is normalised here, once.** Providers disagree about what
 their own prompt and completion counts include, so the exported buckets are
 defined to be disjoint on every provider: ``input_uncached``, ``input_image``,
-``cache_read`` and ``cache_write`` sum to the full prompt, ``output``,
+``cache_read``, ``cache_write`` and ``cache_write_1h`` sum to the full prompt, ``output``,
 ``output_image`` and ``reasoning`` sum to everything generated, and
 ``tool_use`` is what the provider spent running its own server-side tools. A dashboard can therefore sum over
 ``kind`` without knowing which provider served the call.
@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "INDEXING_DOCUMENTS",
+    "LLM_CACHE_MISSES",
     "LLM_CALLS",
     "LLM_CALL_DURATION",
     "LLM_TIME_TO_FIRST_OUTPUT",
@@ -193,6 +194,17 @@ LLM_CALLS = Counter(
     "family_assistant_llm_calls",
     "LLM provider calls, by how they ended.",
     (*_LLM_LABELS, "outcome", "error_type"),
+)
+
+LLM_CACHE_MISSES = Counter(
+    "family_assistant_llm_cache_misses",
+    (
+        "LLM calls whose prompt diverged from the previous call in the same "
+        "conversation, by where the provider says it diverged. Counts the "
+        "divergence, not the cost: a call can diverge and still read most of "
+        "its prompt from an earlier breakpoint."
+    ),
+    (*_LLM_LABELS, "reason"),
 )
 
 LLM_CALL_DURATION = Histogram(
@@ -449,7 +461,7 @@ def normalized_token_buckets(
     from one that cached nothing this call.
 
     The kinds are disjoint by construction: ``input_uncached + input_image +
-    cache_read + cache_write`` is the full prompt, ``output + output_image +
+    cache_read + cache_write + cache_write_1h`` is the full prompt, ``output + output_image +
     reasoning`` is everything generated, and ``tool_use`` is what the provider
     spent on its own server-side tools -- whichever provider served the call.
     """
@@ -465,6 +477,12 @@ def normalized_token_buckets(
         buckets["cache_read"] = max(0, cache_read)
     if cache_write is not None:
         buckets["cache_write"] = max(0, cache_write)
+    # One-hour writes are billed at a different multiple from the default
+    # lifetime, so they are their own tier, carved out of `cache_write`.
+    cache_write_1h = reasoning_info.get("cache_write_1h_tokens")
+    if cache_write_1h is not None:
+        buckets["cache_write_1h"] = max(0, cache_write_1h)
+        buckets["cache_write"] = max(0, (cache_write or 0) - cache_write_1h)
 
     # Image input is priced above text input wherever a provider reports the
     # split, so it is a tier of its own and comes out of the text bucket
@@ -562,10 +580,21 @@ def record_llm_call(
             LLM_TIME_TO_FIRST_OUTPUT.labels(*labels).observe(
                 time_to_first_output_seconds
             )
-        for kind, count in normalized_token_buckets(reasoning_info, provider).items():
-            LLM_TOKENS.labels(*labels, kind).inc(count)
+        _record_llm_usage(labels, provider, reasoning_info)
     except Exception:
         logger.debug("Failed to record LLM call metrics", exc_info=True)
+
+
+def _record_llm_usage(
+    labels: tuple[str, ...],
+    provider: str,
+    reasoning_info: MessageReasoningInfo | None,
+) -> None:
+    """Count a call's tokens, and the cache divergence its provider diagnosed."""
+    for kind, count in normalized_token_buckets(reasoning_info, provider).items():
+        LLM_TOKENS.labels(*labels, kind).inc(count)
+    if reasoning_info and (reason := reasoning_info.get("cache_miss_reason")):
+        LLM_CACHE_MISSES.labels(*labels, reason).inc()
 
 
 def record_indexing_documents(

@@ -78,7 +78,8 @@ every provider maps onto:
 | `input_uncached` | Prompt tokens that were neither read from nor written to cache    |
 | `input_image`    | Prompt tokens that were image rather than text, where reported    |
 | `cache_read`     | Prompt tokens served from the prompt cache                        |
-| `cache_write`    | Prompt tokens written into the prompt cache                       |
+| `cache_write`    | Prompt tokens written into the prompt cache at its default TTL    |
+| `cache_write_1h` | Prompt tokens written into the prompt cache with a one-hour TTL   |
 | `output`         | Generated tokens excluding reasoning                              |
 | `output_image`   | Generated tokens that were image rather than text, where reported |
 | `reasoning`      | Reasoning / thinking tokens                                       |
@@ -90,10 +91,10 @@ rather than merely tidy: each tier is priced differently by every provider, so c
 other axis leaves that arithmetic to every query.
 
 Because the buckets are disjoint, `sum by (kind)` is the total,
-`input_uncached + cache_read + cache_write` is the full prompt, and a cache hit rate is
-`cache_read / (that sum)` — on every provider. The alternative, exporting each provider's raw fields
-and normalising in PromQL, would put the correction in every query and every dashboard instead of in
-one function with tests.
+`input_uncached + cache_read + cache_write + cache_write_1h` is the full prompt, and a cache hit
+rate is `cache_read / (that sum)` — on every provider. The alternative, exporting each provider's
+raw fields and normalising in PromQL, would put the correction in every query and every dashboard
+instead of in one function with tests.
 
 Buckets a provider does not report are not emitted at all, so absent means "not reported" rather
 than zero — the same distinction the span attributes already preserve.

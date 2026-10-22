@@ -20,6 +20,7 @@ from typing import (
     Any,
     Literal,
     NoReturn,
+    NotRequired,
     TypedDict,
     TypeVar,
     cast,
@@ -128,6 +129,12 @@ class _StreamingToolAccumulator(TypedDict):
 # parts. `redacted_thinking` blocks carry an opaque `data` payload instead.
 _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 
+# Labels a system message that arrives after the conversation has started
+# (a delegation completion, a callback trigger), which is rendered where it
+# occurs rather than in the top-level `system` value. See
+# _convert_messages_to_anthropic_format.
+_SYSTEM_NOTICE_PREFIX = "[System notice]\n"
+
 # The API requires max_tokens on every request and has no default of its own.
 # Current models think on every turn, and thinking spends this budget before
 # the reply does, so a tight cap returns a turn that is all thinking and no
@@ -176,6 +183,7 @@ class _MergedAnthropicUsage:
         self.cache_creation_input_tokens = getattr(
             started, "cache_creation_input_tokens", None
         )
+        self.cache_creation = getattr(started, "cache_creation", None)
         self.output_tokens = getattr(delta, "output_tokens", None) or (
             getattr(started, "output_tokens", 0) or 0
         )
@@ -250,10 +258,15 @@ class AnthropicProviderMetadata(TypedDict):
     API rejects a request whose thinking block has an altered `signature` with
     ``400 Invalid 'signature' in 'thinking' block``. Their *position* within the
     turn is not checked, so only content fidelity has to be preserved.
+
+    ``response_id`` is the id of the streamed response that produced the turn.
+    The next request names it as ``diagnostics.previous_message_id``, so the API
+    can say where that request's prompt diverged from this one's.
     """
 
     provider: Literal["anthropic"]
     thinking_blocks: list[JsonObject]
+    response_id: NotRequired[str]
 
 
 class AnthropicClient(BaseLLMClient):
@@ -304,15 +317,80 @@ class AnthropicClient(BaseLLMClient):
         return blocks
 
     @staticmethod
-    def _thinking_metadata(
+    def _provider_metadata(
         thinking_blocks: list[JsonObject],
+        *,
+        response_id: str | None = None,
     ) -> AnthropicProviderMetadata | None:
-        """Wrap thinking blocks as provider metadata, or None when there are none."""
-        if not thinking_blocks:
+        """Wrap a turn's replay state as provider metadata, or None when it has none."""
+        if not thinking_blocks and response_id is None:
             return None
-        return AnthropicProviderMetadata(
+        metadata = AnthropicProviderMetadata(
             provider="anthropic", thinking_blocks=thinking_blocks
         )
+        if response_id is not None:
+            metadata["response_id"] = response_id
+        return metadata
+
+    @staticmethod
+    def _previous_response_id(messages: Sequence[LLMMessage]) -> str | None:
+        """The id of the response this request continues, if Anthropic served it.
+
+        Only the newest assistant turn is the previous request's response; an
+        older one would compare against a request this one never extended.
+        """
+        for message in reversed(messages):
+            if not isinstance(message, AssistantMessage):
+                continue
+            metadata = message.provider_metadata
+            if isinstance(metadata, dict) and metadata.get("provider") == "anthropic":
+                response_id = metadata.get("response_id")
+                if isinstance(response_id, str):
+                    return response_id
+            return None
+        return None
+
+    def _record_cache_diagnosis(
+        self,
+        reasoning_info: MessageReasoningInfo,
+        message: object,
+    ) -> None:
+        """Copy the API's cache diagnosis for *message* into *reasoning_info*.
+
+        A null ``diagnostics`` -- no divergence, or nothing to compare against --
+        records nothing. A comparison still running when the response started
+        is recorded as ``pending``. A divergence is logged as well as recorded:
+        the cache still works past it, so nothing else would ever say it
+        happened.
+
+        The SDK in use predates the field, so it is read off the response as an
+        unparsed extra.
+        """
+        diagnostics = getattr(message, "diagnostics", None)
+        if not isinstance(diagnostics, dict):
+            return
+        reason = diagnostics.get("cache_miss_reason")
+        if reason is None:
+            reasoning_info["cache_miss_reason"] = "pending"
+            return
+        if not isinstance(reason, dict) or not isinstance(reason.get("type"), str):
+            # Diagnostics are advisory; a shape this code does not know is not a
+            # reason to fail the reply it rode in on.
+            logger.warning("Unrecognised Anthropic cache diagnosis: %r", diagnostics)
+            return
+        reason_type = reason["type"]
+        reasoning_info["cache_miss_reason"] = reason_type
+        missed = reason.get("cache_missed_input_tokens")
+        if isinstance(missed, int):
+            reasoning_info["cache_missed_input_tokens"] = missed
+        if reason_type.endswith("_changed"):
+            logger.warning(
+                "Anthropic prompt cache prefix diverged from the previous request "
+                "(%s, ~%s input tokens after the divergence) on %s",
+                reason_type,
+                missed,
+                self.model,
+            )
 
     @staticmethod
     def _thinking_blocks_from_metadata(provider_metadata: object) -> list[JsonObject]:
@@ -844,7 +922,8 @@ class AnthropicClient(BaseLLMClient):
         nothing ever reads.
 
         Key differences from OpenAI:
-        - System messages are extracted to the top-level `system` parameter
+        - Leading system messages are extracted to the top-level `system`
+          parameter; later ones become labelled user blocks in place
         - Tool results use role: "user" with tool_result content blocks
         - Assistant tool calls use tool_use content blocks
         - Consecutive same-role messages are merged (Anthropic requires alternating roles)
@@ -853,17 +932,35 @@ class AnthropicClient(BaseLLMClient):
         system_parts: list[str] = []
         # Stable-prefix length of the first system message, used to place the
         # prompt-cache breakpoint. Only the first is considered: it is the
-        # profile's system prompt, and anything hoisted after it (mid-conversation
-        # system triggers) is per-turn material that belongs past the breakpoint.
+        # profile's system prompt.
         stable_prefix_len: int | None = None
         # ast-grep-ignore: no-dict-any - MessageParam TypedDict incompatible with dynamic content merging in _merge_consecutive_roles
         api_messages: list[dict[str, Any]] = []
 
         for msg in messages:
-            if isinstance(msg, SystemMessage):
+            if isinstance(msg, SystemMessage) and not api_messages:
                 if not system_parts:
                     stable_prefix_len = msg.stable_prefix_len
                 system_parts.append(msg.content)
+
+            elif isinstance(msg, SystemMessage):
+                # A system message that arrives once the conversation is under
+                # way stays where it occurred. `system` precedes the history in
+                # the cache key, so hoisting one there would rewrite the whole
+                # history's cache entry each time a notice appeared or dropped
+                # out of the window. A labelled user block is accepted by every
+                # model and in every position, which the native mid-conversation
+                # `system` role is not: its placement rules depend on what
+                # follows it, so the same message could change shape between
+                # one request and the next.
+                api_messages.append({
+                    "role": "user",
+                    "content": [
+                        TextBlockParam(
+                            type="text", text=f"{_SYSTEM_NOTICE_PREFIX}{msg.content}"
+                        )
+                    ],
+                })
 
             elif isinstance(msg, UserMessage):
                 content = self._convert_user_content(msg)
@@ -1048,6 +1145,11 @@ class AnthropicClient(BaseLLMClient):
             reasoning_info["cached_prompt_tokens"] = cache_read
         if cache_write is not None:
             reasoning_info["cache_write_tokens"] = cache_write
+        cache_write_1h = getattr(
+            getattr(usage, "cache_creation", None), "ephemeral_1h_input_tokens", None
+        )
+        if cache_write_1h is not None:
+            reasoning_info["cache_write_1h_tokens"] = cache_write_1h
         return reasoning_info
 
     @staticmethod
@@ -1255,6 +1357,17 @@ class AnthropicClient(BaseLLMClient):
         )
         if deferred_names:
             _add_beta_header(params, _TOOL_CHANGES_BETA)
+        if streaming:
+            # Opting in on every agent-loop request is what stores the
+            # fingerprint the next request compares against; the first in a
+            # conversation names no predecessor. Sent as a raw body field
+            # because the SDK in use predates it.
+            params["extra_body"] = {
+                **(params.get("extra_body") or {}),
+                "diagnostics": {
+                    "previous_message_id": self._previous_response_id(messages)
+                },
+            }
         return params
 
     def _build_request_params(
@@ -1492,7 +1605,7 @@ class AnthropicClient(BaseLLMClient):
             content=content_text or None,
             tool_calls=tool_calls if tool_calls else None,
             reasoning_info=reasoning_info,
-            provider_metadata=self._thinking_metadata(thinking_blocks),
+            provider_metadata=self._provider_metadata(thinking_blocks),
             resolved_model=response.model,
         )
         telemetry.record_output(llm_output)
@@ -1716,6 +1829,7 @@ class AnthropicClient(BaseLLMClient):
                     async with self.client.messages.stream(**params) as stream:
                         current_tool: _StreamingToolAccumulator | None = None
                         started_usage: Any | None = None
+                        started_message: object | None = None
 
                         async for event in stream:
                             # Usage arrives in two frames -- the prompt side on
@@ -1725,6 +1839,7 @@ class AnthropicClient(BaseLLMClient):
                             # keeps the tokens the provider already reported.
                             if event.type == "message_start":
                                 log_input_transformations(event.message)
+                                started_message = event.message
                                 started_usage = getattr(event.message, "usage", None)
                                 if started_usage is not None:
                                     telemetry.record_usage(
@@ -1811,11 +1926,12 @@ class AnthropicClient(BaseLLMClient):
                     # Taken from the assembled final message rather than the
                     # deltas: only this copy carries the `signature` the API
                     # verifies when the block is replayed.
-                    thinking_metadata = self._thinking_metadata(
-                        self._extract_thinking_blocks(final_message.content)
+                    provider_metadata = self._provider_metadata(
+                        self._extract_thinking_blocks(final_message.content),
+                        response_id=final_message.id,
                     )
-                    if thinking_metadata:
-                        metadata["provider_metadata"] = thinking_metadata
+                    if provider_metadata:
+                        metadata["provider_metadata"] = provider_metadata
                 if final_message:
                     telemetry.record_response_metadata(
                         resolved_model=final_message.model,
@@ -1824,13 +1940,17 @@ class AnthropicClient(BaseLLMClient):
                     )
                     metadata["resolved_model"] = final_message.model
 
-                # Finalized after the response metadata is recorded, so the
-                # measurements stamped onto it include the model that served.
-                metadata["reasoning_info"] = telemetry.finalize_usage(
+                reasoning_info = (
                     self._reasoning_info_from_usage(final_message.usage)
                     if final_message and final_message.usage
                     else None
                 )
+                # The diagnosis rides on message_start, not on the final message.
+                if reasoning_info is not None and started_message is not None:
+                    self._record_cache_diagnosis(reasoning_info, started_message)
+                # Finalized after the response metadata is recorded, so the
+                # measurements stamped onto it include the model that served.
+                metadata["reasoning_info"] = telemetry.finalize_usage(reasoning_info)
 
                 telemetry.finish_success({"streaming": True, "metadata": metadata})
 
@@ -1945,16 +2065,19 @@ class AnthropicClient(BaseLLMClient):
 
         metadata: StreamEventMetadata = {}
         if response.usage:
-            metadata["reasoning_info"] = self._reasoning_info_from_usage(response.usage)
-        # Thinking blocks must reach the done event here exactly as they do on
-        # the live streaming path. Without this, every test exercising Anthropic
+            reasoning_info = self._reasoning_info_from_usage(response.usage)
+            self._record_cache_diagnosis(reasoning_info, response)
+            metadata["reasoning_info"] = reasoning_info
+        # Replay state must reach the done event here exactly as it does on the
+        # live streaming path. Without this, every test exercising Anthropic
         # streaming would silently run without reasoning state and prove nothing
         # about the round trip.
-        thinking_metadata = self._thinking_metadata(
-            self._extract_thinking_blocks(response.content)
+        provider_metadata = self._provider_metadata(
+            self._extract_thinking_blocks(response.content),
+            response_id=response.id,
         )
-        if thinking_metadata:
-            metadata["provider_metadata"] = thinking_metadata
+        if provider_metadata:
+            metadata["provider_metadata"] = provider_metadata
 
         events.append(LLMStreamEvent(type="done", metadata=metadata))
         return events
