@@ -1197,7 +1197,8 @@ A delegated run's reply is not shown to the person, so its rating sits on the tu
 it: the delegating turn when the run finished inline, or a later wake turn when it was handed off.
 The wake turn is not recorded on the run, so the query below rates inline runs only. It counts
 outcomes for every run from the arm persisted on the run when it was queued, so a run that failed
-before it started is counted too:
+before it started is counted too. A thread's reply is shown to the person and rated where it
+appears, like any other turn, so thread runs are left to the query above:
 
 ```sql
 SELECT dr.model_selection_json->>'tier' AS arm,
@@ -1208,7 +1209,8 @@ SELECT dr.model_selection_json->>'tier' AS arm,
 FROM delegation_runs dr
 LEFT JOIN turn_feedback f
        ON f.turn_id = dr.source_turn_id AND dr.handed_off_at IS NULL
-WHERE dr.model_selection_json->>'experiment_id' = 'browser-argon-vs-sol-2026-10'
+WHERE dr.run_kind = 'delegation'
+  AND dr.model_selection_json->>'experiment_id' = 'browser-argon-vs-sol-2026-10'
 GROUP BY 1;
 ```
 
