@@ -18,6 +18,7 @@ from family_assistant.config_models import AppConfig
 from family_assistant.llm.factory import LLMClientFactory
 from family_assistant.llm.model_selection import ModelTierEligibility
 from family_assistant.llm.model_tiers import (
+    resolve_entry_model_parameters,
     resolve_profile_llm_model,
     resolve_tier_client_config,
     validate_profile_model_tier,
@@ -46,6 +47,32 @@ def _tier_config_for(config: AppConfig, profile_id: str) -> dict[str, object]:
     return resolve_tier_client_config(tier, config.llm_parameters)
 
 
+# ast-grep-ignore: no-dict-any - LLM params are provider-specific and genuinely arbitrary
+def _standard_fallback_parameters(config: AppConfig) -> dict[str, dict[str, object]]:
+    return resolve_entry_model_parameters(
+        config.model_tiers["standard"].chain[1], config.llm_parameters
+    )
+
+
+def test_standard_tier_falls_back_to_sol_at_medium_effort(
+    shipped_config: AppConfig,
+) -> None:
+    """The interactive tier's own medium wins over the global entry's high."""
+    resolved = resolve_tier_client_config(
+        shipped_config.model_tiers["standard"], shipped_config.llm_parameters
+    )["retry_config"]
+    fallback = LLMClientFactory.create_client({
+        **resolved["fallback"],
+        "api_key": "test-key",
+    })
+
+    assert isinstance(fallback, OpenAIClient)
+    assert fallback.model == "gpt-6.1-sol"
+    assert fallback._get_model_specific_params(fallback.model) == {
+        "reasoning_effort": "medium"
+    }
+
+
 @pytest.mark.parametrize(
     "profile_id",
     [
@@ -54,7 +81,7 @@ def _tier_config_for(config: AppConfig, profile_id: str) -> dict[str, object]:
         pytest.param("engineer", id="engineer"),
     ],
 )
-def test_standard_tier_profiles_keep_the_gemini_terra_chain(
+def test_standard_tier_profiles_keep_the_gemini_sol_chain(
     shipped_config: AppConfig, profile_id: str
 ) -> None:
     """Through the assistant, so the tier reaching the client is asserted too."""
@@ -67,8 +94,8 @@ def test_standard_tier_profiles_keep_the_gemini_terra_chain(
             },
             "fallback": {
                 "provider": "openai",
-                "model": "gpt-5.6-terra",
-                "model_parameters": shipped_config.llm_parameters,
+                "model": "gpt-6.1-sol",
+                "model_parameters": _standard_fallback_parameters(shipped_config),
             },
         }
     }
@@ -84,7 +111,7 @@ def test_complex_tasks_runs_the_opus_sol_chain(shipped_config: AppConfig) -> Non
             },
             "fallback": {
                 "provider": "openai",
-                "model": "gpt-6-sol",
+                "model": "gpt-6.1-sol",
                 "model_parameters": shipped_config.llm_parameters,
             },
         }
@@ -125,8 +152,8 @@ def test_a_profile_inheriting_the_default_tier_keeps_the_default_chain(
             },
             "fallback": {
                 "provider": "openai",
-                "model": "gpt-5.6-terra",
-                "model_parameters": shipped_config.llm_parameters,
+                "model": "gpt-6.1-sol",
+                "model_parameters": _standard_fallback_parameters(shipped_config),
             },
         }
     }
@@ -139,7 +166,7 @@ def test_deep_tier_reasoning_still_comes_from_the_global_map(
     deep = shipped_config.model_tiers["deep"]
 
     assert all(entry.llm_parameters is None for entry in deep.chain)
-    assert shipped_config.llm_parameters["gpt-6-sol"]["reasoning_effort"] == "high"
+    assert shipped_config.llm_parameters["gpt-6.1-sol"]["reasoning_effort"] == "high"
     assert shipped_config.llm_parameters["claude-opus-5-5"]["output_config"] == {
         "effort": "high"
     }
@@ -274,8 +301,8 @@ def test_browser_tier_runs_sol_with_a_sonnet_fallback_at_medium_effort(
     """End to end: shipped tier -> factory -> the params each entry's request carries.
 
     Sonnet 5.5 rejects `enabled` + `budget_tokens` mid-conversation, and the
-    global map has no `gpt-6.1-sol` key (`gpt-6-sol` does not match it by
-    substring), so both entries' parameters are asserted where they land.
+    browser entry's medium must win over the global `gpt-6.1-sol` high, so both
+    entries' parameters are asserted where they land.
     """
     resolved = resolve_tier_client_config(
         shipped_config.model_tiers["browser"], shipped_config.llm_parameters

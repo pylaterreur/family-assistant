@@ -1022,14 +1022,13 @@ request *is* the authorization. A model choosing it is not, which is why the shi
 `default_assistant` allows `standard`, `deep` and `frontier` but admits only `standard` and `deep`
 automatically.
 
-The shipped presets — `gpt_6_astra`, `gpt_6_1_sol`, `gpt_6_sol`, `claude_opus_5_5`,
-`claude_fable_5_1`, `kimi_k3` and `gemini_4_argon` — are listed once, in
-`default_profile_settings.delegation_model_tiers`, so a delegating model may pin any profile that
-has a tier to any of them without a confirmation ("run complex_tasks on Gemini 4 Argon"). A profile
-that names an inline model drops the inherited list, and a profile that declares its own replaces
-it, so `delegation_model_tiers: []` keeps a profile off presets entirely. Adding a preset is a
-`model_tiers` entry plus a name in that list. The profile catalog lists the presets most profiles
-share once, rather than under each profile.
+The shipped presets — `gpt_6_astra`, `gpt_6_1_sol`, `claude_opus_5_5`, `claude_fable_5_1`, `kimi_k3`
+and `gemini_4_argon` — are listed once, in `default_profile_settings.delegation_model_tiers`, so a
+delegating model may pin any profile that has a tier to any of them without a confirmation ("run
+complex_tasks on Gemini 4 Argon"). A profile that names an inline model drops the inherited list,
+and a profile that declares its own replaces it, so `delegation_model_tiers: []` keeps a profile off
+presets entirely. Adding a preset is a `model_tiers` entry plus a name in that list. The profile
+catalog lists the presets most profiles share once, rather than under each profile.
 
 #### The council's seats
 
@@ -4246,8 +4245,7 @@ Settings currently shipped in `defaults.yaml`:
 | ----------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `claude-opus-5`   | `thinking: {type: adaptive}`, `output_config: {effort: high}` | The recipe Opus 5 gets wherever a deployment names it; no shipped tier runs Opus 5 itself. Thinking on for the long tool loops it suits. See the comment in `defaults.yaml`.                                  |
 | `claude-opus-5-5` | `thinking: {type: adaptive}`, `output_config: {effort: high}` | The `deep` tier's primary, which `complex_tasks` runs on and the assistant and `engineer` reach by request. Restated rather than inherited from `claude-opus-5` because Opus 5.5 defaults to `medium` effort. |
-| `gpt-6-sol`       | `reasoning_effort: high`                                      | The `deep` tier's fallback, so it can afford to think longer.                                                                                                                                                 |
-| `gpt-5.6-terra`   | `reasoning_effort: medium`                                    | The fallback for `default_assistant` and `camera_analyst`, both of which answer interactively, where time-to-first-token is felt directly.                                                                    |
+| `gpt-6.1-sol`     | `reasoning_effort: high`                                      | The `deep` tier's fallback, so it can afford to think longer. The `standard` and `browser` tiers set `medium` on their own entries.                                                                           |
 
 `reasoning_effort` accepts `none`, `low`, `medium`, `high`, `xhigh` or `max` on GPT-6 and GPT-5.6
 models and defaults to `medium` when unset. Raising it trades latency and tokens for capability; it
