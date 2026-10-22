@@ -186,8 +186,12 @@ model_tiers:
       # net, at medium effort because this path answers interactively, where
       # time-to-first-token is felt directly. Sonnet 5.5 takes the `adaptive`
       # thinking shape and rejects `enabled` + `budget_tokens` mid-conversation.
+      # Background calls (automations, callbacks, email intake, indexing) go at
+      # Flex, about half price, falling back to Standard when Flex is full;
+      # interactive calls never do. See docs/design/flex-inference.md.
       - provider: "google"
         model: "gemini-3.8-flash"
+        flex: true
       - provider: "anthropic"
         model: "claude-sonnet-5-5"
         llm_parameters:

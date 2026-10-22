@@ -115,6 +115,10 @@ class MessageReasoningInfo(TypedDict, total=False):
     where the provider reports the split. Anthropic bills these at twice the
     input price against 1.25x for the default five minutes, so the two cannot
     share a price."""
+    service_tier: str
+    """The price class the provider says it served the request at
+    (``standard``, ``flex``, ``priority``...), where it reports one: OpenAI
+    in the response, Gemini as the usage metadata's traffic type."""
     cache_miss_reason: str
     """Where this request's prompt diverged from the previous request in the
     conversation, as the provider diagnosed it (Anthropic: ``system_changed``,

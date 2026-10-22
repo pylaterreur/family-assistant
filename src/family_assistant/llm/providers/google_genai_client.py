@@ -57,6 +57,8 @@ from family_assistant.llm.antigravity_egress import (
     EgressResolver,
     github_git_instruction,
 )
+from family_assistant.llm.call_context import current_service_tier
+from family_assistant.llm.connections import ConnectionKey, ProviderConnections
 from family_assistant.llm.deferred_tools import resolve_deferred_tools
 from family_assistant.llm.google_types import (
     GeminiProviderMetadata,
@@ -578,6 +580,21 @@ def _http_options_for_base_url(base_url: str) -> types.HttpOptions:
     )
 
 
+# Gemini reports the capacity a request was served from as its usage's traffic
+# type; these are the price classes those name.
+_SERVED_SERVICE_TIERS: dict[object, str] = {
+    types.TrafficType.ON_DEMAND: "standard",
+    types.TrafficType.ON_DEMAND_FLEX: "flex",
+    types.TrafficType.ON_DEMAND_PRIORITY: "priority",
+    types.TrafficType.PROVISIONED_THROUGHPUT: "provisioned",
+}
+
+
+async def _close_genai_client(client: genai.Client) -> None:
+    """Release a shared SDK client's async connection pool."""
+    await client.aio.aclose()
+
+
 class GoogleGenAIClient(BaseLLMClient):
     """Direct Google Generative AI implementation."""
 
@@ -597,6 +614,7 @@ class GoogleGenAIClient(BaseLLMClient):
         antigravity_egress_resolver: EgressResolver | None = None,
         debug_messages: bool | None = None,
         debug_config: dict[str, str | None] | None = None,
+        connections: ProviderConnections | None = None,
         **kwargs: Any,  # noqa: ANN401 # Accepts arbitrary Google GenAI API parameters
     ) -> None:
         """
@@ -619,9 +637,13 @@ class GoogleGenAIClient(BaseLLMClient):
                 primarily for tests; built from ``antigravity_environment`` when omitted
             debug_messages: Enable detailed message logging. If None, reads from DEBUG_LLM_MESSAGES env var.
             debug_config: SDK DebugConfig dict for record/replay in tests (client_mode, replay_id, replays_directory)
+            connections: Registry to borrow the SDK client from; the client
+                owns a private one when omitted, or when ``debug_config`` is
+                set, since a record/replay client is bound to one cassette
             **kwargs: Default parameters for generation, as for ``model_parameters``
         """
         http_options = _http_options_for_base_url(base_url) if base_url else None
+        self._owns_client = connections is None or bool(debug_config)
         # Create client with optional debug_config for record/replay in tests
         if debug_config:
             self.client = genai.Client(
@@ -629,8 +651,14 @@ class GoogleGenAIClient(BaseLLMClient):
                 http_options=http_options,
                 debug_config=DebugConfig(**debug_config),
             )
-        else:
+        elif connections is None:
             self.client = genai.Client(api_key=api_key, http_options=http_options)
+        else:
+            self.client = connections.get(
+                ConnectionKey("google", base_url, api_key),
+                lambda: genai.Client(api_key=api_key, http_options=http_options),
+                _close_genai_client,
+            )
         # Google API requires 'models/' prefix
         self.model_name = (
             f"models/{model}" if not model.startswith("models/") else model
@@ -699,13 +727,15 @@ class GoogleGenAIClient(BaseLLMClient):
     async def close(self) -> None:
         """Close the client and flush any pending cassettes (for record/replay)."""
         # Close the underlying API client to flush replay cassettes
-        # The _api_client may be a ReplayApiClient which has a close() method
-        try:
-            api_client = getattr(self.client, "_api_client", None)
-            if api_client and hasattr(api_client, "close"):
-                api_client.close()
-        except Exception as e:
-            logger.debug(f"Error closing API client: {e}")
+        # The _api_client may be a ReplayApiClient which has a close() method.
+        # A borrowed client is closed by the registry it came from.
+        if self._owns_client:
+            try:
+                api_client = getattr(self.client, "_api_client", None)
+                if api_client and hasattr(api_client, "close"):
+                    api_client.close()
+            except Exception as e:
+                logger.debug(f"Error closing API client: {e}")
         if self._owned_antigravity_egress is not None:
             await self._owned_antigravity_egress.aclose()
 
@@ -734,8 +764,13 @@ class GoogleGenAIClient(BaseLLMClient):
         Every generateContent path starts here, so a parameter configured in
         ``llm_parameters`` reaches chat, streaming and structured output alike.
         Callers then set the fields the client owns (tools, response format).
+        The price class is the in-flight call's, not the client's: one client
+        serves interactive and background calls alike.
         """
-        return types.GenerateContentConfig.model_validate(self._generation_fields)
+        config = types.GenerateContentConfig.model_validate(self._generation_fields)
+        if current_service_tier() == "flex":
+            config.service_tier = types.ServiceTier.FLEX
+        return config
 
     def _extract_text_response(self, response: object) -> str | None:
         """Extract text content from a GenerateContent response."""
@@ -1718,8 +1753,8 @@ class GoogleGenAIClient(BaseLLMClient):
                 # terminal path has recorded the call.
                 telemetry.finish_abandoned()
 
-    def _map_error_to_typed_exception(self, e: Exception) -> LLMProviderError:
-        """Map a raw exception to a typed LLMProviderError subclass."""
+    def _map_error_message_to_typed_exception(self, e: Exception) -> LLMProviderError:
+        """Map an exception that carries no HTTP status, by its message."""
         error_message = str(e)
 
         if "401" in error_message or "api key" in error_message.lower():
@@ -1732,6 +1767,14 @@ class GoogleGenAIClient(BaseLLMClient):
                 provider="google",
                 model=self.model_name,
                 retry_after=self._parse_retry_after(error_message),
+            )
+        elif (
+            "503" in error_message
+            or "unavailable" in error_message.lower()
+            or "overloaded" in error_message.lower()
+        ):
+            return ServiceUnavailableError(
+                error_message, provider="google", model=self.model_name
             )
         elif "404" in error_message or "not found" in error_message.lower():
             return ModelNotFoundError(
@@ -1804,6 +1847,9 @@ class GoogleGenAIClient(BaseLLMClient):
             )
             if image_tokens is not None:
                 reasoning_info[key] = image_tokens  # pyright: ignore[reportGeneralTypeIssues] - key is a literal from the tuple above
+        served_tier = _SERVED_SERVICE_TIERS.get(getattr(usage, "traffic_type", None))
+        if served_tier is not None:
+            reasoning_info["service_tier"] = served_tier
         return reasoning_info
 
     @staticmethod
@@ -1857,11 +1903,14 @@ class GoogleGenAIClient(BaseLLMClient):
             return float(match.group(1))
         return None
 
-    def _map_interactions_error(self, e: Exception) -> LLMProviderError:
-        """Map an Interactions API exception to a typed LLMProviderError.
+    def _map_error_to_typed_exception(self, e: Exception) -> LLMProviderError:
+        """Map a raw exception to a typed LLMProviderError subclass.
 
-        Uses duck-typing to check for status_code (SDK APIStatusError) and
-        falls back to string-based matching for non-HTTP errors.
+        An HTTP status is authoritative where the SDK error carries one --
+        generateContent's ``APIError.code`` and the Interactions API's
+        ``status_code`` alike -- so a 503, which a Flex request returns when
+        capacity runs out, is unavailable rather than an unknown error. Only
+        errors without one fall back to matching the message.
         """
         error_message = str(e)
         status_code = _http_status(e)
@@ -1884,7 +1933,7 @@ class GoogleGenAIClient(BaseLLMClient):
                     error_message, provider="google", model=self.model_name
                 )
 
-        return self._map_error_to_typed_exception(e)
+        return self._map_error_message_to_typed_exception(e)
 
     async def format_user_message_with_file(
         self,
@@ -2316,8 +2365,8 @@ class GoogleGenAIClient(BaseLLMClient):
         future), not just Deep Research — used by the submit/poll/cancel
         primitives for the pollable-delegation path (not the interactive
         streaming path, which raises ``LLMProviderError`` subtypes via
-        ``_map_interactions_error`` instead). Duck-types on ``status_code``
-        (SDK ``APIStatusError``), mirroring ``_map_interactions_error``'s own
+        ``_map_error_to_typed_exception`` instead). Duck-types on ``status_code``
+        (SDK ``APIStatusError``), mirroring ``_map_error_to_typed_exception``'s own
         pattern.
 
         A connection that failed or timed out is transient wherever it
@@ -2757,7 +2806,7 @@ class GoogleGenAIClient(BaseLLMClient):
             if isinstance(e, LLMProviderError):
                 typed_error = e
             else:
-                typed_error = self._map_interactions_error(e)
+                typed_error = self._map_error_to_typed_exception(e)
             logger.exception(
                 f"Google {agent_label} error ({type(typed_error).__name__}): {e}"
             )

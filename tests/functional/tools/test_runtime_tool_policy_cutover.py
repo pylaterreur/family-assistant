@@ -21,6 +21,8 @@ from tests.mocks.mock_llm import RuleBasedMockLLMClient
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+    from family_assistant.llm.connections import ProviderConnections
+
 
 def _build_policy_config(
     *,
@@ -188,7 +190,9 @@ async def test_enabled_reviewer_does_not_construct_provider_during_startup(
         reviewer_close_calls += 1
         await original_reviewer_close(reviewer)
 
-    def create_client(config: dict[str, object]) -> RuleBasedMockLLMClient:
+    def create_client(
+        config: dict[str, object], connections: ProviderConnections | None = None
+    ) -> RuleBasedMockLLMClient:
         created_configs.append(config)
         if config.get("provider") == "google":
             raise AssertionError("reviewer provider was constructed during startup")
@@ -225,7 +229,9 @@ async def test_reviewer_model_override_becomes_the_retry_primary(
     })
     created_configs: list[dict[str, object]] = []
 
-    def create_client(config: dict[str, object]) -> RuleBasedMockLLMClient:
+    def create_client(
+        config: dict[str, object], connections: ProviderConnections | None = None
+    ) -> RuleBasedMockLLMClient:
         created_configs.append(config)
         return RuleBasedMockLLMClient(rules=[])
 

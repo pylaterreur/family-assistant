@@ -109,6 +109,12 @@ class RetryModelConfig(BaseModel):
     # so it applies last and only to this entry.
     # ast-grep-ignore: no-dict-any - LLM params are provider-specific and genuinely arbitrary
     llm_parameters: dict[str, Any] | None = None
+    # Send this entry's background calls -- the ones nobody is waiting on --
+    # at the provider's discounted Flex price class, degrading to Standard on
+    # the same model when Flex has no capacity. Interactive calls are never
+    # affected. Google and OpenAI-compatible providers only; see
+    # docs/design/flex-inference.md.
+    flex: bool = False
 
 
 class RetryConfig(BaseModel):

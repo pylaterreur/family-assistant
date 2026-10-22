@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from family_assistant.llm import LLMInterface
+    from family_assistant.llm.connections import ProviderConnections
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ class LLMClientFactory:
         cls,
         # ast-grep-ignore: no-dict-any - LLM config dict has varying keys per provider/format
         config: dict[str, Any],
+        connections: "ProviderConnections | None" = None,
     ) -> "LLMInterface":
         """
         Create appropriate LLM client based on configuration.
@@ -59,6 +61,9 @@ class LLMClientFactory:
 
                 Retry format:
                 - retry_config: Dict with 'primary' and optional 'fallback' configs
+            connections: Registry the clients borrow their provider SDK clients
+                from, so clients on one endpoint share a connection pool. Each
+                client builds a private one when omitted.
 
         Returns:
             Instantiated LLM client
@@ -71,14 +76,18 @@ class LLMClientFactory:
             retry_config = config["retry_config"]
 
             # Create primary client
-            primary_client = cls._create_single_client(retry_config["primary"])
+            primary_client = cls._create_single_client(
+                retry_config["primary"], connections
+            )
             primary_model = retry_config["primary"]["model"]
 
             # Create fallback if specified
             fallback_client = None
             fallback_model = None
             if "fallback" in retry_config:
-                fallback_client = cls._create_single_client(retry_config["fallback"])
+                fallback_client = cls._create_single_client(
+                    retry_config["fallback"], connections
+                )
                 fallback_model = retry_config["fallback"]["model"]
 
             # Return retrying wrapper
@@ -94,11 +103,15 @@ class LLMClientFactory:
             )
 
         # Simple configuration - create single client
-        return cls._create_single_client(config)
+        return cls._create_single_client(config, connections)
 
     @classmethod
-    # ast-grep-ignore: no-dict-any - LLM config dict has varying keys per provider/format
-    def _create_single_client(cls, config: dict[str, Any]) -> "LLMInterface":
+    def _create_single_client(
+        cls,
+        # ast-grep-ignore: no-dict-any - LLM config dict has varying keys per provider/format
+        config: dict[str, Any],
+        connections: "ProviderConnections | None",
+    ) -> "LLMInterface":
         """Create a single LLM client (existing logic)."""
         model = config.get("model")
         if not model:
@@ -144,7 +157,7 @@ class LLMClientFactory:
         provider_params = {
             k: v
             for k, v in config.items()
-            if k not in {"model", "provider", "api_key", "model_parameters"}
+            if k not in {"model", "provider", "api_key", "model_parameters", "flex"}
         }
 
         # OpenRouter uses an OpenAI-compatible API at a custom base URL
@@ -157,6 +170,9 @@ class LLMClientFactory:
 
         # Get model_parameters from llm_parameters config
         model_parameters = config.get("model_parameters", {})
+        flex = bool(config.get("flex"))
+        if flex:
+            cls._validate_flex(provider, model, model_parameters, provider_params)
 
         # Import the provider class dynamically
         client_class_path = cls._provider_classes[provider]
@@ -168,12 +184,79 @@ class LLMClientFactory:
 
         logger.info(f"Creating {class_name} for model: {model}")
 
-        return client_class(
+        client = client_class(
             api_key=api_key,
             model=model,
             model_parameters=model_parameters,
+            connections=connections,
             **provider_params,
         )
+        if not flex:
+            return client
+        from .flex import FlexClient  # noqa: PLC0415 - flex imports this package
+
+        return FlexClient(client, model=model)
+
+    @classmethod
+    def validate_flex_config(
+        cls,
+        # ast-grep-ignore: no-dict-any - LLM config dict has varying keys per provider/format
+        config: dict[str, Any],
+    ) -> None:
+        """Refuse a single-client config whose ``flex`` it could not honour.
+
+        The same check the factory runs when it builds the client, without
+        building it, so configuration nothing builds yet still fails at startup.
+        """
+        if not config.get("flex"):
+            return
+        model = config.get("model")
+        if not model:
+            raise ValueError("Model must be specified in config")
+        provider = config.get("provider") or cls._determine_provider(model)
+        provider_params = {
+            k: v
+            for k, v in config.items()
+            if k not in {"model", "provider", "api_key", "model_parameters", "flex"}
+        }
+        cls._validate_flex(
+            provider, model, config.get("model_parameters", {}), provider_params
+        )
+
+    @staticmethod
+    def _validate_flex(
+        provider: str,
+        model: str,
+        model_parameters: dict[str, dict[str, object]],
+        # ast-grep-ignore: no-dict-any - Provider kwargs have varying types.
+        provider_params: dict[str, Any],
+    ) -> None:
+        from .flex import FLEX_PROVIDERS  # noqa: PLC0415 - flex imports this package
+        from .providers.google_genai_client import (  # noqa: PLC0415 - provider modules load on demand
+            is_interactions_agent_model,
+        )
+
+        if provider not in FLEX_PROVIDERS:
+            raise ValueError(
+                f"Model '{model}' sets flex, but provider '{provider}' has no Flex "
+                f"price class. Flex is available on: {', '.join(sorted(FLEX_PROVIDERS))}."
+            )
+        if is_interactions_agent_model(model):
+            raise ValueError(
+                f"Model '{model}' sets flex, but it is an Interactions API agent, "
+                "which takes no price class."
+            )
+        configured = {
+            pattern
+            for pattern, params in model_parameters.items()
+            if pattern in model and "service_tier" in params
+        }
+        if configured or "service_tier" in provider_params:
+            raise ValueError(
+                f"Model '{model}' sets flex and also configures service_tier "
+                f"({', '.join(sorted(configured)) or 'directly'}). Flex chooses the "
+                "price class per call; remove the explicit service_tier."
+            )
 
     @classmethod
     def _determine_provider(cls, model: str) -> str:

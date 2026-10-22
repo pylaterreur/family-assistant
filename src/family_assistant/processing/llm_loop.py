@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from family_assistant.llm import LLMInterface, LLMStreamEvent, StreamEventMetadata
-from family_assistant.llm.base import ContextLengthError
+from family_assistant.llm.base import ContextLengthError, stream_error_to_exception
 from family_assistant.llm.call_context import CallAttribution, attributed_to_profile
 from family_assistant.llm.deferred_tools import activated_tool_names
 from family_assistant.llm.google_types import GeminiProviderMetadata
@@ -48,9 +48,6 @@ from .quiet_turn import (
     QUIET_END_TOOL_RESULT,
     quiet_end_reason,
     quiet_end_record,
-)
-from .utils import (
-    _map_stream_error_to_exception,
 )
 
 if TYPE_CHECKING:
@@ -791,7 +788,7 @@ class LLMStreamingLoop:
                         # Handle errors -- map to typed exceptions when possible
                         elif event.type == "error":
                             logger.error(f"Stream error: {event.error}")
-                            raise _map_stream_error_to_exception(event)
+                            raise stream_error_to_exception(event)
 
                 def should_retry_empty_response(
                     content_for_attempt: list[str],

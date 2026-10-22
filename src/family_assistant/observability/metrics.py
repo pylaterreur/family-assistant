@@ -33,6 +33,7 @@ from family_assistant.llm.call_context import (
     CallAttribution,
     current_model_selection,
     current_processing_profile,
+    current_service_tier,
 )
 
 if TYPE_CHECKING:
@@ -124,6 +125,7 @@ _LLM_LABELS: Final = (
     "model",
     "resolved_model",
     "operation",
+    "service_tier",
 )
 
 # Provider call latency spans three orders of magnitude: a cached one-liner
@@ -543,6 +545,7 @@ def current_call_attribution() -> CallAttribution:
     return CallAttribution(
         profile_id=current_processing_profile() or UNATTRIBUTED_PROFILE,
         model_selection=current_model_selection(),
+        service_tier=current_service_tier(),
     )
 
 
@@ -572,6 +575,9 @@ def record_llm_call(
         model,
         resolved_model or model,
         operation,
+        # What the provider says it served, where it says: a Flex request a
+        # provider quietly ran at Standard was billed at Standard.
+        (reasoning_info or {}).get("service_tier") or attribution.service_tier,
     )
     try:
         LLM_CALLS.labels(*labels, outcome, error_type or "").inc()

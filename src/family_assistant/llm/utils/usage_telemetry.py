@@ -41,6 +41,8 @@ def set_usage_span_attributes(
             "gen_ai.usage.cache_write_1h_input_tokens",
             reasoning_info["cache_write_1h_tokens"],
         )
+    if "service_tier" in reasoning_info:
+        span.set_attribute("llm.response.service_tier", reasoning_info["service_tier"])
     if "cache_miss_reason" in reasoning_info:
         span.set_attribute(
             "gen_ai.usage.cache_miss_reason", reasoning_info["cache_miss_reason"]

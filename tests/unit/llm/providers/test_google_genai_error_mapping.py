@@ -1,6 +1,7 @@
 """Tests for Google GenAI error mapping and retry parsing."""
 
 import pytest
+from google.genai import errors
 
 from family_assistant.llm.base import (
     AuthenticationError,
@@ -11,6 +12,7 @@ from family_assistant.llm.base import (
     ProviderConnectionError,
     ProviderTimeoutError,
     RateLimitError,
+    ServiceUnavailableError,
 )
 from family_assistant.llm.providers.google_genai_client import GoogleGenAIClient
 
@@ -102,3 +104,51 @@ class TestMapErrorToTypedException:
         result = client._map_error_to_typed_exception(exc)
         assert isinstance(result, RateLimitError)
         assert result.retry_after is None
+
+
+@pytest.mark.no_db
+class TestMapSdkErrorByStatus:
+    """An SDK error's HTTP status decides, whatever its message says."""
+
+    @pytest.fixture
+    def client(self) -> GoogleGenAIClient:
+        return GoogleGenAIClient(api_key="test-key", model="gemini-test")
+
+    def test_a_503_is_service_unavailable(self, client: GoogleGenAIClient) -> None:
+        exc = errors.ServerError(
+            503,
+            {
+                "error": {
+                    "code": 503,
+                    "message": "The model is overloaded.",
+                    "status": "UNAVAILABLE",
+                }
+            },
+        )
+
+        assert isinstance(
+            client._map_error_to_typed_exception(exc), ServiceUnavailableError
+        )
+
+    def test_a_429_is_a_rate_limit(self, client: GoogleGenAIClient) -> None:
+        exc = errors.ClientError(
+            429,
+            {
+                "error": {
+                    "code": 429,
+                    "message": "Resource has been exhausted.",
+                    "status": "RESOURCE_EXHAUSTED",
+                }
+            },
+        )
+
+        assert isinstance(client._map_error_to_typed_exception(exc), RateLimitError)
+
+    def test_an_unavailable_message_without_a_status_is_unavailable(
+        self, client: GoogleGenAIClient
+    ) -> None:
+        exc = Exception("Service temporarily unavailable")
+
+        assert isinstance(
+            client._map_error_to_typed_exception(exc), ServiceUnavailableError
+        )

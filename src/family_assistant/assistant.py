@@ -78,6 +78,8 @@ from family_assistant.llm.antigravity_egress import (
     make_egress_credential_rotation_handler,
     stored_github_credentials,
 )
+from family_assistant.llm.call_context import Workload
+from family_assistant.llm.connections import ProviderConnections
 from family_assistant.llm.factory import LLMClientFactory
 from family_assistant.llm.model_routing import (
     MODEL_ROUTING_PROMPT_KEY,
@@ -643,6 +645,10 @@ class Assistant:
         # tier's client is configured from the tier alone, so per-profile copies
         # would be identical objects multiplied by the profile count.
         self._tier_llm_clients: dict[str, LLMInterface] = {}
+        # Every client the application builds borrows its provider SDK client
+        # from here, so one endpoint is one connection pool however many tiers,
+        # profiles and helpers run on it.
+        self.llm_connections = ProviderConnections()
         self.a2a_cancel_events: dict[str, asyncio.Event] = {}
         self.a2a_background_tasks: dict[str, asyncio.Task[None]] = {}
         self.default_processing_service: ProcessingService | None = None
@@ -1264,6 +1270,7 @@ class Assistant:
         assert self.fastapi_app is not None
         assert self.root_tools_provider is not None
         resolved_profiles = self.config.service_profiles
+        self._validate_flex_tier_entries()
         note_registry = self._load_note_registry()
         delegation_sink_classes = {
             candidate.id: sink_class
@@ -1299,6 +1306,22 @@ class Assistant:
         if not self.processing_services_registry:
             logger.critical("No processing service profiles initialized.")
             raise SystemExit("No processing service profiles initialized.")
+
+    def _validate_flex_tier_entries(self) -> None:
+        """Refuse a tier entry's ``flex`` that its client could not honour.
+
+        Tier clients are built on first use by a profile that can reach them,
+        so without this a tier nothing reaches yet would carry an invalid
+        setting until the day a profile is pointed at it.
+        """
+        for tier_id, tier in self.config.model_tiers.items():
+            for entry in tier.chain:
+                try:
+                    LLMClientFactory.validate_flex_config(
+                        resolve_entry_client_config(entry, self.config.llm_parameters)
+                    )
+                except ValueError as error:
+                    raise SystemExit(f"model_tiers.{tier_id}: {error}") from error
 
     def _load_note_registry(self) -> NoteRegistry | None:
         """Load builtin and user skills into the note registry."""
@@ -1359,7 +1382,10 @@ class Assistant:
                     }
 
                 def create_review_llm_client() -> LLMInterface:
-                    return LLMClientFactory.create_client(config=review_client_config)
+                    return LLMClientFactory.create_client(
+                        config=review_client_config,
+                        connections=self.llm_connections,
+                    )
 
                 tool_call_reviewer = ToolCallReviewer(
                     None,
@@ -1461,7 +1487,8 @@ class Assistant:
         llm_client = override or LLMClientFactory.create_client(
             config=resolve_entry_client_config(
                 routing.classifier, self.config.llm_parameters
-            )
+            ),
+            connections=self.llm_connections,
         )
         logger.info(
             "Model routing enabled in '%s' mode, classifier %s via %s.",
@@ -1503,7 +1530,8 @@ class Assistant:
             llm_client = override or LLMClientFactory.create_client(
                 config=resolve_entry_client_config(
                     summaries.model, self.config.llm_parameters
-                )
+                ),
+                connections=self.llm_connections,
             )
         except ValueError as error:
             # Summaries are on by default and the shipped model is Gemini, so a
@@ -1871,7 +1899,9 @@ class Assistant:
             client_config = self._build_profile_llm_client_config(
                 profile_conf, profile_llm_model, model_tier
             )
-            llm_client = LLMClientFactory.create_client(config=client_config)
+            llm_client = LLMClientFactory.create_client(
+                config=client_config, connections=self.llm_connections
+            )
             logger.info(
                 "Profile '%s' using client: %s", profile_id, type(llm_client).__name__
             )
@@ -1906,7 +1936,9 @@ class Assistant:
             client_config = resolve_tier_client_config(
                 self.config.model_tiers[tier_id], self.config.llm_parameters
             )
-            client = LLMClientFactory.create_client(config=client_config)
+            client = LLMClientFactory.create_client(
+                config=client_config, connections=self.llm_connections
+            )
             self._tier_llm_clients[tier_id] = client
         return client
 
@@ -1929,7 +1961,9 @@ class Assistant:
             antigravity_config.agent,
             client_config["antigravity_model"],
         )
-        return LLMClientFactory.create_client(config=client_config)
+        return LLMClientFactory.create_client(
+            config=client_config, connections=self.llm_connections
+        )
 
     @staticmethod
     def _validate_computer_use_config(
@@ -2899,20 +2933,30 @@ class Assistant:
         worker.register_task_handler("log_message", task_wrapper_handle_log_message)
         if self.document_indexer:
             worker.register_task_handler(
-                "process_uploaded_document", self.document_indexer.process_document
+                "process_uploaded_document",
+                self.document_indexer.process_document,
+                workload=Workload.BACKGROUND,
             )
         if self.email_indexer:
             worker.register_task_handler(
-                "index_email", self.email_indexer.handle_index_email
+                "index_email",
+                self.email_indexer.handle_index_email,
+                workload=Workload.BACKGROUND,
             )
         worker.register_task_handler(
-            EMAIL_INTAKE_ACTION_TASK_TYPE, handle_email_intake_action
+            EMAIL_INTAKE_ACTION_TASK_TYPE,
+            handle_email_intake_action,
+            workload=Workload.BACKGROUND,
         )
         if self.notes_indexer:
             worker.register_task_handler(
-                "index_note", self.notes_indexer.handle_index_note
+                "index_note",
+                self.notes_indexer.handle_index_note,
+                workload=Workload.BACKGROUND,
             )
-        worker.register_task_handler("llm_callback", handle_llm_callback)
+        worker.register_task_handler(
+            "llm_callback", handle_llm_callback, workload=Workload.BACKGROUND
+        )
         worker.register_task_handler(
             TURN_RESUME_TASK_TYPE,
             self._turn_lease_registry().handle_resume_task,
@@ -2938,10 +2982,14 @@ class Assistant:
             worker.handle_delegation_run_cleanup,
         )
         worker.register_task_handler(
-            "embed_and_store_batch", handle_embed_and_store_batch
+            "embed_and_store_batch",
+            handle_embed_and_store_batch,
+            workload=Workload.BACKGROUND,
         )
         worker.register_task_handler(
-            "index_message_history_batch", handle_index_message_history_batch
+            "index_message_history_batch",
+            handle_index_message_history_batch,
+            workload=Workload.BACKGROUND,
         )
         worker.register_task_handler(
             "system_event_cleanup", handle_system_event_cleanup
@@ -2949,7 +2997,9 @@ class Assistant:
         worker.register_task_handler(
             "system_error_log_cleanup", handle_system_error_log_cleanup
         )
-        worker.register_task_handler("script_execution", handle_script_execution)
+        worker.register_task_handler(
+            "script_execution", handle_script_execution, workload=Workload.BACKGROUND
+        )
         worker.register_task_handler(
             SCHEDULE_AUTOMATION_ADVANCE_TASK_TYPE,
             worker.handle_schedule_automation_advance,
@@ -2966,13 +3016,18 @@ class Assistant:
         )
         worker.register_task_handler("confirmation_expiry", handle_confirmation_expiry)
         worker.register_task_handler("attachment_cleanup", handle_attachment_cleanup)
-        worker.register_task_handler("reindex_document", self.handle_reindex_document)
+        worker.register_task_handler(
+            "reindex_document",
+            self.handle_reindex_document,
+            workload=Workload.BACKGROUND,
+        )
         worker.register_task_handler(
             MEMORY_REVIEW_SWEEP_TASK_TYPE,
             make_memory_review_sweep_handler(
                 settings=self.config.memory_config.to_review_settings(),
                 configured_contributors=self._memory_contributing_profiles(),
             ),
+            workload=Workload.BACKGROUND,
         )
         worker.register_task_handler(
             CONVERSATION_SUMMARY_SWEEP_TASK_TYPE,
@@ -2981,6 +3036,7 @@ class Assistant:
                 config=self.config.conversation_summaries,
                 stream_hub=self.fastapi_app.state.conversation_stream_hub,
             ),
+            workload=Workload.BACKGROUND,
         )
         worker.register_task_handler(
             MEMORY_REVIEW_TASK_TYPE,
@@ -2998,6 +3054,7 @@ class Assistant:
                     self.config
                 ).label_for_stored_user_id,
             ),
+            workload=Workload.BACKGROUND,
         )
         worker.register_task_handler(
             EGRESS_CREDENTIAL_ROTATION_TASK_TYPE,
@@ -3226,6 +3283,10 @@ class Assistant:
             await self.plugin_runtime.close()
         if self._jev_client is not None:
             await self._jev_client.close()
+        try:
+            await self.llm_connections.aclose()
+        except Exception:
+            logger.exception("Error closing LLM provider connections")
         if self.shared_httpx_client:
             await self.shared_httpx_client.aclose()
             logger.info("Shared httpx client closed.")

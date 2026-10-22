@@ -34,6 +34,7 @@ from family_assistant.actions import (
     resolve_home_target,
     threads_enabled,
 )
+from family_assistant.llm.call_context import Workload, running_as
 from family_assistant.llm.messages import (
     AssistantMessage,
     MessageAttachmentMetadata,
@@ -2137,6 +2138,9 @@ class TaskWorker:
         # Initialize handlers - specific handlers are registered externally
         # Update handler signature type hint
         self.task_handlers: dict[str, TaskHandler] = {}
+        # Which task types are work nobody is waiting on, so the LLM calls they
+        # make may queue for discounted capacity (docs/design/flex-inference.md).
+        self.task_workloads: dict[str, Workload] = {}
         self.worker_id = f"worker-{uuid.uuid4()}"
         if claim_renew_seconds * 3 > STALE_TASK_TIMEOUT_MINUTES * 60:
             raise ValueError(
@@ -2285,9 +2289,17 @@ class TaskWorker:
         task_type: str,
         # Update handler signature type hint
         handler: TaskHandler,
+        *,
+        workload: Workload = Workload.INTERACTIVE,
     ) -> None:
-        """Register a task handler function for a specific task type."""
+        """Register a task handler function for a specific task type.
+
+        ``workload`` says whether anybody waits on the task's result. It is
+        interactive unless the registration says otherwise, so a task type
+        nobody classified pays full price rather than making a person wait.
+        """
         self.task_handlers[task_type] = handler
+        self.task_workloads[task_type] = workload
         logger.info(
             f"Worker {self.worker_id}: Registered handler for task type: {task_type}"
         )
@@ -6415,10 +6427,13 @@ class TaskWorker:
                 effective_timeout = self._timeout_for_task_type(task["task_type"])
                 handler_started = time.monotonic()
                 try:
-                    completion_note = await asyncio.wait_for(
-                        handler(exec_context, task["payload"]),
-                        timeout=effective_timeout,
-                    )
+                    with running_as(
+                        self.task_workloads.get(task["task_type"], Workload.INTERACTIVE)
+                    ):
+                        completion_note = await asyncio.wait_for(
+                            handler(exec_context, task["payload"]),
+                            timeout=effective_timeout,
+                        )
                     logger.debug(
                         f"HANDLER SUCCESS: Worker {self.worker_id} completed handler for task {task['task_id']}"
                     )

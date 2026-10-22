@@ -7,9 +7,9 @@ from family_assistant.llm.base import (
     ContextLengthError,
     LLMProviderError,
     RateLimitError,
+    stream_error_to_exception,
 )
 from family_assistant.processing.utils import (
-    _map_stream_error_to_exception,  # noqa: PLC2701 - Testing internal function
     _user_friendly_error_message,  # noqa: PLC2701 - Testing internal function
 )
 
@@ -58,7 +58,7 @@ class TestMapStreamErrorToException:
                 "model": "gemini",
             },
         )
-        exc = _map_stream_error_to_exception(event)
+        exc = stream_error_to_exception(event)
         assert isinstance(exc, RateLimitError)
         assert exc.provider == "google"
         assert exc.model == "gemini"
@@ -73,7 +73,7 @@ class TestMapStreamErrorToException:
                 "model": "gemini",
             },
         )
-        exc = _map_stream_error_to_exception(event)
+        exc = stream_error_to_exception(event)
         assert isinstance(exc, ContextLengthError)
 
     def test_snake_case_rate_limit_error_event(self) -> None:
@@ -86,7 +86,7 @@ class TestMapStreamErrorToException:
                 "model": "gpt-4.1",
             },
         )
-        exc = _map_stream_error_to_exception(event)
+        exc = stream_error_to_exception(event)
         assert isinstance(exc, RateLimitError)
         assert exc.provider == "openai"
         assert exc.model == "gpt-4.1"
@@ -101,18 +101,18 @@ class TestMapStreamErrorToException:
                 "model": "gemini",
             },
         )
-        exc = _map_stream_error_to_exception(event)
+        exc = stream_error_to_exception(event)
         assert isinstance(exc, RuntimeError)
         assert "Something weird" in str(exc)
 
     def test_no_metadata_returns_runtime_error(self) -> None:
         event = LLMStreamEvent(type="error", error="Oops")
-        exc = _map_stream_error_to_exception(event)
+        exc = stream_error_to_exception(event)
         assert isinstance(exc, RuntimeError)
 
     def test_no_error_message_uses_default(self) -> None:
         event = LLMStreamEvent(type="error")
-        exc = _map_stream_error_to_exception(event)
+        exc = stream_error_to_exception(event)
         assert isinstance(exc, RuntimeError)
         assert "Unknown streaming error" in str(exc)
 
@@ -122,5 +122,5 @@ class TestMapStreamErrorToException:
             error="Some error",
             metadata={"error_type": "", "provider": "google", "model": "gemini"},
         )
-        exc = _map_stream_error_to_exception(event)
+        exc = stream_error_to_exception(event)
         assert isinstance(exc, RuntimeError)

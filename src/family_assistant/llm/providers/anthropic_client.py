@@ -57,6 +57,7 @@ from family_assistant.llm import (
     ToolCallItem,
     UserMessageDict,
 )
+from family_assistant.llm.connections import ConnectionKey, ProviderConnections
 from family_assistant.llm.deferred_tools import (
     is_deferred,
     resolve_deferred_tools,
@@ -279,9 +280,18 @@ class AnthropicClient(BaseLLMClient):
         model: str,
         model_parameters: dict[str, dict[str, object]] | None = None,
         base_url: str | None = None,
+        connections: ProviderConnections | None = None,
         **kwargs: Any,  # noqa: ANN401 # Accepts arbitrary Anthropic API parameters
     ) -> None:
-        self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url)
+        self._owns_client = connections is None
+        if connections is None:
+            self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url)
+        else:
+            self.client = connections.get(
+                ConnectionKey("anthropic", base_url, api_key),
+                lambda: anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url),
+                anthropic.AsyncAnthropic.close,
+            )
         self.model = model
         self.model_parameters = model_parameters or {}
         self.default_kwargs = kwargs
@@ -291,8 +301,9 @@ class AnthropicClient(BaseLLMClient):
         )
 
     async def close(self) -> None:
-        """Close the owned asynchronous Anthropic SDK client."""
-        await self.client.close()
+        """Close the asynchronous Anthropic SDK client, unless it was borrowed."""
+        if self._owns_client:
+            await self.client.close()
 
     def _supports_multimodal_tools(self) -> bool:
         """Anthropic supports images and PDFs in tool results natively."""
