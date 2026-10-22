@@ -384,6 +384,7 @@ class MessageHistoryToolCallSummary(TypedDict):
     id: str
     name: str
     arguments: str | dict[str, object]
+    arguments_length: NotRequired[int]
 
 
 class MessageHistorySummary(TypedDict):

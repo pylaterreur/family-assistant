@@ -580,6 +580,43 @@ async def test_get_message_history_tool_pages_through_a_long_turn(
 
 
 @pytest.mark.asyncio
+async def test_get_message_history_tool_bounds_tool_call_arguments(
+    db_engine: AsyncEngine,
+) -> None:
+    """A large tool argument is cut like content, and reports its length."""
+    db = Database(engine=db_engine)
+    body = "x" * 10_000
+    await db.message_history.add_message(
+        AssistantMessage(
+            tool_calls=[
+                ToolCallItem(
+                    id="call-big",
+                    type="function",
+                    function=ToolCallFunction(
+                        name="add_or_update_note", arguments={"content": body}
+                    ),
+                )
+            ],
+        ),
+        interface_type="test",
+        conversation_id="current",
+        timestamp=datetime.now(UTC),
+        turn_id="turn-big",
+        user_id="user-a",
+        processing_profile_id="default",
+    )
+    context = _build_exec_context(db)
+
+    result = await get_message_history_tool(
+        exec_context=context, tool_call_ids=["call-big"], max_content_chars=100
+    )
+
+    call = cast("dict[str, Any]", result.data)["results"][0]["tool_calls"][0]
+    assert len(call["arguments"]) == 100
+    assert call["arguments_length"] == len('{"content": "' + body + '"}')
+
+
+@pytest.mark.asyncio
 async def test_get_message_history_lookup_by_id_keeps_the_access_scope(
     db_engine: AsyncEngine,
 ) -> None:

@@ -92,7 +92,7 @@ COMMUNICATION_TOOLS_DEFINITION: list[ToolDefinition] = [
                 "Structured and semantic lookup against past conversation history. Use structured mode for exact filters like dates, roles, tools, attachments, or errors; semantic mode for fuzzy recall; and hybrid mode when both are useful. "
                 "When you already know a turn_id, tool_call_ids or message_ids (an earlier turn's compacted note names them), pass them to read exactly those rows, oldest first, instead of searching. "
                 "Returns compact message summaries (each with a stable message_id, turn_id, timestamp, role, content, and optional neighboring context), or an empty list when nothing matches. "
-                "Each content is cut to max_content_chars starting at content_offset; a cut row reports content_length, so read further with a larger content_offset. A result too large to keep inline was saved as an attachment, which read_text_attachment can page through or grep. "
+                "Each content and tool-call arguments string is cut to max_content_chars starting at content_offset; a cut one reports content_length or arguments_length, so read further with a larger content_offset. A result too large to keep inline was saved as an attachment, which read_text_attachment can page through or grep. "
                 "Semantic recall lags the conversation by a couple of minutes because a turn is indexed once it has finished, so use structured mode to look up something said in the last few exchanges."
             ),
             "parameters": {
@@ -447,10 +447,11 @@ async def _history_response(
 def _bound_history_content(
     results: list[MessageHistorySummary], *, offset: int, limit: int
 ) -> list[MessageHistorySummary]:
-    """Each result's content cut to ``limit`` characters from ``offset``.
+    """Each result's content and tool-call arguments cut to ``limit`` characters
+    from ``offset``.
 
-    A row that was cut reports its full ``content_length``, so the model can
-    read on with a larger offset.
+    A row that was cut reports its full ``content_length``, and a call its full
+    ``arguments_length``, so the model can read on with a larger offset.
     """
     for result in results:
         content = result["content"]
@@ -458,6 +459,12 @@ def _bound_history_content(
             result["content"] = content[offset : offset + limit]
             result["content_offset"] = offset
             result["content_length"] = len(content)
+        for tool_call in result["tool_calls"]:
+            arguments = tool_call["arguments"]
+            text = arguments if isinstance(arguments, str) else json.dumps(arguments)
+            if offset > 0 or len(text) > limit:
+                tool_call["arguments"] = text[offset : offset + limit]
+                tool_call["arguments_length"] = len(text)
         if "context" in result:
             _bound_history_content(result["context"], offset=offset, limit=limit)
     return results
