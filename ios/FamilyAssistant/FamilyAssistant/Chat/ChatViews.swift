@@ -471,6 +471,10 @@ struct ChatThreadView: View {
             }
             .padding()
         }
+        // Dragging the messages is how the keyboard goes away: nothing else
+        // in the thread dismisses it, so a keyboard that ends up over the
+        // composer would otherwise stay there.
+        .scrollDismissesKeyboard(.interactively)
         .overlay {
             if viewModel.isLoadingMessages && viewModel.messages.isEmpty {
                 ProgressView("Loading messages...")

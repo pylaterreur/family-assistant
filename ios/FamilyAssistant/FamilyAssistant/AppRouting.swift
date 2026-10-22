@@ -131,6 +131,17 @@ final class AppRouter {
     var notesRoute: NotesRoute = .list
     var documentsPath: [WebRoute] = []
     var morePath: [MoreRoute] = []
+    /// Counts taps on the Chat tab while it was already selected.
+    private(set) var chatTabReselections = 0
+
+    /// The tab bar's selection. Tapping the selected tab sets it again, which
+    /// is the only signal SwiftUI gives for that tap.
+    func selectTab(_ tab: AppTab) {
+        if tab == selectedTab, tab == .chat {
+            chatTabReselections += 1
+        }
+        selectedTab = tab
+    }
 
     /// The tab that owns a given same-origin app URL. Returns `nil` for
     /// foreign-origin URLs (which should be opened externally). Resolution is
