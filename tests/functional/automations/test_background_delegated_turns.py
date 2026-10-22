@@ -285,3 +285,32 @@ async def test_a_stray_retry_of_a_running_run_leaves_it_to_its_lease(
     run = await db.delegation_runs.get_by_delegation_id("delegation_owned")
     assert run is not None
     assert run["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_cut_off_before_recording_its_inputs_starts_afresh(
+    db_engine: AsyncEngine,
+) -> None:
+    """With nothing saved under its turn, a continuation records its inputs again."""
+    target = FakeDelegatableService()
+    processing_service = _source_processing_service(target)
+    chat_interface = ScriptedChatInterface(otherwise="external_message_id")
+    db = Database(engine=db_engine)
+    await _start_run(db, "delegation_continued")
+    await db.delegation_runs.mark_running("delegation_continued", SystemClock().now())
+    runner = BackgroundTurnRunner()
+    worker = _worker(db_engine, processing_service, chat_interface, runner=runner)
+    payload = _payload("delegation_continued")
+    payload["continuation"] = True
+    payload["resume"] = {
+        "turn_id": "turn_unrecorded",
+        "kind": "continuation",
+        "attempt": 1,
+    }
+
+    await run_delegated_profile_run(
+        worker, _tool_context(db, processing_service, chat_interface), payload
+    )
+
+    assert [call["resume"] for call in target.calls] == [False]
+    assert target.calls[0]["turn_id"] == "turn_unrecorded"

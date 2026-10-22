@@ -2758,9 +2758,10 @@ class TaskWorker:
         if not self.background_turns.has_capacity():
             await self._defer_delegated_run(exec_context, payload, run)
             return
-        # A request turn cut off before it saved its prompt has done nothing
-        # yet, so it starts afresh under the same turn id.
-        resume = resumed["kind"] == "continuation" or (
+        # A turn cut off before it saved its input -- a request's prompt, a
+        # continuation's children's results -- has done nothing yet, so it
+        # starts afresh under the same turn id.
+        resume = (
             await history.get_first_row_by_turn_id(turn_id, role="user") is not None
         )
         lease = await self._arm_delegated_turn_lease(
