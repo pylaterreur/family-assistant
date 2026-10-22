@@ -69,11 +69,10 @@ it thinks changes.
 
 ## Which assistants offer a choice
 
-The **Assistant** offers all three levels. So does the **Engineer** (`/engineer`), which runs at
-Deep unless you say otherwise: working out why something happened means holding several pieces of
-evidence at once, so Standard is the exception there, for a plain lookup. **Complex Tasks**
-(`/complex`) offers Deep and Max — it exists for requests Standard was not expected to complete
-well, so Standard is not on its menu.
+The **Assistant** offers all three levels, and so does the **Engineer** (`/engineer`). Both run at
+Standard unless you say otherwise; for a hard "why did this happen?" investigation, ask the Engineer
+for Deep. **Complex Tasks** (`/complex`) offers Deep and Max — it exists for requests Standard was
+not expected to complete well, so Standard is not on its menu.
 
 Every other assistant runs on one fixed level: some because what they do is tied to one model
 (reading audio and video, driving a browser visually, running code in a sandbox), the rest because

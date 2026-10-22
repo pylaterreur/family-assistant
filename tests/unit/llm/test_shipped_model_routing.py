@@ -199,14 +199,13 @@ def test_complex_tasks_is_not_routed(shipped_config: AppConfig) -> None:
     assert profile.processing_config.model_selection == "explicit"
 
 
-def test_the_engineer_is_routed_with_deep_as_the_tier_turns_run_on(
+def test_the_engineer_is_routed_like_the_assistant(
     shipped_config: AppConfig,
 ) -> None:
-    """Shadow decisions are recorded against turns that all executed on `deep`."""
     profile = shipped_profile(shipped_config, "engineer")
 
     assert profile.processing_config.model_selection == "auto"
-    assert profile.processing_config.model_tier == "deep"
+    assert profile.processing_config.model_tier == "standard"
     assert profile.auto_model_tiers == ["standard", "deep"]
     assert profile.auto_routing_guidance
 
