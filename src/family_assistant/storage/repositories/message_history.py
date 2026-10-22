@@ -60,7 +60,7 @@ from family_assistant.storage.conversation_threads import (
 )
 from family_assistant.storage.database import DatabaseExecutor, DatabaseTransaction
 from family_assistant.storage.delegation_runs import (
-    historical_delegation_wake_content,
+    delegation_wake_record_content,
     is_delegation_wake_trigger,
 )
 from family_assistant.storage.message_history import (
@@ -3521,7 +3521,7 @@ class MessageHistoryRepository(BaseRepository):
         elif role == "system":
             content = msg.get("content") or ""
             if is_delegation_wake_trigger(content):
-                return UserMessage(content=historical_delegation_wake_content(content))
+                content = delegation_wake_record_content(content)
             return SystemMessage(
                 content=content,
             )

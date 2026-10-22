@@ -14,6 +14,11 @@ first, since the moving marker is the one difference that is meant to be there.
 The diagnostics opt-in is a request parameter rather than part of the prompt,
 so it is not compared.
 
+A delegation wake is one of those shapes: its row is replayed on later turns
+exactly as its own turn sent it, and what tells the wake turn to act is
+trailing scaffolding, sent after the cache breakpoint on each of that turn's
+requests and on no later one. The earlier request is compared without it.
+
 One extension is left out on purpose: a user message landing directly on tool
 results, which only an interrupted turn produces (the loop otherwise sends the
 results and appends the model's reply). A deferred tool those results activated
@@ -41,6 +46,10 @@ from family_assistant.llm.messages import (
 )
 from family_assistant.llm.providers.anthropic_client import AnthropicClient
 from family_assistant.llm.tool_call import ToolCallFunction, ToolCallItem
+from family_assistant.storage.delegation_runs import (
+    delegation_wake_instruction,
+    delegation_wake_record_content,
+)
 
 if TYPE_CHECKING:
     from family_assistant.llm import JsonObject
@@ -82,7 +91,7 @@ TOOLS: list[ToolDefinition] = [
     },
 ]
 
-StepKind = Literal["tool_round", "answer", "user", "notice"]
+StepKind = Literal["tool_round", "answer", "user", "notice", "wake"]
 
 
 @dataclass(frozen=True)
@@ -98,7 +107,7 @@ class Step:
 
 _STEP = st.builds(
     Step,
-    kind=st.sampled_from(["tool_round", "answer", "user", "notice"]),
+    kind=st.sampled_from(["tool_round", "answer", "user", "notice", "wake"]),
     calls=st.integers(min_value=1, max_value=3),
     thinking=st.booleans(),
     activates=st.booleans(),
@@ -106,6 +115,16 @@ _STEP = st.builds(
 )
 
 WireMessage = dict[str, object]
+
+
+def _wake_trigger(index: int) -> str:
+    """A completion wake's trigger, as the task worker writes it."""
+    return (
+        "System: Delegated profile task completed.\n\n"
+        f"Delegation reference: delegation-{index}\n"
+        "The delegated result is provided as lower-priority data in the message "
+        "history for this turn. Use it to respond to the user."
+    )
 
 
 def _metadata(index: int, *, thinking: bool) -> JsonObject:
@@ -132,7 +151,11 @@ def _messages_for(
     step: Step, index: int, history: list[LLMMessage]
 ) -> list[LLMMessage]:
     kind = step.kind
-    if kind in {"user", "notice"} and history and isinstance(history[-1], ToolMessage):
+    if (
+        kind in {"user", "notice", "wake"}
+        and history
+        and isinstance(history[-1], ToolMessage)
+    ):
         # The model answers its tool results before anything else arrives;
         # see the module docstring for the interrupted turn this leaves out.
         return [_answer(index, thinking=step.thinking), *_messages_for(step, index, [])]
@@ -140,6 +163,11 @@ def _messages_for(
         return [UserMessage(content=f"Question {index}")]
     if kind == "notice":
         return [SystemMessage(content=f"Delegation {index} finished.")]
+    if kind == "wake":
+        return [
+            UserMessage(content=f"Delegated result {index}"),
+            SystemMessage(content=delegation_wake_record_content(_wake_trigger(index))),
+        ]
     if kind == "answer":
         return [_answer(index, thinking=step.thinking)]
     calls = [
@@ -195,8 +223,35 @@ def _flattened(api_messages: list[WireMessage]) -> list[tuple[str, object]]:
     return flat
 
 
-def _request(client: AnthropicClient, history: list[LLMMessage]) -> WireMessage:
-    return client._assemble_request(history, TOOLS, "auto", streaming=True)
+def _request(
+    client: AnthropicClient, history: list[LLMMessage], instruction: str | None
+) -> WireMessage:
+    """The request for *history*, with the turn's trailing instruction if any."""
+    trailing = (
+        [UserMessage(content=instruction, is_turn_scaffolding=True)]
+        if instruction is not None
+        else []
+    )
+    return client._assemble_request(
+        [*history, *trailing], TOOLS, "auto", streaming=True
+    )
+
+
+def _breakpoint_index(api_messages: list[WireMessage]) -> int:
+    """Where the conversation breakpoint sits, as a flattened block index."""
+    index = 0
+    found: int | None = None
+    for message in api_messages:
+        content = message["content"]
+        blocks = (
+            [content] if isinstance(content, str) else cast("list[object]", content)
+        )
+        for block in blocks:
+            if isinstance(block, dict) and "cache_control" in block:
+                found = index
+            index += 1
+    assert found is not None
+    return found
 
 
 def _sends_a_request(history: list[LLMMessage]) -> bool:
@@ -218,17 +273,43 @@ class TestAnthropicPrefixStability:
             SystemMessage(content=SYSTEM_PROMPT, stable_prefix_len=len(SYSTEM_PROMPT)),
             UserMessage(content="Hello"),
         ]
-        previous = _request(client, history)
+        instruction: str | None = None
+        previous = _request(client, history, instruction)
+        previous_instruction = instruction
 
         for index, step in enumerate(steps):
             history.extend(_messages_for(step, index, history))
+            if step.kind == "wake":
+                instruction = delegation_wake_instruction(_wake_trigger(index))
+            elif step.kind == "user":
+                instruction = None
             if not _sends_a_request(history):
                 continue
-            current = _request(client, history)
+            current = _request(client, history, instruction)
 
             assert current["tools"] == previous["tools"]
             assert _strip(current["system"]) == _strip(previous["system"])
-            earlier = _flattened(cast("list[WireMessage]", previous["messages"]))
+            previous_messages = cast("list[WireMessage]", previous["messages"])
+            earlier = _flattened(previous_messages)
+            instruction_block = (
+                ("user", {"type": "text", "text": previous_instruction})
+                if previous_instruction is not None
+                else None
+            )
+            # Only the trailing instruction and tool additions, which carry no
+            # breakpoint, come after it: dropping the instruction loses nothing
+            # that was cached.
+            after_breakpoint = earlier[_breakpoint_index(previous_messages) + 1 :]
+            assert all(
+                entry == instruction_block
+                or cast("dict[str, object]", entry[1])["type"] == "tool_addition"
+                for entry in after_breakpoint
+            )
+            if instruction_block is not None:
+                assert instruction_block in after_breakpoint
+                # A tool addition can follow it, so it is not always last.
+                earlier.remove(instruction_block)
             later = _flattened(cast("list[WireMessage]", current["messages"]))
             assert later[: len(earlier)] == earlier
             previous = current
+            previous_instruction = instruction

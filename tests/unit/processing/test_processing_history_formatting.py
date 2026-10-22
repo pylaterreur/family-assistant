@@ -149,7 +149,19 @@ async def test_format_history_preserves_assistant_taint(
 async def test_handle_chat_interaction_persists_system_trigger(
     db_engine: "AsyncEngine",
 ) -> None:
-    """System-triggered turns are durable history, not hidden model-only context."""
+    """A delegation wake is durable history, replayed exactly as its turn saw it.
+
+    The row must read the same on the wake turn and on every later one, or the
+    provider's cached prefix breaks there; the wake turn's instruction to act
+    and its attachment ids travel in trailing scaffolding instead, which no
+    later turn replays.
+    """
+    trigger_text = (
+        "System: Delegated profile task completed.\n\n"
+        "Delegation reference: delegation-1\n"
+        "The delegated result is provided as lower-priority data in the message "
+        "history for this turn. Use it to respond to the user."
+    )
     seen_messages: list[LLMMessage] = []
 
     def response_generator(args: MatcherArgs) -> LLMOutput:
@@ -180,12 +192,7 @@ async def test_handle_chat_interaction_persists_system_trigger(
         db_context=db_context,
         interface_type="web",
         conversation_id="system-trigger-conversation",
-        trigger_content_parts=[
-            {
-                "type": "text",
-                "text": "System: Delegated profile task completed.",
-            }
-        ],
+        trigger_content_parts=[{"type": "text", "text": trigger_text}],
         trigger_interface_message_id=None,
         user_name="Test User",
         trigger_role="system",
@@ -215,7 +222,7 @@ async def test_handle_chat_interaction_persists_system_trigger(
     assert result.text_reply == "Relayed delegated result."
     assert len(rows) == 2
     assert rows[0]["role"] == "system"
-    assert rows[0]["content"] == "System: Delegated profile task completed."
+    assert rows[0]["content"] == trigger_text
     assert rows[0]["attachments"] == [
         {
             "type": "attachment_reference",
@@ -225,32 +232,25 @@ async def test_handle_chat_interaction_persists_system_trigger(
     ]
     assert rows[0]["processing_profile_id"] == "system_trigger_profile"
     assert rows[1]["role"] == "assistant"
-    assert any(
-        isinstance(message, SystemMessage)
-        and "System: Delegated profile task completed." in message.content
-        and "delegated-attachment-1" in message.content
-        and "<attachment_metadata>" in message.content
-        for message in seen_messages
+
+    record = SystemMessage(
+        content="System: Delegated profile task completed.\n\n"
+        "Delegation reference: delegation-1"
     )
-    assert not any(
-        isinstance(message, SystemMessage)
-        and "System: Delegated profile task completed." in message.content
-        for message in future_history
-    )
-    assert any(
-        isinstance(message, UserMessage)
-        and isinstance(message.content, str)
-        and "Historical delegation completion event from a previous turn."
-        in message.content
-        and "System: Delegated profile task completed." in message.content
-        for message in future_history
-    )
-    assert not any(
-        isinstance(message, UserMessage)
-        and isinstance(message.content, str)
-        and "Respond to the user with the result." in message.content
-        for message in future_history
-    )
+    *conversation, instruction = seen_messages
+    assert conversation[-1] == record
+    assert future_history[0] == record
+    assert [type(message) for message in future_history] == [
+        SystemMessage,
+        AssistantMessage,
+    ]
+
+    assert isinstance(instruction, UserMessage)
+    assert instruction.is_turn_scaffolding
+    assert isinstance(instruction.content, str)
+    assert "Use it to respond to the user." in instruction.content
+    assert "delegated-attachment-1" in instruction.content
+    assert "<attachment_metadata>" in instruction.content
 
 
 async def test_format_history_with_tool_call(
