@@ -263,6 +263,79 @@ final class HomeThreadsUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Yes, bins go out Tuesday night."].exists)
     }
 
+    func testKeyboardLeftOpenInAThreadDoesNotCoverHomeAfterBack() throws {
+        try openQuotesThreadWithKeyboardUp()
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        assertHomeComposerIsReachable()
+    }
+
+    func testKeyboardLeftOpenInAThreadDoesNotCoverHomeAfterSwipeBack() throws {
+        try openQuotesThreadWithKeyboardUp()
+        let window = app.windows.firstMatch
+        let edge = window.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.4))
+        edge.press(forDuration: 0.05, thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.4)))
+        assertHomeComposerIsReachable()
+    }
+
+    func testScrollingHomeDismissesTheKeyboard() throws {
+        XCTAssertTrue(element("home-title").waitForExistence(timeout: Self.readyTimeout))
+        let composer = element("chat-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 20))
+        composer.tap()
+        guard app.keyboards.firstMatch.waitForExistence(timeout: 5) else {
+            throw XCTSkip("The simulator is using a hardware keyboard, so no software keyboard appears.")
+        }
+        // Drag the messages down through the keyboard, as a reader would.
+        let window = app.windows.firstMatch
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3)).press(
+            forDuration: 0.05,
+            thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
+        )
+        XCTAssertTrue(waitForNonExistence(of: app.keyboards.firstMatch))
+    }
+
+    /// Opens the quotes thread from its card and brings its composer's
+    /// keyboard up.
+    private func openQuotesThreadWithKeyboardUp() throws {
+        let card = quotesCard
+        XCTAssertTrue(card.waitForExistence(timeout: Self.readyTimeout))
+        XCTAssertTrue(waitForEnabled(card))
+        card.tap()
+        XCTAssertTrue(element("thread-title").waitForExistence(timeout: 20))
+        let composer = element("chat-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 20))
+        composer.tap()
+        guard app.keyboards.firstMatch.waitForExistence(timeout: 5) else {
+            throw XCTSkip("The simulator is using a hardware keyboard, so no software keyboard appears.")
+        }
+    }
+
+    /// Home's composer is on screen and not under the keyboard, whether or not
+    /// the keyboard is still up.
+    private func assertHomeComposerIsReachable() {
+        XCTAssertTrue(element("home-title").waitForExistence(timeout: 10))
+        XCTAssertTrue(waitForNonExistence(of: element("thread-title")))
+        let composer = element("chat-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        // Let the pop and any keyboard transition settle before measuring.
+        _ = waitForNonExistence(of: app.keyboards.firstMatch, timeout: 3)
+        attachScreenshot(named: "home-after-thread-with-keyboard")
+        let keyboard = app.keyboards.firstMatch
+        if keyboard.exists {
+            XCTAssertLessThanOrEqual(
+                composer.frame.maxY,
+                keyboard.frame.minY + 1,
+                "Home's composer is under the keyboard."
+            )
+        }
+        XCTAssertTrue(composer.isHittable)
+    }
+
+    private func waitForNonExistence(of element: XCUIElement, timeout: TimeInterval = 10) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
     /// Tap a context-menu item once it can take the tap. A tap while the menu
     /// is still animating in is dropped, so tap again while the item is
     /// still showing and what it opens has not appeared.
@@ -327,3 +400,4 @@ final class HomeThreadsUITests: XCTestCase {
         add(attachment)
     }
 }
+
