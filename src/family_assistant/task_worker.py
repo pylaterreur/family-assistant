@@ -1346,6 +1346,16 @@ BACKGROUND_TURN_DEFER_SECONDS = 15.0
 # handler, so no handler timeout applies to it.
 DELEGATED_RUN_TURN_BUDGET_SECONDS = 1800.0
 
+# Task types whose handler is itself one LLM turn. A worker that claims one hands
+# the whole task -- handler, completion, retries -- to the background turn
+# runner and goes back to the queue, so a slow model holds a turn slot rather
+# than a worker. The task's claim stays renewed while it runs, and a retry of
+# the task resumes its turn from what it persisted (both handlers checkpoint).
+BACKGROUND_TURN_TASK_TYPES: frozenset[str] = frozenset({
+    "llm_callback",
+    MEMORY_REVIEW_TASK_TYPE,
+})
+
 # Task types whose handler needs more than ``handler_timeout`` (TASK_HANDLER_TIMEOUT).
 #
 # A memory review runs up to two curator turns -- the review and one re-run
@@ -2171,6 +2181,43 @@ class TaskWorker:
             return f"no activity for {idle:.0f}s"
         return None
 
+    def _launch_turn_task(self, task: TaskDict, wake_up_event: asyncio.Event) -> None:
+        """Process a claimed task whose handler is an LLM turn as a background turn.
+
+        Everything after the claim runs there exactly as it would here --
+        handler timeout, completion, recurrence, retries -- while this worker
+        goes back to the queue.
+        """
+        assert self.engine is not None
+        engine = self.engine
+
+        async def process() -> None:
+            renewer = asyncio.create_task(
+                self._renew_claim_while_running(task["task_id"])
+            )
+            try:
+                advance_request = await self._process_task(
+                    Database(engine=engine), task, wake_up_event
+                )
+            finally:
+                renewer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await renewer
+            if advance_request is not None:
+                await self._flush_schedule_automation_advance_outbox(
+                    Database(engine=engine), advance_request.source_task_id
+                )
+
+        self.background_turns.launch(
+            f"task-turn:{task['task_id']}",
+            process(),
+            # The task's claim is this turn's liveness: renewed while it runs,
+            # reclaimed and retried if its process goes away.
+            lease=None,
+            database=Database(engine=engine),
+            request_suspend=lambda: None,
+        )
+
     async def _renew_claim_while_running(self, task_id: str) -> None:
         """Refresh this worker's claim on ``task_id`` until cancelled."""
         assert self.engine is not None
@@ -2246,8 +2293,18 @@ class TaskWorker:
         return self.task_handlers
 
     def dequeued_task_types(self) -> list[str]:
-        """The task types this worker claims from the queue."""
-        return list(self.task_handlers)
+        """The task types this worker claims from the queue right now.
+
+        Task types that run as background turns are left in the queue while
+        the turn runner is full.
+        """
+        if self.background_turns.has_capacity():
+            return list(self.task_handlers)
+        return [
+            task_type
+            for task_type in self.task_handlers
+            if task_type not in BACKGROUND_TURN_TASK_TYPES
+        ]
 
     async def handle_delegated_profile_run(
         self,
@@ -6789,8 +6846,7 @@ class TaskWorker:
         """The task-processing loop body, run with a registered wake event."""
         logger.info(f"Task worker {self.worker_id} run loop started.")
         # Get task types dequeued by *this specific instance*
-        task_types_handled = self.dequeued_task_types()
-        if not task_types_handled:
+        if not self.task_handlers:
             logger.warning(
                 f"Task worker {self.worker_id} has no task types to dequeue. Exiting loop."
             )
@@ -6832,7 +6888,7 @@ class TaskWorker:
                 try:  # Inner try for dequeue
                     task = await dequeue_context.tasks.dequeue(
                         worker_id=self.worker_id,
-                        task_types=task_types_handled,
+                        task_types=self.dequeued_task_types(),
                         current_time=self.clock.now(),  # Pass current time from worker's clock
                         min_priority=self.min_priority,
                     )
@@ -6883,6 +6939,9 @@ class TaskWorker:
                             )
                         self._update_last_activity()  # Update after successful task processing
 
+                    if task["task_type"] in BACKGROUND_TURN_TASK_TYPES:
+                        self._launch_turn_task(task, wake_up_event)
+                        return
                     try:  # Inner try for task processing
                         await process_dequeued_task()
                     except Exception as e:

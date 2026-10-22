@@ -1,6 +1,6 @@
 # Background LLM turns off the task worker
 
-**Status:** Approved 2026-10-21 (M0 through M3). M0 through M2 implemented.
+**Status:** Approved 2026-10-21 (M0 through M3). Implemented.
 
 ## Summary
 
@@ -140,6 +140,12 @@ After this, task workers only run short handlers, so the clocks can be simplifie
   task, a transient failure was retried by the task queue within minutes. Once the delivery runs as
   a background turn there is no task left to retry, and a wake that fails transiently already falls
   back to the standard notice, so only a notice that also fails waits for the cleanup's next pass.
+- **Callback and memory-review turns keep their task as their lease.** Their handlers already
+  checkpoint per task (the turn id comes from the task id), so M3 runs the whole task -- handler
+  timeout, completion, retries -- on the runner and keeps renewing its claim, rather than giving
+  them turn leases and resumers of their own. A crash is recovered by the stale-claim reclaim, which
+  retries the task and resumes its turn, as before. The watchdog's idle check stays: with no turn
+  inside a handler it only fires on a worker loop that has really stopped polling.
 - **Deliveries are not held back by the concurrency cap.** A delivery belongs to a run that was
   admitted already, and making it wait would hold back the result rather than bound new work.
 

@@ -820,3 +820,64 @@ def test_a_claim_renewal_interval_near_the_stale_cutoff_is_refused() -> None:
             embedding_generator=MockEmbeddingGenerator(),
             claim_renew_seconds=STALE_TASK_TIMEOUT_MINUTES * 60 / 2,
         )
+
+
+@pytest.mark.asyncio
+async def test_a_turn_task_runs_off_the_worker_that_claimed_it(
+    db_engine: AsyncEngine, shutdown_event: asyncio.Event
+) -> None:
+    """While a callback's turn runs, the worker that claimed it keeps serving.
+
+    One worker, so the second task can only run if the first one's turn is not
+    holding it.
+    """
+    turn_started = asyncio.Event()
+    finish_turn = asyncio.Event()
+    ran: list[str] = []
+
+    async def slow_turn(
+        exec_context: ToolExecutionContext, payload: TaskPayload
+    ) -> None:
+        turn_started.set()
+        await finish_turn.wait()
+        ran.append("turn")
+
+    async def quick(exec_context: ToolExecutionContext, payload: TaskPayload) -> None:
+        ran.append("quick")
+
+    worker = _make_worker(db_engine, shutdown_event)
+    worker.register_task_handler("llm_callback", slow_turn)
+    worker.register_task_handler("quick", quick)
+    worker_task = asyncio.create_task(worker.run())
+    try:
+        db_context = Database(engine=db_engine)
+        await db_context.tasks.enqueue(
+            task_id="turn-task",
+            task_type="llm_callback",
+            payload={"interface_type": "web", "conversation_id": "conv-1"},
+            priority=TaskPriority.INTERACTIVE,
+        )
+        await asyncio.wait_for(turn_started.wait(), timeout=10.0)
+        await db_context.tasks.enqueue(
+            task_id="quick-task",
+            task_type="quick",
+            payload={},
+            priority=TaskPriority.INTERACTIVE,
+        )
+
+        await wait_for_tasks_to_complete(
+            engine=db_engine, task_ids={"quick-task"}, timeout_seconds=10.0
+        )
+        assert ran == ["quick"]
+        assert await _task_status(db_engine, "turn-task") == "processing"
+
+        finish_turn.set()
+        await wait_for_tasks_to_complete(
+            engine=db_engine, task_ids={"turn-task"}, timeout_seconds=10.0
+        )
+        assert ran == ["quick", "turn"]
+    finally:
+        finish_turn.set()
+        await worker.background_turns.wait_idle()
+        await cleanup_task_worker(worker_task, shutdown_event)
+        await _dispose_worker_engine(worker, db_engine)

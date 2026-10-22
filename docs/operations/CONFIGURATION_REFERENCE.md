@@ -182,13 +182,15 @@ tasks only, so a burst of background work cannot delay a reminder or a confirmat
 | Sensitive | No    |
 | Example   | `2`   |
 
-Delegated runs, a web thread's first turn and the follow-up turn that delivers a delegation's result
-do not hold a worker while their turn runs; see `max_background_turns`.
+Background LLM turns -- delegated runs, a web thread's first turn, delegation follow-ups, scheduled
+callbacks and reminders, and memory reviews -- do not hold a worker while they run; see
+`max_background_turns`.
 
 ### max_background_turns
 
 How many background turns may run at once: delegated runs' turns, including a web thread's first
-turn, and the follow-up turns that deliver a delegation's result. The task that starts such a turn
+turn, the follow-up turns that deliver a delegation's result, scheduled callbacks and reminders
+(including scripts' and automations' wakes), and memory reviews. The task that starts such a turn
 returns once it is running: the turn itself runs outside the task workers, so it neither occupies a
 worker nor is bound by a worker's handler timeout, and a turn cut off by a restart is resumed rather
 than failed. This bounds model and tool load. A run that finds every slot taken stays queued and
