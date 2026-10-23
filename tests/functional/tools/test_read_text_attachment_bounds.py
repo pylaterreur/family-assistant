@@ -90,6 +90,19 @@ async def test_grep_on_a_single_line_returns_only_the_matching_piece(
 
 
 @pytest.mark.asyncio
+async def test_grep_finds_a_match_straddling_a_piece_boundary(
+    db_engine: AsyncEngine, tmp_path: Path
+) -> None:
+    content = "x" * (LONG_LINE_CHARS - 2) + "pool_temperature" + "y" * 5_000
+    context, attachment_id = await _stored(db_engine, tmp_path, content, "text/plain")
+
+    result = await read_text_attachment_tool(context, attachment_id, grep="pool")
+
+    assert result.text is not None
+    assert "pool_temperature" in result.text
+
+
+@pytest.mark.asyncio
 async def test_a_read_stops_at_max_chars_and_says_where_to_continue(
     db_engine: AsyncEngine, tmp_path: Path
 ) -> None:

@@ -197,13 +197,13 @@ async def _read_text_attachment(
     except UnicodeDecodeError:
         return ToolResult(text="Error: Attachment content is not valid UTF-8 text.")
 
-    lines = _split_long_lines(content_text.splitlines())
-    total_lines = len(lines)
+    original_lines = content_text.splitlines()
+    total_lines = len(_split_long_lines(original_lines))
     if grep:
-        grep_lower = grep.lower()
-        lines = [line for line in lines if grep_lower in line.lower()]
+        lines = _grep_excerpts(original_lines, grep)
         filtered_count = len(lines)
     else:
+        lines = _split_long_lines(original_lines)
         filtered_count = total_lines
 
     paged_lines = _within_budget(lines[offset : offset + limit], max_chars)
@@ -258,6 +258,36 @@ def _split_long_lines(lines: list[str]) -> list[str]:
             for start in range(0, len(line), LONG_LINE_CHARS)
         )
     return pieces
+
+
+def _grep_excerpts(lines: list[str], grep: str) -> list[str]:
+    """The lines containing ``grep``, case-insensitively, each match kept whole.
+
+    A matching line within ``LONG_LINE_CHARS`` is returned as it is. A longer
+    one contributes a window of that size centred on each match, skipping a
+    match the previous window already shows. Searching the original line rather
+    than its pieces is what keeps a match that straddles a piece boundary.
+    """
+    needle = grep.lower()
+    half = max(0, (LONG_LINE_CHARS - len(needle)) // 2)
+    excerpts: list[str] = []
+    for line in lines:
+        haystack = line.lower()
+        if needle not in haystack:
+            continue
+        if len(line) <= LONG_LINE_CHARS:
+            excerpts.append(line)
+            continue
+        shown_until = 0
+        position = haystack.find(needle)
+        while position != -1:
+            if position + len(needle) > shown_until:
+                start = max(0, position - half)
+                end = min(len(line), start + LONG_LINE_CHARS)
+                excerpts.append(line[start:end])
+                shown_until = end
+            position = haystack.find(needle, position + 1)
+    return excerpts
 
 
 def _within_budget(lines: list[str], max_chars: int) -> list[str]:
