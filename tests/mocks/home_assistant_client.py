@@ -8,6 +8,8 @@ does not have. Configure SDK responses through ``api.<method>.return_value`` /
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 from unittest.mock import create_autospec
@@ -18,6 +20,7 @@ from homeassistant_api.models.domains import Domain
 from family_assistant.plugins.home_assistant.client import HomeAssistantClientWrapper
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
     from unittest.mock import NonCallableMagicMock
 
     from homeassistant_api.utils import JSONType
@@ -54,3 +57,31 @@ def make_home_assistant_client(
         api_url=api_url, token=token, client=api, verify_ssl=verify_ssl
     )
     return SpeccedHomeAssistant(wrapper=wrapper, api=api)
+
+
+def serve_entities(
+    api: NonCallableMagicMock,
+    entities: Sequence[Mapping[str, object]],
+    states: Mapping[str, tuple[str, str | None]] | None = None,
+) -> None:
+    """Answer the wrapper's entity-list and current-state templates from fixed data.
+
+    The state template is the one that loops over a list of ids.
+    An entity missing from ``states`` reports ``unknown``, as ``states()`` does.
+    """
+    known_states = states or {}
+
+    async def render(template: str) -> str:
+        requested = re.search(r"for id in (\[.*?\]) %", template)
+        if requested is None:
+            return json.dumps(list(entities))
+        return json.dumps([
+            {
+                "entity_id": entity_id,
+                "state": known_states.get(entity_id, ("unknown", None))[0],
+                "unit": known_states.get(entity_id, ("unknown", None))[1],
+            }
+            for entity_id in json.loads(requested.group(1))
+        ])
+
+    api.async_get_rendered_template.side_effect = render

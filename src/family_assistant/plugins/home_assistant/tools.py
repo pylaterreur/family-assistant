@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant_api.errors import HomeassistantAPIError
 
+from family_assistant.plugins.home_assistant.client import EntityMetadata
 from family_assistant.plugins.home_assistant.instance import HomeAssistantInstance
 from family_assistant.tools.metadata import (
     ToolRegistration,
@@ -33,6 +35,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 GET_HOME_STATUS_TOOL_NAME = "get_home_status"
+
+DEFAULT_ENTITY_RESULTS = 25
+MAX_ENTITY_RESULTS = 200
+# A query word matches an entity word it is a prefix of, or that is a prefix of
+# it ("temp" / "temperature"), but only from this length: shorter prefixes
+# ("t", "on") match nearly everything.
+MIN_PREFIX_MATCH_LENGTH = 3
 
 
 def detect_image_mime_type(content: bytes) -> str:
@@ -277,49 +286,53 @@ HOME_ASSISTANT_TOOLS_DEFINITION: list[ToolDefinition] = [
         "function": {
             "name": "list_home_assistant_entities",
             "description": (
-                "List and search Home Assistant entities by ID, name, or area. "
-                "Returns entities with their IDs, friendly names, areas, and devices. "
-                "Useful for discovering what sensors, lights, switches, cameras, and other entities "
-                "are available in your Home Assistant setup.\n\n"
-                "The entity_id_filter parameter does substring matching, so you can search by:\n"
-                "- Entity type: 'sensor', 'light', 'switch', 'binary_sensor'\n"
-                "- Function: 'temperature', 'motion', 'energy', 'camera'\n"
-                "- Specific entity: 'pool', 'living_room', 'garage'\n"
-                "- Combined: 'sensor.pool' finds pool sensors, 'light.living' finds living room lights\n\n"
+                "Find Home Assistant entities and read their current state. "
+                "Each result gives the entity ID, friendly name, area, device "
+                "and its state right now (with unit), so a question like "
+                "'what's the pool temperature?' is usually answered by one "
+                "call.\n\n"
+                "Give at least one of `query`, `entity_id_filter` or "
+                "`area_filter`; the full list is too long to be useful.\n\n"
                 "Examples:\n"
-                "- list_home_assistant_entities(entity_id_filter='temperature') → all temperature sensors\n"
-                "- list_home_assistant_entities(entity_id_filter='light.living') → living room lights\n"
-                "- list_home_assistant_entities(area_filter='pool') → all pool equipment\n"
-                "- list_home_assistant_entities(entity_id_filter='motion') → motion sensors\n\n"
-                "Results are cached for 2 minutes to improve performance."
+                "- list_home_assistant_entities(query='pool temperature')\n"
+                "- list_home_assistant_entities(query='front door lock')\n"
+                "- list_home_assistant_entities(area_filter='kitchen')\n"
+                "- list_home_assistant_entities(entity_id_filter='light.')"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Words describing what you are looking for, e.g. "
+                            "'pool temperature' or 'garage door'. Matched "
+                            "against entity ID, name, area, device and sensor "
+                            "type, best matches first. A word also matches "
+                            "its abbreviation, so 'temperature' finds 'temp'."
+                        ),
+                    },
                     "entity_id_filter": {
                         "type": "string",
                         "description": (
-                            "Optional case-insensitive substring to filter entity IDs. "
-                            "Since entity IDs follow the pattern 'domain.name' (e.g., 'sensor.pool_temperature'), "
-                            "you can filter by domain ('sensor'), function ('temperature'), location ('pool'), "
-                            "or combinations ('sensor.pool'). Matches any part of the entity ID."
+                            "Case-insensitive substring of the entity ID, "
+                            "e.g. 'sensor.pool' or 'light.'."
                         ),
                     },
                     "area_filter": {
                         "type": "string",
                         "description": (
-                            "Optional case-insensitive substring to filter by area name "
-                            "(e.g., 'living room', 'pool', 'garage', 'bedroom'). "
-                            "Only returns entities assigned to areas matching this substring."
+                            "Case-insensitive substring of the area name, "
+                            "e.g. 'living room' or 'garage'."
                         ),
                     },
                     "max_results": {
                         "type": "integer",
                         "description": (
-                            "Maximum number of results to return. Defaults to 50. "
-                            "Maximum allowed is 200. Use filters to narrow results if needed."
+                            f"Maximum number of entities to return. Defaults to "
+                            f"{DEFAULT_ENTITY_RESULTS}, maximum {MAX_ENTITY_RESULTS}."
                         ),
-                        "default": 50,
+                        "default": DEFAULT_ENTITY_RESULTS,
                     },
                 },
                 "required": [],
@@ -962,124 +975,167 @@ async def list_home_assistant_actions_tool(
 
 async def list_home_assistant_entities_tool(
     exec_context: ToolExecutionContext,
+    query: str | None = None,
     entity_id_filter: str | None = None,
     area_filter: str | None = None,
-    max_results: int = 50,
+    max_results: int = DEFAULT_ENTITY_RESULTS,
 ) -> ToolResult:
-    """
-    List and search Home Assistant entities with filtering.
-
-    Args:
-        exec_context: The tool execution context containing HA client
-        entity_id_filter: Optional case-insensitive substring to filter entity IDs
-        area_filter: Optional case-insensitive substring to filter by area name
-        max_results: Maximum number of results to return (default: 50, max: 200)
-
-    Returns:
-        ToolResult with structured data containing matching entities
-    """
+    """Find entities by query and filters, with each one's current state."""
     logger.info(
-        f"Listing HA entities: entity_filter={entity_id_filter}, "
-        f"area_filter={area_filter}, max={max_results}"
+        "Listing HA entities: query=%r, entity_filter=%r, area_filter=%r, max=%d",
+        query,
+        entity_id_filter,
+        area_filter,
+        max_results,
     )
-
-    # Check if Home Assistant client is available
     ha_client = _home_assistant_client(exec_context)
     if ha_client is None:
         logger.error("Home Assistant client not available in execution context")
         return ToolResult(
             text="Error: Home Assistant integration is not configured or available."
         )
-
-    # Limit max_results to 200
-    max_results = min(max_results, 200)
+    query_words = _words(query or "")
+    if not (query_words or entity_id_filter or area_filter):
+        return ToolResult(
+            text=(
+                "Error: give a query (e.g. 'pool temperature'), an "
+                "entity_id_filter or an area_filter. Home Assistant has too "
+                "many entities to list them all."
+            )
+        )
+    max_results = max(1, min(max_results, MAX_ENTITY_RESULTS))
 
     try:
-        # Get entities from client (with built-in caching)
         entities = await ha_client.async_get_entity_list_with_metadata()
     except Exception as e:
         logger.exception(f"Error listing entities: {e}")
         return ToolResult(text=f"Error: Failed to list entities: {e!s}")
 
-    # Apply filters
-    filtered = entities
+    matches = find_entities(
+        entities,
+        query_words=query_words,
+        entity_id_filter=entity_id_filter,
+        area_filter=area_filter,
+    )
+    total_matches = len(matches)
+    shown = matches[:max_results]
 
-    if entity_id_filter:
-        filter_lower = entity_id_filter.lower()
-        filtered = [e for e in filtered if filter_lower in e["entity_id"].lower()]
-        logger.debug(f"After entity_id filter: {len(filtered)} entities")
+    try:
+        states = await ha_client.async_get_current_states([
+            entity["entity_id"] for entity in shown
+        ])
+    except HomeassistantAPIError as e:
+        logger.exception(f"Error reading entity states: {e}")
+        return ToolResult(text=f"Error: Failed to read entity states: {e!s}")
 
-    if area_filter:
-        filter_lower = area_filter.lower()
-        filtered = [
-            e
-            for e in filtered
-            if (area_name := e.get("area_name")) and filter_lower in area_name.lower()
-        ]
-        logger.debug(f"After area filter: {len(filtered)} entities")
-
-    # Limit results
-    total_matches = len(filtered)
-    result_entities = filtered[:max_results]
-
-    logger.info(
-        f"Returning {len(result_entities)} of {total_matches} matching entities"
+    result_entities = [
+        EntityListing(
+            **entity,
+            state=states[entity["entity_id"]]["state"],
+            unit=states[entity["entity_id"]]["unit"],
+        )
+        for entity in shown
+    ]
+    return ToolResult(
+        text=_render_entity_listing(result_entities, total_matches),
+        data={"entities": result_entities, "total_matches": total_matches},
     )
 
-    # Build result data
-    # ast-grep-ignore: no-dict-any - Tool result data structure
-    result_data: dict[str, Any] = {
-        "entities": result_entities,
-        "total_matches": total_matches,
-    }
 
-    # Add filter info if filters were applied
-    if entity_id_filter or area_filter:
-        # ast-grep-ignore: no-dict-any - Filter info structure
-        filters_applied: dict[str, Any] = {}
-        if entity_id_filter:
-            filters_applied["entity_id_filter"] = entity_id_filter
-        if area_filter:
-            filters_applied["area_filter"] = area_filter
-        result_data["filters_applied"] = filters_applied
+class EntityListing(EntityMetadata):
+    """One entity in a listing, with the state it reported just now."""
 
-    # Build text summary with actual entity details
+    state: str
+    unit: str | None
+
+
+def _words(text: str) -> list[str]:
+    # Letters and digits in any script; underscores split entity IDs.
+    return re.findall(r"[^\W_]+", text.lower())
+
+
+def _word_matches(query_word: str, entity_words: set[str]) -> bool:
+    if query_word in entity_words:
+        return True
+    if len(query_word) < MIN_PREFIX_MATCH_LENGTH:
+        return False
+    return any(
+        len(word) >= MIN_PREFIX_MATCH_LENGTH
+        and (word.startswith(query_word) or query_word.startswith(word))
+        for word in entity_words
+    )
+
+
+def find_entities(
+    entities: list[EntityMetadata],
+    *,
+    query_words: list[str],
+    entity_id_filter: str | None,
+    area_filter: str | None,
+) -> list[EntityMetadata]:
+    """Filter ``entities`` and rank them by how many query words they match.
+
+    The filters are substring tests and must all hold. Query words are
+    matched against every descriptive field at once, so "pool temperature"
+    finds a sensor named "Temp inflow" in the Pool area with a temperature
+    device class. An entity matching no query word is dropped; among the rest,
+    more matched words rank first and ties keep Home Assistant's order.
+    """
+    id_filter = (entity_id_filter or "").lower()
+    area = (area_filter or "").lower()
+    scored: list[tuple[int, int, EntityMetadata]] = []
+    for position, entity in enumerate(entities):
+        if id_filter and id_filter not in entity["entity_id"].lower():
+            continue
+        if area and area not in (entity.get("area_name") or "").lower():
+            continue
+        score = 0
+        if query_words:
+            entity_words = set(
+                _words(
+                    " ".join(
+                        value or ""
+                        for value in (
+                            entity["entity_id"],
+                            entity.get("name"),
+                            entity.get("area_name"),
+                            entity.get("device_name"),
+                            entity.get("device_class"),
+                        )
+                    )
+                )
+            )
+            score = sum(_word_matches(word, entity_words) for word in query_words)
+            if score == 0:
+                continue
+        scored.append((-score, position, entity))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return [entity for _, _, entity in scored]
+
+
+def _render_entity_listing(entities: list[EntityListing], total_matches: int) -> str:
     if total_matches == 0:
-        text = "No matching entities found."
+        return "No matching entities found."
+    if total_matches <= len(entities):
+        lines = [f"Found {total_matches} matching entities:", ""]
     else:
-        # Build header
-        if total_matches <= max_results:
-            text = f"Found {total_matches} matching entities:\n\n"
-        else:
-            text = f"Found {total_matches} matching entities. Showing first {max_results}:\n\n"
-
-        # List each entity with details
-        for entity in result_entities:
-            entity_id = entity.get("entity_id", "unknown")
-            name = entity.get("name", entity_id)
-            area = entity.get("area_name")
-            device = entity.get("device_name")
-
-            # Build entity line with available metadata
-            text += f"- {entity_id}"
-            if name and name != entity_id:
-                text += f" - {name}"
-            if area:
-                text += f" (Area: {area})"
-            if device:
-                text += f" [Device: {device}]"
-            text += "\n"
-
-        # Add filter info if filters were applied
-        if entity_id_filter or area_filter:
-            filter_desc = []
-            if entity_id_filter:
-                filter_desc.append(f"entity_id contains '{entity_id_filter}'")
-            if area_filter:
-                filter_desc.append(f"area contains '{area_filter}'")
-            text += f"\nFilters applied: {', '.join(filter_desc)}"
-
-    return ToolResult(text=text, data=result_data)
+        lines = [
+            f"Found {total_matches} matching entities, best {len(entities)} "
+            "shown. Narrow the query for the rest:",
+            "",
+        ]
+    for entity in entities:
+        line = f"- {entity['entity_id']}"
+        if entity["name"] and entity["name"] != entity["entity_id"]:
+            line += f" - {entity['name']}"
+        if area := entity["area_name"]:
+            line += f" (Area: {area})"
+        if device := entity["device_name"]:
+            line += f" [Device: {device}]"
+        unit = entity["unit"]
+        line += f": {entity['state']} {unit}" if unit else f": {entity['state']}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _tool(

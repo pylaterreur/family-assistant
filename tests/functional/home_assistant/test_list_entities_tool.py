@@ -30,7 +30,10 @@ from family_assistant.tools.infrastructure import (
     LocalToolsProvider,
 )
 from family_assistant.tools.mcp import MCPToolsProvider
-from tests.mocks.home_assistant_client import make_home_assistant_client
+from tests.mocks.home_assistant_client import (
+    make_home_assistant_client,
+    serve_entities,
+)
 from tests.mocks.mock_llm import (
     LLMOutput as MockLLMOutput,
 )
@@ -100,10 +103,7 @@ async def test_list_home_assistant_entities_with_filter(
     ]
 
     home_assistant = make_home_assistant_client()
-    # The wrapper fetches entity metadata by rendering a template that emits JSON.
-    home_assistant.api.async_get_rendered_template.return_value = json.dumps(
-        mock_entities
-    )
+    serve_entities(home_assistant.api, mock_entities)
 
     tool_call_id = f"call_ha_list_{uuid.uuid4()}"
 
@@ -272,10 +272,7 @@ async def test_list_home_assistant_entities_with_area_filter(
     ]
 
     home_assistant = make_home_assistant_client()
-    # The wrapper fetches entity metadata by rendering a template that emits JSON.
-    home_assistant.api.async_get_rendered_template.return_value = json.dumps(
-        mock_entities
-    )
+    serve_entities(home_assistant.api, mock_entities)
 
     tool_call_id = f"call_ha_area_{uuid.uuid4()}"
 

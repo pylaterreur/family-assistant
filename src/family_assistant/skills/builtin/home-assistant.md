@@ -21,7 +21,7 @@ a thermostat, activate a scene, trigger a script, etc. Loading the skill activat
 | Tool                             | Use it for                                                  |
 | -------------------------------- | ----------------------------------------------------------- |
 | `render_home_assistant_template` | Read current state via Jinja2 (`{{ states('...') }}`, etc.) |
-| `list_home_assistant_entities`   | Discover entity IDs by substring or area                    |
+| `list_home_assistant_entities`   | Find entities by description, with their current state      |
 | `list_home_assistant_actions`    | Discover available actions and their field schemas          |
 | `call_home_assistant_action`     | Execute an action (a.k.a. service call)                     |
 | `get_camera_snapshot`            | Pull a still image from a HA camera entity                  |
@@ -41,10 +41,11 @@ The set of entities, actions, and field schemas depends entirely on which integr
 on the user's HA, and HA itself is a moving target. **Do not guess names from training data** — they
 drift between versions and between installations. Instead, query the live catalog at runtime:
 
-1. **Find the entity** with `list_home_assistant_entities` (substring or area filter). The user says
-   "the kitchen lamp"; you map that to a concrete `entity_id` like `light.kitchen_main`.
-2. **For state queries**, use `render_home_assistant_template` directly:
-   `{{ states('light.kitchen_main') }}` or
+1. **Find the entity** with `list_home_assistant_entities(query="kitchen lamp")`. The query is
+   matched against entity ID, name, area, device and sensor type, and each result carries its
+   current state and unit, so a plain "what is X?" is usually answered here.
+2. **For anything the state alone does not answer** (an attribute, a calculation), use
+   `render_home_assistant_template`:
    `{{ state_attr('climate.living_room', 'current_temperature') }}`.
 3. **For actions**, look up the schema with `list_home_assistant_actions(domain="light")` to see
    what fields the action accepts (`brightness_pct`, `color_temp_kelvin`, `transition`, …) and
@@ -73,17 +74,15 @@ the integrations actually installed — no offline list to keep in sync with the
 ### "Is the front door locked?"
 
 ```text
-list_home_assistant_entities(entity_id_filter="front_door")
-   → finds lock.front_door
-render_home_assistant_template(template="{{ states('lock.front_door') }}")
-   → "locked"
+list_home_assistant_entities(query="front door lock")
+   → lock.front_door - Front Door (Area: Entry): locked
 ```
 
 ### "Turn on the kitchen light at 75%"
 
 ```text
-list_home_assistant_entities(entity_id_filter="kitchen", area_filter="kitchen")
-   → finds light.kitchen_main
+list_home_assistant_entities(query="light", area_filter="kitchen")
+   → light.kitchen_main - Kitchen Main (Area: Kitchen): off
 list_home_assistant_actions(domain="light", action_filter="turn_on")
    → confirms light.turn_on, fields include brightness_pct, transition
 call_home_assistant_action(
@@ -122,8 +121,8 @@ call_home_assistant_action(
 ### "Show me the doorbell camera"
 
 ```text
-list_home_assistant_entities(entity_id_filter="camera")
-   → finds camera.front_door
+list_home_assistant_entities(query="doorbell camera")
+   → camera.front_door - Doorbell (Area: Entry): idle
 get_camera_snapshot(camera_entity_id="camera.front_door")
    → image attached to the reply
 ```
