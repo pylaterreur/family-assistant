@@ -1044,7 +1044,8 @@ async def list_home_assistant_entities_tool(
 
 
 def _words(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
+    # Letters and digits in any script; underscores split entity IDs.
+    return re.findall(r"[^\W_]+", text.lower())
 
 
 def _word_matches(query_word: str, entity_words: set[str]) -> bool:

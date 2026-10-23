@@ -133,6 +133,22 @@ def test_query_finds_an_entity_with_no_area() -> None:
     assert "sensor.pool_sensor_temperature" in _ids(found)[:2]
 
 
+@pytest.mark.asyncio
+async def test_query_in_a_non_latin_script_matches_names_in_it() -> None:
+    home_assistant = make_home_assistant_client()
+    serve_entities(
+        home_assistant.api,
+        [*ENTITIES, _entity("light.kukhnia", "Свет кухня", area="Кухня")],
+    )
+
+    result = await list_home_assistant_entities_tool(
+        _context(home_assistant), query="кухня"
+    )
+
+    assert result.text is not None
+    assert "light.kukhnia" in result.text
+
+
 def test_query_drops_entities_matching_no_word() -> None:
     found = find_entities(
         cast("list[EntityMetadata]", ENTITIES),
