@@ -1,5 +1,5 @@
 # Use the official UV image as the base
-FROM ghcr.io/astral-sh/uv:debian-slim AS base
+FROM ghcr.io/astral-sh/uv:0.13.5-debian-slim@sha256:95611d89b7324e0517fe7257bb00979cf1f68461e5fb2b2d027d039da054bc07 AS base
 
 # Create non-root user and group early in the build with specific UID/GID
 RUN groupadd -r -g 1001 appuser && useradd -r -u 1001 -g appuser -m -d /home/appuser -s /bin/bash appuser
@@ -21,8 +21,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     gnupg \
     && \
     # Add NodeSource repository for newer Node.js
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -     && \
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash -     && \
     apt-get install -y --no-install-recommends nodejs && \
+    sed -i \
+        -e 's|^mozilla/emSign_ECC_Root_CA_-_G3.crt|!&|' \
+        -e 's|^mozilla/Comodo_AAA_Services_root.crt|!&|' \
+        /etc/ca-certificates.conf && \
     update-ca-certificates && \
     # Clean up apt cache to reduce image size
     rm -rf /var/lib/apt/lists/*
@@ -51,7 +55,7 @@ RUN uv venv /app/.venv && \
 ENV PATH="/app/.venv/bin:$PATH"
 
 # --- Install Deno ---
-ARG DENO_VERSION=v2.2.11
+ARG DENO_VERSION=v2.9.8
 ARG TARGETARCH
 # Select the correct Deno binary based on architecture
 RUN ARCHITECTURE="" && \
@@ -91,8 +95,8 @@ ENV UV_TOOL_DIR=/uv/tools
 # server dies with an ImportError before it can speak MCP. Pin the SDK to the 1.x line the
 # application itself resolves. scripts/check_mcp_servers.py fails the container smoke test if this
 # regresses.
-RUN uv tool install mcp-server-time --with "mcp<2"
-RUN uv tool install mcp-server-fetch --with "mcp<2"
+RUN uv tool install mcp-server-time --with "mcp<2" --with "certifi>=2026.10.19"
+RUN uv tool install mcp-server-fetch --with "mcp<2" --with "certifi>=2026.10.19"
 
 # Switch back to root for remaining system-level operations
 USER root
@@ -119,11 +123,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Update PATH separately (use home directory agnostic path)
 ENV PATH="${UV_TOOL_BIN_DIR}:/home/appuser/.deno/bin:/usr/local/bin:${PATH}"
 
-# --- Install Python dependencies for contrib/scrape_mcp.py and Playwright browsers ---
-# Install rebrowser-playwright and markitdown packages first
-# Pin rebrowser-playwright to match pyproject.toml version to ensure browser compatibility
+# Install browser tooling from the same lock used by the application, before
+# downloading the matching browser binaries.
+COPY --chown=appuser:appuser pyproject.toml uv.lock ./
 USER appuser
-RUN uv pip install "rebrowser-playwright>=1.52.0" "markitdown[html]>=0.1.0"
+RUN uv sync --locked --no-install-project --extra local-embeddings
 
 # Install Playwright system dependencies and browser
 # Note: We install deps manually to handle renamed packages in newer Debian
@@ -164,13 +168,6 @@ RUN python -m rebrowser_playwright install chromium && \
 
 USER root
 
-# Copy dependency definition files
-COPY --chown=appuser:appuser pyproject.toml uv.lock* ./
-
-# Install Python dependencies (without installing the project itself yet)
-USER appuser
-RUN uv sync --no-install-project --extra local-embeddings
-
 # --- Frontend Build Stage ---
 # Copy frontend package files first for layer caching
 COPY --chown=appuser:appuser frontend/package*.json ./frontend/
@@ -197,7 +194,7 @@ COPY --chown=appuser:appuser . .
 # Install the package using uv sync to ensure uv.lock continues to apply.
 # This completes the installation by adding the project itself.
 USER appuser
-RUN uv sync --extra local-embeddings
+RUN uv sync --locked --extra local-embeddings
 
 # The production app serves prebuilt assets from src/family_assistant/static/dist.
 # Keeping the frontend workspace in the runtime image also keeps npm lockfiles and
