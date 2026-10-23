@@ -15,6 +15,7 @@ from family_assistant.llm import LLMInterface, ToolCallFunction, ToolCallItem
 from family_assistant.plugins.home_assistant.client import HomeAssistantClientWrapper
 from family_assistant.plugins.home_assistant.instance import HomeAssistantInstance
 from family_assistant.plugins.home_assistant.tools import (
+    ACTION_FIELD_DETAIL_LIMIT,
     call_home_assistant_action_tool,
     list_home_assistant_actions_tool,
 )
@@ -130,6 +131,83 @@ async def test_list_actions_tool_filters_and_summarizes(
     assert "light.turn_off" in result.text
     assert "light.toggle" not in result.text
     assert "switch.turn_on" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_narrowed_action_lookup_shows_each_field(
+    db_engine: AsyncEngine,
+) -> None:
+    """The fields are what calling an action needs; the model only sees text."""
+    home_assistant = make_home_assistant_client()
+    home_assistant.api.async_get_domains.return_value = home_assistant.domains([
+        {
+            "domain": "cat_printer",
+            "services": {
+                "print_text": {
+                    "name": "Print text",
+                    "description": "Print a line of text",
+                    "fields": {
+                        "text": {
+                            "required": True,
+                            "description": "What to print",
+                            "example": "Hello",
+                            "selector": {"text": {}},
+                        },
+                        "font_size": {
+                            "selector": {"number": {"min": 8, "max": 48}},
+                        },
+                    },
+                    "target": {"entity": [{"domain": ["cat_printer"]}]},
+                }
+            },
+        }
+    ])
+    exec_context = _make_exec_context(
+        db_context=Database(engine=db_engine), ha_client=home_assistant.wrapper
+    )
+
+    result = await list_home_assistant_actions_tool(
+        exec_context=exec_context, domain="cat_printer"
+    )
+
+    assert result.text is not None
+    assert (
+        '    text (required): What to print e.g. "Hello" [{"text":{}}]' in result.text
+    )
+    assert '    font_size [{"number":{"min":8,"max":48}}]' in result.text
+    assert "    target: " in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_broad_action_listing_says_how_to_see_fields(
+    db_engine: AsyncEngine,
+) -> None:
+    home_assistant = make_home_assistant_client()
+    home_assistant.api.async_get_domains.return_value = home_assistant.domains([
+        {
+            "domain": "media_player",
+            "services": {
+                f"action_{i}": {
+                    "name": f"Action {i}",
+                    "fields": {"volume": {"selector": {"number": {}}}},
+                }
+                for i in range(ACTION_FIELD_DETAIL_LIMIT + 1)
+            },
+        }
+    ])
+    exec_context = _make_exec_context(
+        db_context=Database(engine=db_engine), ha_client=home_assistant.wrapper
+    )
+
+    result = await list_home_assistant_actions_tool(
+        exec_context=exec_context,
+        domain="media_player",
+        max_results=ACTION_FIELD_DETAIL_LIMIT,
+    )
+
+    assert result.text is not None
+    assert "volume" not in result.text
+    assert "narrow with domain and action_filter" in result.text
 
 
 @pytest.mark.asyncio
