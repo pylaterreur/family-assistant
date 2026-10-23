@@ -124,7 +124,12 @@ class FrontendTelemetryResponse(BaseModel):
 # FrontendErrorReport), and unauthenticated reports never persist — they are
 # clamped into the in-memory telemetry ring, which is fixed-size and dropped
 # on restart. Authenticated reporters keep the full severity behaviour.
-ERROR_INTAKE_RATE_LIMIT = 60  # reports per window per authenticated user or address
+ERROR_INTAKE_RATE_LIMIT = 60  # reports per window per unauthenticated address
+# A signed-in client's own breadcrumbs are not the abuse this limit exists for,
+# and a voice call alone sends dozens in its first half minute (setup, every
+# tool call, chat resync). At the lower limit a phone's diagnostics went dark
+# for the rest of a call, exactly the stretch that needed explaining.
+AUTHENTICATED_ERROR_INTAKE_RATE_LIMIT = 600
 # A higher pre-authentication ceiling bounds invalid-token verification and body
 # buffering without collapsing all authenticated users behind one proxy into the
 # same reporting bucket. The normal per-user/address limit still applies below.
@@ -146,8 +151,12 @@ class ErrorIntakeRateLimiter:
         self._lock = threading.Lock()
         self._hits: dict[str, deque[float]] = {}
 
-    def allow(self, client_key: str) -> bool:
-        """Return whether this client may submit another report."""
+    def allow(self, client_key: str, max_hits: int | None = None) -> bool:
+        """Return whether this client may submit another report.
+
+        ``max_hits`` overrides the limiter's own limit for this key's bucket.
+        """
+        limit = self._max_hits if max_hits is None else max_hits
         now = time.monotonic()
         with self._lock:
             hits = self._hits.get(client_key)
@@ -164,7 +173,7 @@ class ErrorIntakeRateLimiter:
                     return False
                 hits = deque()
                 self._hits[client_key] = hits
-            if len(hits) >= self._max_hits:
+            if len(hits) >= limit:
                 return False
             hits.append(now)
             return True
@@ -301,7 +310,12 @@ async def report_frontend_error(
         raise HTTPException(
             status_code=500, detail="Error intake limiter is unavailable."
         )
-    if not limiter.allow(rate_limit_key):
+    if not limiter.allow(
+        rate_limit_key,
+        AUTHENTICATED_ERROR_INTAKE_RATE_LIMIT
+        if reporter_authenticated and reporter_identifier
+        else None,
+    ):
         raise HTTPException(status_code=429, detail="Too many error reports.")
 
     try:

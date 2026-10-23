@@ -153,7 +153,7 @@ async def test_reading_the_attachment_through_call_tool_returns_its_content(
         "/api/tools/execute/call_tool",
         json=_voice_call(
             "read_text_attachment",
-            json.dumps({"attachment_id": match.group(1), "limit": 1000}),
+            json.dumps({"attachment_id": match.group(1), "grep": "reading_900"}),
         ),
     )
 

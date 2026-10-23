@@ -4,7 +4,7 @@
 # Pinned tool versions; keep these in step with .devcontainer/Dockerfile, which
 # builds the same base. PLAYWRIGHT_VERSION must match the playwright pin in
 # pyproject.toml so rebrowser-playwright and playwright share browser binaries.
-ARG UV_VERSION=0.12.15
+ARG UV_VERSION=0.13.5
 ARG NODE_MAJOR=22
 ARG AST_GREP_VERSION=0.45.3
 ARG YQ_VERSION=v4.47.1
