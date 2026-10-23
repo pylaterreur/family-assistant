@@ -220,6 +220,36 @@ async def test_search_returns_the_full_argument_schema() -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_by_exact_name_returns_only_that_tool() -> None:
+    """Every token of a name can match its siblings; the name itself cannot."""
+    provider = _build_provider()
+
+    result = await provider.execute_tool(
+        SEARCH_TOOLS_TOOL_NAME, {"query": "call_home_assistant_action"}, _context()
+    )
+
+    assert isinstance(result, ToolResult)
+    data = cast("dict[str, Any]", result.get_data())
+    assert [tool["name"] for tool in data["tools"]] == ["call_home_assistant_action"]
+    assert set(data["tools"][0]["parameters"]["properties"]) == {"entity_id", "action"}
+
+
+@pytest.mark.asyncio
+async def test_search_gives_only_the_first_hit_its_schema() -> None:
+    provider = _build_provider()
+
+    result = await provider.execute_tool(SEARCH_TOOLS_TOOL_NAME, {}, _context())
+
+    assert isinstance(result, ToolResult)
+    data = cast("dict[str, Any]", result.get_data())
+    assert "parameters" in data["tools"][0]
+    assert all(
+        set(tool) == {"name", "summary", "already_declared"}
+        for tool in data["tools"][1:]
+    )
+
+
+@pytest.mark.asyncio
 async def test_search_marks_declared_tools_so_the_model_calls_them_directly() -> None:
     provider = _build_provider()
 
