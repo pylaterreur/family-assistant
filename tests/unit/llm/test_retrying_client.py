@@ -84,7 +84,6 @@ class ScriptedLLMClient:
         messages: Sequence[LLMMessage],
         tools: "list[ToolDefinition] | None" = None,
         tool_choice: str | None = "auto",
-        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         raise AssertionError("Streaming is not scripted in these tests")
 

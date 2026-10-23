@@ -30,8 +30,7 @@ path; see "Deliberate simplifications" in docs/design/prompt-caching.md.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from hypothesis import HealthCheck, given, settings
@@ -40,91 +39,28 @@ from hypothesis import strategies as st
 from family_assistant.llm.messages import (
     AssistantMessage,
     LLMMessage,
-    SystemMessage,
-    ToolMessage,
     UserMessage,
 )
 from family_assistant.llm.providers.anthropic_client import AnthropicClient
-from family_assistant.llm.tool_call import ToolCallFunction, ToolCallItem
-from family_assistant.storage.delegation_runs import (
-    delegation_wake_instruction,
-    delegation_wake_record_content,
+from family_assistant.storage.delegation_runs import delegation_wake_instruction
+from tests.unit.llm.agent_loop_conversations import (
+    STEP,
+    TOOLS,
+    Step,
+    messages_for,
+    opening,
+    sends_a_request,
+    wake_trigger,
 )
 
 if TYPE_CHECKING:
     from family_assistant.llm import JsonObject
-    from family_assistant.tools.types import ToolDefinition
 
 # A model that takes deferred tools natively, so activations go through
 # tool_addition messages rather than changing the tool list.
 MODEL = "claude-opus-5-5"
 
-SYSTEM_PROMPT = "You are the family's household assistant."
-
-TOOLS: list[ToolDefinition] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "activate_tools",
-            "description": "Load on-demand tools by name.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "tool_names": {"type": "array", "items": {"type": "string"}}
-                },
-                "required": ["tool_names"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_lights",
-            "description": "Turn the lights in a room on or off.",
-            "parameters": {
-                "type": "object",
-                "properties": {"room": {"type": "string"}},
-                "required": ["room"],
-            },
-        },
-        "defer_loading": True,
-    },
-]
-
-StepKind = Literal["tool_round", "answer", "user", "notice", "wake"]
-
-
-@dataclass(frozen=True)
-class Step:
-    """One thing the agent loop appends to a conversation."""
-
-    kind: StepKind
-    calls: int
-    thinking: bool
-    activates: bool
-    text: bool
-
-
-_STEP = st.builds(
-    Step,
-    kind=st.sampled_from(["tool_round", "answer", "user", "notice", "wake"]),
-    calls=st.integers(min_value=1, max_value=3),
-    thinking=st.booleans(),
-    activates=st.booleans(),
-    text=st.booleans(),
-)
-
 WireMessage = dict[str, object]
-
-
-def _wake_trigger(index: int) -> str:
-    """A completion wake's trigger, as the task worker writes it."""
-    return (
-        "System: Delegated profile task completed.\n\n"
-        f"Delegation reference: delegation-{index}\n"
-        "The delegated result is provided as lower-priority data in the message "
-        "history for this turn. Use it to respond to the user."
-    )
 
 
 def _metadata(index: int, *, thinking: bool) -> JsonObject:
@@ -140,60 +76,12 @@ def _metadata(index: int, *, thinking: bool) -> JsonObject:
     }
 
 
-def _answer(index: int, *, thinking: bool) -> AssistantMessage:
-    return AssistantMessage(
-        content=f"Answer {index}",
-        provider_metadata=_metadata(index, thinking=thinking),
+def _decorate(
+    message: AssistantMessage, index: int, thinking: bool
+) -> AssistantMessage:
+    return message.model_copy(
+        update={"provider_metadata": _metadata(index, thinking=thinking)}
     )
-
-
-def _messages_for(
-    step: Step, index: int, history: list[LLMMessage]
-) -> list[LLMMessage]:
-    kind = step.kind
-    if (
-        kind in {"user", "notice", "wake"}
-        and history
-        and isinstance(history[-1], ToolMessage)
-    ):
-        # The model answers its tool results before anything else arrives;
-        # see the module docstring for the interrupted turn this leaves out.
-        return [_answer(index, thinking=step.thinking), *_messages_for(step, index, [])]
-    if kind == "user":
-        return [UserMessage(content=f"Question {index}")]
-    if kind == "notice":
-        return [SystemMessage(content=f"Delegation {index} finished.")]
-    if kind == "wake":
-        return [
-            UserMessage(content=f"Delegated result {index}"),
-            SystemMessage(content=delegation_wake_record_content(_wake_trigger(index))),
-        ]
-    if kind == "answer":
-        return [_answer(index, thinking=step.thinking)]
-    calls = [
-        ToolCallItem(
-            id=f"call_{index}_{n}",
-            type="function",
-            function=ToolCallFunction(name="activate_tools", arguments="{}"),
-        )
-        for n in range(step.calls)
-    ]
-    return [
-        AssistantMessage(
-            content=f"Checking {index}" if step.text else None,
-            tool_calls=calls,
-            provider_metadata=_metadata(index, thinking=step.thinking),
-        ),
-        *(
-            ToolMessage(
-                tool_call_id=call.id,
-                name="activate_tools",
-                content=f"result {call.id}",
-                activated_tools=(["set_lights"] if step.activates and n == 0 else None),
-            )
-            for n, call in enumerate(calls)
-        ),
-    ]
 
 
 def _strip(value: object) -> object:
@@ -254,14 +142,9 @@ def _breakpoint_index(api_messages: list[WireMessage]) -> int:
     return found
 
 
-def _sends_a_request(history: list[LLMMessage]) -> bool:
-    """The agent loop calls the model whenever the model has not just spoken."""
-    return not isinstance(history[-1], AssistantMessage)
-
-
 @pytest.mark.no_db
 class TestAnthropicPrefixStability:
-    @given(st.lists(_STEP, min_size=1, max_size=12))
+    @given(st.lists(STEP, min_size=1, max_size=12))
     @settings(
         max_examples=300,
         deadline=None,
@@ -269,21 +152,18 @@ class TestAnthropicPrefixStability:
     )
     def test_each_request_extends_the_previous_one(self, steps: list[Step]) -> None:
         client = AnthropicClient(api_key="test", model=MODEL)
-        history: list[LLMMessage] = [
-            SystemMessage(content=SYSTEM_PROMPT, stable_prefix_len=len(SYSTEM_PROMPT)),
-            UserMessage(content="Hello"),
-        ]
+        history = opening()
         instruction: str | None = None
         previous = _request(client, history, instruction)
         previous_instruction = instruction
 
         for index, step in enumerate(steps):
-            history.extend(_messages_for(step, index, history))
+            history.extend(messages_for(step, index, history, _decorate))
             if step.kind == "wake":
-                instruction = delegation_wake_instruction(_wake_trigger(index))
+                instruction = delegation_wake_instruction(wake_trigger(index))
             elif step.kind == "user":
                 instruction = None
-            if not _sends_a_request(history):
+            if not sends_a_request(history):
                 continue
             current = _request(client, history, instruction)
 

@@ -61,13 +61,16 @@ _ELIGIBILITY = ModelTierEligibility(
 )
 
 
+CLOCK_START = datetime(2026, 10, 22, 1, 0, tzinfo=UTC)
+
+
 def _client_saying(reply: str) -> RuleBasedMockLLMClient:
     return RuleBasedMockLLMClient(rules=[], default_response=LLMOutput(content=reply))
 
 
 @pytest.fixture(name="clock")
 def clock_fixture() -> MockClock:
-    return MockClock(datetime(2026, 10, 22, 1, 0, tzinfo=UTC))
+    return MockClock(CLOCK_START)
 
 
 @pytest.fixture(name="experiment_app")
@@ -125,15 +128,19 @@ async def _send(
 async def _latest_reasoning(
     db_engine: AsyncEngine, conversation_id: str
 ) -> MessageReasoningInfo:
-    reasoning = await Database(
-        engine=db_engine
-    ).message_history.get_latest_model_selection_reasoning(
-        conversation_id,
-        subconversation_id=None,
-        processing_profile_id="chat_api_test_profile",
+    # The rows carry the pinned clock's time, but the age cutoff is taken from
+    # the real one, so the default 24 hours would lose them a day after the pin.
+    rows = await Database(engine=db_engine).message_history.get_recent_with_metadata(
+        interface_type="api",
+        conversation_id=conversation_id,
+        limit=10,
+        max_age=datetime.now(UTC) - CLOCK_START + timedelta(days=1),
     )
+    reasoning = [row for row in rows if row["role"] == "assistant"][-1][
+        "reasoning_info"
+    ]
     assert reasoning is not None
-    return reasoning
+    return cast("MessageReasoningInfo", reasoning)
 
 
 def _conversation_on(

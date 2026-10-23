@@ -3227,6 +3227,21 @@ Set it to `false` to declare every advertisable tool up front, as before. Either
 session has no confirmation channel, so tools that require confirmation are never advertised to it
 and `call_tool` refuses them.
 
+```yaml
+gemini_live_config:
+  tools:
+    excluded_tools:
+      - "some_mcp_tool_search"
+```
+
+`excluded_tools` (default empty) names tools a voice session never offers or runs, though chat still
+may: ones whose output is fine in a chat turn but too large to be heard in voice, such as an MCP
+server's own tool search, which `search_tools` already covers. They are left out of the catalog and
+`search_tools`, refused by `call_tool`, and refused when a voice client calls one by name. With
+`on_demand: false` they are still declared, since that mode exists to declare everything; a call to
+one is refused all the same. To hide a tool from every interface, use a `deny` rule in
+`tools_policy` instead.
+
 See [voice-mode-on-demand-tools.md](../design/voice-mode-on-demand-tools.md).
 
 ______________________________________________________________________
@@ -3536,7 +3551,12 @@ engine.
 
 The rules apply regardless of the profile's own `tools_policy`, which otherwise replaces the shipped
 defaults wholesale rather than merging with them. Use it for tools that must be available in all
-contexts. Operator policy still overrides global rules.
+contexts, or a `deny` rule for a tool no profile should see. Operator policy still overrides global
+rules.
+
+Rules in `config.yaml` are **added to** the shipped ones rather than replacing them, so a deployment
+can add a global deny without restating the shipped grants below. To withdraw a shipped grant, write
+a `deny` rule at a higher priority, or use a profile's `excluded_global_tools`.
 
 **A profile's own `tools_policy` cannot opt out.** Global rules are injected at the `profile` policy
 layer, which outranks the `defaults` layer a profile's own `tools_policy` occupies, so a deny rule

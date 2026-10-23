@@ -2132,6 +2132,42 @@ class TestLoadConfig:
         )
         assert engine.evaluate(code_execution_tool).decision is ToolPolicyDecision.ALLOW
 
+    def test_operator_global_tools_policy_rules_add_to_shipped_ones(
+        self, tmp_path: Path
+    ) -> None:
+        """A deployment's global deny must not delete the shipped global grants."""
+        shipped_rule = {
+            "match": {"names": ["read_text_attachment"]},
+            "decision": "allow",
+            "priority": 50,
+        }
+        operator_rule = {
+            "match": {"names": ["redundant_overview"]},
+            "decision": "deny",
+            "priority": 60,
+        }
+        defaults_file = tmp_path / "defaults.yaml"
+        defaults_file.write_text(
+            yaml.dump({"global_tools_policy": {"rules": [shipped_rule]}})
+        )
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            yaml.dump({"global_tools_policy": {"rules": [operator_rule]}})
+        )
+
+        config = load_config(
+            defaults_file_path=str(defaults_file),
+            config_file_path=str(config_file),
+            prompts_file_path=str(tmp_path / "nonexistent_prompts.yaml"),
+            load_dotenv_file=False,
+        )
+
+        assert config.global_tools_policy is not None
+        assert [rule.match.names for rule in config.global_tools_policy.rules] == [
+            ["read_text_attachment"],
+            ["redundant_overview"],
+        ]
+
     def test_operator_default_profile_tools_policy_overrides_defaults(
         self, tmp_path: Path
     ) -> None:

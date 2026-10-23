@@ -925,19 +925,12 @@ class LLMInterface(Protocol):
         messages: Sequence[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
-        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         """
         Generates a streaming response from the LLM.
 
         Yields LLMStreamEvent objects as the response is generated.
         Must be implemented by all LLM clients (can use fallback implementation).
-
-        ``history_prefix_len`` counts the leading ``messages`` that are settled
-        history rather than the turn being run. It is advisory, like
-        ``SystemMessage.stable_prefix_len``: a provider that can pin a cache
-        breakpoint there does so, and one that cannot ignores it and sends the
-        same bytes. ``None`` means the caller did not identify a boundary.
 
         Note: This is typed as a regular method (not async def) that returns
         AsyncIterator because it's an async generator function.
@@ -1143,7 +1136,6 @@ class RecordingLLMClient:
         messages: Sequence[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
-        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         """Delegates streaming to wrapped client - no recording for streams yet."""
         # For now, just pass through to wrapped client
@@ -1151,7 +1143,7 @@ class RecordingLLMClient:
         # Note: type: ignore needed due to basedpyright incorrectly flagging async generators from protocols
         # as not iterable. This is a known limitation with protocol type inference.
         async for event in self.wrapped_client.generate_response_stream(  # type: ignore[reportGeneralTypeIssues]
-            messages, tools, tool_choice, history_prefix_len
+            messages, tools, tool_choice
         ):
             yield event
 
@@ -1449,15 +1441,10 @@ class PlaybackLLMClient:
         messages: Sequence[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
-        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         """
         Plays back streaming response by converting recorded non-streaming response.
-
-        ``history_prefix_len`` shapes only cache breakpoints, which a recording
-        does not replay, so it is accepted and ignored.
         """
-        del history_prefix_len
         # Get the recorded response
         response = await self.generate_response(messages, tools, tool_choice)
 

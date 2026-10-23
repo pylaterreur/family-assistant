@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from family_assistant.tools.argument_schema import argument_schema_errors
@@ -205,9 +206,11 @@ class LiveMetaToolsProvider:
         on_demand_view: OnDemandToolsView,
         *,
         search_result_limit: int = DEFAULT_SEARCH_RESULT_LIMIT,
+        excluded_tool_names: frozenset[str] = frozenset(),
     ) -> None:
         self._view = on_demand_view
         self._wrapped_provider = on_demand_view.wrapped_provider
+        self._excluded_tool_names = excluded_tool_names
         self._search_result_limit = max(
             1, min(search_result_limit, MAX_SEARCH_RESULT_LIMIT)
         )
@@ -231,15 +234,27 @@ class LiveMetaToolsProvider:
         afford the tighter test because it rebuilds its list every turn.
         """
         visible = await self._view.get_visible_definitions(can_confirm=False)
+        definitions = [
+            definition
+            for definition in visible.definitions
+            if (name := definition.get("function", {}).get("name")) is None
+            or name not in self._excluded_tool_names
+        ]
         if not self._view.has_on_demand_tools():
-            return visible.definitions
-        return [*visible.definitions, SEARCH_TOOLS_DEFINITION, CALL_TOOL_DEFINITION]
+            return definitions
+        return [*definitions, SEARCH_TOOLS_DEFINITION, CALL_TOOL_DEFINITION]
 
     async def get_system_prompt_addition(self) -> str | None:
         """Return the catalog of reachable-but-undeclared tools, or None."""
         catalog = await self._view.get_on_demand_catalog(can_confirm=False)
-        if not catalog.entries:
+        filtered_entries = [
+            entry
+            for entry in catalog.entries
+            if entry.name not in self._excluded_tool_names
+        ]
+        if not filtered_entries:
             return None
+        catalog = replace(catalog, entries=filtered_entries)
         return catalog.render_for_system_prompt(
             heading=CATALOG_HEADING,
             instruction=CATALOG_INSTRUCTION,
@@ -280,6 +295,7 @@ class LiveMetaToolsProvider:
             name: definition
             for definition in definitions
             if (name := definition.get("function", {}).get("name")) is not None
+            and name not in self._excluded_tool_names
         }
 
     # ast-grep-ignore: no-dict-any - Tool arguments are dynamic JSON from the LLM
@@ -361,6 +377,10 @@ class LiveMetaToolsProvider:
                     f"call_tool cannot run '{inner_name}'. Pass the name of a "
                     "tool that search_tools returned."
                 )
+            )
+        if inner_name in self._excluded_tool_names:
+            return ToolResult(
+                text=f"Tool '{inner_name}' is not available in voice sessions."
             )
 
         parsed = _parse_arguments_json(arguments.get("arguments_json"))

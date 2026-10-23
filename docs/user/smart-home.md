@@ -67,8 +67,9 @@ These create automations. See [automations.md](automations.md).
 
 ## Troubleshooting
 
-- **The assistant can't find a device.** Use the exact entity name from Home Assistant. Ask "what
-  lights are available?" to see what it can reach.
+- **The assistant can't find a device.** Describe it the way Home Assistant names it, or by its room
+  ("the pool heater", "lights in the kitchen"). Ask "what lights are in the kitchen?" to see what it
+  can reach.
 - **Nothing responds at all.** Ask your operator to check the Home Assistant integration —
   specifically the URL and access token.
 - **Brief gaps in event monitoring.** The assistant reconnects to Home Assistant automatically after

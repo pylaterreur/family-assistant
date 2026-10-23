@@ -372,12 +372,93 @@ supervision requirements based on input trust level:
 The Rule of Two addresses prompt injection specifically; it complements rather than replaces
 least-privilege access, input validation, and defense in depth.
 
-## Code Review
+## Code Review Rules
 
 Reviewing a pull request, diff or design document, or answering review feedback on your own change,
 follows the `review-guidelines` skill
 ([.agents/skills/review-guidelines/SKILL.md](.agents/skills/review-guidelines/SKILL.md)). Codex
-reviews through native Codex GitHub review (`@codex review`).
+reviews through native Codex GitHub review (`@codex review`). The rules below are the short form of
+that skill for a reviewer that reads only this file; the skill's reference file is the full standard
+and the two must say the same thing (see
+[docs/design/review-guidelines-precision-recall.md](docs/design/review-guidelines-precision-recall.md)
+for why).
+
+### What to post
+
+- A finding names a concrete failure: the input or state that triggers it, who can trigger it, and
+  what goes wrong. No hedged speculation, no "please verify", no questions you cannot answer.
+- Say whether the defect is **introduced by this change or pre-existing**. A pre-existing defect in
+  an uncommon path whose fix needs a migration, new persisted state or new config surface is
+  follow-up work; say so and do not block on it.
+- Before asserting how a library, SDK, runtime, API or tool configuration behaves, check the pinned
+  source or its documentation and cite it. Before reporting a missing file or dangling link, check
+  the base branch, not only the PR head: companion and stacked PRs merge separately.
+- Read the PR description and the design doc first. A point recorded under "Deliberate
+  simplifications", "Not in this PR", a filed issue or a stated merge dependency is already decided;
+  comment only if the recorded rationale is factually wrong.
+- Report a pattern once. The Nth instance of a family (the Nth missed call site, the Nth free-text
+  field, the Nth edge of the same state machine) is reported as the class with a proposed
+  chokepoint, not as instance N+1. Do not re-post a finding on a later commit unless the new head
+  changes it.
+
+### Proportionality
+
+- A scenario that needs **two independent failures, or two concurrent actions by the same user**, is
+  a documented residual, not a finding, unless the outcome is data loss or a crossing of a trust
+  boundary. State the scenario's likelihood and blast radius in the comment.
+- When the code you are flagging was added to satisfy an earlier review comment, first ask whether
+  the mechanism should exist. Prefer deletion, narrowing the stated guarantee, or reuse of an
+  existing chokepoint over another guard, state or lifecycle. Each round that adds machinery for an
+  edge case of the previous round's machinery is a design signal, not progress.
+- **Fail fast has a scope.** Strict rejection applies where a malformed input would advance durable
+  state or be acted on. Tolerant parsing of read-only discovery from a pinned in-house service, and
+  visible failure on operator-authored configuration, are acceptable; do not demand validation of
+  values our own services return without a reachable failure.
+- Eval harnesses, dev CLIs and one-time scripts are reviewed for wrong results and defects in
+  committed data. They are not hardened against their own maintainer, and a one-time script needs no
+  concurrency hardening.
+- Client-side state on a trusted, server-enforced client (a lingering rejected token, a stale badge)
+  is UX debt, not a security finding. See the threat model in the skill.
+
+### Severity
+
+- **P1 / blocking** requires a failure reachable in the shipped configuration that loses or
+  duplicates data, runs a side effect twice, crosses a trust boundary, or breaks startup.
+- Findings reachable only in a mode or configuration the PR does not ship are P3 or omitted.
+- Lint and type-checker suppressions, test hygiene, documentation placement and cosmetic status
+  codes are never above P3, whatever rule they violate.
+
+### Design documents
+
+- Review a design document per revision, not per commit: check its internal consistency once when
+  the author marks the revision complete.
+- A contradiction that a previous fix introduced is answered by restating the rule at higher
+  altitude, not by adding a case. Do not request wire formats, field names, verification-criteria
+  tuning or statistical bands; the implementing PR carries those.
+
+### Recall
+
+- When a change adds an external call, a task-worker handler or a loop over remote data, check what
+  is *absent*: a timeout, a bound or page size, a `LIMIT` placed after the aggregate, and whether a
+  retried task re-runs a side effect.
+- A test whose only evidence for an external contract is the author's own mock proves nothing about
+  the provider. Ask for a recorded cassette, a real call, or a stated reason none is possible.
+- When a change alters how messages, tools or request parameters reach a provider, check the prompt
+  cache prefix survives: history rendered identically on every request, the tool list fixed (an
+  activation appends), no parameter change mid-conversation, no cache write from a one-shot request,
+  and a longer cache lifetime only where a read will repay it. The per-provider prefix-stability
+  property tests are the chokepoint. A broken prefix costs money, not data: never blocking, and
+  posted with an estimated cost.
+
+### Answering review on your own change
+
+- Every review thread gets a disposition before merge: fixed (with the commit), declined (with the
+  reason, recorded in the PR description or design doc when it is an accepted residual), or filed.
+  An unanswered thread is how real findings get lost.
+- Before pushing a fix for a review comment, check the neighbouring failure mode the fix creates
+  (the `finally` that references a name the early path never bound, the count carried through a
+  second merge, the state held open until an age cap). Review-induced defects are the commonest
+  shape of regression in this repository.
 
 ## Development Guidelines
 
@@ -420,7 +501,9 @@ reviews through native Codex GitHub review (`@codex review`).
   slipping through. Arrange mechanisms so neglect degrades availability (visible failure, gets
   fixed) rather than safety (silent widening, gets exploited), and check that every gate leaves a
   satisfiable path for ordinary use: a gate that blocks normal workflows gets turned off and then
-  protects nothing.
+  protects nothing. A chokepoint is for a class with real exposure; it does not license hardening
+  every instance of a pattern in code only the maintainer runs, or a new mechanism for a scenario
+  the behaviour-altitude principle says gets reasonable behaviour.
 - **Record accepted trade-offs where reviewers will find them.** When you and the user deliberately
   accept a residual risk or simplification, write it down in the change or its design doc (e.g. a
   "Deliberate simplifications" section) with the rationale. A documented, reasoned acceptance closes
@@ -441,7 +524,9 @@ error handling guidelines. Key principles:
   handling them at runtime.
 - **No Silent Failures**: Never silently drop errors or user input. A silent failure at one layer
   often causes a confusing error at another layer (e.g., user sends video → video silently stripped
-  → empty input error shown to user).
+  → empty input error shown to user). This is about errors and input that are acted on or persisted;
+  it does not require rejecting every unexpected field in a read-only response from a service we
+  pin, and it does not make a rare, self-correcting transient a defect.
 - **Fail Fast**: Do not implement "graceful fallbacks" that mask bugs (e.g., returning `None` or
   empty lists when an unexpected error occurs). Errors should look like errors. Let exceptions
   propagate so they can be caught by tests and debugging tools.

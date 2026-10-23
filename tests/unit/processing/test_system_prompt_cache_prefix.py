@@ -186,45 +186,6 @@ class TestSystemMessageBreakpoint:
             service.format_system_prompt(user_name="tester")
         )
 
-    @pytest.mark.asyncio
-    async def test_history_boundary_ends_where_this_turn_begins(
-        self, db_engine: AsyncEngine
-    ) -> None:
-        """What a provider needs to pin a longer-lived breakpoint on the history.
-
-        The second turn re-sends the first one verbatim, so everything before
-        its own trigger is what the next turn will send again unchanged.
-        """
-        llm_client = _CapturingMockLLMClient()
-        service = _make_service(llm_client=llm_client)
-        db_context = Database(db_engine)
-
-        for prompt in ("Hello", "Again"):
-            result = await service.handle_chat_interaction(
-                db_context=db_context,
-                interface_type="web",
-                conversation_id="cache-prefix-boundary",
-                trigger_content_parts=[{"type": "text", "text": prompt}],
-                trigger_interface_message_id=None,
-                user_name="tester",
-            )
-            assert result.status.value == "success"
-
-        second_turn = llm_client.requests[-1]
-        boundary = llm_client.history_prefix_lens[-1]
-        assert boundary is not None
-        # Everything after the boundary is this turn's own; everything before it
-        # is the system prompt plus the settled first turn. A trigger carries a
-        # "[Sent ...]" stamp, so the text is matched by suffix.
-        after = [str(getattr(m, "content", "")) for m in second_turn[boundary:]]
-        assert len(after) == 1
-        assert after[0].endswith("Again")
-        assert isinstance(second_turn[0], SystemMessage)
-        before = [str(getattr(m, "content", "")) for m in second_turn[1:boundary]]
-        assert len(before) == 2
-        assert before[0].endswith("Hello")
-        assert before[1] == "done"
-
 
 @pytest.mark.no_db
 class TestRemovedPlaceholdersFailLoudly:

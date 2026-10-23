@@ -70,32 +70,6 @@ other request — a tool-call review, a structured or JSON output, a summary, an
 one-shot: its tail is unique and no later request extends it, so a breakpoint there writes a cache
 entry (at 1.25× the input price) that is never read, and skews the account's cache-hit metric.
 
-### The history breakpoint
-
-The trailing breakpoint only pays off while a turn is running: it moves with every tool round, so
-each request reads what the previous one wrote, and five minutes is ample. It does nothing for the
-gap between turns, which is as long as a person takes to reply. Seven weeks of production traffic
-measured that gap: requests 5–60 minutes after the previous one wrote 11.8M cache tokens and read
-1.5M, and past an hour 4.4M writes read essentially nothing — the whole history, rewritten, because
-the only breakpoint naming it had expired.
-
-So a second breakpoint sits at the end of the settled history, with the one-hour TTL. The processing
-service knows where that is — the system prompt plus the window, everything before the turn's own
-messages — and passes it as `history_prefix_len` on the streaming call. It is advisory in the same
-way as `SystemMessage.stable_prefix_len`: Anthropic pins a breakpoint there, and the providers that
-cache implicitly ignore it and send identical bytes.
-
-It moves once per turn rather than once per request, so one write is read by every later request in
-the turn and by the whole of the next turn. Ordering holds: tools and system prompt (1h) precede the
-history (1h), which precedes the tail (5m), and Anthropic requires longer-lived breakpoints first.
-Three of the four available breakpoints are now in use.
-
-Two cases deliberately go unmarked. A prefix with no turn after it has nothing to separate, and
-marking its last block would collide with the trailing breakpoint. And after an emergency compaction
-(`CompactionReason.CONTEXT_LENGTH`) the rest of the turn runs without it: that compaction has just
-rewritten the prefix the breakpoint would have named, so there is nothing left to read back, and the
-boundary the caller measured no longer points at the end of the history.
-
 A prompt that is stable all the way to the end — what a template with no volatile placeholders
 produces — needs no split and is emitted as a single cacheable block. Only when there is no boundary
 at all does the client send the plain string as before, so requests that cannot benefit keep their
@@ -120,11 +94,13 @@ model.
 
 Two mechanisms, one before deploy and one after:
 
-- **A property test** (`TestAnthropicPrefixStability`) generates conversations and extensions of
-  them in the shapes the agent loop produces — tool rounds, new user turns, system notices — and
-  asserts the earlier request, with `cache_control` stripped, is a prefix of the later one: same
-  `tools`, same `system`, and its messages reappearing as a block-level prefix. A conversion that
-  rewrites earlier output fails it without anyone having to think of the case.
+- **A property test per adapter** (`tests/unit/llm/providers/test_*_prefix_stability.py`) generates
+  conversations in the shapes the agent loop produces — tool rounds, activations, new user turns,
+  system notices, delegation wakes — from a shared generator
+  (`tests/unit/llm/agent_loop_conversations.py`), and asserts each request the loop would send
+  extends the one before it. A conversion that rewrites earlier output fails it without anyone
+  having to think of the case. For Gemini, which reports nothing when a prefix breaks, this test is
+  the only guard.
 - **Anthropic cache diagnostics** on every streamed request. The client sends
   `diagnostics.previous_message_id` naming the response that produced the conversation's newest
   assistant turn (kept as `response_id` in that turn's provider metadata), and the API reports where
@@ -141,11 +117,9 @@ call. The load-bearing part, the final-iteration "you must answer now" instructi
 trailing user message, which appends at the end of the prefix and invalidates nothing. That path
 already existed for conversations carrying Gemini thought signatures; it is now the only path.
 
-On-demand tool activation changes neither. The tool list and the on-demand catalog are fixed for the
-whole conversation -- every tool is declared on every request, the on-demand ones marked
-`defer_loading`, and the catalog lists them whether or not they are active -- so activating one
-appends a `tool_addition` block and leaves every earlier byte alone. Models without that beta get
-the deferred tools filtered out of the list instead, as on any other provider.
+On-demand tool activation still rebuilds the system prompt, but only when the addition actually
+changes. Activation also changes the tool list, which invalidates the prefix regardless, so this
+costs nothing extra.
 
 An instruction meant for one turn only is sent as **trailing scaffolding**: a user message flagged
 `is_turn_scaffolding` that follows the conversation on that turn's requests and is never saved. The
@@ -210,6 +184,41 @@ per provider, because providers report it in the `done` event's metadata and the
 no span of its own. Doing it at the retry layer is what makes `gen_ai.usage.*` present for every
 provider instead of only the ones that instrument themselves.
 
+## Other providers
+
+Caching on OpenAI and Gemini is driven by the same rule — send each request as an extension of the
+last — but the controls differ, so each adapter applies what its API offers. Everything above the
+adapters (the stable system prompt, the time stamped on user messages, history-level fixes) applies
+to all of them unchanged.
+
+### OpenAI
+
+GPT-5.6 and later accept explicit breakpoints, cache lifetimes and `additional_tools` input items on
+the Responses API, with writes billed at 1.25× (30 minutes) or 2.5× (12 hours) and reads at 0.1×. On
+those models:
+
+- **The tools and stable system prompt carry a 12-hour breakpoint.** Shared by every conversation on
+  a profile and changed only by a note, skill or config edit, they are read back by a turn that
+  arrives after the 30-minute default expired. The position never moves, so nothing is re-written at
+  the longer lifetime.
+- **The agent loop keeps OpenAI's implicit breakpoint**, which caches each tool round at the end of
+  the latest message for the next. A non-streamed request is one-shot and runs in explicit-only
+  mode, writing nothing past the shared prefix.
+- **The `tools` array is fixed.** An activation appends an `additional_tools` item after the outputs
+  that activated it, the counterpart of Anthropic's `tool_addition` blocks.
+
+Earlier models, Chat Completions and OpenAI-compatible backends get none of this; they reject the
+fields.
+
+### Gemini
+
+Gemini caches implicitly, with no breakpoints, no write charge and no lifetime control, so prefix
+stability is the only lever, and the adapter already holds it: every system message is sent where it
+occurred, and thought signatures are replayed exactly as received. Explicit caching
+(`cachedContents`) exists on Flash but not on Gemini 4 Argon, and was measured at roughly $8–17 a
+month net of storage — not yet worth the lifecycle of recreating a cache whenever the prompt
+changes.
+
 ## Deliberate simplifications
 
 - **An interrupted turn that activated a deferred tool rewrites the cache once.** The
@@ -223,6 +232,30 @@ provider instead of only the ones that instrument themselves.
   than as an operator instruction. Before this change it was in `system`; nothing in the notices
   requires operator authority, and the placement rules of the native role would make it change shape
   between requests.
+- **The conversation history keeps the five-minute lifetime.** A turn that arrives more than five
+  minutes after the last one rewrites the history at 1.25×. A one-hour breakpoint at the end of the
+  settled history was shipped and taken out again, because it costs more than it saves. Moving the
+  breakpoint each turn writes every turn twice: at five minutes during the turn, then again at one
+  hour on the next turn, since a one-hour write is charged from the last one-hour entry even when a
+  warm five-minute entry covers more. No placement escapes the underlying arithmetic. Writing a span
+  at one hour costs an extra 0.75× input, and pays back 1.15× only if the next turn arrives five to
+  sixty minutes later, so it breaks even when that happens 65% of the time. Measured on production
+  Anthropic turns (September–October 2026), it happens 36% of the time. Even conditioned on the
+  previous gap, the most predictable case reaches only 47%. Replaying those turns against simulated
+  cache state put every variant tried above the five-minute baseline: the moving breakpoint, one
+  moved only when the tail had expired or only after enough new history, one anchored at compaction
+  boundaries, and a one-hour tail. Revisit only if the gap distribution changes enough to clear that
+  bar.
+- **On Gemini, activating a deferred tool costs that request its cache.** Gemini cannot add a tool
+  mid-conversation, so the tool list grows on activation and everything after it misses. In
+  production every such request missed (160 of 160), costing about $5 a month; sending every
+  on-demand tool on every request instead was measured at 3–60× that, per tool server.
+- **No long-lived breakpoint at the end of the settled history on OpenAI.** It would move every
+  turn, re-writing the turn just finished at 2.5× on the next request whether or not the cache was
+  still warm. On deep-tier traffic that costs about four times what it saves, because most
+  follow-ups arrive within the 30 minutes the default already covers.
+- **OpenAI structured and JSON calls get no cache controls.** They go through Chat Completions,
+  where the controls are not offered; they are few, and run on the default implicit caching.
 - **Diagnostics compare against the newest assistant turn only.** If that turn was served by another
   provider, or predates response ids being stored, the request opts in without a predecessor and the
   first divergence after it goes unreported.
