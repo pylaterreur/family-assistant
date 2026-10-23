@@ -31,6 +31,7 @@ from family_assistant.tools.infrastructure import (
     ToolDescriptorProvider,
     get_tool_definitions_for_advertisement,
 )
+from family_assistant.tools.metadata import extract_tool_summary
 from family_assistant.tools.types import ToolResult
 
 if TYPE_CHECKING:
@@ -59,6 +60,8 @@ CATALOG_INSTRUCTION = (
     "first call `search_tools` with its exact name from this list, then read "
     "the argument schema it returns, then call `call_tool` with "
     "`arguments_json` holding only the argument names that schema declares. "
+    "A search that is not an exact name gives only its first match a schema; "
+    "search again by exact name before calling any other match. "
     "Never invent an argument name, and never fold the request into a made-up "
     "argument value: a call whose arguments do not match the schema is "
     "rejected without running and the rejection carries the schema, so a "
@@ -70,9 +73,12 @@ SEARCH_TOOLS_DEFINITION: ToolDefinition = {
     "function": {
         "name": SEARCH_TOOLS_TOOL_NAME,
         "description": (
-            "Find tools that are not declared in this session. Returns each "
-            "match's name, description and the full JSON Schema of its "
-            "arguments, which is what you need to run it with call_tool."
+            "Find tools that are not declared in this session. Searching an "
+            "exact tool name returns that tool's description and the full JSON "
+            "Schema of its arguments, which is what you need to run it with "
+            "call_tool. A keyword search returns the best match with its schema "
+            "and the other matches as name and summary only: to run one of "
+            "those, search again with its exact name first."
         ),
         "parameters": {
             "type": "object",
@@ -153,6 +159,34 @@ def _score(name: str, description: str, query_tokens: list[str]) -> int:
         elif token in description_tokens:
             score += 1
     return score
+
+
+def _search_entry(
+    name: str,
+    definition: ToolDefinition,
+    *,
+    already_declared: bool,
+    with_schema: bool,
+) -> dict[str, object]:
+    """One search hit: the full definition, or only enough to choose by.
+
+    Some tools carry descriptions and schemas several kilobytes long, and a
+    Live model prefills every byte of a result before it speaks, so a search
+    hands over one schema rather than one per hit.
+    """
+    function = definition.get("function", {})
+    if not with_schema:
+        return {
+            "name": name,
+            "summary": extract_tool_summary(definition),
+            "already_declared": already_declared,
+        }
+    return {
+        "name": name,
+        "description": function.get("description", ""),
+        "parameters": function.get("parameters", {"type": "object", "properties": {}}),
+        "already_declared": already_declared,
+    }
 
 
 class LiveMetaToolsProvider:
@@ -259,24 +293,25 @@ class LiveMetaToolsProvider:
         query_tokens = _tokenize(query)
 
         scored: list[tuple[int, str, ToolDefinition]] = []
-        for name, definition in advertised.items():
-            function = definition.get("function", {})
-            description = function.get("description", "")
-            score = _score(name, description, query_tokens) if query_tokens else 1
-            if score:
-                scored.append((score, name, definition))
-        scored.sort(key=lambda item: (-item[0], item[1]))
+        if query in advertised:
+            scored.append((1, query, advertised[query]))
+        else:
+            for name, definition in advertised.items():
+                function = definition.get("function", {})
+                description = function.get("description", "")
+                score = _score(name, description, query_tokens) if query_tokens else 1
+                if score:
+                    scored.append((score, name, definition))
+            scored.sort(key=lambda item: (-item[0], item[1]))
 
         results = [
-            {
-                "name": name,
-                "description": definition.get("function", {}).get("description", ""),
-                "parameters": definition.get("function", {}).get(
-                    "parameters", {"type": "object", "properties": {}}
-                ),
-                "already_declared": name not in visible.hidden_names,
-            }
-            for _, name, definition in scored[:limit]
+            _search_entry(
+                name,
+                definition,
+                already_declared=name not in visible.hidden_names,
+                with_schema=index == 0,
+            )
+            for index, (_, name, definition) in enumerate(scored[:limit])
         ]
         # ast-grep-ignore: no-dict-any - JSON tool result handed straight to the model
         payload: dict[str, Any] = {
@@ -288,6 +323,11 @@ class LiveMetaToolsProvider:
             payload["hint"] = (
                 "No tool matched. Search again with a single keyword, or with "
                 "no query at all to list everything available."
+            )
+        elif len(results) > 1:
+            payload["hint"] = (
+                "Only the first match carries its argument schema. To use "
+                "another, search again with its exact name."
             )
         logger.info(
             "search_tools(query=%r) matched %d tools, returned %d",

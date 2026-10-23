@@ -3245,7 +3245,9 @@ gets the same pointer the chat assistant gets for results past
 read it with `jq_query` or `read_text_attachment`. It applies to every voice entry point (browser,
 iOS, watch and Asterisk calls). In an app session the attachment belongs to the caller. A profile
 that can reach neither `jq_query` nor `read_text_attachment` gets the whole result instead, since it
-could not follow the pointer.
+could not follow the pointer. A `search_tools` result is never converted, since it is the schema the
+model needs for its next call. A result with both text and structured data reaches the voice model
+as its text alone, as it does in chat; size is measured on that.
 
 ______________________________________________________________________
 

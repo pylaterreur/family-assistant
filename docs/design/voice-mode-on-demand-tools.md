@@ -30,8 +30,8 @@ only how it is reached. A Live session declares
 
 - the eager tools (what the chat path shows before any activation), and
 - two meta tools whose declarations never change:
-  - **`search_tools(query, limit)`** — returns matching tools with name, description and the **full
-    JSON Schema of their arguments**, and
+  - **`search_tools(query, limit)`** — returns matching tools, the best match with its description
+    and the **full JSON Schema of its arguments**, and
   - **`call_tool(name, arguments_json)`** — runs one of them.
 
 Because the declaration list is static, nothing needs to be injected mid-session: the schema the
@@ -99,6 +99,14 @@ endpoint's behaviour for existing callers is unchanged.
 - **Input schemas only.** The registry declares argument schemas (OpenAI function-calling format)
   and describes results in prose. `search_tools` returns the `parameters` schema verbatim alongside
   the description — precisely what a declared tool would have given the model.
+- **One schema per search.** Some tools, MCP ones especially, carry descriptions and schemas several
+  kilobytes long, and the model prefills every byte before it speaks. A search for an exact tool
+  name returns that tool alone; any other search gives its first match the full definition and the
+  rest a name and summary, and says to search again by exact name before calling one of those. The
+  catalog means the common search is already an exact name.
+- **Results are what the chat model sees.** A result carrying both `text` and `data` reaches a live
+  model as its text alone, because `data` is the same result shaped for a script. A `search_tools`
+  result is never swapped for a large-result attachment: it is the schema the next call needs.
 - **Recursion.** `call_tool` refuses the meta tool names.
 - **Kill switch.** `gemini_live_config.tools.on_demand` (default `true`) turns the whole mechanism
   off, restoring flat declaration of every advertisable tool. How many tools a search returns is a

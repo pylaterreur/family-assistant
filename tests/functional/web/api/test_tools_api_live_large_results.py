@@ -44,6 +44,16 @@ async def _home_overview() -> ToolResult:
     )
 
 
+POOL_ENTITIES = ["sensor.pool_temperature", "sensor.spa_temperature"]
+
+
+async def _home_entities() -> ToolResult:
+    return ToolResult(
+        text=f"Found {len(POOL_ENTITIES)} entities: {', '.join(POOL_ENTITIES)}",
+        data={"entities": POOL_ENTITIES},
+    )
+
+
 async def _home_price() -> ToolResult:
     return ToolResult(data={"price": {"low": 0.07, "high": 0.13}})
 
@@ -75,6 +85,7 @@ def _install_provider(app: FastAPI, *, with_readers: bool = True) -> None:
         registrations=[
             _registration("home_overview", _home_overview),
             _registration("home_price", _home_price),
+            _registration("home_entities", _home_entities),
             *(r for r in LOCAL_TOOL_REGISTRATIONS if r.name in readers),
         ]
     )
@@ -82,7 +93,7 @@ def _install_provider(app: FastAPI, *, with_readers: bool = True) -> None:
     service.tools_provider = provider
     service.on_demand_view = OnDemandToolsView(
         wrapped_provider=provider,
-        on_demand_tool_names={"home_overview", "home_price"},
+        on_demand_tool_names={"home_overview", "home_price", "home_entities"},
     )
 
 
@@ -197,3 +208,58 @@ async def test_non_voice_call_keeps_the_whole_result(
 
     assert response.status_code == 200, response.text
     assert len(response.json()["result"]["data"]["entities"]) == ENTITY_COUNT
+
+
+@pytest.mark.asyncio
+async def test_voice_result_with_text_carries_the_text_alone(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+) -> None:
+    """``data`` restates the text for scripts; the model needs one of them."""
+    _install_provider(app_fixture)
+
+    response = await api_test_client.post(
+        "/api/tools/execute/call_tool", json=_voice_call("home_entities")
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == {
+        "text": "Found 2 entities: sensor.pool_temperature, sensor.spa_temperature"
+    }
+
+
+@pytest.mark.asyncio
+async def test_non_voice_call_keeps_both_text_and_data(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+) -> None:
+    _install_provider(app_fixture)
+
+    response = await api_test_client.post(
+        "/api/tools/execute/call_tool",
+        json={"arguments": {"name": "home_entities", "arguments_json": "{}"}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert set(response.json()["result"]) == {"text", "data"}
+
+
+@pytest.mark.asyncio
+async def test_large_search_result_is_never_converted(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+) -> None:
+    """A pointer to the schema would only cost a round trip to read it back."""
+    _install_provider(app_fixture)
+    app_fixture.state.processing_service.app_config.gemini_live_config.large_tool_result_threshold_kb = 1
+
+    response = await api_test_client.post(
+        "/api/tools/execute/search_tools",
+        json={
+            "voice_conversation_id": f"web_conv_{uuid4()}",
+            "arguments": {"limit": 15},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["data"]["tools"]

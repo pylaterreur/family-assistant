@@ -13,13 +13,18 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from family_assistant.config_models import GeminiLiveConfig
 from family_assistant.tools.infrastructure import (
     get_tool_definitions_for_advertisement,
 )
-from family_assistant.tools.live_meta import CALL_TOOL_TOOL_NAME, LiveMetaToolsProvider
+from family_assistant.tools.live_meta import (
+    CALL_TOOL_TOOL_NAME,
+    SEARCH_TOOLS_TOOL_NAME,
+    LiveMetaToolsProvider,
+)
 from family_assistant.tools.types import ToolResult
 
 if TYPE_CHECKING:
@@ -67,10 +72,18 @@ async def execute_live_tool(
     attachment, and the model gets the same pointer and ``jq_query`` /
     ``read_text_attachment`` hint the chat loop gives it. A profile that can
     reach neither reader gets the whole result: slow, but a pointer it cannot
-    follow would leave it with nothing.
+    follow would leave it with nothing. A ``search_tools`` result is never
+    converted: it is the schema the model needs to make its next call, so a
+    pointer to it would only cost a round trip to read it back.
+
+    A result carrying both ``text`` and ``data`` reaches the model as its text
+    alone, which is what the chat loop shows a model too: ``data`` is the same
+    result in the shape a script reads, and sending both pays for it twice.
     """
-    result = await service.live_tools_provider.execute_tool(
-        name, arguments, context, call_id
+    result = _model_facing(
+        await service.live_tools_provider.execute_tool(
+            name, arguments, context, call_id
+        )
     )
     live_config = (
         service.app_config.gemini_live_config
@@ -79,7 +92,10 @@ async def execute_live_tool(
     )
     content = _live_response_text(result)
     threshold_kb = live_config.large_tool_result_threshold_kb
-    if len(content.encode("utf-8")) < threshold_kb * 1024:
+    if (
+        name == SEARCH_TOOLS_TOOL_NAME
+        or len(content.encode("utf-8")) < threshold_kb * 1024
+    ):
         return result
     if not await _can_read_attachments(service):
         logger.info(
@@ -133,14 +149,17 @@ def _target_tool_name(name: str, arguments: dict[str, Any]) -> str:
     return inner.strip() if isinstance(inner, str) and inner.strip() else name
 
 
+def _model_facing[ResultT](result: ResultT) -> ResultT:
+    """Drop ``data`` from a result whose ``text`` already speaks for it."""
+    if isinstance(result, ToolResult) and result.text is not None:
+        return replace(result, data=None)
+    return result
+
+
 def _live_response_text(result: object) -> str:
     """Everything a Live entry point would put in the function response."""
     if isinstance(result, str):
         return result
     if isinstance(result, ToolResult):
-        if result.data is None:
-            return result.text or ""
-        if result.text is None:
-            return result.get_text()
-        return json.dumps({"text": result.text, "data": result.data}, default=str)
+        return result.get_text()
     return json.dumps(result, default=str)
