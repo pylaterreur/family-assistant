@@ -42,7 +42,6 @@ class ScriptedStreamingClient:
     def __init__(self, streams: Sequence[StreamScript] = ()) -> None:
         self._streams = list(streams)
         self.stream_calls = 0
-        self.history_prefix_lens: list[int | None] = []
 
     async def generate_response(
         self,
@@ -57,10 +56,8 @@ class ScriptedStreamingClient:
         messages: Sequence[LLMMessage],
         tools: "list[ToolDefinition] | None" = None,
         tool_choice: str | None = "auto",
-        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         self.stream_calls += 1
-        self.history_prefix_lens.append(history_prefix_len)
         if not self._streams:
             raise AssertionError("Unscripted call to generate_response_stream")
         return self._streams.pop(0)()
@@ -145,28 +142,6 @@ async def test_streaming_fallback_on_immediate_error() -> None:
     assert events[0].content == "Fallback content"
     assert primary.stream_calls == 1
     assert fallback.stream_calls == 1
-
-
-@pytest.mark.no_db
-async def test_history_boundary_reaches_the_primary_and_the_fallback() -> None:
-    """It indexes `messages`, which this client passes through untouched, so it
-    means the same thing to a fallback on another provider."""
-    primary = ScriptedStreamingClient([rate_limited()])
-    fallback = ScriptedStreamingClient([fallback_stream])
-    client = RetryingLLMClient(
-        primary_client=primary,
-        primary_model="test-model",
-        fallback_client=fallback,
-        fallback_model="fallback-model",
-    )
-
-    async for _ in client.generate_response_stream(
-        [create_user_message("test")], history_prefix_len=3
-    ):
-        pass
-
-    assert primary.history_prefix_lens == [3]
-    assert fallback.history_prefix_lens == [3]
 
 
 @pytest.mark.no_db

@@ -70,32 +70,6 @@ other request — a tool-call review, a structured or JSON output, a summary, an
 one-shot: its tail is unique and no later request extends it, so a breakpoint there writes a cache
 entry (at 1.25× the input price) that is never read, and skews the account's cache-hit metric.
 
-### The history breakpoint
-
-The trailing breakpoint only pays off while a turn is running: it moves with every tool round, so
-each request reads what the previous one wrote, and five minutes is ample. It does nothing for the
-gap between turns, which is as long as a person takes to reply. Seven weeks of production traffic
-measured that gap: requests 5–60 minutes after the previous one wrote 11.8M cache tokens and read
-1.5M, and past an hour 4.4M writes read essentially nothing — the whole history, rewritten, because
-the only breakpoint naming it had expired.
-
-So a second breakpoint sits at the end of the settled history, with the one-hour TTL. The processing
-service knows where that is — the system prompt plus the window, everything before the turn's own
-messages — and passes it as `history_prefix_len` on the streaming call. It is advisory in the same
-way as `SystemMessage.stable_prefix_len`: Anthropic pins a breakpoint there, and the providers that
-cache implicitly ignore it and send identical bytes.
-
-It moves once per turn rather than once per request, so one write is read by every later request in
-the turn and by the whole of the next turn. Ordering holds: tools and system prompt (1h) precede the
-history (1h), which precedes the tail (5m), and Anthropic requires longer-lived breakpoints first.
-Three of the four available breakpoints are now in use.
-
-Two cases deliberately go unmarked. A prefix with no turn after it has nothing to separate, and
-marking its last block would collide with the trailing breakpoint. And after an emergency compaction
-(`CompactionReason.CONTEXT_LENGTH`) the rest of the turn runs without it: that compaction has just
-rewritten the prefix the breakpoint would have named, so there is nothing left to read back, and the
-boundary the caller measured no longer points at the end of the history.
-
 A prompt that is stable all the way to the end — what a template with no volatile placeholders
 produces — needs no split and is emitted as a single cacheable block. Only when there is no boundary
 at all does the client send the plain string as before, so requests that cannot benefit keep their
@@ -141,11 +115,9 @@ call. The load-bearing part, the final-iteration "you must answer now" instructi
 trailing user message, which appends at the end of the prefix and invalidates nothing. That path
 already existed for conversations carrying Gemini thought signatures; it is now the only path.
 
-On-demand tool activation changes neither. The tool list and the on-demand catalog are fixed for the
-whole conversation -- every tool is declared on every request, the on-demand ones marked
-`defer_loading`, and the catalog lists them whether or not they are active -- so activating one
-appends a `tool_addition` block and leaves every earlier byte alone. Models without that beta get
-the deferred tools filtered out of the list instead, as on any other provider.
+On-demand tool activation still rebuilds the system prompt, but only when the addition actually
+changes. Activation also changes the tool list, which invalidates the prefix regardless, so this
+costs nothing extra.
 
 An instruction meant for one turn only is sent as **trailing scaffolding**: a user message flagged
 `is_turn_scaffolding` that follows the conversation on that turn's requests and is never saved. The
@@ -223,6 +195,20 @@ provider instead of only the ones that instrument themselves.
   than as an operator instruction. Before this change it was in `system`; nothing in the notices
   requires operator authority, and the placement rules of the native role would make it change shape
   between requests.
+- **The conversation history keeps the five-minute lifetime.** A turn that arrives more than five
+  minutes after the last one rewrites the history at 1.25×. A one-hour breakpoint at the end of the
+  settled history was shipped and taken out again, because it costs more than it saves. Moving the
+  breakpoint each turn writes every turn twice: at five minutes during the turn, then again at one
+  hour on the next turn, since a one-hour write is charged from the last one-hour entry even when a
+  warm five-minute entry covers more. No placement escapes the underlying arithmetic. Writing a span
+  at one hour costs an extra 0.75× input, and pays back 1.15× only if the next turn arrives five to
+  sixty minutes later, so it breaks even when that happens 65% of the time. Measured on production
+  Anthropic turns (September–October 2026), it happens 36% of the time. Even conditioned on the
+  previous gap, the most predictable case reaches only 47%. Replaying those turns against simulated
+  cache state put every variant tried above the five-minute baseline: the moving breakpoint, one
+  moved only when the tail had expired or only after enough new history, one anchored at compaction
+  boundaries, and a one-hour tail. Revisit only if the gap distribution changes enough to clear that
+  bar.
 - **Diagnostics compare against the newest assistant turn only.** If that turn was served by another
   provider, or predates response ids being stored, the request opts in without a predecessor and the
   first divergence after it goes unreported.

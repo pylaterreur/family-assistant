@@ -2000,7 +2000,6 @@ class ProcessingService:
         tuple[TaintSource, ...],
         ContextLengthCompactor,
         str | None,
-        int,
     ]:
         """Build the full pre-LLM turn state shared by sync and streaming flows.
 
@@ -2012,12 +2011,6 @@ class ProcessingService:
         row and every row it produced are already in history, so nothing is
         inserted, and per-turn material goes back where the original run had it
         -- after the turn's prompt, not after its trailing tool results.
-
-        The last element is how many leading messages are settled history: the
-        system prompt and the window, everything before this turn's own
-        messages. A provider with explicit cache breakpoints pins one there, so
-        a reply that arrives after the five-minute conversation cache has
-        expired reads the history back instead of rewriting it.
         """
         thread_root_id_for_turn = thread_root_id
         if thread_root_id_for_turn is None:
@@ -2252,7 +2245,6 @@ class ProcessingService:
             context_taint_sources,
             compact_for_context_length,
             trailing_instruction,
-            window_slot.start + window_slot.length,
         )
 
     def _repaired_window(
@@ -2365,7 +2357,6 @@ class ProcessingService:
         completed_iterations: int = 0,
         context_length_compactor: ContextLengthCompactor | None = None,
         trailing_instruction: str | None = None,
-        history_prefix_len: int | None = None,
     ) -> AsyncIterator[tuple[LLMStreamEvent, LLMMessage | None]]:
         """
         Streaming version of process_message that yields LLMStreamEvent objects as they are generated.
@@ -2379,7 +2370,6 @@ class ProcessingService:
         async for item in self.llm_loop.run_stream(
             db_context=db_context,
             messages=messages,
-            history_prefix_len=history_prefix_len,
             interface_type=interface_type,
             conversation_id=conversation_id,
             user_name=user_name,
@@ -2516,7 +2506,6 @@ class ProcessingService:
                 context_taint_sources,
                 compact_for_context_length,
                 trailing_instruction,
-                history_prefix_len,
             ) = await self._prepare_turn_messages_for_llm(
                 db_context,
                 interface_type=interface_type,
@@ -2559,7 +2548,6 @@ class ProcessingService:
             async for event, turn_msg in self.process_message_stream(
                 context_length_compactor=compact_for_context_length,
                 trailing_instruction=trailing_instruction,
-                history_prefix_len=history_prefix_len,
                 db_context=db_context,
                 messages=typed_messages_for_llm,
                 interface_type=interface_type,
@@ -2798,7 +2786,6 @@ class ProcessingService:
                 context_taint_sources,
                 compact_for_context_length,
                 trailing_instruction,
-                history_prefix_len,
             ) = await self._prepare_turn_messages_for_llm(
                 db_context,
                 interface_type=interface_type,
@@ -2826,7 +2813,6 @@ class ProcessingService:
             async for event, stream_msg in self.process_message_stream(
                 context_length_compactor=compact_for_context_length,
                 trailing_instruction=trailing_instruction,
-                history_prefix_len=history_prefix_len,
                 db_context=db_context,
                 messages=typed_messages_for_llm,
                 interface_type=interface_type,

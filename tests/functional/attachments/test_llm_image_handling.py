@@ -44,7 +44,6 @@ class MockLLMClient:
         # ast-grep-ignore: no-dict-any - tool definitions match external LLM API format
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
-        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         self.captured_messages = list(messages)  # Make a copy
         # Yield a simple content event

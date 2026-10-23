@@ -1350,14 +1350,8 @@ class OpenAIClient(BaseLLMClient):
         messages: Sequence[LLMMessage],
         tools: list["ToolDefinition"] | None = None,
         tool_choice: str | None = "auto",
-        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
-        """Generate streaming response using OpenAI API.
-
-        ``history_prefix_len`` is ignored: OpenAI caches implicitly, with no
-        breakpoint for a caller to place.
-        """
-        del history_prefix_len
+        """Generate streaming response using OpenAI API."""
         # Validate user input before processing
         self._validate_user_input(messages)
         tools = resolve_deferred_tools(tools, messages)

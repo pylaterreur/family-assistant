@@ -47,7 +47,6 @@ class _BrowsingAgentClient(RuleBasedMockLLMClient):
         messages: list[LLMMessage],
         tools: list[ToolDefinition] | None = None,
         tool_choice: str | None = "auto",
-        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
         inner = super().generate_response_stream(messages, tools, tool_choice)
 

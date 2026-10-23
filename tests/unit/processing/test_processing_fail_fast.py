@@ -542,7 +542,6 @@ async def test_done_event_attachment_type_reflects_mime_type(
             messages: list[object],
             tools: list[dict[str, object]] | None,
             tool_choice: str,
-            history_prefix_len: int | None = None,
         ) -> AsyncIterator[LLMStreamEvent]:
             self.call_count += 1
             if self.call_count == 1:
@@ -1239,7 +1238,6 @@ async def test_stream_done_attachment_metadata_lookup_propagates_failures(
             messages: list[object],
             tools: list[dict[str, object]] | None,
             tool_choice: str,
-            history_prefix_len: int | None = None,
         ) -> AsyncIterator[LLMStreamEvent]:
             self.call_count += 1
             if self.call_count == 1:
@@ -1300,9 +1298,8 @@ async def test_denial_escalation_ends_after_complete_tool_result_batch_without_m
             messages: list[object],
             tools: list[dict[str, object]] | None,
             tool_choice: str,
-            history_prefix_len: int | None = None,
         ) -> AsyncIterator[LLMStreamEvent]:
-            del messages, tools, tool_choice, history_prefix_len
+            del messages, tools, tool_choice
             self.call_count += 1
             if self.call_count > 1:
                 raise AssertionError("termination must prevent another model call")
@@ -1405,7 +1402,6 @@ async def test_stream_attachment_selection_failure_uses_capped_auto_queue(
             messages: list[object],
             tools: list[dict[str, object]] | None,
             tool_choice: str,
-            history_prefix_len: int | None = None,
         ) -> AsyncIterator[LLMStreamEvent]:
             self.call_count += 1
             if self.call_count == 1:
