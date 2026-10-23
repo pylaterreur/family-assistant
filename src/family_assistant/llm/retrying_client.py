@@ -365,14 +365,8 @@ class RetryingLLMClient:
         messages: Sequence[LLMMessage],
         tools: "list[ToolDefinition] | None" = None,
         tool_choice: str | None = "auto",
-        history_prefix_len: int | None = None,
     ) -> AsyncIterator[LLMStreamEvent]:
-        """Generate streaming response with retry and fallback logic.
-
-        ``history_prefix_len`` is forwarded unchanged: it indexes ``messages``,
-        which this client passes through untouched, so it means the same thing
-        to the primary and to a fallback on another provider.
-        """
+        """Generate streaming response with retry and fallback logic."""
         span = tracer.start_span(
             "llm.generate_stream",
             attributes={
@@ -402,7 +396,6 @@ class RetryingLLMClient:
                         messages=messages,
                         tools=tools,
                         tool_choice=tool_choice,
-                        history_prefix_len=history_prefix_len,
                     ):
                         with trace.use_span(span, end_on_exit=False):
                             stream_telemetry.observe(event)
@@ -451,7 +444,6 @@ class RetryingLLMClient:
                                     messages=messages,
                                     tools=tools,
                                     tool_choice=tool_choice,
-                                    history_prefix_len=history_prefix_len,
                                 ):
                                     events_yielded = True
                                     with trace.use_span(span, end_on_exit=False):
@@ -511,7 +503,6 @@ class RetryingLLMClient:
                                     messages=messages,
                                     tools=tools,
                                     tool_choice=tool_choice,
-                                    history_prefix_len=history_prefix_len,
                                 ):
                                     with trace.use_span(span, end_on_exit=False):
                                         stream_telemetry.observe(event)
