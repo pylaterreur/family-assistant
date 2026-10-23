@@ -512,3 +512,79 @@ async def test_shadowed_meta_tool_raises_on_direct_dispatch(reserved: str) -> No
         await provider.execute_tool(reserved, {}, _context())
 
     assert CALLS == []
+
+
+@pytest.mark.asyncio
+async def test_voice_excluded_tools_hidden_from_definitions_and_catalog() -> None:
+    excluded_name = "ha_search_tools"
+    local_provider = LocalToolsProvider(
+        registrations=[
+            _registration(excluded_name, description="HA search tools proxy."),
+            _registration("get_home_status", description="Get home status."),
+        ]
+    )
+    # Test as eager tool
+    view_eager = OnDemandToolsView(
+        wrapped_provider=local_provider,
+        on_demand_tool_names=set(),
+    )
+    provider_eager = LiveMetaToolsProvider(view_eager)
+    defs = await provider_eager.get_tool_definitions()
+    names = [d["function"]["name"] for d in defs]
+    assert excluded_name not in names
+    assert "get_home_status" in names
+
+    # Test as on-demand tool
+    view_ondemand = OnDemandToolsView(
+        wrapped_provider=local_provider,
+        on_demand_tool_names={excluded_name},
+    )
+    provider_ondemand = LiveMetaToolsProvider(view_ondemand)
+    prompt = await provider_ondemand.get_system_prompt_addition()
+    assert prompt is None or excluded_name not in prompt
+
+
+@pytest.mark.asyncio
+async def test_voice_excluded_tools_rejected_on_call() -> None:
+    excluded_name = "ha_search_tools"
+    local_provider = LocalToolsProvider(
+        registrations=[
+            _registration(excluded_name, description="HA search tools proxy."),
+        ]
+    )
+    view = OnDemandToolsView(
+        wrapped_provider=local_provider,
+        on_demand_tool_names={excluded_name},
+    )
+    provider = LiveMetaToolsProvider(view)
+
+    # Rejection via search_tools
+    search_result = await provider.execute_tool(
+        SEARCH_TOOLS_TOOL_NAME, {"query": excluded_name}, _context()
+    )
+    assert isinstance(search_result, ToolResult)
+    data = cast("dict[str, Any]", search_result.data)
+    assert data["match_count"] == 0
+
+    # Rejection via call_tool
+    call_result = await provider.execute_tool(
+        CALL_TOOL_TOOL_NAME,
+        {"name": excluded_name, "arguments_json": "{}"},
+        _context(),
+    )
+    assert isinstance(call_result, ToolResult)
+    assert f"Tool '{excluded_name}' is not available in voice sessions." in (
+        call_result.text or ""
+    )
+
+    # Rejection via direct execute_tool
+    direct_result = await provider.execute_tool(
+        excluded_name,
+        {},
+        _context(),
+    )
+    assert isinstance(direct_result, ToolResult)
+    assert f"Tool '{excluded_name}' is not available in voice sessions." in (
+        direct_result.text or ""
+    )
+    assert CALLS == []
