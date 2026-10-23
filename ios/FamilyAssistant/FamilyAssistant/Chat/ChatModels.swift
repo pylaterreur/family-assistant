@@ -1,9 +1,7 @@
 import Foundation
 
-/// The processing profile the user last chose, which every entry point that is
-/// not pinned to a conversation starts from — the chat composer and the voice
-/// tab alike. Owning the stored key in one place is what keeps the two from
-/// drifting onto different profiles.
+/// The processing profile the user last chose in the chat composer, which a new
+/// chat starts from. Voice does not follow it; see ``VoiceProfile``.
 enum PreferredProfile {
     /// The profile id a fresh session runs under. `default_assistant` until the
     /// user picks something else, matching the backend's own default.
@@ -17,6 +15,17 @@ enum PreferredProfile {
 
     static let fallbackID = "default_assistant"
     private static let storageKey = "selectedProfileId"
+}
+
+/// The profile every voice session runs under: the Voice tab and Siri,
+/// CallKit and CarPlay calls alike.
+///
+/// Not the chat composer's choice. The picker remembers whatever was last used,
+/// and nothing in a voice session shows which profile it is on or lets the user
+/// change it, so a profile picked for one chat would silently follow them into
+/// the car.
+enum VoiceProfile {
+    static let id = PreferredProfile.fallbackID
 }
 
 enum ChatConstants {

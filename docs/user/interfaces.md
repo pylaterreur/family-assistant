@@ -400,10 +400,10 @@ beside the composer. The Photos share sheet does not list Family Assistant — c
 paste it, use the composer's photo button, or share from Files. Long-pressing the app icon offers
 **New Chat** and **Voice** quick actions.
 
-**Voice** asks for microphone permission and shows a level meter while capturing audio. A call runs
-under the profile currently picked in Chat, and when it ends the transcript is saved as its own
-conversation in that profile, including its tool calls and results — so opening it in Chat picks the
-conversation up where the call left off. Quick delegated results are spoken in the call; later
+**Voice** asks for microphone permission and shows a level meter while capturing audio. A call
+always runs on the default assistant, whatever is picked in Chat, and when it ends the transcript is
+saved as its own conversation, including its tool calls and results — so opening it in Chat picks
+the conversation up where the call left off. Quick delegated results are spoken in the call; later
 results appear directly in Chat and can send a notification. Calls placed by Siri work the same way.
 
 If you need something on your phone while talking, ask voice to **send it to my Chat**. It saves the
