@@ -966,7 +966,7 @@ async def list_home_assistant_actions_tool(
             if total_matches <= max_results
             else f"Found {total_matches} Home Assistant action(s); showing first {max_results}"
         )
-        with_fields = len(result_entries) <= ACTION_FIELD_DETAIL_LIMIT
+        with_fields = total_matches <= ACTION_FIELD_DETAIL_LIMIT
         lines = [header + ":"]
         for entry in result_entries:
             line = f"- {entry['domain']}.{entry['action']}"

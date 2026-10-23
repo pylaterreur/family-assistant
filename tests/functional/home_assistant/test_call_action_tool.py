@@ -200,7 +200,9 @@ async def test_a_broad_action_listing_says_how_to_see_fields(
     )
 
     result = await list_home_assistant_actions_tool(
-        exec_context=exec_context, domain="media_player"
+        exec_context=exec_context,
+        domain="media_player",
+        max_results=ACTION_FIELD_DETAIL_LIMIT,
     )
 
     assert result.text is not None
