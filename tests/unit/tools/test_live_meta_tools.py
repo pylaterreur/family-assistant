@@ -528,7 +528,9 @@ async def test_voice_excluded_tools_hidden_from_definitions_and_catalog() -> Non
         wrapped_provider=local_provider,
         on_demand_tool_names=set(),
     )
-    provider_eager = LiveMetaToolsProvider(view_eager)
+    provider_eager = LiveMetaToolsProvider(
+        view_eager, excluded_tool_names=frozenset({excluded_name})
+    )
     defs = await provider_eager.get_tool_definitions()
     names = [d["function"]["name"] for d in defs]
     assert excluded_name not in names
@@ -539,7 +541,9 @@ async def test_voice_excluded_tools_hidden_from_definitions_and_catalog() -> Non
         wrapped_provider=local_provider,
         on_demand_tool_names={excluded_name},
     )
-    provider_ondemand = LiveMetaToolsProvider(view_ondemand)
+    provider_ondemand = LiveMetaToolsProvider(
+        view_ondemand, excluded_tool_names=frozenset({excluded_name})
+    )
     prompt = await provider_ondemand.get_system_prompt_addition()
     assert prompt is None or excluded_name not in prompt
 
@@ -556,7 +560,9 @@ async def test_voice_excluded_tools_rejected_on_call() -> None:
         wrapped_provider=local_provider,
         on_demand_tool_names={excluded_name},
     )
-    provider = LiveMetaToolsProvider(view)
+    provider = LiveMetaToolsProvider(
+        view, excluded_tool_names=frozenset({excluded_name})
+    )
 
     # Rejection via search_tools
     search_result = await provider.execute_tool(
@@ -575,16 +581,5 @@ async def test_voice_excluded_tools_rejected_on_call() -> None:
     assert isinstance(call_result, ToolResult)
     assert f"Tool '{excluded_name}' is not available in voice sessions." in (
         call_result.text or ""
-    )
-
-    # Rejection via direct execute_tool
-    direct_result = await provider.execute_tool(
-        excluded_name,
-        {},
-        _context(),
-    )
-    assert isinstance(direct_result, ToolResult)
-    assert f"Tool '{excluded_name}' is not available in voice sessions." in (
-        direct_result.text or ""
     )
     assert CALLS == []

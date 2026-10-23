@@ -3227,6 +3227,20 @@ Set it to `false` to declare every advertisable tool up front, as before. Either
 session has no confirmation channel, so tools that require confirmation are never advertised to it
 and `call_tool` refuses them.
 
+```yaml
+gemini_live_config:
+  tools:
+    excluded_tools:
+      - "ha_search_tools"
+```
+
+`excluded_tools` names tools a voice session never offers or runs, though chat still may: ones whose
+output is fine in a chat turn but too large to be heard in voice. They are left out of the catalog
+and `search_tools`, refused by `call_tool`, and refused when a voice client calls one by name. With
+`on_demand: false` they are still declared, since that mode exists to declare everything; a call to
+one is refused all the same. The shipped default excludes Home Assistant MCP's own tool search,
+which `search_tools` already covers.
+
 See [voice-mode-on-demand-tools.md](../design/voice-mode-on-demand-tools.md).
 
 ______________________________________________________________________

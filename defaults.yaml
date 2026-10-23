@@ -384,6 +384,11 @@ gemini_live_config:
     # call_tool meta-tools instead. Set false to declare every advertisable
     # tool up front. See docs/design/voice-mode-on-demand-tools.md.
     on_demand: true
+    # Never offered or run in voice, though chat may use them: Home Assistant
+    # MCP's own tool search returns 14-29 KB per call, which a voice model
+    # hears as dead air, and search_tools already covers that job.
+    excluded_tools:
+      - "ha_search_tools"
   # Voice configuration
   voice:
     # Prebuilt voice name (e.g., "Puck", "Kore", "Charon", "Fenrir", "Aoede")

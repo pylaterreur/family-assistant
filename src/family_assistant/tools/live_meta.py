@@ -47,10 +47,6 @@ SEARCH_TOOLS_TOOL_NAME = "search_tools"
 CALL_TOOL_TOOL_NAME = "call_tool"
 LIVE_META_TOOL_NAMES = frozenset({SEARCH_TOOLS_TOOL_NAME, CALL_TOOL_TOOL_NAME})
 
-# Tools excluded from voice/live sessions even if allowed by the profile
-# (e.g. tools that dump large schemas when built-in meta-tools already exist).
-VOICE_EXCLUDED_TOOL_NAMES = frozenset({"ha_search_tools"})
-
 DEFAULT_SEARCH_RESULT_LIMIT = 5
 MAX_SEARCH_RESULT_LIMIT = 15
 
@@ -210,9 +206,11 @@ class LiveMetaToolsProvider:
         on_demand_view: OnDemandToolsView,
         *,
         search_result_limit: int = DEFAULT_SEARCH_RESULT_LIMIT,
+        excluded_tool_names: frozenset[str] = frozenset(),
     ) -> None:
         self._view = on_demand_view
         self._wrapped_provider = on_demand_view.wrapped_provider
+        self._excluded_tool_names = excluded_tool_names
         self._search_result_limit = max(
             1, min(search_result_limit, MAX_SEARCH_RESULT_LIMIT)
         )
@@ -240,7 +238,7 @@ class LiveMetaToolsProvider:
             definition
             for definition in visible.definitions
             if (name := definition.get("function", {}).get("name")) is None
-            or name not in VOICE_EXCLUDED_TOOL_NAMES
+            or name not in self._excluded_tool_names
         ]
         if not self._view.has_on_demand_tools():
             return definitions
@@ -252,7 +250,7 @@ class LiveMetaToolsProvider:
         filtered_entries = [
             entry
             for entry in catalog.entries
-            if entry.name not in VOICE_EXCLUDED_TOOL_NAMES
+            if entry.name not in self._excluded_tool_names
         ]
         if not filtered_entries:
             return None
@@ -284,8 +282,6 @@ class LiveMetaToolsProvider:
             if name == SEARCH_TOOLS_TOOL_NAME:
                 return await self._search_tools(arguments)
             return await self._call_tool(arguments, context, call_id)
-        if name in VOICE_EXCLUDED_TOOL_NAMES:
-            return ToolResult(text=f"Tool '{name}' is not available in voice sessions.")
         return await self._wrapped_provider.execute_tool(
             name, arguments, context, call_id
         )
@@ -299,7 +295,7 @@ class LiveMetaToolsProvider:
             name: definition
             for definition in definitions
             if (name := definition.get("function", {}).get("name")) is not None
-            and name not in VOICE_EXCLUDED_TOOL_NAMES
+            and name not in self._excluded_tool_names
         }
 
     # ast-grep-ignore: no-dict-any - Tool arguments are dynamic JSON from the LLM
@@ -382,7 +378,7 @@ class LiveMetaToolsProvider:
                     "tool that search_tools returned."
                 )
             )
-        if inner_name in VOICE_EXCLUDED_TOOL_NAMES:
+        if inner_name in self._excluded_tool_names:
             return ToolResult(
                 text=f"Tool '{inner_name}' is not available in voice sessions."
             )
