@@ -787,7 +787,9 @@ principle of using real or fake dependencies wherever possible.
 
 #### Time-Based Waits
 
-**CRITICAL: Tests must NEVER use fixed time-based waits.** This is a **LOGIC_ERROR** severity issue.
+**Tests must not use fixed time-based waits.** Flag a new one as **SHORTCUT** (warning): it is test
+hygiene under the severity rubric above, and the conformance rules in `.ast-grep/rules/` catch
+`asyncio.sleep` and `time.sleep` in Python tests deterministically, so CI is authoritative there.
 
 Tests using `setTimeout`, `sleep`, or fixed delays are flaky and will fail under load or in CI:
 
@@ -813,7 +815,7 @@ Tests using `setTimeout`, `sleep`, or fixed delays are flaky and will fail under
 
 **When reviewing test changes:**
 
-1. Flag any new `setTimeout`, `sleep`, or fixed delays as **LOGIC_ERROR**
+1. Flag any new `setTimeout`, `sleep`, or fixed delays as **SHORTCUT**
 2. Suggest condition-based alternatives
 3. Accept fixed waits ONLY if modeling actual user behavior timing
 4. Ensure test helpers use condition-based waits internally

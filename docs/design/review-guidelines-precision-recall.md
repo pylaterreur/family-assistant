@@ -65,6 +65,7 @@ unrelated findings, and the "approach-level" rule cited in support of demands fo
 | True but disproportionate                |   322 |   16% |
 | Restates a recorded trade-off            |    22 |    1% |
 | False positive                           |    34 |    2% |
+| Unclear                                  |     2 |    0% |
 
 | Outcome                                   | Count | Share |
 | ----------------------------------------- | ----: | ----: |
