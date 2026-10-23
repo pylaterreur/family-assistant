@@ -125,14 +125,15 @@ async def _send(
 async def _latest_reasoning(
     db_engine: AsyncEngine, conversation_id: str
 ) -> MessageReasoningInfo:
-    rows = await Database(engine=db_engine).message_history.get_recent_with_metadata(
-        interface_type="api", conversation_id=conversation_id, limit=10
+    reasoning = await Database(
+        engine=db_engine
+    ).message_history.get_latest_model_selection_reasoning(
+        conversation_id,
+        subconversation_id=None,
+        processing_profile_id="chat_api_test_profile",
     )
-    reasoning = [row for row in rows if row["role"] == "assistant"][-1][
-        "reasoning_info"
-    ]
     assert reasoning is not None
-    return cast("MessageReasoningInfo", reasoning)
+    return reasoning
 
 
 def _conversation_on(
