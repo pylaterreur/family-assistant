@@ -3231,15 +3231,16 @@ and `call_tool` refuses them.
 gemini_live_config:
   tools:
     excluded_tools:
-      - "ha_search_tools"
+      - "some_mcp_tool_search"
 ```
 
-`excluded_tools` names tools a voice session never offers or runs, though chat still may: ones whose
-output is fine in a chat turn but too large to be heard in voice. They are left out of the catalog
-and `search_tools`, refused by `call_tool`, and refused when a voice client calls one by name. With
+`excluded_tools` (default empty) names tools a voice session never offers or runs, though chat still
+may: ones whose output is fine in a chat turn but too large to be heard in voice, such as an MCP
+server's own tool search, which `search_tools` already covers. They are left out of the catalog and
+`search_tools`, refused by `call_tool`, and refused when a voice client calls one by name. With
 `on_demand: false` they are still declared, since that mode exists to declare everything; a call to
-one is refused all the same. The shipped default excludes Home Assistant MCP's own tool search,
-which `search_tools` already covers.
+one is refused all the same. To hide a tool from every interface, use a `deny` rule in
+`tools_policy` instead.
 
 See [voice-mode-on-demand-tools.md](../design/voice-mode-on-demand-tools.md).
 

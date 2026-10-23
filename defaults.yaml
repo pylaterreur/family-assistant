@@ -384,11 +384,6 @@ gemini_live_config:
     # call_tool meta-tools instead. Set false to declare every advertisable
     # tool up front. See docs/design/voice-mode-on-demand-tools.md.
     on_demand: true
-    # Never offered or run in voice, though chat may use them: Home Assistant
-    # MCP's own tool search returns 14-29 KB per call, which a voice model
-    # hears as dead air, and search_tools already covers that job.
-    excluded_tools:
-      - "ha_search_tools"
   # Voice configuration
   voice:
     # Prebuilt voice name (e.g., "Puck", "Kore", "Charon", "Fenrir", "Aoede")
@@ -1114,20 +1109,6 @@ default_profile_settings:
             - "google-maps"
         decision: "allow"
         priority: 10
-      # Built-in tools from the Home Assistant plugin cover these more cheaply
-      # (get_home_status, render_home_assistant_template, download_state_history,
-      # get_camera_snapshot, list_home_assistant_entities with query).
-      # ha_search remains callable via ha_call_read_tool proxy.
-      - match:
-          names:
-            - "ha_get_overview"
-            - "ha_get_state"
-            - "ha_eval_template"
-            - "ha_get_history"
-            - "ha_get_camera_image"
-            - "ha_search"
-        decision: "deny"
-        priority: 30
       # Per-target delegation rules match the delegation tag rather than a tool
       # name, so delegate_to_service and start_thread -- both of which hand a
       # turn to target_service_id -- always get the same decision. The status
@@ -2273,18 +2254,6 @@ service_profiles:
               - "google-maps"
           decision: "allow"
           priority: 10
-        # Built-in tools cover these more cheaply; ha_search_tools is hidden in voice
-        - match:
-            names:
-              - "ha_get_overview"
-              - "ha_get_state"
-              - "ha_eval_template"
-              - "ha_get_history"
-              - "ha_get_camera_image"
-              - "ha_search"
-              - "ha_search_tools"
-          decision: "deny"
-          priority: 30
         - match:
             names:
               - "delegate_to_service"

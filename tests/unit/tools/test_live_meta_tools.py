@@ -516,10 +516,10 @@ async def test_shadowed_meta_tool_raises_on_direct_dispatch(reserved: str) -> No
 
 @pytest.mark.asyncio
 async def test_voice_excluded_tools_hidden_from_definitions_and_catalog() -> None:
-    excluded_name = "ha_search_tools"
+    excluded_name = "noisy_tool_search"
     local_provider = LocalToolsProvider(
         registrations=[
-            _registration(excluded_name, description="HA search tools proxy."),
+            _registration(excluded_name, description="Search another tool catalog."),
             _registration("get_home_status", description="Get home status."),
         ]
     )
@@ -550,10 +550,10 @@ async def test_voice_excluded_tools_hidden_from_definitions_and_catalog() -> Non
 
 @pytest.mark.asyncio
 async def test_voice_excluded_tools_rejected_on_call() -> None:
-    excluded_name = "ha_search_tools"
+    excluded_name = "noisy_tool_search"
     local_provider = LocalToolsProvider(
         registrations=[
-            _registration(excluded_name, description="HA search tools proxy."),
+            _registration(excluded_name, description="Search another tool catalog."),
         ]
     )
     view = OnDemandToolsView(
