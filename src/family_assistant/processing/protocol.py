@@ -187,6 +187,7 @@ class PollableDelegationService(Protocol):
         initial_taint_state: TurnTaintState | None = None,
         source_turn_id: str | None = None,
         model_selection: ResolvedModelSelection | None = None,
+        review_trigger: TriggerReviewInput | None = None,
     ) -> RemoteSubmission:
         """Submit without a client-supplied task id; the remote assigns one.
 
@@ -202,6 +203,9 @@ class PollableDelegationService(Protocol):
         an implementation that audits a decision on that turn's behalf.
         ``model_selection`` is the tier envelope frozen with the run, for an
         implementation whose models are selectable; ``None`` is its default.
+        ``review_trigger`` is the run's review trigger, carrying the human
+        request it answers, for an implementation that reviews the submission
+        here; it is local authorization context and never crosses to a remote.
         """
         ...
 

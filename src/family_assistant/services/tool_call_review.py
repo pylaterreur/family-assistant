@@ -1694,6 +1694,7 @@ async def build_delegation_review_trigger(
     source_started_by_human: bool,
     source_rows_before: datetime | None = None,
     inherited: TriggerReviewInput | None = None,
+    recorded_request: tuple[str, TaintMetadata] | None = None,
 ) -> TriggerReviewInput:
     """Build the review trigger for a turn that runs on another turn's behalf.
 
@@ -1723,13 +1724,33 @@ async def build_delegation_review_trigger(
     reading history for work handed off earlier passes ``source_rows_before``
     to get the request as it stood then: a delegated run answers to the request
     that caused it, not to whatever the same human said next.
+
+    ``recorded_request`` is the request a queued delegation run recorded when
+    it was created, by this same function, from the delegating turn: it stands
+    in for re-reading that turn, so a run delegated off an unattended turn --
+    a completion wake, another run -- keeps the human request that turn
+    inherited, and a resumed run keeps the request that started it. It passes
+    the same provenance check as an inherited request.
     """
     messages: Sequence[LLMMessage] = ()
-    if source_started_by_human and source_turn_id is not None:
+    if (
+        recorded_request is None
+        and source_started_by_human
+        and source_turn_id is not None
+    ):
         messages = await db.message_history.get_by_turn_id(
             source_turn_id,
             visible_only=True,
             before=source_rows_before,
+        )
+    if recorded_request is not None:
+        text, metadata = recorded_request
+        inherited = TriggerReviewInput(
+            trigger_type=trigger_type,
+            active_request_role=active_request_role,
+            started_by="delegation",
+            originating_request=text,
+            originating_request_taint_metadata=metadata,
         )
     originating = resolve_originating_request(messages, inherited=inherited)
     return TriggerReviewInput(

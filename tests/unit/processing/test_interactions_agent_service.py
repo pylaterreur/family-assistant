@@ -71,6 +71,7 @@ from family_assistant.services.tool_call_review import (
     ToolCallReviewResponse,
     ToolCallReviewStatus,
     ToolCallReviewVerdict,
+    TriggerReviewInput,
 )
 from family_assistant.storage.database import Database
 from family_assistant.tools.infrastructure import (
@@ -900,6 +901,59 @@ async def test_submit_async_trusted_request_is_rendered_to_reviewer(
     review_prompt = "\n".join(str(message.content) for message in llm.last_messages)
     assert '<trusted_conversation index="1" role="user">' in review_prompt
     assert "Write a script to total this column." in review_prompt
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_submit_async_tainted_goal_is_reviewed_with_the_human_request(
+    db_engine: AsyncEngine,
+) -> None:
+    """The goal was composed on a tainted turn; the request reaches the reviewer.
+
+    Without the run's trigger the reviewer would see only a stubbed goal and
+    confirm a delegation the person had just asked for.
+    """
+    llm = _ReviewLLM(ToolCallReviewVerdict.ALLOW)
+    taint_policy = TaintPolicyConfig(mode=TaintPolicyMode.ENFORCE)
+    provider = _reviewing_provider(llm, taint_policy=taint_policy)
+    service = _make_service(
+        _google_client("inter_tainted"),
+        taint_sink_class=SinkClass.SANDBOX_NETWORK,
+        taint_policy=taint_policy,
+        tools_provider=provider,
+    )
+
+    submission = await service.submit_async(
+        [{"type": "text", "text": "COMPOSED GOAL: fix the 3MF file."}],
+        conversation_id="conv-tainted-review",
+        subconversation_id="sub-1",
+        user_name="Andrew",
+        db_context=Database(db_engine),
+        initial_taint_sources=[
+            TaintSource(
+                source_type=TaintSourceType.TOOL_OUTPUT,
+                source_id="brave_web_search",
+                tier=SourceTrustTier.UNKNOWN_EXTERNAL,
+                labels=frozenset(),
+                reason="Search results read earlier in the turn.",
+            )
+        ],
+        review_trigger=TriggerReviewInput(
+            trigger_type="delegation_request",
+            active_request_role="user",
+            started_by="delegation",
+            definition="COMPOSED GOAL: fix the 3MF file.",
+            payload_present=False,
+            originating_request="Please get the bookmark file fixed up.",
+            originating_request_taint_metadata=TurnTaintState.empty().to_metadata(),
+        ),
+    )
+
+    assert submission.remote_task_id == "inter_tainted"
+    assert llm.last_messages is not None
+    review_prompt = "\n".join(str(message.content) for message in llm.last_messages)
+    assert "Please get the bookmark file fixed up." in review_prompt
+    assert "<trusted_conversation" not in review_prompt
     await provider.close()
 
 

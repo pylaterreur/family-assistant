@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     from family_assistant.llm.messages import LLMMessage, MessageReasoningInfo
     from family_assistant.llm.model_selection import ResolvedModelSelection
     from family_assistant.services.attachment_registry import AttachmentMetadata
+    from family_assistant.services.tool_call_review import TriggerReviewInput
     from family_assistant.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -495,6 +496,7 @@ class InteractionsAgentProcessingService(ProcessingService):
         db_context: Database,
         messages: Sequence[LLMMessage],
         llm_client: LLMInterface,
+        review_trigger: TriggerReviewInput | None,
     ) -> None:
         """Authorize a pollable submit through the shared reviewer chokepoint.
 
@@ -547,6 +549,9 @@ class InteractionsAgentProcessingService(ProcessingService):
             taint_tracker=InMemoryTurnTaintTracker(state),
             taint_policy_snapshot=state,
             tool_call_review_messages=tuple(messages),
+            # The goal below was composed by the delegating turn; the human
+            # request it answers reaches the reviewer only through the trigger.
+            tool_call_review_trigger=review_trigger,
         )
         try:
             await taint_provider.authorize_taint_sink(
@@ -659,6 +664,7 @@ class InteractionsAgentProcessingService(ProcessingService):
         initial_taint_state: TurnTaintState | None = None,
         source_turn_id: str | None = None,
         model_selection: ResolvedModelSelection | None = None,
+        review_trigger: TriggerReviewInput | None = None,
     ) -> RemoteSubmission:
         """Start the agent interaction without blocking on its result.
 
@@ -722,6 +728,7 @@ class InteractionsAgentProcessingService(ProcessingService):
             db_context=db_context,
             messages=messages,
             llm_client=llm_client,
+            review_trigger=review_trigger,
         )
 
         client = self._google_client(llm_client)
