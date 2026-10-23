@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import os
+import re
 from collections.abc import (
     AsyncGenerator,
     AsyncIterator,
@@ -43,14 +44,20 @@ from family_assistant.llm import (
 )
 from family_assistant.llm.call_context import current_service_tier
 from family_assistant.llm.connections import ConnectionKey, ProviderConnections
-from family_assistant.llm.deferred_tools import resolve_deferred_tools
+from family_assistant.llm.deferred_tools import (
+    is_deferred,
+    resolve_deferred_tools,
+    tool_name,
+)
 from family_assistant.llm.messages import (
     AssistantMessage,
     ContentPart,
     ImageUrlContentPart,
     LLMMessage,
     MessageReasoningInfo,
+    SystemMessage,
     TextContentPart,
+    ToolMessage,
     UserMessage,
     message_to_json_dict,
 )
@@ -142,6 +149,20 @@ def _with_extra_body(
 # OpenAI proper. Anything else is an OpenAI-*compatible* endpoint, which
 # implements Chat Completions but not necessarily Responses.
 _OPENAI_API_BASE_URL = "https://api.openai.com/v1"
+
+# GPT-5.6 and later accept explicit cache breakpoints, cache lifetimes and
+# `additional_tools` input items on the Responses API. Earlier models reject
+# them, so they are gated on the model id the request is sent with.
+_CACHE_CONTROLS_MIN_VERSION = (5, 6)
+_GPT_VERSION = re.compile(r"^gpt-(\d+)(?:\.(\d+))?(?![\d.])")
+
+# The tools and the stable system prompt are shared by every turn of every
+# conversation on a profile, and change only when a note, skill or config
+# value does. Half a day costs 2.5x input to write instead of 1.25x for the
+# 30-minute default, which the first turn arriving after that default expired
+# repays. The breakpoint never moves, so nothing written at the shorter
+# lifetime is ever re-written at this one.
+_STABLE_PREFIX_CACHE_TTL = "12h"
 
 # What the Responses API will actually accept as a non-text user input part.
 # Images become `input_image`; PDFs become `input_file`, which the API parses for
@@ -404,6 +425,69 @@ class OpenAIClient(BaseLLMClient):
             )
         return configured
 
+    def _supports_cache_controls(self) -> bool:
+        """Whether a request may carry cache breakpoints and ``additional_tools``.
+
+        Both are Responses API features of GPT-5.6 and later. An earlier model
+        rejects them, and so would an OpenAI-compatible backend, which never
+        reaches the Responses API here at all.
+        """
+        if not self._uses_responses_api():
+            return False
+        match = _GPT_VERSION.match(self._api_model)
+        if match is None:
+            return False
+        version = (int(match[1]), int(match[2] or 0))
+        return version >= _CACHE_CONTROLS_MIN_VERSION
+
+    @staticmethod
+    def _responses_tool(tool: "ToolDefinition") -> dict[str, object]:
+        """One tool definition in the Responses API's flat shape."""
+        return {
+            "type": "function",
+            "name": tool["function"]["name"],
+            "description": tool["function"].get("description"),
+            "parameters": tool["function"].get("parameters", {}),
+            "strict": False,
+        }
+
+    @classmethod
+    def _insert_additional_tools(
+        cls,
+        input_items: list[dict[str, object]],
+        activations: Mapping[str, Sequence[str]],
+        deferred: Mapping[str, "ToolDefinition"],
+    ) -> list[dict[str, object]]:
+        """Surface each activated tool after the tool outputs that activated it.
+
+        The OpenAI counterpart of Anthropic's ``tool_addition`` blocks: the
+        ``tools`` array keeps only the always-available tools and never changes
+        within a conversation, and an activation appends an ``additional_tools``
+        item instead, so loading a tool leaves every earlier byte of the prompt
+        -- and its cache -- untouched. The item goes after the whole run of
+        outputs a batch of parallel calls produced, before the next model item.
+        """
+        result: list[dict[str, object]] = []
+        pending: list[str] = []
+        for index, item in enumerate(input_items):
+            result.append(item)
+            if item.get("type") != "function_call_output":
+                continue
+            for name in activations.get(str(item.get("call_id")), ()):
+                if name in deferred and name not in pending:
+                    pending.append(name)
+            following = input_items[index + 1] if index + 1 < len(input_items) else None
+            if pending and (
+                following is None or following.get("type") != "function_call_output"
+            ):
+                result.append({
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [cls._responses_tool(deferred[name]) for name in pending],
+                })
+                pending = []
+        return result
+
     def _build_responses_params(
         self,
         messages: Sequence[LLMMessage],
@@ -412,7 +496,20 @@ class OpenAIClient(BaseLLMClient):
         *,
         stream: bool,
     ) -> dict[str, object]:
-        """Translate the shared client request shape to the Responses API."""
+        """Translate the shared client request shape to the Responses API.
+
+        On a model that takes cache controls, the request carries a long-lived
+        breakpoint on the tools and stable system prompt and keeps its ``tools``
+        array fixed, surfacing activated deferred tools through
+        ``additional_tools`` items. A streamed request -- the agent loop, whose
+        next request extends this one -- keeps OpenAI's implicit breakpoint on
+        its latest message as well. A non-streamed one is one-shot, so it runs
+        in explicit-only mode and writes nothing past the shared prefix: a write
+        of its unique tail would be billed at 1.25x and never read.
+
+        ``tools`` arrive with deferred ones still marked; on a model without
+        ``additional_tools`` they are narrowed to the activated ones here.
+        """
         model_params = {
             **self.default_kwargs,
             **self._get_model_specific_params(self.model),
@@ -425,12 +522,37 @@ class OpenAIClient(BaseLLMClient):
                 provider="openai",
                 model=self.model,
             )
+        cache_controls = self._supports_cache_controls()
+        input_items = self._messages_to_responses_input(
+            messages, cache_controls=cache_controls
+        )
+        if cache_controls:
+            deferred = {
+                name: tool
+                for tool in tools or ()
+                if is_deferred(tool) and (name := tool_name(tool)) is not None
+            }
+            activations = {
+                message.tool_call_id: message.activated_tools
+                for message in messages
+                if isinstance(message, ToolMessage) and message.activated_tools
+            }
+            input_items = self._insert_additional_tools(
+                input_items, activations, deferred
+            )
+            tools = [tool for tool in tools or () if not is_deferred(tool)] or None
+        else:
+            tools = resolve_deferred_tools(tools, messages)
         params: dict[str, object] = {
             "model": self._api_model,
-            "input": self._messages_to_responses_input(messages),
+            "input": input_items,
             "include": ["reasoning.encrypted_content"],
             "stream": stream,
         }
+        if cache_controls:
+            params["prompt_cache_options"] = {
+                "mode": "implicit" if stream else "explicit"
+            }
 
         if reasoning_effort is not None:
             params["reasoning"] = {"effort": reasoning_effort}
@@ -442,16 +564,7 @@ class OpenAIClient(BaseLLMClient):
         params.update(model_params)
 
         if tools:
-            params["tools"] = [
-                {
-                    "type": "function",
-                    "name": tool["function"]["name"],
-                    "description": tool["function"].get("description"),
-                    "parameters": tool["function"].get("parameters", {}),
-                    "strict": False,
-                }
-                for tool in tools
-            ]
+            params["tools"] = [self._responses_tool(tool) for tool in tools]
             params["tool_choice"] = tool_choice
 
         return _with_extra_body(params, _RESPONSES_PARAMS)
@@ -666,13 +779,52 @@ class OpenAIClient(BaseLLMClient):
             ),
         }
 
+    @staticmethod
+    def _cached_system_item(message: SystemMessage) -> dict[str, object]:
+        """The opening system prompt with a long-lived breakpoint after its stable part.
+
+        The text is split at ``stable_prefix_len`` into two ``input_text``
+        blocks whose concatenation is the original prompt, and only the stable
+        block is marked. Because every request opens with this item and marks
+        it, it has the same shape on every request -- a string on one and a
+        block list on the next would differ under the cache.
+        """
+        stable = message.stable_prefix_len or 0
+        blocks: list[dict[str, object]] = [
+            {
+                "type": "input_text",
+                "text": message.content[:stable],
+                "prompt_cache_breakpoint": {
+                    "mode": "explicit",
+                    "ttl": _STABLE_PREFIX_CACHE_TTL,
+                },
+            }
+        ]
+        if message.content[stable:]:
+            blocks.append({"type": "input_text", "text": message.content[stable:]})
+        return {"role": "system", "content": blocks}
+
     def _messages_to_responses_input(
         self,
         messages: Sequence[LLMMessage],
+        *,
+        cache_controls: bool = False,
     ) -> list[dict[str, object]]:
-        """Convert application messages to stateless Responses API input items."""
+        """Convert application messages to stateless Responses API input items.
+
+        ``cache_controls`` marks the opening system prompt's stable prefix as a
+        long-lived cache breakpoint; see :meth:`_cached_system_item`.
+        """
         input_items: list[dict[str, object]] = []
-        for message in messages:
+        for index, message in enumerate(messages):
+            if (
+                cache_controls
+                and index == 0
+                and isinstance(message, SystemMessage)
+                and message.stable_prefix_len
+            ):
+                input_items.append(self._cached_system_item(message))
+                continue
             if isinstance(message, (UserMessage,)):
                 content: object
                 if isinstance(message.content, str):
@@ -968,7 +1120,6 @@ class OpenAIClient(BaseLLMClient):
         """Generate response using OpenAI API."""
         # Validate user input before processing
         self._validate_user_input(messages)
-        tools = resolve_deferred_tools(tools, messages)
 
         with tracer.start_as_current_span("llm.provider.generate") as span:
             telemetry = LLMCallTelemetry(
@@ -1046,6 +1197,7 @@ class OpenAIClient(BaseLLMClient):
                 )
             return llm_output
 
+        tools = resolve_deferred_tools(tools, processed_messages)
         # Convert typed messages to dicts for API call
         api_message_dicts = [
             self._to_chat_completions_message(msg) for msg in processed_messages
@@ -1354,7 +1506,6 @@ class OpenAIClient(BaseLLMClient):
         """Generate streaming response using OpenAI API."""
         # Validate user input before processing
         self._validate_user_input(messages)
-        tools = resolve_deferred_tools(tools, messages)
         return self._generate_response_stream(messages, tools, tool_choice)
 
     async def _generate_response_stream(
@@ -1429,6 +1580,7 @@ class OpenAIClient(BaseLLMClient):
                     telemetry.finish_success({"streaming": True})
                 return
 
+            chat_tools = resolve_deferred_tools(tools, processed_messages)
             # Convert typed messages to dicts for SDK boundary
             api_message_dicts = [
                 self._to_chat_completions_message(msg) for msg in processed_messages
@@ -1456,8 +1608,8 @@ class OpenAIClient(BaseLLMClient):
             }
 
             # Add tools if provided
-            if tools:
-                params["tools"] = tools
+            if chat_tools:
+                params["tools"] = chat_tools
                 params["tool_choice"] = tool_choice
 
             # Make streaming API call
