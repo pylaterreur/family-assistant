@@ -26,6 +26,7 @@ from family_assistant.tools.types import (
 
 if TYPE_CHECKING:
     from family_assistant.plugins.home_assistant.client import (
+        ActionCatalogEntry,
         ActionPayload,
         HomeAssistantClientWrapper,
     )
@@ -35,6 +36,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 GET_HOME_STATUS_TOOL_NAME = "get_home_status"
+
+# A narrowed lookup shows each action's fields, which is what calling it
+# needs; a broad listing stays to names, since every field of every action in
+# a domain like "media_player" runs to tens of kilobytes.
+ACTION_FIELD_DETAIL_LIMIT = 10
+ACTION_DETAIL_VALUE_CHARS = 160
 
 DEFAULT_ENTITY_RESULTS = 25
 MAX_ENTITY_RESULTS = 200
@@ -352,16 +359,16 @@ HOME_ASSISTANT_TOOLS_DEFINITION: list[ToolDefinition] = [
                 "Use this BEFORE calling `call_home_assistant_action` so you "
                 "know which `domain` / `action` names exist and which fields "
                 "they accept. Workflow:\n"
-                "  1. Call without arguments to see all available domains and actions.\n"
-                "  2. Call with `domain='light'` (or whatever domain you need) "
-                "to see the field schema for each action in that domain.\n"
-                "  3. Optionally narrow further with `action_filter` to find "
-                "actions whose name contains a substring (e.g. 'turn_on').\n\n"
-                "Each entry returns the `domain`, `action` (service id), human "
-                "`name`/`description`, the `fields` schema (per-parameter HA "
-                "selectors describing accepted values), the optional `target` "
-                "selector block, and `supports_response` (whether the action "
-                "supports `return_response=true`)."
+                "  1. Call with `domain='light'` (or whatever domain you need) "
+                "to see its actions.\n"
+                "  2. Narrow with `action_filter` (e.g. 'turn_on') until "
+                f"{ACTION_FIELD_DETAIL_LIMIT} actions or fewer match: each "
+                "is then listed with its fields (name, whether required, "
+                "description, example and HA selector) and target, which is "
+                "what calling it needs.\n\n"
+                "Each entry gives `domain.action` (service id), its "
+                "description, and whether it supports `return_response=true`. "
+                "Calling with no arguments lists every action by name only."
             ),
             "parameters": {
                 "type": "object",
@@ -959,6 +966,7 @@ async def list_home_assistant_actions_tool(
             if total_matches <= max_results
             else f"Found {total_matches} Home Assistant action(s); showing first {max_results}"
         )
+        with_fields = len(result_entries) <= ACTION_FIELD_DETAIL_LIMIT
         lines = [header + ":"]
         for entry in result_entries:
             line = f"- {entry['domain']}.{entry['action']}"
@@ -968,9 +976,42 @@ async def list_home_assistant_actions_tool(
             if entry.get("supports_response"):
                 line += " [supports response]"
             lines.append(line)
+            if with_fields:
+                lines.extend(_action_detail_lines(entry))
+        if not with_fields:
+            lines.append(
+                f"Field details are shown for {ACTION_FIELD_DETAIL_LIMIT} actions "
+                "or fewer: narrow with domain and action_filter to see them."
+            )
         text = "\n".join(lines)
 
     return ToolResult(text=text, data=result_data)
+
+
+def _action_detail_lines(entry: ActionCatalogEntry) -> list[str]:
+    """One line per field of ``entry``, plus its target, for the model to call it by."""
+    lines: list[str] = []
+    if entry.get("target"):
+        lines.append(f"    target: {_compact(entry['target'])}")
+    for field_name, field in entry["fields"].items():
+        line = f"    {field_name}"
+        if field.get("required"):
+            line += " (required)"
+        if description := field.get("description"):
+            line += f": {description}"
+        if "example" in field:
+            line += f" e.g. {_compact(field['example'])}"
+        if selector := field.get("selector"):
+            line += f" [{_compact(selector)}]"
+        lines.append(line)
+    return lines
+
+
+def _compact(value: object) -> str:
+    rendered = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    if len(rendered) > ACTION_DETAIL_VALUE_CHARS:
+        return rendered[: ACTION_DETAIL_VALUE_CHARS - 1] + "…"
+    return rendered
 
 
 async def list_home_assistant_entities_tool(
