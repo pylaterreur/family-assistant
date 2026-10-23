@@ -18,6 +18,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# A read returns lines, so a line is the unit grep and paging work in; pieces
+# this long keep a match readable while bounding what one matching line costs.
+LONG_LINE_CHARS = 2_000
+DEFAULT_READ_MAX_CHARS = 8_000
+MAX_READ_MAX_CHARS = 50_000
+
 
 # Tool Definitions
 ATTACHMENT_TOOLS_DEFINITION: list[ToolDefinition] = [
@@ -54,6 +60,10 @@ ATTACHMENT_TOOLS_DEFINITION: list[ToolDefinition] = [
             "description": (
                 "Read text content from an attachment with optional filtering and pagination. "
                 "Use this to explore large text files or tool results that were auto-converted to attachments. "
+                f"Lines longer than {LONG_LINE_CHARS} characters are split into pieces, so "
+                "grep, offset and limit work on a file that is one long line, and a "
+                "read is capped at max_chars. For JSON, jq_query extracts exactly the "
+                "fields you need. "
                 "Stored attachment provenance is tracked internally; using external-source content may make later writes, browsing, worker execution, or outgoing messages require approval."
             ),
             "parameters": {
@@ -77,6 +87,16 @@ ATTACHMENT_TOOLS_DEFINITION: list[ToolDefinition] = [
                         "description": "Maximum number of lines to return (default 100).",
                         "default": 100,
                     },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": (
+                            f"Maximum characters to return (default "
+                            f"{DEFAULT_READ_MAX_CHARS}, maximum {MAX_READ_MAX_CHARS}). "
+                            "A longer read stops early and says which offset "
+                            "to continue from."
+                        ),
+                        "default": DEFAULT_READ_MAX_CHARS,
+                    },
                 },
                 "required": ["attachment_id"],
             },
@@ -92,6 +112,7 @@ async def read_text_attachment_tool(
     grep: str | None = None,
     offset: int = 0,
     limit: int = 100,
+    max_chars: int = DEFAULT_READ_MAX_CHARS,
 ) -> ToolResult:
     """
     Read text from an attachment with optional filtering and pagination.
@@ -122,7 +143,12 @@ async def read_text_attachment_tool(
 
     try:
         return await _read_text_attachment(
-            exec_context, attachment_id_str, grep=grep, offset=offset, limit=limit
+            exec_context,
+            attachment_id_str,
+            grep=grep,
+            offset=offset,
+            limit=limit,
+            max_chars=max(1, min(max_chars, MAX_READ_MAX_CHARS)),
         )
     except Exception as e:
         logger.exception(f"Error reading attachment {attachment_id_str}: {e}")
@@ -136,6 +162,7 @@ async def _read_text_attachment(
     grep: str | None,
     offset: int,
     limit: int,
+    max_chars: int,
 ) -> ToolResult:
     registry = exec_context.attachment_registry
     if registry is None:
@@ -170,7 +197,7 @@ async def _read_text_attachment(
     except UnicodeDecodeError:
         return ToolResult(text="Error: Attachment content is not valid UTF-8 text.")
 
-    lines = content_text.splitlines()
+    lines = _split_long_lines(content_text.splitlines())
     total_lines = len(lines)
     if grep:
         grep_lower = grep.lower()
@@ -179,7 +206,7 @@ async def _read_text_attachment(
     else:
         filtered_count = total_lines
 
-    paged_lines = lines[offset : offset + limit]
+    paged_lines = _within_budget(lines[offset : offset + limit], max_chars)
     summary = f"Read {len(paged_lines)} lines"
     if grep:
         summary += f" matching '{grep}'"
@@ -187,9 +214,23 @@ async def _read_text_attachment(
     if filtered_count != total_lines:
         summary += f" [out of {total_lines} total lines in file]"
 
+    notes: list[str] = []
+    next_offset = offset + len(paged_lines)
+    if next_offset < min(offset + limit, filtered_count):
+        notes.append(
+            f"Stopped at {max_chars} characters. Continue with offset={next_offset}, "
+            "or narrow the read with grep."
+        )
+    if _looks_like_json(content_text):
+        notes.append(
+            f"This attachment is JSON: jq_query(attachment_id='{attachment_id}', "
+            "jq_program='...') returns just the fields you need."
+        )
+
     result_text = "\n".join(paged_lines)
+    footer = "".join(f"\n[{note}]" for note in notes)
     return ToolResult(
-        text=f"--- Attachment {attachment_id} ({summary}) ---\n{result_text}",
+        text=f"--- Attachment {attachment_id} ({summary}) ---\n{result_text}{footer}",
         data={
             "attachment_id": attachment_id,
             "total_lines": total_lines,
@@ -199,6 +240,40 @@ async def _read_text_attachment(
             "lines": paged_lines,
         },
     )
+
+
+def _split_long_lines(lines: list[str]) -> list[str]:
+    """Cut every line longer than ``LONG_LINE_CHARS`` into pieces of that size.
+
+    A tool result stored as compact JSON is one line, so without this a grep
+    returns the whole file and ``limit`` bounds nothing.
+    """
+    pieces: list[str] = []
+    for line in lines:
+        if len(line) <= LONG_LINE_CHARS:
+            pieces.append(line)
+            continue
+        pieces.extend(
+            line[start : start + LONG_LINE_CHARS]
+            for start in range(0, len(line), LONG_LINE_CHARS)
+        )
+    return pieces
+
+
+def _within_budget(lines: list[str], max_chars: int) -> list[str]:
+    """The leading lines whose total length fits in ``max_chars``, at least one."""
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        if kept and used + len(line) > max_chars:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return kept
+
+
+def _looks_like_json(text: str) -> bool:
+    return text.lstrip()[:1] in {"{", "["}
 
 
 def _response_attachment_id(attachment: ScriptAttachment | str) -> str:
