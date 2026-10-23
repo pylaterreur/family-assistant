@@ -595,6 +595,55 @@ This project follows the patterns defined in CLAUDE.md:
 - Use virtualenv in .venv
 - Follow existing code conventions in the codebase
 
+## Prompt Caching
+
+Every provider caches a prompt by prefix: a byte that changes anywhere in what an earlier request
+sent discards the cache from that point on, and with it every later thinking block. Nothing reports
+this -- the request succeeds at full price -- so review is where it gets caught. Most LLM spend is
+cache writes, and most of those come from content re-sent after the cache broke. See
+[docs/design/prompt-caching.md](../../../../docs/design/prompt-caching.md).
+
+Check any change to how messages, tools or request parameters reach a provider:
+
+- **History renders the same way on every request.** Rendering stored rows must be a pure function
+  of those rows: no timestamps, ids, counters or per-request values ahead of the last breakpoint;
+  one shape per message (a string on one request and a block list on the next differs under the
+  cache); replay metadata -- thinking blocks, thought signatures, reasoning items -- sent back
+  exactly as received; a mid-conversation system notice kept where it occurred, never hoisted into
+  the system prompt. A row rewritten once its turn is over (a delegation wake re-rendered as
+  history, say) breaks the prefix there for every later turn.
+- **The tool list is fixed for the conversation.** Activating a tool appends to the end (Anthropic
+  `tool_addition`, OpenAI `additional_tools`) rather than editing the array. Gemini has no
+  equivalent and is the documented exception.
+- **Request parameters stay put mid-conversation.** A change to the model, to thinking or effort, or
+  on Anthropic to `tool_choice`, discards the cached history even when the messages are identical.
+- **One-shot requests write nothing the next request will not read.** A review, a summary or a
+  structured call has a unique tail; a breakpoint there is a write at above the input price that is
+  never read.
+- **A long-lived breakpoint sits at a position that does not move.** A marker that advances every
+  turn re-writes everything it passes at the longer lifetime, warm cache or not. #1505 put a
+  one-hour marker at the end of the settled history: it saved on replies 5-60 minutes later and lost
+  more re-writing each turn on the far more common quick follow-up. Fixed positions -- tools and the
+  system prompt -- do not have this cost.
+- **Provider cache fields are gated** on the model and endpoint that accept them; an unsupported
+  field is a 400 for every request on that path.
+
+The chokepoint is the per-provider prefix-stability property tests
+(`tests/unit/llm/providers/test_*_prefix_stability.py`), which render every request the agent loop
+would send and check each extends the last. A change to message rendering must keep them passing,
+and a new conversation shape belongs in their shared generator
+(`tests/unit/llm/agent_loop_conversations.py`), not in a one-off test.
+
+**Severity.** Breaking the prefix on the agent loop's common path -- every turn, or every tool round
+-- is `DESIGN_FLAW_MAJOR`: it costs money on every request and nothing else will ever report it. On
+a rare path it is `DESIGN_FLAW_MINOR`, or an accepted residual recorded under "Deliberate
+simplifications" in the design doc.
+
+**Evidence.** A claim that a caching change saves money needs measurement, not a model of what the
+provider should do: the API's own usage accounting from a recorded test against the live API, and,
+where the saving depends on how people use the app, production traffic (`message_history`
+`reasoning_info`, or the billing views). Ask for both before accepting the claim.
+
 ## Linter and Type-Checker Bypasses
 
 **Severity: 🟠 High / SHORTCUT — without a specific justification.** Reviewers must flag this at high
