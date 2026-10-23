@@ -51,11 +51,53 @@ def _strip_cache_control(value: Any) -> Any:  # noqa: ANN401
         return {
             key: _strip_cache_control(item)
             for key, item in value.items()
-            if key != "cache_control"
+            if key not in _CACHE_DIRECTIVE_KEYS
         }
     if isinstance(value, list):
         return [_strip_cache_control(item) for item in value]
     return value
+
+
+# Anthropic's per-block breakpoint, and OpenAI's per-block breakpoint and
+# request-level caching mode. None of them can change what the model answers.
+_CACHE_DIRECTIVE_KEYS = frozenset({
+    "cache_control",
+    "prompt_cache_breakpoint",
+    "prompt_cache_options",
+})
+
+
+def _join_text_blocks(input_items: object) -> object:
+    """Collapse a Responses message's all-text content to the string it spells.
+
+    A message carrying a cache breakpoint has to be a block list -- the marker
+    lives on a block -- and may be split in two at the breakpoint, while the
+    same message without one goes out as a plain string. Both send the model
+    the same text, so recordings made either way still match.
+    """
+    if not isinstance(input_items, list):
+        return input_items
+    joined = []
+    for item in input_items:
+        content = item.get("content") if isinstance(item, dict) else None
+        if (
+            isinstance(content, list)
+            and content
+            and item.get("role") in {"system", "developer", "user"}
+            and all(
+                isinstance(block, dict)
+                and block.get("type") == "input_text"
+                and set(block) <= {"type", "text"}
+                for block in content
+            )
+        ):
+            joined.append({
+                **item,
+                "content": "".join(block["text"] for block in content),
+            })
+            continue
+        joined.append(item)
+    return joined
 
 
 # ast-grep-ignore: no-dict-any - VCR cassette body matches external LLM API JSON format
@@ -98,7 +140,7 @@ def normalize_llm_request_body(body: dict[str, Any]) -> dict[str, Any]:
     # Keep the full item structure so recordings with the same model but
     # different turns cannot be replayed interchangeably.
     if "input" in body:
-        normalized["input"] = _normalize_json_value(body["input"])
+        normalized["input"] = _normalize_json_value(_join_text_blocks(body["input"]))
         normalized["responses_params"] = _normalize_json_value({
             key: value for key, value in body.items() if key not in {"input", "tools"}
         })

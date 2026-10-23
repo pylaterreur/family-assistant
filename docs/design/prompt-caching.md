@@ -94,11 +94,13 @@ model.
 
 Two mechanisms, one before deploy and one after:
 
-- **A property test** (`TestAnthropicPrefixStability`) generates conversations and extensions of
-  them in the shapes the agent loop produces — tool rounds, new user turns, system notices — and
-  asserts the earlier request, with `cache_control` stripped, is a prefix of the later one: same
-  `tools`, same `system`, and its messages reappearing as a block-level prefix. A conversion that
-  rewrites earlier output fails it without anyone having to think of the case.
+- **A property test per adapter** (`tests/unit/llm/providers/test_*_prefix_stability.py`) generates
+  conversations in the shapes the agent loop produces — tool rounds, activations, new user turns,
+  system notices, delegation wakes — from a shared generator
+  (`tests/unit/llm/agent_loop_conversations.py`), and asserts each request the loop would send
+  extends the one before it. A conversion that rewrites earlier output fails it without anyone
+  having to think of the case. For Gemini, which reports nothing when a prefix breaks, this test is
+  the only guard.
 - **Anthropic cache diagnostics** on every streamed request. The client sends
   `diagnostics.previous_message_id` naming the response that produced the conversation's newest
   assistant turn (kept as `response_id` in that turn's provider metadata), and the API reports where
@@ -182,6 +184,41 @@ per provider, because providers report it in the `done` event's metadata and the
 no span of its own. Doing it at the retry layer is what makes `gen_ai.usage.*` present for every
 provider instead of only the ones that instrument themselves.
 
+## Other providers
+
+Caching on OpenAI and Gemini is driven by the same rule — send each request as an extension of the
+last — but the controls differ, so each adapter applies what its API offers. Everything above the
+adapters (the stable system prompt, the time stamped on user messages, history-level fixes) applies
+to all of them unchanged.
+
+### OpenAI
+
+GPT-5.6 and later accept explicit breakpoints, cache lifetimes and `additional_tools` input items on
+the Responses API, with writes billed at 1.25× (30 minutes) or 2.5× (12 hours) and reads at 0.1×. On
+those models:
+
+- **The tools and stable system prompt carry a 12-hour breakpoint.** Shared by every conversation on
+  a profile and changed only by a note, skill or config edit, they are read back by a turn that
+  arrives after the 30-minute default expired. The position never moves, so nothing is re-written at
+  the longer lifetime.
+- **The agent loop keeps OpenAI's implicit breakpoint**, which caches each tool round at the end of
+  the latest message for the next. A non-streamed request is one-shot and runs in explicit-only
+  mode, writing nothing past the shared prefix.
+- **The `tools` array is fixed.** An activation appends an `additional_tools` item after the outputs
+  that activated it, the counterpart of Anthropic's `tool_addition` blocks.
+
+Earlier models, Chat Completions and OpenAI-compatible backends get none of this; they reject the
+fields.
+
+### Gemini
+
+Gemini caches implicitly, with no breakpoints, no write charge and no lifetime control, so prefix
+stability is the only lever, and the adapter already holds it: every system message is sent where it
+occurred, and thought signatures are replayed exactly as received. Explicit caching
+(`cachedContents`) exists on Flash but not on Gemini 4 Argon, and was measured at roughly $8–17 a
+month net of storage — not yet worth the lifecycle of recreating a cache whenever the prompt
+changes.
+
 ## Deliberate simplifications
 
 - **An interrupted turn that activated a deferred tool rewrites the cache once.** The
@@ -209,6 +246,16 @@ provider instead of only the ones that instrument themselves.
   moved only when the tail had expired or only after enough new history, one anchored at compaction
   boundaries, and a one-hour tail. Revisit only if the gap distribution changes enough to clear that
   bar.
+- **On Gemini, activating a deferred tool costs that request its cache.** Gemini cannot add a tool
+  mid-conversation, so the tool list grows on activation and everything after it misses. In
+  production every such request missed (160 of 160), costing about $5 a month; sending every
+  on-demand tool on every request instead was measured at 3–60× that, per tool server.
+- **No long-lived breakpoint at the end of the settled history on OpenAI.** It would move every
+  turn, re-writing the turn just finished at 2.5× on the next request whether or not the cache was
+  still warm. On deep-tier traffic that costs about four times what it saves, because most
+  follow-ups arrive within the 30 minutes the default already covers.
+- **OpenAI structured and JSON calls get no cache controls.** They go through Chat Completions,
+  where the controls are not offered; they are few, and run on the default implicit caching.
 - **Diagnostics compare against the newest assistant turn only.** If that turn was served by another
   provider, or predates response ids being stored, the request opts in without a predecessor and the
   first divergence after it goes unreported.
