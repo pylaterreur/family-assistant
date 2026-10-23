@@ -19,6 +19,7 @@ from family_assistant.web.frontend_telemetry import (
     reset_frontend_telemetry_buffer,
 )
 from family_assistant.web.routers.errors_api import (
+    AUTHENTICATED_ERROR_INTAKE_RATE_LIMIT,
     ERROR_INTAKE_ADDRESS_ADMISSION_RATE_LIMIT,
     ERROR_INTAKE_RATE_LIMIT,
     RATE_LIMIT_MAX_ADDRESSES,
@@ -644,11 +645,18 @@ async def test_authenticated_reporters_have_separate_rate_limit_buckets(
 ) -> None:
     """A shared reverse-proxy address does not combine authenticated users."""
     assert web_only_assistant.fastapi_app is not None
-    original = getattr(web_only_assistant.fastapi_app.state, "auth_service", None)
-    web_only_assistant.fastapi_app.state.auth_service = _FakeAuthService(True)
+    state = web_only_assistant.fastapi_app.state
+    original = getattr(state, "auth_service", None)
+    original_admission = state.error_intake_address_admission_limiter
+    state.auth_service = _FakeAuthService(True)
+    # Both users share the test client's address; its pre-authentication
+    # ceiling is not what this test is about.
+    state.error_intake_address_admission_limiter = ErrorIntakeRateLimiter(
+        2 * AUTHENTICATED_ERROR_INTAKE_RATE_LIMIT
+    )
     try:
         async with _client_for(web_only_assistant) as client:
-            for _ in range(ERROR_INTAKE_RATE_LIMIT):
+            for _ in range(AUTHENTICATED_ERROR_INTAKE_RATE_LIMIT):
                 response = await client.post(
                     "/api/errors/",
                     json={"message": "user-a", "url": "http://x/"},
@@ -666,10 +674,23 @@ async def test_authenticated_reporters_have_separate_rate_limit_buckets(
                 headers={"Authorization": "Bearer user-b"},
             )
     finally:
-        web_only_assistant.fastapi_app.state.auth_service = original
+        state.auth_service = original
+        state.error_intake_address_admission_limiter = original_admission
 
     assert limited.status_code == 429
     assert other_user.status_code == 200
+
+
+def test_authenticated_reporters_get_the_higher_limit() -> None:
+    """A signed-in phone's breadcrumbs during one voice call exceed the address limit."""
+    assert AUTHENTICATED_ERROR_INTAKE_RATE_LIMIT > ERROR_INTAKE_RATE_LIMIT
+    limiter = ErrorIntakeRateLimiter()
+    for _ in range(ERROR_INTAKE_RATE_LIMIT):
+        assert limiter.allow("address:10.0.0.1")
+        assert limiter.allow("user:alice", AUTHENTICATED_ERROR_INTAKE_RATE_LIMIT)
+
+    assert not limiter.allow("address:10.0.0.1")
+    assert limiter.allow("user:alice", AUTHENTICATED_ERROR_INTAKE_RATE_LIMIT)
 
 
 @pytest.mark.asyncio

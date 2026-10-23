@@ -47,7 +47,7 @@ unchanged. This is why the split keys on an explicit `severity`, not on `error_t
 ### Telemetry ring buffer
 
 `FrontendTelemetryBuffer` is a thread-safe, bounded `deque` ring buffer modelled on the existing
-`LLMRequestBuffer` (`llm/request_buffer.py`): a global singleton, default capacity 500, oldest
+`LLMRequestBuffer` (`llm/request_buffer.py`): a global singleton, default capacity 2,000, oldest
 entries evicted automatically. It holds only non-error frontend reports. It is deliberately
 in-memory and non-persistent for now — a process restart drops it, which is acceptable for
 live-debugging telemetry (the same tradeoff the LLM request buffer already accepts).
