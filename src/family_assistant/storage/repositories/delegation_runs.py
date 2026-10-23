@@ -60,6 +60,8 @@ class DelegationRunCreate(TypedDict, total=False):
     content_parts_json: Required[list[ContentPartDict]]
     taint_state_json: TaintMetadata | None
     model_selection_json: dict[str, str | None] | None
+    originating_request: str | None
+    originating_request_taint_json: TaintMetadata | None
     user_id: str | None
     user_name: str | None
     source_turn_id: str | None
@@ -93,6 +95,8 @@ class DelegationRunDict(TypedDict):
     # envelope, and it raises when it is not. Narrowing it here would let a
     # malformed one read as "no selection" and run at the default tier.
     model_selection_json: object | None
+    originating_request: str | None
+    originating_request_taint_json: TaintMetadata | None
     handed_off_at: datetime | None
     started_at: datetime | None
     completed_at: datetime | None
@@ -1171,6 +1175,10 @@ class DelegationRunsRepository(BaseRepository):
             content_parts_json=self._json_list(row["content_parts_json"]),
             taint_state_json=self._json_mapping(row.get("taint_state_json")),
             model_selection_json=self._json_value(row.get("model_selection_json")),
+            originating_request=row.get("originating_request"),
+            originating_request_taint_json=self._json_mapping(
+                row.get("originating_request_taint_json")
+            ),
             handed_off_at=row.get("handed_off_at"),
             started_at=row.get("started_at"),
             completed_at=row.get("completed_at"),

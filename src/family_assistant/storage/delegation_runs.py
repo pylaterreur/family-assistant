@@ -206,6 +206,16 @@ delegation_runs_table = Table(
     Column(
         "model_selection_json", JSON().with_variant(JSONB, "postgresql"), nullable=True
     ),
+    # The human request the run answers, resolved when the run was created from
+    # the delegating turn, or carried down from what that turn inherited. Null
+    # when nothing qualified, and for runs created before it was recorded; the
+    # run's review then reads the delegating turn's rows instead.
+    Column("originating_request", Text, nullable=True),
+    Column(
+        "originating_request_taint_json",
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=True,
+    ),
     Column("handed_off_at", DateTime(timezone=True), nullable=True),
     Column("started_at", DateTime(timezone=True), nullable=True),
     Column("completed_at", DateTime(timezone=True), nullable=True),

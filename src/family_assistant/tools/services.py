@@ -29,6 +29,7 @@ from family_assistant.security.taint import (
     TaintSource,
     TaintSourceType,
     TurnTaintState,
+    agent_request_source,
     merge_taint_state_into_tracker,
     merge_taint_state_origins,
     unknown_external_taint_metadata,
@@ -200,6 +201,49 @@ async def _delegation_review_trigger(
         source_started_by_human=exec_context.tool_call_review_trigger is None,
         inherited=exec_context.tool_call_review_trigger,
     )
+
+
+async def _run_originating_request(
+    exec_context: ToolExecutionContext,
+    *,
+    user_request: str,
+    resume_delegation_id: str | None,
+) -> tuple[str, TaintMetadata] | None:
+    """The human request a queued run will answer, resolved while its turn runs.
+
+    Resolved now rather than when the worker claims the run, because only the
+    live turn knows what it inherited: a completion wake or another delegated
+    run holds no human row of its own, and re-reading it later would find
+    nothing. A resumed run answers to the request that started the delegation
+    as well as to the one that resumed it, so the earlier run's recorded request
+    comes first -- but only when the resuming turn's own request qualifies, so a
+    resume from an untrusted turn cannot borrow the earlier run's standing.
+    """
+    trigger = await _delegation_review_trigger(exec_context, definition=user_request)
+    text = trigger.originating_request
+    metadata = trigger.originating_request_taint_metadata
+    if text is None or metadata is None:
+        return None
+    if resume_delegation_id is None:
+        return text, metadata
+    prior = await _load_delegation_run(exec_context, resume_delegation_id)
+    prior_text = prior["originating_request"] if prior is not None else None
+    prior_metadata = (
+        prior["originating_request_taint_json"] if prior is not None else None
+    )
+    if prior_text is None or prior_metadata is None or prior_text == text:
+        return text, metadata
+    # Joined, the request is only as attributable as its weakest part: a
+    # relayed half makes the whole of it the relaying agent's.
+    relayed = next(
+        (
+            candidate
+            for candidate in (metadata, prior_metadata)
+            if agent_request_source(candidate) is not None
+        ),
+        None,
+    )
+    return f"{prior_text}\n\n{text}", relayed or metadata
 
 
 def _terminal_delegation_run(run: DelegationRunDict | None) -> bool:
@@ -1309,6 +1353,11 @@ async def _enqueue_delegation(
         delivery_hint,
     )
     taint_state_json = current_taint_metadata(exec_context)
+    originating = await _run_originating_request(
+        exec_context,
+        user_request=user_request,
+        resume_delegation_id=resume_delegation_id,
+    )
 
     logger.info(
         "Enqueuing delegated request to service profile '%s' with %d content parts "
@@ -1341,6 +1390,8 @@ async def _enqueue_delegation(
             # configuration deployment between enqueue and execution must not
             # change the models of a run that was already authorized.
             "model_selection_json": model_selection.to_json(),
+            "originating_request": originating[0] if originating else None,
+            "originating_request_taint_json": originating[1] if originating else None,
         })
         if prepare_run is not None:
             await prepare_run(txn, delegation_id, subconversation_id)

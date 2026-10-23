@@ -247,12 +247,12 @@ async def _delegation_run_review_trigger(
     """Build a delegation run's review trigger from the turn that delegated.
 
     The request text was composed by the delegating turn's model and so carries
-    that turn's persisted taint. The human message behind it is read back from
-    the delegating turn's stored rows, where its own provenance decides whether
-    the reviewer may read it -- a run delegated off an email-intake turn
-    propagates nothing, because that turn's user row is not trusted, and one
-    delegated off another unattended turn propagates nothing either, because
-    that turn's rows hold composed text rather than a human request.
+    that turn's persisted taint. The human request behind it was recorded on
+    the run when it was created -- including one the delegating turn inherited
+    from further up a chain -- and its own provenance decides whether the
+    reviewer may read it: a run delegated off an email-intake turn propagates
+    nothing, because that turn's user row is not trusted. A run with no
+    recorded request falls back to reading the delegating turn's stored rows.
     """
     return await build_delegation_review_trigger(
         exec_context.db_context,
@@ -262,6 +262,7 @@ async def _delegation_run_review_trigger(
         definition_taint_metadata=run["taint_state_json"],
         payload_present=payload_present,
         source_turn_id=run["source_turn_id"],
+        recorded_request=_recorded_originating_request(run),
         # A subconversation turn holds a composed goal rather than a human
         # message. The delegating turn's other unattended shapes are excluded by
         # the visible-rows read: a completion wake's result data is an internal
@@ -272,6 +273,17 @@ async def _delegation_run_review_trigger(
         # turn as it stood when it was created.
         source_rows_before=run["created_at"],
     )
+
+
+def _recorded_originating_request(
+    run: DelegationRunDict,
+) -> tuple[str, TaintMetadata] | None:
+    """The human request the run recorded when it was created, if any."""
+    text = run["originating_request"]
+    metadata = run["originating_request_taint_json"]
+    if text is None or metadata is None:
+        return None
+    return text, metadata
 
 
 def _taint_sources_from_delegation_run(
@@ -3441,6 +3453,13 @@ class TaskWorker:
                 initial_taint_state=_taint_state_from_delegation_run(run),
                 source_turn_id=run["source_turn_id"],
                 model_selection=_model_selection_from_delegation_run(run),
+                review_trigger=await _delegation_run_review_trigger(
+                    exec_context,
+                    run,
+                    trigger_type="delegation_request",
+                    active_request_role="user",
+                    payload_present=False,
+                ),
             )
         except Exception as exc:
             await self._handle_submit_failure(
@@ -3574,6 +3593,13 @@ class TaskWorker:
                 initial_taint_state=_taint_state_from_delegation_run(run),
                 source_turn_id=run["source_turn_id"],
                 model_selection=_model_selection_from_delegation_run(run),
+                review_trigger=await _delegation_run_review_trigger(
+                    exec_context,
+                    run,
+                    trigger_type="delegation_request",
+                    active_request_role="user",
+                    payload_present=False,
+                ),
             )
         except Exception as exc:
             await self._handle_submit_failure(

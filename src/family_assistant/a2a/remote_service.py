@@ -201,6 +201,7 @@ class RemoteA2AService:
         initial_taint_state: TurnTaintState | None = None,
         source_turn_id: str | None = None,
         model_selection: ResolvedModelSelection | None = None,
+        review_trigger: TriggerReviewInput | None = None,
     ) -> RemoteSubmission:
         """Submit to the remote agent without blocking; the remote assigns the id.
 
@@ -216,11 +217,14 @@ class RemoteA2AService:
         unused (the remote agent chooses its own model): the remote agent's own
         context_id already carries continuity, unlike a local pollable target,
         and this service reads attachments through its own registry handle.
+        ``review_trigger`` is local authorization context and does not cross
+        the A2A boundary.
         """
         _ = user_name
         _ = db_context
         _ = initial_taint_state
         _ = model_selection
+        _ = review_trigger
         context_id = self._context_id(conversation_id, subconversation_id)
         logger.info(
             "Submitting async request to remote A2A agent '%s' (context_id=%s)",
