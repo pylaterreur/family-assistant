@@ -1576,7 +1576,12 @@ class ProcessingService:
         if self.on_demand_view is None:
             return self.tools_provider
         if self._live_tools_provider is None:
-            self._live_tools_provider = LiveMetaToolsProvider(self.on_demand_view)
+            self._live_tools_provider = LiveMetaToolsProvider(
+                self.on_demand_view,
+                excluded_tool_names=frozenset(
+                    self.app_config.gemini_live_config.tools.excluded_tools
+                ),
+            )
         return self._live_tools_provider
 
     async def delegation_catalog_addition(self) -> str:

@@ -263,3 +263,42 @@ async def test_large_search_result_is_never_converted(
 
     assert response.status_code == 200, response.text
     assert response.json()["result"]["data"]["tools"]
+
+
+@pytest.mark.asyncio
+async def test_voice_excluded_tool_is_refused_when_called_directly(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+) -> None:
+    """A Live client runs whatever name the model emits, declared or not."""
+    _install_provider(app_fixture)
+    app_fixture.state.processing_service.app_config.gemini_live_config.tools.excluded_tools = [
+        "home_price"
+    ]
+
+    response = await api_test_client.post(
+        "/api/tools/execute/home_price",
+        json={"voice_conversation_id": f"web_conv_{uuid4()}", "arguments": {}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert "not available in voice sessions" in response.json()["result"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_voice_excluded_tool_still_runs_outside_voice(
+    app_fixture: FastAPI,
+    api_test_client: AsyncClient,
+) -> None:
+    """The tools page reaches the same endpoint without a voice conversation."""
+    _install_provider(app_fixture)
+    app_fixture.state.processing_service.app_config.gemini_live_config.tools.excluded_tools = [
+        "home_price"
+    ]
+
+    response = await api_test_client.post(
+        "/api/tools/execute/home_price", json={"arguments": {}}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["data"] == {"price": {"low": 0.07, "high": 0.13}}

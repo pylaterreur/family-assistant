@@ -1250,6 +1250,14 @@ class GeminiLiveToolsConfig(BaseModel):
     docs/design/voice-mode-on-demand-tools.md.
     """
 
+    excluded_tools: list[str] = Field(default_factory=list)
+    """Tools a Live session never offers or runs, though chat may.
+
+    For tools whose output is fine in a chat turn but too large to be heard
+    in voice. Applied by name to the declarations, the on-demand catalog,
+    ``search_tools``, ``call_tool`` and direct calls.
+    """
+
 
 class GeminiLiveConfig(BaseModel):
     """Gemini Live Voice API configuration."""

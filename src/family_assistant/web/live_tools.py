@@ -79,16 +79,22 @@ async def execute_live_tool(
     A result carrying both ``text`` and ``data`` reaches the model as its text
     alone, which is what the chat loop shows a model too: ``data`` is the same
     result in the shape a script reads, and sending both pays for it twice.
+
+    A name in ``gemini_live_config.tools.excluded_tools`` is refused here, so
+    the refusal covers every voice entry point and no other caller.
     """
-    result = _model_facing(
-        await service.live_tools_provider.execute_tool(
-            name, arguments, context, call_id
-        )
-    )
     live_config = (
         service.app_config.gemini_live_config
         if service.app_config is not None
         else GeminiLiveConfig()
+    )
+    # A Live client runs whatever name the model emits, declared or not.
+    if name in live_config.tools.excluded_tools:
+        return ToolResult(text=f"Tool '{name}' is not available in voice sessions.")
+    result = _model_facing(
+        await service.live_tools_provider.execute_tool(
+            name, arguments, context, call_id
+        )
     )
     content = _live_response_text(result)
     threshold_kb = live_config.large_tool_result_threshold_kb
