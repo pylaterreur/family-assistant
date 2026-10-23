@@ -1128,7 +1128,7 @@ class OpenAIClient(BaseLLMClient):
                 system="openai",
                 requested_model=self.model,
                 messages=messages,
-                tools=tools,
+                tools=resolve_deferred_tools(tools, messages),
                 tool_choice=tool_choice,
                 streaming=False,
             )
@@ -1522,7 +1522,7 @@ class OpenAIClient(BaseLLMClient):
             system="openai",
             requested_model=self.model,
             messages=messages,
-            tools=tools,
+            tools=resolve_deferred_tools(tools, messages),
             tool_choice=tool_choice,
             streaming=True,
         )

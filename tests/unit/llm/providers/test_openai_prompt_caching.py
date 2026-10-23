@@ -6,7 +6,11 @@ API's acceptance of it is recorded in
 ``tests/integration/llm/test_openai_prompt_caching.py``.
 """
 
+import json
+
+import httpx
 import pytest
+from openai import AsyncOpenAI
 
 from family_assistant.llm import ToolCallFunction, ToolCallItem
 from family_assistant.llm.messages import (
@@ -17,6 +21,7 @@ from family_assistant.llm.messages import (
     UserMessage,
 )
 from family_assistant.llm.providers.openai_client import OpenAIClient
+from family_assistant.llm.request_buffer import get_request_buffer
 from family_assistant.tools.types import ToolDefinition
 
 PROMPT = "You are the household assistant.\n\nAlways be brief."
@@ -314,3 +319,50 @@ class TestDeferredTools:
 
         assert [t["name"] for t in _tools(params)] == ["activate_tools", "set_lights"]
         assert all(item.get("type") != "additional_tools" for item in _input(params))
+
+
+_CHAT_COMPLETION_REPLY = {
+    "id": "gen-1",
+    "object": "chat.completion",
+    "created": 1760400000,
+    "model": "openai/gpt-5.4",
+    "choices": [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "ok"},
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+}
+
+
+class TestTelemetry:
+    async def test_diagnostics_record_the_tools_the_request_sent(self) -> None:
+        sent: list[dict[str, object]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, json=_CHAT_COMPLETION_REPLY)
+
+        base_url = "https://openrouter.ai/api/v1"
+        client = OpenAIClient(
+            api_key="test", model="openrouter/openai/gpt-5.4", base_url=base_url
+        )
+        client.client = AsyncOpenAI(
+            api_key="test",
+            base_url=base_url,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        buffer = get_request_buffer()
+        buffer.clear()
+
+        await client.generate_response(_conversation(), TOOLS)
+
+        [record] = buffer.get_recent(limit=1)
+        buffer.clear()
+        recorded = [tool["function"]["name"] for tool in record.tools or ()]
+        sent_tools = sent[0]["tools"]
+        assert isinstance(sent_tools, list)
+        assert recorded == [tool["function"]["name"] for tool in sent_tools]
+        assert recorded == ["activate_tools"]
