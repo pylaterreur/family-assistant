@@ -13,6 +13,13 @@ same file, so a review you write and the script's review apply one standard.
 
 ## Answering review on your own change
 
+Every review thread gets a disposition before merge: fixed (naming the commit), declined (with the
+reason, recorded in the PR description or the design doc when it is an accepted residual), or filed
+as an issue. Unanswered threads are where real findings were lost in the period analysed in
+[docs/design/review-guidelines-precision-recall.md](../../../docs/design/review-guidelines-precision-recall.md).
+Before pushing a fix for a comment, check the neighbouring failure mode the fix creates, not only
+the scenario the comment named.
+
 Stop review-fix loops at the scope boundary. On rereview, distinguish defects in the original change
 from defects introduced by earlier feedback. If repairing review-added code would require another
 layer of state, validation, attestation, retries, or lifecycle machinery, prefer deletion,
