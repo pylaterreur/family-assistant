@@ -17,15 +17,17 @@ enum PreferredProfile {
     private static let storageKey = "selectedProfileId"
 }
 
-/// The profile every voice session runs under: the Voice tab and Siri,
-/// CallKit and CarPlay calls alike.
+/// The profile every voice session asks for: the Voice tab and Siri, CallKit
+/// and CarPlay calls alike.
 ///
-/// Not the chat composer's choice. The picker remembers whatever was last used,
-/// and nothing in a voice session shows which profile it is on or lets the user
-/// change it, so a profile picked for one chat would silently follow them into
-/// the car.
+/// None, so the server runs the session on its configured default profile and
+/// reports which one in the token response; the session files its tool calls
+/// and transcript under that. Not the chat composer's choice: the picker
+/// remembers whatever was last used, and nothing in a voice session shows which
+/// profile it is on or lets the user change it, so a profile picked for one
+/// chat would silently follow them into the car.
 enum VoiceProfile {
-    static let id = PreferredProfile.fallbackID
+    static let id: String? = nil
 }
 
 enum ChatConstants {

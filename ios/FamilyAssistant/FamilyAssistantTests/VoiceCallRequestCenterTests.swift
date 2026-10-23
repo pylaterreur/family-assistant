@@ -133,11 +133,11 @@ final class VoiceCallRequestCenterTests: XCTestCase {
 
     /// The chat picker remembers the last profile used; a call, which shows no
     /// profile, must not inherit it.
-    func testVoiceRunsOnTheDefaultAssistantWhateverChatLastUsed() {
+    func testVoiceAsksForTheServerDefaultWhateverChatLastUsed() {
         PreferredProfile.store("complex_tasks")
         defer { UserDefaults.standard.removeObject(forKey: "selectedProfileId") }
 
-        XCTAssertEqual(VoiceProfile.id, "default_assistant")
+        XCTAssertNil(VoiceProfile.id)
     }
 
     func testAStartCallActivityProducesAPendingRequest() {
