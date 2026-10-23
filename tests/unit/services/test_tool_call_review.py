@@ -2825,6 +2825,18 @@ def test_fallback_can_never_be_allow_watched() -> None:
 
 
 @pytest.mark.no_db
+def test_program_review_prompt_names_exactly_what_can_be_watched() -> None:
+    # The validator accepts tools and these functions alone; a prompt that
+    # invited watching anything else would turn the watch into a fallback.
+    system, _ = assemble_tool_call_review_messages(
+        _program_review_input(), _watching_constraints()
+    )
+    system_text = str(system.content)
+    assert all(name in system_text for name in GATED_EXTERNAL_FUNCTIONS)
+    assert "Nothing else can be watched" in system_text
+
+
+@pytest.mark.no_db
 def test_program_review_prompt_offers_and_explains_watching() -> None:
     system, user = assemble_tool_call_review_messages(
         _program_review_input(), _watching_constraints()
