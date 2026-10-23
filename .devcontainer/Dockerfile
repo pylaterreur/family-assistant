@@ -6,7 +6,7 @@
 # what the project actually pins. PLAYWRIGHT_VERSION must match the playwright
 # pin in pyproject.toml, which is itself tied to rebrowser-playwright so the two
 # share browser binaries.
-ARG UV_VERSION=0.12.15
+ARG UV_VERSION=0.13.5
 ARG NODE_MAJOR=22
 # gh-token tags releases v2.x but its go.mod never took the /v2 module path,
 # so the v2 tags are unresolvable and the proxy only serves pseudo-versions.

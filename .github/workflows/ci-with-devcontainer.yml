@@ -318,7 +318,7 @@ jobs:
               echo "Setting up Python environment..." && \
               uv venv .venv && \
               . .venv/bin/activate && \
-              uv sync --extra dev && \
+              uv sync --locked --extra dev && \
               if [ -d "/opt/frontend/node_modules" ] && [ ! -d "frontend/node_modules" ]; then \
                 echo "Symlinking pre-installed node_modules for frontend linting..."; \
                 ln -s /opt/frontend/node_modules frontend/node_modules; \
@@ -403,7 +403,7 @@ jobs:
               echo "Setting up Python environment..." && \
               uv venv .venv && \
               . .venv/bin/activate && \
-              uv sync --extra dev && \
+              uv sync --locked --extra dev && \
               if [ -d "/opt/frontend/node_modules" ] && [ ! -d "frontend/node_modules" ]; then \
                 echo "Symlinking pre-installed node_modules for backend tests..."; \
                 ln -s /opt/frontend/node_modules frontend/node_modules; \
@@ -524,7 +524,7 @@ jobs:
               echo "Setting up Python environment..." && \
               uv venv .venv && \
               . .venv/bin/activate && \
-              uv sync --extra dev && \
+              uv sync --locked --extra dev && \
               if [ -d "/opt/frontend/node_modules" ] && [ ! -d "frontend/node_modules" ]; then \
                 echo "Symlinking pre-installed node_modules for backend tests..."; \
                 ln -s /opt/frontend/node_modules frontend/node_modules; \
@@ -635,7 +635,7 @@ jobs:
               echo "Setting up Python environment..." && \
               uv venv .venv && \
               . .venv/bin/activate && \
-              uv sync --extra dev && \
+              uv sync --locked --extra dev && \
               if [ -d "/opt/frontend-dist" ]; then \
                 echo "Copying pre-built frontend assets..."; \
                 mkdir -p /workspace/main/src/family_assistant/static/dist; \
@@ -720,7 +720,7 @@ jobs:
               echo "Setting up Python environment..." && \
               uv venv .venv && \
               . .venv/bin/activate && \
-              uv sync --extra dev && \
+              uv sync --locked --extra dev && \
               if [ -d "/opt/frontend-dist" ]; then \
                 echo "Copying pre-built frontend assets..."; \
                 mkdir -p /workspace/main/src/family_assistant/static/dist; \
@@ -789,7 +789,7 @@ jobs:
               echo "Setting up Python environment..." && \
               uv venv .venv && \
               . .venv/bin/activate && \
-              uv sync --extra dev && \
+              uv sync --locked --extra dev && \
               mkdir -p test-results && \
               .venv/bin/pytest -q --timeout=300 -m "gemini_live" \
                 --json-report --json-report-file=test-results/gemini-live-report.json'
@@ -837,7 +837,7 @@ jobs:
               echo "Setting up Python environment..." && \
               uv venv .venv && \
               . .venv/bin/activate && \
-              uv sync --extra dev && \
+              uv sync --locked --extra dev && \
               mkdir -p test-results && \
               .venv/bin/pytest -q --timeout=300 -m "llm_integration" -o "addopts=" \
                 --json-report --json-report-file=test-results/llm-integration-report.json'
