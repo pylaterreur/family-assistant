@@ -19,7 +19,7 @@ from typing import Any
 
 # Per-record size caps. POST /api/errors/ is intentionally unauthenticated, so a
 # remote caller controls every telemetry field. The entry-count cap (maxlen)
-# alone does not bound memory — 500 multi-megabyte records would still exhaust
+# alone does not bound memory — 2,000 multi-megabyte records would still exhaust
 # it — so each record is clamped on insertion. Truncating (rather than rejecting)
 # keeps a legitimate-but-large breadcrumb usefully present without letting it
 # blow up retained memory.
@@ -91,7 +91,7 @@ class FrontendTelemetryBuffer:
     Uses ``collections.deque`` with ``maxlen`` for automatic oldest-entry eviction.
     """
 
-    max_size: int = 500
+    max_size: int = 2_000
     _buffer: deque[FrontendTelemetryRecord] = field(default_factory=deque)
     _lock: Lock = field(default_factory=Lock)
 
@@ -162,7 +162,7 @@ _global_buffer: FrontendTelemetryBuffer | None = None
 _buffer_lock = Lock()
 
 
-def get_frontend_telemetry_buffer(max_size: int = 500) -> FrontendTelemetryBuffer:
+def get_frontend_telemetry_buffer(max_size: int = 2_000) -> FrontendTelemetryBuffer:
     """Get the global frontend telemetry buffer, creating it on first access.
 
     Args:
