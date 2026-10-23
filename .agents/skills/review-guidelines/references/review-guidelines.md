@@ -620,11 +620,13 @@ Check any change to how messages, tools or request parameters reach a provider:
 - **One-shot requests write nothing the next request will not read.** A review, a summary or a
   structured call has a unique tail; a breakpoint there is a write at above the input price that is
   never read.
-- **A long-lived breakpoint sits at a position that does not move.** A marker that advances every
-  turn re-writes everything it passes at the longer lifetime, warm cache or not. #1505 put a
-  one-hour marker at the end of the settled history: it saved on replies 5-60 minutes later and lost
-  more re-writing each turn on the far more common quick follow-up. Fixed positions -- tools and the
-  system prompt -- do not have this cost.
+- **A longer cache lifetime needs a read that repays it.** A one-hour write on Anthropic costs an
+  extra 0.75x input and repays 1.15x only if the entry is read after the five-minute one would have
+  expired, so it pays where that is likely: the tools and system prompt, shared by every
+  conversation at a fixed position. A per-conversation marker that advances every turn also
+  re-writes each turn at the longer lifetime, warm cache or not. #1505 shipped one at the end of the
+  settled history, and backtesting production traffic showed it lost money under every placement
+  tried; #1518 reverted it.
 - **Provider cache fields are gated** on the model and endpoint that accept them; an unsupported
   field is a 400 for every request on that path.
 
@@ -634,10 +636,11 @@ would send and check each extends the last. A change to message rendering must k
 and a new conversation shape belongs in their shared generator
 (`tests/unit/llm/agent_loop_conversations.py`), not in a one-off test.
 
-**Severity.** Breaking the prefix on the agent loop's common path -- every turn, or every tool round
--- is `DESIGN_FLAW_MAJOR`: it costs money on every request and nothing else will ever report it. On
-a rare path it is `DESIGN_FLAW_MINOR`, or an accepted residual recorded under "Deliberate
-simplifications" in the design doc.
+**Severity.** A broken prefix costs money, never data, so it is never blocking. On the agent loop's
+common path -- every turn, or every tool round -- it is `DESIGN_FLAW_MINOR`: post it with the
+estimated cost (the tokens re-written per request times the write price), since nothing else will
+ever report it. On a rare path it is an accepted residual, recorded under "Deliberate
+simplifications" in the design doc, not a finding.
 
 **Evidence.** A claim that a caching change saves money needs measurement, not a model of what the
 provider should do: the API's own usage accounting from a recorded test against the live API, and,

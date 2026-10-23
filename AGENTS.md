@@ -443,6 +443,12 @@ for why).
   retried task re-runs a side effect.
 - A test whose only evidence for an external contract is the author's own mock proves nothing about
   the provider. Ask for a recorded cassette, a real call, or a stated reason none is possible.
+- When a change alters how messages, tools or request parameters reach a provider, check the prompt
+  cache prefix survives: history rendered identically on every request, the tool list fixed (an
+  activation appends), no parameter change mid-conversation, no cache write from a one-shot request,
+  and a longer cache lifetime only where a read will repay it. The per-provider prefix-stability
+  property tests are the chokepoint. A broken prefix costs money, not data: never blocking, and
+  posted with an estimated cost.
 
 ### Answering review on your own change
 
