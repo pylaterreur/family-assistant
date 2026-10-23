@@ -26,6 +26,26 @@ concrete problem in the changed code and tells the author what to do differently
 
 If there are no actionable findings for a file, say nothing about that file.
 
+Four checks before posting, each of which has produced a measurable share of the wrong or
+disproportionate comments on this repository
+([analysis](../../../../docs/design/review-guidelines-precision-recall.md)):
+
+- **Introduced or pre-existing?** Say which. A pre-existing defect in an uncommon path whose fix
+  needs a migration, new persisted state or new configuration surface is follow-up work: name it, do
+  not block on it, and do not attribute it to the change.
+- **Verified or assumed?** A claim about how a library, SDK, runtime, API or tool configuration
+  behaves is posted only after checking the pinned source or its documentation, and the comment
+  cites what it checked. A claim that a file or link is missing is checked against the base branch,
+  not only the PR head tree: companion and stacked PRs merge separately and the "missing" file is
+  often already on `main`.
+- **Already decided?** Read the PR description and any design doc first. A point recorded under
+  "Deliberate simplifications", "Not in this PR", a filed issue or a stated merge dependency is
+  decided; comment only if the recorded rationale is factually wrong (see "Respect documented
+  deliberate simplifications" below).
+- **Already reported?** Report a pattern once, as the class (see "Flag the class, not instance
+  N+1"). Do not re-post a finding on a later commit unless the new head changes it, and do not post
+  the same finding twice in one review.
+
 ## Change Summary in the Review Summary
 
 Every review summary **must** open with a reviewer-written restatement of the PR's **intent** (what
@@ -91,6 +111,14 @@ fallback: the review comment should demand a specific justification (what failur
 wrong answer better than an exception, how will the caller know degradation occurred) and block the
 change until that justification exists in the code or commit message.
 
+**Fail fast has a scope.** Strict rejection applies where a malformed input would advance durable
+state or be acted on: a poll cursor, a persisted row, a policy decision. It does not require
+rejecting every unexpected field in a read-only discovery response from a service this project pins,
+nor validating values our own services return without a reachable failure, nor turning a rare,
+self-correcting transient into a defect. Visible failure on operator-authored configuration (a
+policy denial, a startup error naming the key) is the correct outcome, not a gap that needs a
+validator for every custom profile.
+
 ## Proportionality and Accepted Trade-offs
 
 Review demands must be proportionate to the scenario they protect. Sensible scenarios must have good
@@ -108,6 +136,17 @@ give rare scenarios ideal behavior when reasonable behavior suffices.
   race in which a user can only affect their own data through their own actions (e.g. racing their
   own reconnect of an account) does not justify leases, drain barriers, or generation fencing. A
   cross-user or attacker-facing hole does — flag those regardless of how narrow the window is.
+- **The two-failures gate.** A scenario that needs two independent failures (a lost POST *and* a
+  lost stream; a database failure *inside* a crash window), or two concurrent actions by the same
+  user (rating and moving a reply within one round trip; logging out while a refresh is in flight),
+  is a documented residual, not a finding — unless its outcome is data loss or a trust-boundary
+  crossing. A comment on such a scenario states its likelihood and blast radius and asks for the
+  residual to be recorded, not for machinery to eliminate it. Retry or durability is not demanded on
+  a path whose failures are permanent (a provider that rejected the payload will reject it again).
+- **Maintainer-run tooling is not an attack surface.** Eval harnesses, dev CLIs, one-time scripts
+  and offline extractors are reviewed for wrong results and defects in committed data. They are not
+  hardened against their own operator (a maintainer who deliberately bypasses a gate on their own
+  local data), and a one-time script needs no concurrency hardening.
 - **Apply a cost/benefit gate before adding machinery.** Before pushing for significant new state,
   abstraction, or defensive machinery, state the concrete user-facing requirement it serves and
   confirm that the added complexity is proportionate to the benefit. Prefer the simplest design that
@@ -123,7 +162,12 @@ give rare scenarios ideal behavior when reasonable behavior suffices.
 - **Track finding lineage on rereview.** Distinguish a defect in the original change from a defect
   in code added solely for earlier feedback. When the latter would require another defensive layer,
   treat that as a scope checkpoint: recommend deletion, narrowing, reuse, or a bounded residual, and
-  require the decision owner's approval before prescribing an expanded design.
+  require the decision owner's approval before prescribing an expanded design. Concretely: when the
+  code you are about to flag exists because of your earlier comment, the first question is whether
+  the mechanism should exist at all. Review rounds on this repository that answered edge cases of
+  review-added machinery with more machinery were reversed wholesale far more often than they
+  survived; a "fresh evidence" follow-up that attacks the previous round's fix is the signal to
+  propose the simplification, not the next guard.
 - **Machinery vs. a sentence.** When the honest resolution is to document an accepted residual
   behavior, prefer requiring that documentation over requiring new synchronization, classification,
   or plumbing. A *silent* gap is a finding; a documented, reasoned acceptance is not.
@@ -187,9 +231,35 @@ produces prose specifications that drift from the code.
   missing *approach*; do not demand a missing *specification*.
 - **Review the work plan for verifiability, not completeness of detail.** A milestone that names its
   outcome and how it will be verified (tests, conformance rule, measurement) is complete, even if it
-  leaves the construction open. The implementing PR gets its own review.
+  leaves the construction open. The implementing PR gets its own review. Do not tune the
+  verification criteria themselves (medians versus every-day targets, tolerance bands) unless a
+  stated acceptance claim is unverifiable as written.
+- **Review per revision, not per commit.** A design document's internal consistency — stale wording
+  in one section after another changed, a superseded marker on a companion doc that is too broad or
+  too narrow — is checked once, when the author marks the revision complete. Reviewing it after
+  every push finds the contradiction the previous fix left behind and produces a round per commit; a
+  design-doc PR in this repository reached fifty commits that way. When a contradiction was
+  introduced by a previous review fix, the answer is the higher-altitude restatement above, not
+  another case.
+- **Check the doc's claims against the code, which is where design-doc review earns its keep.** The
+  reviewer's best design-doc findings on this repository were claims the document made that the code
+  contradicted (a client filter the doc said did not exist, a reaper the doc said covered a case it
+  did not). Prefer that to reviewing the prose for completeness.
 
 ## Severity Levels
+
+Severity follows the **consequence**, not the rule cited. A finding is blocking (exit code 2, or a
+P1 badge in a native review) only when a failure reachable in the shipped configuration loses or
+duplicates data, runs a side effect twice, crosses a trust boundary, or breaks startup. That rules
+out, whatever rule they violate:
+
+- Findings reachable only in a mode, tier or configuration the change does not ship (a feature
+  behind a flag the PR leaves off, a stage the design defers): warning at most, usually omitted.
+- Lint and type-checker suppressions, test hygiene (a fixed sleep, a test that should be split),
+  documentation placement and cosmetic status codes: never above `SHORTCUT` / P3. A bare `noqa` is
+  worth a comment; it is not worth the same badge as a trust-boundary bypass.
+- Performance findings without a measured or estimated cost against the threshold the code already
+  uses (for example the 10 ms `asyncio.to_thread` rule): state the number or do not post.
 
 ### BREAKS_BUILD
 
@@ -227,7 +297,7 @@ Examples:
 
 - `user.name` without checking if user is None
 - `items[index]` without bounds checking
-- Missing try/except around external API calls
+- An external call with no timeout, or a loop over remote data with no bound (see "Review Focus")
 - `open()` without corresponding close or context manager
 
 ### SECURITY_RISK
@@ -651,6 +721,28 @@ Given the auto-formatting tools in place, the reviewer should focus on:
 5. **Missing error handling** or edge cases
 6. **Documentation completeness** (not formatting)
 7. **Test coverage** and quality
+
+Three shapes of defect reached `main` past review repeatedly on this repository, and none of them is
+a failure of the rules above so much as of what a diff-reader looks at. Check for them explicitly:
+
+- **What is absent.** When a change adds an external call, a task-worker handler, a query, or a loop
+  over remote data, look for the bound that is not there: a timeout on the await, a page size or cap
+  on the list, a `LIMIT` that sits after the aggregate rather than before it, a full refetch where
+  an incremental one was intended, argument validation at a dispatch point that forwards
+  model-chosen arguments. And ask whether a retried task re-runs a side effect (a notification
+  raised after the tool ran; a callback that re-enters the LLM loop).
+- **Evidence that is only the author's own assumption.** A unit test that asserts the request the
+  author *intended* to send proves nothing about what the provider accepts. Where a change depends
+  on an external contract (a provider API, an SDK, a platform entitlement, a database's plan or
+  transaction semantics), ask for a recorded cassette, a real call, or a stated reason neither is
+  possible. Do not guess the provider's behaviour yourself — that is the main source of this
+  reviewer's false positives — ask for the evidence.
+- **The neighbouring failure mode of a review fix.** A fix pushed to satisfy a review comment is
+  re-reviewed for the comment's scenario; look instead at what the fix changed for the path next to
+  it: the `finally` that references a name the early-exit path never bound, the count carried
+  through a second merge as a sum, the state now held open until an age cap, the ordering that a
+  concurrent worker can interleave. Review-induced defects were the commonest single shape of
+  regression fixed in the period analysed.
 
 ### Test Quality Requirements
 
