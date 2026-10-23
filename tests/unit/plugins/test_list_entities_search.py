@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
+from homeassistant_api.errors import HomeassistantAPIError
 
 from family_assistant.plugins.home_assistant.instance import HomeAssistantInstance
 from family_assistant.plugins.home_assistant.tools import (
@@ -220,3 +221,25 @@ async def test_states_are_read_only_for_the_entities_returned() -> None:
         -1
     ].kwargs["template"]
     assert state_template.count("sensor.") + state_template.count("switch.") == 2
+
+
+@pytest.mark.asyncio
+async def test_a_home_assistant_failure_reading_states_is_reported() -> None:
+    home_assistant = make_home_assistant_client()
+    serve_entities(home_assistant.api, ENTITIES)
+    list_render = home_assistant.api.async_get_rendered_template.side_effect
+
+    async def fail_on_states(template: str) -> str:
+        if "for id in" in template:
+            raise HomeassistantAPIError("template render failed")
+        return await list_render(template)
+
+    home_assistant.api.async_get_rendered_template.side_effect = fail_on_states
+
+    result = await list_home_assistant_entities_tool(
+        _context(home_assistant), query="pool"
+    )
+
+    assert result.text == (
+        "Error: Failed to read entity states: template render failed"
+    )

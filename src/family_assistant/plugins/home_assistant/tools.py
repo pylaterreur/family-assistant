@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant_api.errors import HomeassistantAPIError
 
+from family_assistant.plugins.home_assistant.client import EntityMetadata
 from family_assistant.plugins.home_assistant.instance import HomeAssistantInstance
 from family_assistant.tools.metadata import (
     ToolRegistration,
@@ -26,7 +27,6 @@ from family_assistant.tools.types import (
 if TYPE_CHECKING:
     from family_assistant.plugins.home_assistant.client import (
         ActionPayload,
-        EntityMetadata,
         HomeAssistantClientWrapper,
     )
     from family_assistant.tools.metadata import ToolImplementation
@@ -1024,23 +1024,29 @@ async def list_home_assistant_entities_tool(
         states = await ha_client.async_get_current_states([
             entity["entity_id"] for entity in shown
         ])
-    except Exception as e:
+    except HomeassistantAPIError as e:
         logger.exception(f"Error reading entity states: {e}")
         return ToolResult(text=f"Error: Failed to read entity states: {e!s}")
 
-    # ast-grep-ignore: no-dict-any - Tool result data structure
-    result_entities: list[dict[str, Any]] = [
-        {
+    result_entities = [
+        EntityListing(
             **entity,
-            "state": states.get(entity["entity_id"], {}).get("state"),
-            "unit": states.get(entity["entity_id"], {}).get("unit"),
-        }
+            state=states[entity["entity_id"]]["state"],
+            unit=states[entity["entity_id"]]["unit"],
+        )
         for entity in shown
     ]
     return ToolResult(
         text=_render_entity_listing(result_entities, total_matches),
         data={"entities": result_entities, "total_matches": total_matches},
     )
+
+
+class EntityListing(EntityMetadata):
+    """One entity in a listing, with the state it reported just now."""
+
+    state: str
+    unit: str | None
 
 
 def _words(text: str) -> list[str]:
@@ -1107,8 +1113,7 @@ def find_entities(
     return [entity for _, _, entity in scored]
 
 
-# ast-grep-ignore: no-dict-any - Tool result data structure
-def _render_entity_listing(entities: list[dict[str, Any]], total_matches: int) -> str:
+def _render_entity_listing(entities: list[EntityListing], total_matches: int) -> str:
     if total_matches == 0:
         return "No matching entities found."
     if total_matches <= len(entities):
@@ -1121,17 +1126,14 @@ def _render_entity_listing(entities: list[dict[str, Any]], total_matches: int) -
         ]
     for entity in entities:
         line = f"- {entity['entity_id']}"
-        name = entity.get("name")
-        if name and name != entity["entity_id"]:
-            line += f" - {name}"
-        if area := entity.get("area_name"):
+        if entity["name"] and entity["name"] != entity["entity_id"]:
+            line += f" - {entity['name']}"
+        if area := entity["area_name"]:
             line += f" (Area: {area})"
-        if device := entity.get("device_name"):
+        if device := entity["device_name"]:
             line += f" [Device: {device}]"
-        state = entity.get("state")
-        if state is not None:
-            unit = entity.get("unit")
-            line += f": {state} {unit}" if unit else f": {state}"
+        unit = entity["unit"]
+        line += f": {entity['state']} {unit}" if unit else f": {entity['state']}"
         lines.append(line)
     return "\n".join(lines)
 
