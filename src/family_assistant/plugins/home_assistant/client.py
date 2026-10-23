@@ -27,6 +27,14 @@ class EntityMetadata(TypedDict):
     area_name: str | None
     device_id: str | None
     device_name: str | None
+    device_class: str | None
+
+
+class EntityState(TypedDict):
+    """An entity's current state and the unit it is measured in."""
+
+    state: str
+    unit: str | None
 
 
 # Home Assistant action payloads and entity state dicts have arbitrary,
@@ -216,7 +224,8 @@ class HomeAssistantClientWrapper:
     "name": {{ state.name | tojson }},
     "area_name": {{ area_name(state.entity_id) | default(none, true) | tojson }},
     "device_id": {{ device_id(state.entity_id) | default(none, true) | tojson }},
-    "device_name": {{ device_name(state.entity_id) | default(none, true) | tojson }}
+    "device_name": {{ device_name(state.entity_id) | default(none, true) | tojson }},
+    "device_class": {{ state.attributes.device_class | default(none, true) | tojson }}
   }{% if not loop.last %},{% endif %}
 {% endfor %}
 ]"""
@@ -233,6 +242,33 @@ class HomeAssistantClientWrapper:
             )
 
             return entities
+
+    async def async_get_current_states(
+        self, entity_ids: list[str]
+    ) -> dict[str, EntityState]:
+        """Return the live state and unit of each of ``entity_ids``.
+
+        Rendered fresh on every call, unlike the entity list: the list says
+        what exists and is cached, while a state is what the caller is asking
+        about right now. An entity Home Assistant does not know reports
+        ``unknown``, as ``states()`` does.
+        """
+        if not entity_ids:
+            return {}
+        # The ids are serialized as JSON, which is also a valid Jinja list
+        # literal, so no id can break out of the template.
+        template = (
+            f"[{{% for id in {json.dumps(entity_ids)} %}}"
+            '{"entity_id": {{ id | tojson }}, '
+            '"state": {{ states(id) | tojson }}, '
+            '"unit": {{ state_attr(id, "unit_of_measurement") | tojson }}}'
+            "{% if not loop.last %},{% endif %}{% endfor %}]"
+        )
+        rendered = await self.async_get_rendered_template(template=template)
+        return {
+            row["entity_id"]: EntityState(state=row["state"], unit=row["unit"])
+            for row in json.loads(rendered)
+        }
 
     async def async_call_action(
         self,
