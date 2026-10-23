@@ -3551,7 +3551,12 @@ engine.
 
 The rules apply regardless of the profile's own `tools_policy`, which otherwise replaces the shipped
 defaults wholesale rather than merging with them. Use it for tools that must be available in all
-contexts. Operator policy still overrides global rules.
+contexts, or a `deny` rule for a tool no profile should see. Operator policy still overrides global
+rules.
+
+Rules in `config.yaml` are **added to** the shipped ones rather than replacing them, so a deployment
+can add a global deny without restating the shipped grants below. To withdraw a shipped grant, write
+a `deny` rule at a higher priority, or use a profile's `excluded_global_tools`.
 
 **A profile's own `tools_policy` cannot opt out.** Global rules are injected at the `profile` policy
 layer, which outranks the `defaults` layer a profile's own `tools_policy` occupies, so a deny rule

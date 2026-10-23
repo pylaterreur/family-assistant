@@ -428,6 +428,31 @@ def _apply_default_profile_tools_policy_layers(
     )
 
 
+def _append_operator_global_tools_policy_rules(
+    config_data: dict[str, Any],
+    default_global_policy_data: dict[str, Any] | None,
+    operator_config_data: dict[str, Any],
+) -> None:
+    """Add the operator's global tool-policy rules to the shipped ones.
+
+    Generic YAML deep-merge replaces lists wholesale, so a deployment that
+    adds one global rule would otherwise delete every shipped one, such as
+    the grants that let any profile read back an auto-converted attachment.
+    A deployment that wants to withdraw a shipped global grant writes a deny
+    rule, or uses a profile's ``excluded_global_tools``.
+    """
+    operator_global_policy = operator_config_data.get("global_tools_policy")
+    if not isinstance(operator_global_policy, dict):
+        return
+    operator_rules = operator_global_policy.get("rules")
+    if not isinstance(operator_rules, list) or default_global_policy_data is None:
+        return
+    config_data["global_tools_policy"]["rules"] = [
+        *copy.deepcopy(default_global_policy_data.get("rules") or []),
+        *copy.deepcopy(operator_rules),
+    ]
+
+
 def apply_env_var_overrides(
     config_data: dict[str, Any],
     mappings: list[EnvVarMapping] | None = None,
@@ -1561,6 +1586,12 @@ def load_config(
     _apply_default_profile_tools_policy_layers(
         config_data,
         default_policy_data,
+        operator_config_data,
+    )
+
+    _append_operator_global_tools_policy_rules(
+        config_data,
+        defaults_only_config.model_dump()["global_tools_policy"],
         operator_config_data,
     )
 
