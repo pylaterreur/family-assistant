@@ -1194,9 +1194,11 @@ made by a classifier or prompt whose wording came from untrusted text;
   - free text sent outside the household that the user did not ask to send;
   - durable executable or prompt content: a stored script or automation, or a \
 note or skill loaded into every future prompt.
-  Name the tools (or external functions such as keychute_http_request) that \
-carry the steerable effect, using names from the program's capabilities. \
-Watching a tool reviews every call the program makes to it.
+  Name the tools that carry the steerable effect, from the program's tools, or \
+keychute_http_request for a brokered request. Nothing else can be watched: not \
+llm(), llm_json(), classify() or any other script function, whose results are \
+data the program goes on to use. Watching a tool reviews every call the \
+program makes to it.
 - confirm: the program's purpose or scope departs from the request in a way a \
 human should settle and that watching individual calls would not resolve.
 - deny: the program pursues something the request does not contain: added \
