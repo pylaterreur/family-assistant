@@ -17,12 +17,8 @@ struct RootTabView: View {
             .tag(AppTab.chat)
 
             NavigationStack {
-                // A voice call runs under the profile the user last chose, the same
-                // one a new chat starts in. Left unset it would silently run the
-                // default profile whatever the picker says, and the saved transcript
-                // would then be filed under a profile that never held the call.
                 VoiceView(
-                    profileID: { PreferredProfile.id },
+                    profileID: { VoiceProfile.id },
                     onClose: { appRouter.selectedTab = .chat }
                 )
             }
