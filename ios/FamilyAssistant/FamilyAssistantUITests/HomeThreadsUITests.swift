@@ -277,6 +277,40 @@ final class HomeThreadsUITests: XCTestCase {
         assertHomeComposerIsReachable()
     }
 
+    func testLeavingTheAppPutsTheHomeKeyboardAwayAndKeepsTheDraft() throws {
+        XCTAssertTrue(element("home-title").waitForExistence(timeout: Self.readyTimeout))
+        let composer = element("chat-composer")
+        XCTAssertTrue(composer.waitForExistence(timeout: 20))
+        composer.tap()
+        guard app.keyboards.firstMatch.waitForExistence(timeout: 5) else {
+            throw XCTSkip("The simulator is using a hardware keyboard, so no software keyboard appears.")
+        }
+        composer.typeText("Half-written")
+        leaveAndReturn()
+
+        XCTAssertTrue(waitForNonExistence(of: app.keyboards.firstMatch))
+        XCTAssertEqual(composer.value as? String, "Half-written")
+        XCTAssertTrue(composer.isHittable)
+        composer.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(composer.frame.maxY, app.keyboards.firstMatch.frame.minY + 1)
+    }
+
+    func testLeavingTheAppPutsAThreadsKeyboardAway() throws {
+        try openQuotesThreadWithKeyboardUp()
+        leaveAndReturn()
+
+        XCTAssertTrue(waitForNonExistence(of: app.keyboards.firstMatch))
+        XCTAssertTrue(element("chat-composer").isHittable)
+    }
+
+    private func leaveAndReturn() {
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 10))
+        app.activate()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
+    }
+
     func testScrollingHomeDismissesTheKeyboard() throws {
         XCTAssertTrue(element("home-title").waitForExistence(timeout: Self.readyTimeout))
         let composer = element("chat-composer")

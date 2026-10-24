@@ -1279,6 +1279,13 @@ private struct ChatComposerView: View {
             handledFocusRequestID = requestID
             isComposerFocused = true
         }
+        // iOS 27 restores a backgrounded app's keyboard without restoring the
+        // keyboard's safe area, leaving the composer underneath it. Coming
+        // back without the keyboard avoids that; the draft is kept, and a tap
+        // on the composer brings the keyboard back laid out correctly.
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            isComposerFocused = false
+        }
         .onChange(of: selectedPhotoItem) { _, item in
             guard let item else { return }
             Task {
