@@ -8,7 +8,7 @@ See docs/design/mobile-state-sync.md, "Change tracking".
 import asyncio
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from family_assistant.llm.messages import AssistantMessage
@@ -70,6 +70,28 @@ async def test_rows_written_in_one_transaction_share_its_cursor(
         )
 
     assert await _cursor_of(db, first) == await _cursor_of(db, second)
+
+
+async def test_a_multi_row_insert_stamps_every_row(db_engine: AsyncEngine) -> None:
+    db = Database(db_engine)
+    now = datetime.now(UTC)
+
+    await db.execute(
+        insert(message_history_table).values([
+            {
+                "interface_type": "web",
+                "conversation_id": "c1",
+                "timestamp": now,
+                "role": "assistant",
+                "content": text,
+            }
+            for text in ("a", "b")
+        ])
+    )
+
+    cursors = await db.fetch_all(select(message_history_table.c.sync_cursor))
+    assert len({row["sync_cursor"] for row in cursors}) == 1
+    assert cursors[0]["sync_cursor"] > 0
 
 
 async def test_an_update_restamps_the_row(db_engine: AsyncEngine) -> None:

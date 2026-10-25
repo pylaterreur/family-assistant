@@ -574,6 +574,7 @@ class DatabaseExecutor(ABC):
     @property
     def sync(self) -> SyncRepository:
         """Get the client sync repository instance."""
+        # Repositories import this module, so a module-level import would be a cycle.
         from family_assistant.storage.repositories.sync import (  # noqa: PLC0415
             SyncRepository,
         )
@@ -1018,7 +1019,10 @@ class DatabaseTransaction(DatabaseExecutor):
         if isinstance(query, Delete):
             await self._record_tombstones(query, table, cursor)
             return query
-        stamped = query.values({SYNC_CURSOR_COLUMN: cursor})
+        if isinstance(query, Insert) and _multi_row_values(query):
+            stamped = _stamp_multi_row_insert(query, cursor)
+        else:
+            stamped = query.values({SYNC_CURSOR_COLUMN: cursor})
         if isinstance(stamped, Insert):
             _stamp_upsert_update(stamped, cursor)
         return stamped
@@ -1098,6 +1102,30 @@ class DatabaseTransaction(DatabaseExecutor):
         _ = self.connection
         self._on_commit_callbacks.append(callback)
         return callback
+
+
+# SQLAlchemy keeps the rows of ``insert(...).values([row, ...])`` here; a scalar
+# ``.values()`` cannot be added to that form, so the stamp goes into each row.
+_MULTI_VALUES_ATTRIBUTE = "_multi_values"
+
+
+# ast-grep-ignore: no-dict-any - insert rows map column keys to arbitrary bound values
+def _multi_row_values(statement: Insert) -> tuple[list[dict[Any, Any]], ...]:
+    return getattr(statement, _MULTI_VALUES_ATTRIBUTE, ())
+
+
+def _stamp_multi_row_insert(statement: Insert, cursor: int) -> Insert:
+    # SQLAlchemy's own copy step for generative edits; the caller's statement is untouched.
+    stamped = statement._generate()
+    setattr(
+        stamped,
+        _MULTI_VALUES_ATTRIBUTE,
+        tuple(
+            [{**row, SYNC_CURSOR_COLUMN: cursor} for row in rows]
+            for rows in _multi_row_values(statement)
+        ),
+    )
+    return stamped
 
 
 def _stamp_upsert_update(statement: Insert, cursor: int) -> None:
