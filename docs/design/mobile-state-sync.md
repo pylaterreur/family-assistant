@@ -110,11 +110,11 @@ trips) is the one fast path the app has, which is why the reply appears a moment
 
 Every synced row carries a `sync_cursor`: the cursor of the transaction that last wrote it. The
 synced tables are the ones behind the client's collections: `message_history`,
-`conversation_threads`, `conversation_read_markers`, `confirmation_requests` and `delegation_runs`.
-"What changed since N" is then a query of the state itself, `WHERE sync_cursor > N`, and the answer
-is already compacted: a row written five times appears once, in its current state. Deletes leave a
-row in `sync_tombstones` (kind, entity id, audience, cursor), because a deleted row cannot answer a
-query.
+`conversation_threads`, `conversation_read_markers`, `confirmation_requests`, `delegation_runs` and
+`turn_feedback`. "What changed since N" is then a query of the state itself,
+`WHERE sync_cursor > N`, and the answer is already compacted: a row written five times appears once,
+in its current state. Deletes leave a row in `sync_tombstones` (kind, entity id, audience, cursor),
+because a deleted row cannot answer a query.
 
 **The stamp is applied by the transaction executor, not by each writer.** `DatabaseTransaction`
 already sees every symbolic `INSERT`, `UPDATE` and `DELETE` before it runs. For a statement on a
@@ -151,40 +151,42 @@ but the bootstrap is one request, not a different code path.
 
 ### 3.2 The sync endpoint
 
-`GET /api/v1/sync?cursor=N&focus=<conversation_id>[,…]&wait=<seconds>&limit=<n>`
+`GET /api/v1/sync?cursor=N&focus=<ids>&fresh=<ids>&running=<ids>&focus_seq=<id:seq,…>&wait=<s>&limit=<n>`
 
-Response: `{cursor, server_time, has_more, changes: [...], active_turns: [...]}`.
+The response carries what changed since `cursor`, already compacted, because a changed row is read
+in its current state:
 
-- `changes` is **compacted**: at most one entry per `(kind, entity_id)` since the cursor, carrying
-  the entity's current state (or a tombstone). A list row for a conversation (preview, last
-  timestamp, unread count, kind), a thread row, a read marker, a pending confirmation. **Message
-  rows are included only for `focus` conversations**; for the rest the conversation row is enough
-  and the client fetches history when the user opens it. Bounded by `limit` with `has_more`.
-- `active_turns` is a **progress snapshot** per running turn in a focus conversation: `turn_id`,
-  `progress_seq`, and the accumulated parts so far (text, tool calls, tool results, confirmation
-  requests). The producer maintains this materialised view as it streams; today it only appends to
-  the ring buffer. A client that syncs mid-turn renders the whole partial reply, not the tail from
-  the connect point (closing the "mid-sentence" limitation recorded in the live-resilience doc).
-- `cursor=0` is the bootstrap: the full list, focus history (last page), active turns. `limit` and
-  `has_more` keep each response small enough to survive a lossy link.
-- `wait` turns the same request into a **long poll**: the server holds the response up to `wait`
-  seconds until a change for this account commits (woken in-process by the hub, which becomes a
-  wake-up broker rather than a replay buffer), then returns. An empty response after `wait` is the
-  heartbeat. One request shape serves "poll now" and "wait for change", and a completed HTTP
+- **Conversation rows** (preview, last timestamp, count, kind, thread card, unread count) for every
+  conversation whose messages, thread record, delegation runs or the caller's read marker changed,
+  plus removals. **Message rows only for `focus` conversations**; for the rest the row is enough and
+  history arrives when the user opens it. `fresh` asks for a focus conversation's latest page in
+  place of whatever the client holds. History further back pages by `before_id`.
+- **Small collections are replaced whole when anything in them changed**: the caller's pending
+  confirmations, and a conversation's pending delegations. They are a handful of items, so a list is
+  simpler and safer than deltas.
+- **State that lives only in the hub has no cursor**, so the client reports what it last saw and the
+  server answers with whatever differs: `running` (conversations with a turn in progress) and
+  `focus_seq` (how far it has seen each focus conversation's turn progress). A turn's progress is
+  sent as a snapshot of everything it has produced so far, consecutive text merged, so a client that
+  joins mid-turn renders the whole partial reply rather than the tail from its connect point.
+- `cursor=0`, or a cursor the server cannot continue (above its newest commit, as after a restore),
+  is a **bootstrap**: the recent list, focus history and running turns, flagged so the client drops
+  rows not in it.
+- `limit` bounds message rows, cutting only between transactions, with `has_more` telling the client
+  to ask again at once.
+- `wait` turns the same request into a **long poll**: the server holds it until a commit, or until
+  hub state the client reported moves, then returns; a wake caused by turn progress waits a quarter
+  second for more, so a slow link gets fewer, larger responses. An empty response after `wait` is
+  the heartbeat. One request shape serves "poll now" and "wait for change", and a completed HTTP
   response traverses every proxy that has ever broken SSE here.
-
-History paging for a focus conversation uses `internal_id` as the cursor (`before=<internal_id>`),
-not timestamps.
 
 ### 3.3 Live channel
 
-`GET /api/v1/sync/stream?cursor=N&focus=…` is **one SSE stream per account** (not per conversation)
-that emits the **same frames the sync response contains**: a `changes` frame with the new cursor,
-and `turn_progress` frames for focus turns. A progress frame carries `turn_id`, `progress_seq` and
-the delta (appended text, a new tool call); the client applies it only if `progress_seq` is
-contiguous and otherwise asks for a snapshot via sync. Heartbeat every 10 s; the client treats 25 s
-of silence as death and falls back to the long poll. There is no replay from this stream: resumption
-is always a sync request.
+`GET /api/v1/sync/stream` is **one SSE stream per account** (not per conversation) that repeats the
+sync request over one connection: each `sync` frame is a full sync response, sent as soon as there
+is news, and a `heartbeat` frame follows every quiet 10 s. The client treats 25 s of silence as
+death and falls back to the long poll. There is no replay from this stream: resumption is always a
+sync request from the last cursor applied.
 
 Whether to keep this stream at all is a decision for the benchmark (§7, decision D1). The long poll
 with `wait` is the baseline and is sufficient on its own: when a turn is active the server returns
@@ -358,61 +360,95 @@ buffering or cutting it. After M1 it gains a long-poll probe. It needs a user ac
 read-only diagnostics token is rejected at the gateway, so it has not yet been run against
 production.
 
-### 6.6 Baseline (M0, current web client)
+### 6.6 Baseline and the new protocol
 
 Recorded 2026-10-25 with `poe sync-benchmark`, five runs per cell, against a local backend through
-the impairment proxy. The app is loaded over a good link before the profile applies, as for someone
-whose connection degrades with the app open; the two load scenarios then reload under the profile
-with assets already cached. "KB down" includes that initial page load and is not comparable between
-scenarios. A timeout means the client had not shown the change 60 seconds later.
+the impairment proxy. A timeout means the client had not shown the change 60 seconds later.
+Connections and KB count only the measured runs.
+
+**Current web client (M0 baseline).** The app is loaded over a good link before the profile applies,
+as for someone whose connection degrades with the app open; the two load scenarios then reload under
+the profile with assets already cached. Changes are real turns started through `POST /turns`, and a
+sample ends when the reply is in the DOM.
 
 | Client | Scenario           | Profile        | Runs | p50 (s) | p95 (s) | Timeouts | Connections | KB down |
 | ------ | ------------------ | -------------- | ---- | ------- | ------- | -------- | ----------- | ------- |
-| web    | after_blackhole    | good           | 5    | 0.20    | 0.22    | 0        | 27          | 3063    |
-| web    | after_blackhole    | lossy_cellular | 5    | 0.50    | 0.69    | 0        | 31          | 3062    |
-| web    | after_blackhole    | airplane_wifi  | 5    | 1.28    | 1.57    | 0        | 31          | 3062    |
-| web    | after_blackhole    | hotel_wifi     | 5    | timeout | timeout | 5        | 37          | 3038    |
-| web    | after_handover     | good           | 5    | 6.99    | 7.06    | 0        | 32          | 3062    |
-| web    | after_handover     | lossy_cellular | 5    | 7.41    | 23.22   | 0        | 34          | 3060    |
-| web    | after_handover     | airplane_wifi  | 5    | 8.92    | timeout | 1        | 34          | 3058    |
-| web    | after_handover     | hotel_wifi     | 5    | 7.23    | 7.28    | 0        | 38          | 3061    |
-| web    | cold_load          | good           | 5    | 0.66    | 0.80    | 0        | 6           | 3219    |
-| web    | cold_load          | lossy_cellular | 5    | 1.28    | 1.46    | 0        | 22          | 3181    |
-| web    | cold_load          | airplane_wifi  | 5    | 2.60    | 2.65    | 0        | 17          | 3147    |
-| web    | cold_load          | hotel_wifi     | 5    | 0.95    | 1.02    | 0        | 17          | 3218    |
-| web    | commit_during_load | good           | 5    | timeout | timeout | 5        | 46          | 3263    |
-| web    | commit_during_load | lossy_cellular | 5    | 59.78   | timeout | 2        | 52          | 3254    |
-| web    | commit_during_load | airplane_wifi  | 5    | timeout | timeout | 3        | 49          | 3247    |
-| web    | commit_during_load | hotel_wifi     | 5    | timeout | timeout | 5        | 53          | 3254    |
-| web    | connected_idle     | good           | 5    | 0.15    | 0.18    | 0        | 8           | 3065    |
-| web    | connected_idle     | lossy_cellular | 5    | 0.63    | 0.68    | 0        | 10          | 3063    |
-| web    | connected_idle     | airplane_wifi  | 5    | 1.54    | 1.80    | 0        | 10          | 3062    |
-| web    | connected_idle     | hotel_wifi     | 5    | timeout | timeout | 5        | 32          | 3037    |
-| web    | other_conversation | good           | 5    | 0.12    | 0.21    | 0        | 6           | 3042    |
-| web    | other_conversation | lossy_cellular | 5    | 0.82    | 0.93    | 0        | 9           | 3039    |
-| web    | other_conversation | airplane_wifi  | 5    | 1.95    | 2.18    | 0        | 9           | 3038    |
-| web    | other_conversation | hotel_wifi     | 5    | timeout | timeout | 4        | 28          | 3037    |
-| web    | own_send           | good           | 5    | 0.13    | 0.24    | 0        | 6           | 3043    |
-| web    | own_send           | lossy_cellular | 5    | 0.79    | 1.12    | 0        | 13          | 3047    |
-| web    | own_send           | airplane_wifi  | 5    | 1.86    | 2.34    | 0        | 14          | 3047    |
-| web    | own_send           | hotel_wifi     | 5    | 5.42    | 5.46    | 0        | 28          | 3043    |
+| web    | after_blackhole    | good           | 5    | 0.30    | 0.44    | 0        | 24          | 29      |
+| web    | after_blackhole    | lossy_cellular | 5    | 0.50    | 19.36   | 0        | 32          | 27      |
+| web    | after_blackhole    | airplane_wifi  | 5    | 1.37    | 1.69    | 0        | 26          | 29      |
+| web    | after_blackhole    | hotel_wifi     | 5    | timeout | timeout | 5        | 24          | 5       |
+| web    | after_handover     | good           | 5    | 6.99    | 7.00    | 0        | 27          | 29      |
+| web    | after_handover     | lossy_cellular | 5    | 7.54    | 7.63    | 0        | 26          | 27      |
+| web    | after_handover     | airplane_wifi  | 5    | 8.74    | 15.05   | 0        | 27          | 28      |
+| web    | after_handover     | hotel_wifi     | 5    | 7.22    | 7.43    | 0        | 26          | 28      |
+| web    | cold_load          | good           | 5    | 0.62    | 0.74    | 0        | 0           | 185     |
+| web    | cold_load          | lossy_cellular | 5    | 1.30    | 1.35    | 0        | 14          | 182     |
+| web    | cold_load          | airplane_wifi  | 5    | 2.53    | 2.87    | 0        | 15          | 146     |
+| web    | cold_load          | hotel_wifi     | 5    | 0.95    | 0.98    | 0        | 6           | 184     |
+| web    | commit_during_load | good           | 5    | timeout | timeout | 5        | 42          | 203     |
+| web    | commit_during_load | lossy_cellular | 5    | 32.81   | timeout | 1        | 43          | 225     |
+| web    | commit_during_load | airplane_wifi  | 5    | timeout | timeout | 3        | 45          | 215     |
+| web    | commit_during_load | hotel_wifi     | 5    | timeout | timeout | 5        | 41          | 203     |
+| web    | connected_idle     | good           | 5    | 0.21    | 0.24    | 0        | 0           | 32      |
+| web    | connected_idle     | lossy_cellular | 5    | 0.64    | 9.42    | 0        | 10          | 28      |
+| web    | connected_idle     | airplane_wifi  | 5    | 1.52    | 1.61    | 0        | 3           | 26      |
+| web    | connected_idle     | hotel_wifi     | 5    | timeout | timeout | 5        | 20          | 4       |
+| web    | other_conversation | good           | 5    | 0.13    | 0.25    | 0        | 0           | 9       |
+| web    | other_conversation | lossy_cellular | 5    | 0.76    | 0.81    | 0        | 2           | 5       |
+| web    | other_conversation | airplane_wifi  | 5    | 1.74    | 1.91    | 0        | 4           | 5       |
+| web    | other_conversation | hotel_wifi     | 5    | timeout | timeout | 4        | 16          | 3       |
+| web    | own_send           | good           | 5    | 0.29    | 2.65    | 0        | 7           | 16      |
+| web    | own_send           | lossy_cellular | 5    | 1.03    | 1.38    | 0        | 6           | 14      |
+| web    | own_send           | airplane_wifi  | 5    | 2.32    | 2.86    | 0        | 7           | 15      |
+| web    | own_send           | hotel_wifi     | 5    | 5.47    | 5.80    | 0        | 16          | 10      |
 
-What the table shows:
+**Reference client on `GET /v1/sync` (M1).** The same scenarios and profiles, with the reference
+client long-polling. Changes are committed straight to the database, and a sample ends when the
+reply is in the client's store, so these numbers leave out turn production and rendering; they
+measure the protocol, and the iOS and web engines have to keep them.
 
-- **A reply committed while the page loads is lost.** The client loads history, then opens its
-  follow stream about a second later from the live head and skips the reload on first connect, so a
-  turn that ends in between never appears until something else triggers a reload. This happens on a
-  perfect link. The design removes it structurally: a sync request carries the cursor its snapshot
-  was taken at.
-- **A buffering front door freezes the client.** On the hotel profile, idle updates, other
-  conversations and recovery after an outage never arrive, because nothing reaches the client until
-  the buffer fills. The client's own send recovers in about five seconds only because its stream
-  closes when the turn ends. Plain request and response, as in §3.2, is immune.
-- **Every hand-over costs about seven seconds**, the client's fixed reconnect delay plus a reload,
-  and on lossy links the tail reaches 23 seconds or never.
-- **Steady state on a working stream is fast**: about 0.15 s on a good link and 1.5 to 2 s on the
-  airplane profile, roughly one round trip plus a history reload. The new protocol has to match this
-  rather than beat it.
+| Client    | Scenario           | Profile        | Runs | p50 (s) | p95 (s) | Timeouts | Connections | KB down |
+| --------- | ------------------ | -------------- | ---- | ------- | ------- | -------- | ----------- | ------- |
+| reference | after_blackhole    | good           | 5    | 0.07    | 0.11    | 0        | 5           | 6       |
+| reference | after_blackhole    | lossy_cellular | 5    | 0.30    | 0.31    | 0        | 9           | 6       |
+| reference | after_blackhole    | airplane_wifi  | 5    | 0.49    | 0.64    | 0        | 7           | 6       |
+| reference | after_blackhole    | hotel_wifi     | 5    | 0.12    | 0.13    | 0        | 5           | 6       |
+| reference | after_handover     | good           | 5    | 0.58    | 0.59    | 0        | 5           | 6       |
+| reference | after_handover     | lossy_cellular | 5    | 0.91    | 0.99    | 0        | 5           | 6       |
+| reference | after_handover     | airplane_wifi  | 5    | 1.50    | 1.63    | 0        | 5           | 6       |
+| reference | after_handover     | hotel_wifi     | 5    | 0.71    | 0.72    | 0        | 5           | 6       |
+| reference | cold_load          | good           | 5    | 0.05    | 0.05    | 0        | 5           | 16      |
+| reference | cold_load          | lossy_cellular | 5    | 0.44    | 0.54    | 0        | 5           | 18      |
+| reference | cold_load          | airplane_wifi  | 5    | 1.18    | 1.24    | 0        | 5           | 18      |
+| reference | cold_load          | hotel_wifi     | 5    | 0.20    | 0.20    | 0        | 5           | 16      |
+| reference | commit_during_load | good           | 5    | 0.05    | 0.05    | 0        | 5           | 18      |
+| reference | commit_during_load | lossy_cellular | 5    | 0.47    | 0.54    | 0        | 5           | 18      |
+| reference | commit_during_load | airplane_wifi  | 5    | 0.93    | 0.96    | 0        | 5           | 16      |
+| reference | commit_during_load | hotel_wifi     | 5    | 0.19    | 0.20    | 0        | 5           | 18      |
+| reference | connected_idle     | good           | 5    | 0.04    | 0.04    | 0        | 0           | 6       |
+| reference | connected_idle     | lossy_cellular | 5    | 0.41    | 0.54    | 0        | 0           | 6       |
+| reference | connected_idle     | airplane_wifi  | 5    | 1.13    | 1.88    | 0        | 1           | 6       |
+| reference | connected_idle     | hotel_wifi     | 5    | 0.19    | 0.20    | 0        | 0           | 6       |
+| reference | other_conversation | good           | 5    | 0.04    | 0.04    | 0        | 0           | 3       |
+| reference | other_conversation | lossy_cellular | 5    | 0.41    | 0.53    | 0        | 0           | 3       |
+| reference | other_conversation | airplane_wifi  | 5    | 1.16    | 1.23    | 0        | 0           | 3       |
+| reference | other_conversation | hotel_wifi     | 5    | 0.19    | 0.20    | 0        | 0           | 3       |
+
+What the tables show:
+
+- **A reply committed while the client loads** is lost by the current web client: it loads history,
+  then opens its follow stream about a second later from the live head and skips the reload on first
+  connect. This happens on a perfect link. The sync request carries the cursor its snapshot was
+  taken at, so the reference client shows it within one long poll on every profile.
+- **A buffering front door freezes the current client.** On the hotel profile idle updates, other
+  conversations and recovery after an outage never arrive; its own send recovers only because the
+  send stream closes when the turn ends. The long poll is a plain request and response and answers
+  in about 0.2 s.
+- **A hand-over costs the current client about seven seconds**, its fixed reconnect delay plus a
+  reload, and 15 s at the airplane tail. The reference client recovers in 0.6 to 1.5 s, one retry
+  and one request.
+- **Resets hurt the current client's tail**: on lossy cellular its 95th percentile is 9 s for an
+  idle update and 19 s after an outage, against about 0.5 s for the reference client.
 - **The web bundle is about 3 MB.** On the airplane profile's 1 Mbit/s a first load takes longer
   than the page-load timeout. That is outside this design, but it is why the benchmark loads the app
   before degrading the link.
@@ -447,6 +483,14 @@ What the table shows:
   need `LISTEN/NOTIFY` for long-poll wake-ups; nothing in the protocol assumes one process.
 - Silent pushes are best effort (iOS budgets them); the plan never depends on one arriving.
 - Token streaming may become chunked (≈250 ms) if D1 lands on long poll only.
+- Tombstones are not pruned yet. Deletions are rare (moving a turn to a thread, cleanup), so the
+  table grows slowly; pruning and the 410 that comes with it are added when it matters.
+- A pending confirmation that passes its deadline is not a write until the expiry sweep runs, so
+  clients hide expired confirmations by `expires_at` themselves.
+- Long polls are woken in-process. A second server process would not wake them; they would answer at
+  their `wait` deadline instead, until `LISTEN/NOTIFY` is added.
+- The bootstrap lists the 100 most recent conversations. Older ones arrive when they change, and the
+  existing list endpoint pages further back.
 
 ## 9. Milestones
 
