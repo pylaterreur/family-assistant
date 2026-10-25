@@ -12,7 +12,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 import pytest
 import pytest_asyncio
 
-from tests.netem.proxy import ImpairedNetworkProxy, Impairment
+from tests.netem.proxy import EventStreamHold, ImpairedNetworkProxy, Impairment
 
 pytestmark = pytest.mark.no_db
 
@@ -70,6 +70,21 @@ async def test_latency_applies_in_each_direction(
     await _round_trip(reader, writer, b"ping")
 
     assert time.monotonic() - started >= 0.4
+    writer.close()
+
+
+async def test_latency_is_paid_once_for_a_response_spanning_many_reads(
+    echo_proxy: ImpairedNetworkProxy,
+) -> None:
+    echo_proxy.set_impairment(Impairment(latency_s=0.05))
+    reader, writer = await _connect(echo_proxy)
+    payload = b"x" * (256 * 1024)
+
+    started = time.monotonic()
+    await _round_trip(reader, writer, payload)
+
+    # Sixteen 16 KiB reads each way; paying latency per read would take 1.6 s.
+    assert time.monotonic() - started < 0.5
     writer.close()
 
 
@@ -235,3 +250,13 @@ async def test_buffering_turned_on_mid_stream_holds_a_stream_already_open() -> N
         assert not done
         assert body.startswith(b"event: turn_ended")
         writer.close()
+
+
+def test_a_response_head_split_across_reads_is_still_recognised() -> None:
+    hold = EventStreamHold()
+
+    first = hold.feed(b"HTTP/1.1 200 OK\r\nContent-Ty", 1024)
+    second = hold.feed(b"pe: text/event-stream\r\n\r\nevent: heartbeat\n\n", 1024)
+
+    assert first == []
+    assert second == [b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"]

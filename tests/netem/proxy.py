@@ -249,11 +249,39 @@ class ImpairedNetworkProxy:
         *,
         to_server: bool,
     ) -> None:
+        """Read as bytes arrive and deliver each chunk when the link would.
+
+        Reading and delivering run separately, so latency is paid once per
+        chunk in flight rather than once per chunk in turn: a response that
+        spans many reads takes one round trip plus its serialisation time, as
+        on a real link.
+        """
+        queue: asyncio.Queue[tuple[float, bytes] | None] = asyncio.Queue()
+        sender = asyncio.create_task(
+            self._send_in_order(connection, queue, writer, to_server=to_server)
+        )
+        try:
+            await self._schedule(connection, reader, queue, to_server=to_server)
+            await queue.put(None)
+            await sender
+        finally:
+            sender.cancel()
+
+    async def _schedule(
+        self,
+        connection: _Connection,
+        reader: asyncio.StreamReader,
+        queue: asyncio.Queue[tuple[float, bytes] | None],
+        *,
+        to_server: bool,
+    ) -> None:
         loop = asyncio.get_running_loop()
-        # Each chunk is delivered no earlier than the previous one, so jitter
-        # and bandwidth never reorder bytes within a direction.
-        next_delivery = loop.time()
-        hold = None if to_server else _EventStreamHold()
+        # When the link finishes putting the previous chunk on the wire, and
+        # when the previous chunk arrives: bandwidth queues chunks behind each
+        # other, and arrival order never changes, as with TCP.
+        link_free_at = loop.time()
+        last_arrival = loop.time()
+        hold = None if to_server else EventStreamHold()
         async for received in _read_chunks(reader):
             connection.last_activity = loop.time()
             impairment = self._impairment
@@ -263,23 +291,41 @@ class ImpairedNetworkProxy:
                 else [received]
             )
             for chunk in outgoing:
-                next_delivery = max(next_delivery, loop.time()) + self._delay_for(
-                    len(chunk), impairment
-                )
-                await self._deliver(writer, chunk, next_delivery, to_server)
-            connection.last_activity = loop.time()
+                if not chunk:
+                    continue
+                now = loop.time()
+                link_free_at = max(now, link_free_at)
+                if impairment.bandwidth_bytes_per_s:
+                    link_free_at += len(chunk) / impairment.bandwidth_bytes_per_s
+                propagation = impairment.latency_s
+                if impairment.jitter_s:
+                    propagation += self._random.uniform(0.0, impairment.jitter_s)
+                last_arrival = max(link_free_at + propagation, last_arrival)
+                await queue.put((last_arrival, chunk))
         if hold is not None and (remainder := hold.flush()):
-            await self._deliver(writer, remainder, next_delivery, to_server)
+            await queue.put((max(loop.time(), last_arrival), remainder))
+
+    async def _send_in_order(
+        self,
+        connection: _Connection,
+        queue: asyncio.Queue[tuple[float, bytes] | None],
+        writer: asyncio.StreamWriter,
+        *,
+        to_server: bool,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            while (item := await queue.get()) is not None:
+                arrival, chunk = item
+                await self._deliver(writer, chunk, arrival, to_server)
+                connection.last_activity = loop.time()
+        except (ConnectionError, OSError):
+            # The reader may be waiting on a peer that is still connected;
+            # resetting both sides ends it the way a broken path would.
+            connection.abort()
+            raise
         if writer.can_write_eof() and not writer.transport.is_closing():
             writer.write_eof()
-
-    def _delay_for(self, size: int, impairment: Impairment) -> float:
-        delay = impairment.latency_s
-        if impairment.jitter_s:
-            delay += self._random.uniform(0.0, impairment.jitter_s)
-        if impairment.bandwidth_bytes_per_s:
-            delay += size / impairment.bandwidth_bytes_per_s
-        return delay
 
     async def _deliver(
         self,
@@ -311,34 +357,45 @@ class ImpairedNetworkProxy:
             self.stats.bytes_to_client += len(chunk)
 
 
-class _EventStreamHold:
+class EventStreamHold:
     """Withhold an event-stream response body the way a buffering proxy does.
 
     The response head goes through at once; the body is released only in
     blocks of ``limit`` bytes, or when the upstream closes. Responses are
     recognised whether or not buffering is on, so turning it on mid-stream
-    holds a stream that was already open.
+    holds a stream that was already open. A response head split across reads
+    is gathered before it is classified.
     """
 
     def __init__(self) -> None:
         self._event_stream = False
+        self._head = bytearray()
         self._held = bytearray()
 
     def feed(self, received: bytes, limit: int | None) -> list[bytes]:
-        if not self._event_stream:
-            if not _starts_event_stream(received):
-                return [received]
-            # An event stream never ends while the connection is open, so
-            # everything after its head on this connection is its body.
-            self._event_stream = True
-            head, body = _split_head(received)
-            self._held.extend(body)
-            return [head, *self._release(limit)]
-        self._held.extend(received)
-        return self._release(limit)
+        if self._event_stream:
+            self._held.extend(received)
+            return self._release(limit)
+        if not self._head and not received.startswith(b"HTTP/"):
+            return [received]
+        self._head.extend(received)
+        end = self._head.find(b"\r\n\r\n")
+        if end < 0:
+            return []
+        head = bytes(self._head[: end + 4])
+        body = bytes(self._head[end + 4 :])
+        self._head.clear()
+        if _EVENT_STREAM_MARKER not in head.lower():
+            return [head, body]
+        # An event stream never ends while the connection is open, so
+        # everything after its head on this connection is its body.
+        self._event_stream = True
+        self._held.extend(body)
+        return [head, *self._release(limit)]
 
     def flush(self) -> bytes:
-        remainder = bytes(self._held)
+        remainder = bytes(self._head) + bytes(self._held)
+        self._head.clear()
         self._held.clear()
         return remainder
 
@@ -354,15 +411,3 @@ async def _read_chunks(reader: asyncio.StreamReader) -> AsyncIterator[bytes]:
         if not chunk:
             return
         yield chunk
-
-
-def _starts_event_stream(chunk: bytes) -> bool:
-    head, _ = _split_head(chunk)
-    return head.startswith(b"HTTP/") and _EVENT_STREAM_MARKER in head.lower()
-
-
-def _split_head(chunk: bytes) -> tuple[bytes, bytes]:
-    end = chunk.find(b"\r\n\r\n")
-    if end < 0:
-        return chunk, b""
-    return chunk[: end + 4], chunk[end + 4 :]

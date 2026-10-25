@@ -15,6 +15,7 @@ See docs/design/mobile-state-sync.md, "Measurement and test infrastructure".
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 
 import pytest
 from playwright.async_api import Error as PlaywrightError
@@ -244,9 +245,10 @@ async def test_web_client_time_to_consistency(
         profile=profile_name,
         deadline_s=_DEADLINE_S,
     )
+    before_runs = replace(impaired_proxy.stats)
     for _ in range(runs_per_scenario()):
         result.add(await run(uuid.uuid4().hex[:10]))
-    result.record_traffic(impaired_proxy.stats)
+    result.record_traffic(impaired_proxy.stats, since=before_runs)
     benchmark_results.append(result)
 
     if not _FULL:

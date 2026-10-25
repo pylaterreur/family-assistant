@@ -4,7 +4,8 @@ A sample is how long a client took to show a change after the moment it
 became possible to show it: the commit, or the end of an outage that hid the
 commit. A sample that never arrived within the scenario's deadline is kept as
 a timeout rather than dropped, because "never caught up" is the result the
-benchmark exists to expose.
+benchmark exists to expose. Traffic columns are totals across a scenario's
+runs, excluding the page load that precedes them.
 """
 
 import json
@@ -49,10 +50,11 @@ class ScenarioResult:
         else:
             self.samples_s.append(seconds)
 
-    def record_traffic(self, stats: ProxyStats) -> None:
-        self.requests_opened = stats.connections_opened
-        self.bytes_to_client = stats.bytes_to_client
-        self.bytes_to_server = stats.bytes_to_server
+    def record_traffic(self, stats: ProxyStats, *, since: ProxyStats) -> None:
+        """Traffic during the measured runs only, not the page load before them."""
+        self.requests_opened = stats.connections_opened - since.connections_opened
+        self.bytes_to_client = stats.bytes_to_client - since.bytes_to_client
+        self.bytes_to_server = stats.bytes_to_server - since.bytes_to_server
 
     def percentile(self, q: float) -> float | None:
         """Percentile over all runs, counting a timeout as infinitely slow."""
