@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 class SyncStore:
     """What a client knows. Changed only by :meth:`apply`."""
 
-    cursor: int = 0
+    # None until the first response: the next request bootstraps.
+    cursor: int | None = None
     conversations: dict[str, ConversationRow] = field(default_factory=dict)
     messages: dict[str, dict[int, ConversationMessage]] = field(default_factory=dict)
     confirmations: list[PendingToolConfirmation] = field(default_factory=list)
@@ -115,11 +116,9 @@ class ReferenceSyncClient:
         self._needs_history.add(conversation_id)
 
     def _params(self, wait: float) -> dict[str, str | int | float]:
-        params: dict[str, str | int | float] = {
-            "cursor": self.store.cursor,
-            "limit": self.limit,
-            "wait": wait,
-        }
+        params: dict[str, str | int | float] = {"limit": self.limit, "wait": wait}
+        if self.store.cursor is not None:
+            params["cursor"] = self.store.cursor
         if self.focus:
             params["focus"] = ",".join(sorted(self.focus))
         if self._needs_history:

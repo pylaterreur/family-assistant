@@ -25,6 +25,7 @@ from family_assistant.storage.sync_tracking import (
     sync_cursor_counter_table,
     sync_tombstones_table,
 )
+from family_assistant.storage.turn_feedback import turn_feedback_table
 
 
 def _in_range(table: Table, after: int, through: int) -> ColumnElement[bool]:
@@ -169,3 +170,23 @@ class SyncRepository(BaseRepository):
             .distinct()
         )
         return {row["conversation_id"] for row in rows}
+
+    async def feedback_turn_ids(
+        self, user_ids: Collection[str], after: int, through: int
+    ) -> set[str]:
+        """Turns whose rating by one of ``user_ids`` was set or cleared."""
+        if not user_ids:
+            return set()
+        statement = union(
+            select(turn_feedback_table.c.turn_id.label("turn_id")).where(
+                _in_range(turn_feedback_table, after, through),
+                turn_feedback_table.c.user_id.in_(user_ids),
+            ),
+            select(sync_tombstones_table.c.entity_id.label("turn_id")).where(
+                _in_range(sync_tombstones_table, after, through),
+                sync_tombstones_table.c.kind == "feedback",
+                sync_tombstones_table.c.owner_user_id.in_(user_ids),
+            ),
+        )
+        rows = await self._db.fetch_all(select(statement.subquery()))
+        return {row["turn_id"] for row in rows}

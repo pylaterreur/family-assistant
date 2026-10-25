@@ -3009,7 +3009,26 @@ class MessageHistoryRepository(BaseRepository):
 
         # Add timestamp conditions
         if before_id is not None:
-            conditions.append(message_history_table.c.internal_id < before_id)
+            # Page in the same (timestamp, internal_id) order as the latest page,
+            # so a message whose timestamp is out of insertion order is neither
+            # skipped nor repeated.
+            anchor = await self._db.fetch_value(
+                select(message_history_table.c.timestamp).where(
+                    message_history_table.c.internal_id == before_id
+                )
+            )
+            if anchor is None:
+                conditions.append(message_history_table.c.internal_id < before_id)
+            else:
+                conditions.append(
+                    or_(
+                        message_history_table.c.timestamp < anchor,
+                        and_(
+                            message_history_table.c.timestamp == anchor,
+                            message_history_table.c.internal_id < before_id,
+                        ),
+                    )
+                )
             timestamp_order = message_history_table.c.timestamp.desc()
             internal_id_order = message_history_table.c.internal_id.desc()
         elif before:
@@ -3701,6 +3720,24 @@ class MessageHistoryRepository(BaseRepository):
             .distinct()
         )
         return {row["conversation_id"] for row in rows}
+
+    async def visible_rows_for_turns(
+        self, conversation_ids: Collection[str], turn_ids: Collection[str]
+    ) -> list[MessageHistoryRow]:
+        """Visible rows of ``turn_ids`` in ``conversation_ids``, oldest first."""
+        if not conversation_ids or not turn_ids:
+            return []
+        rows = await self._db.fetch_all(
+            select(message_history_table)
+            .where(
+                message_history_table.c.conversation_id.in_(list(conversation_ids)),
+                message_history_table.c.turn_id.in_(list(turn_ids)),
+                message_history_table.c.subconversation_id.is_(None),
+                _visible_message_condition(),
+            )
+            .order_by(message_history_table.c.internal_id)
+        )
+        return [self._process_message_row_as_dict(row) for row in rows]
 
     async def rows_changed_between(
         self,

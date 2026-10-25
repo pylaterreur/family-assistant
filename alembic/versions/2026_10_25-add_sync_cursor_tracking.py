@@ -23,6 +23,7 @@ _SYNCED_TABLES = (
     "conversation_read_markers",
     "confirmation_requests",
     "delegation_runs",
+    "turn_feedback",
 )
 
 

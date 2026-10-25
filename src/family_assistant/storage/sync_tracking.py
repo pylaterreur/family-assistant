@@ -130,6 +130,13 @@ SYNCED_TABLES: dict[str, SyncedTable] = {
         conversation_column="conversation_id",
         owner_column="user_id",
     ),
+    # A rating is shown on the messages of its turn, so a change resends them.
+    "turn_feedback": SyncedTable(
+        kind="feedback",
+        entity_column="turn_id",
+        conversation_column=None,
+        owner_column="user_id",
+    ),
 }
 
 

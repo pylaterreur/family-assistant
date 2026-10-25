@@ -328,3 +328,65 @@ async def test_history_pages_back_from_a_message_id(
     body = response.json()
     assert [m["content"] for m in body["messages"]] == ["second"]
     assert body["has_more_before"] is True
+
+
+async def test_a_synced_client_waits_even_before_any_tracked_write(
+    client: AsyncClient,
+) -> None:
+    """Cursor zero is a real position, not a request to bootstrap again."""
+    first = await _sync(client)
+
+    started = time.monotonic()
+    body = await _sync(client, cursor=first.cursor, wait=0.5)
+
+    assert first.cursor == 0
+    assert body.bootstrap is False
+    assert time.monotonic() - started >= 0.5
+
+
+async def test_a_rating_change_resends_its_turns_messages(
+    client: AsyncClient, db: Database
+) -> None:
+    conversation_id = await _conversation(db)
+    turn_id = str(uuid.uuid4())
+    await db.message_history.add_message(
+        AssistantMessage(content="rate me"),
+        interface_type="web",
+        conversation_id=conversation_id,
+        timestamp=datetime.now(UTC),
+        turn_id=turn_id,
+    )
+    cursor = (await _sync(client)).cursor
+
+    await db.turn_feedback.set(
+        turn_id=turn_id, user_id=OWNER, rating="up", comment=None
+    )
+    body = await _sync(client, cursor=cursor, focus=conversation_id)
+
+    [change] = body.messages
+    assert [(m.content, m.feedback) for m in change.messages] == [("rate me", "up")]
+
+
+async def test_paging_back_keeps_messages_whose_timestamps_are_out_of_order(
+    client: AsyncClient, db: Database
+) -> None:
+    conversation_id = str(uuid.uuid4())
+    later = datetime.now(UTC)
+    for text, timestamp in (("newer", later), ("older", later - timedelta(minutes=5))):
+        await db.message_history.add_message(
+            AssistantMessage(content=text),
+            interface_type="web",
+            conversation_id=conversation_id,
+            timestamp=timestamp,
+        )
+    url = f"/api/v1/chat/conversations/{conversation_id}/messages"
+    latest = (await client.get(url, params={"limit": 1})).json()["messages"]
+
+    earlier = (
+        await client.get(
+            url, params={"limit": 1, "before_id": latest[0]["internal_id"]}
+        )
+    ).json()["messages"]
+
+    assert [m["content"] for m in latest] == ["newer"]
+    assert [m["content"] for m in earlier] == ["older"]

@@ -161,7 +161,9 @@ class SyncResponse(BaseModel):
 
 @dataclass(frozen=True)
 class SyncQuery:
-    cursor: int
+    # None asks for a bootstrap. Zero is a real position: a database with no
+    # tracked writes yet.
+    cursor: int | None
     focus: frozenset[str]
     fresh: frozenset[str]
     running: frozenset[str]
@@ -283,8 +285,17 @@ async def _focus_messages(
         ctx, incremental, after, through, query.limit
     )
     removed = await ctx.db.sync.removed_message_ids(incremental, after, through)
+    # A rating is shown on its turn's messages, so a rating change resends them.
+    rated = await ctx.db.message_history.visible_rows_for_turns(
+        incremental,
+        await ctx.db.sync.feedback_turn_ids(ctx.owner_user_ids, after, through),
+    )
     by_conversation: dict[str, list[MessageHistoryRow]] = {}
-    for row in rows:
+    sent: set[int] = set()
+    for row in [*rows, *rated]:
+        if row["internal_id"] in sent:
+            continue
+        sent.add(row["internal_id"])
         if row.get("is_internal"):
             removed.setdefault(row["conversation_id"], []).append(row["internal_id"])
         else:
@@ -426,8 +437,8 @@ async def build_sync_response(ctx: SyncContext, query: SyncQuery) -> SyncRespons
     through = await ctx.db.sync.current_cursor()
     # A cursor above the newest commit came from another database (a restored
     # backup, a test reset): continuing from it would silently skip changes.
-    bootstrap = query.cursor <= 0 or query.cursor > through
-    after = 0 if bootstrap else query.cursor
+    bootstrap = query.cursor is None or query.cursor > through
+    after = 0 if query.cursor is None or bootstrap else query.cursor
 
     focus = await ctx.db.message_history.owned_conversation_ids(
         query.focus, ctx.owner_user_ids
@@ -600,7 +611,7 @@ async def long_poll(ctx: SyncContext, query: SyncQuery, wait: float) -> SyncResp
 
 
 def _query(
-    cursor: int,
+    cursor: int | None,
     focus: str | None,
     fresh: str | None,
     running: str | None,
@@ -625,7 +636,10 @@ async def sync(
     attachment_registry: Annotated[
         "AttachmentRegistry", Depends(get_attachment_registry)
     ],
-    cursor: Annotated[int, Query(description="The cursor of the last response")] = 0,
+    cursor: Annotated[
+        int | None,
+        Query(description="The cursor of the last response; omit to bootstrap"),
+    ] = None,
     focus: Annotated[
         str | None, Query(description="Comma-separated open conversation ids")
     ] = None,
@@ -691,7 +705,7 @@ async def sync_stream(
     attachment_registry: Annotated[
         "AttachmentRegistry", Depends(get_attachment_registry)
     ],
-    cursor: int = 0,
+    cursor: int | None = None,
     focus: str | None = None,
     fresh: str | None = None,
     running: str | None = None,
@@ -711,7 +725,7 @@ async def sync_stream(
     async def frames() -> AsyncIterator[str]:
         # Flush the response head at once, so a front door that waits for the
         # first byte does not hold the connection open silently.
-        yield f"event: heartbeat\ndata: {json.dumps({'cursor': query.cursor})}\n\n"
+        yield "event: heartbeat\ndata: {}\n\n"
         async for frame in _stream_frames(request, ctx, query):
             yield frame
 
