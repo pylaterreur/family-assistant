@@ -315,11 +315,12 @@ reorderings, the store equals the server state once a sync succeeds.
 
 ### 6.4 Production telemetry
 
-Client-side, via the telemetry lane: **staleness** (server `committed_at` of each applied change
-minus client apply time, with clock offset estimated from `server_time`), **push gap** (push arrival
-minus the time the announced `sync_cursor` was applied; negative means the app was already current),
-sync request duration and outcome by reason, and time in each presentation state. This turns
-"notifications arrive before the app updates" into a number with a baseline and a target.
+Client-side, via the telemetry lane: **staleness** (client apply time minus the server
+`committed_at` of each applied change, with clock offset estimated from `server_time`; larger is
+worse), **push gap** (the time the announced `sync_cursor` was applied minus push arrival; positive
+means the banner beat the app, zero or negative means the app was already current), sync request
+duration and outcome by reason, and time in each presentation state. This turns "notifications
+arrive before the app updates" into a number with a baseline and a target.
 
 ### 6.5 Front door check
 
