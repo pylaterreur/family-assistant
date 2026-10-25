@@ -108,7 +108,7 @@ trips) is the one fast path the app has, which is why the reply appears a moment
 
 ### 3.1 Change log (the chokepoint)
 
-A `sync_changes` table: `id` (autoincrement; **the cursor**), `conversation_id`, `kind`
+A `sync_changes` table: `cursor`, `conversation_id` (nullable), `owner_user_id` (nullable), `kind`
 (`conversation`, `message`, `thread`, `read_marker`, `confirmation`, `delegation`), `entity_id`,
 `op` (`upsert` | `delete`), `committed_at`. Rows are written **inside the same transaction** as the
 state change, at the repository layer, so every writer feeds sync without enumeration: web turns,
@@ -116,9 +116,23 @@ Telegram, the task worker, scheduled callbacks, move-to-thread (which becomes to
 upserts), in-place row mutations (attachments, tracebacks). Writing a message-history row without a
 change row is impossible by construction, because the repository method is the only writer.
 
-Scoping follows the list endpoint's ownership predicate at read time: a sync request returns changes
-for conversations the caller owns, resolved with the same SQL filter `GET /conversations` already
-uses. The change log records `conversation_id`, not a user, so ownership rules stay in one place.
+**The cursor is commit-ordered, not sequence-ordered.** A PostgreSQL sequence hands out values
+outside the transaction, so two writers can take 10 and 11, 11 commits first, a client advances to
+11, and 10 becomes visible afterwards below the client's cursor and is never delivered. The cursor
+is therefore allocated from a single counter row that the writing transaction updates and holds
+locked until commit (`UPDATE sync_cursor SET value = value + 1 RETURNING value`). Writers serialise
+on that row for the duration of their transaction, which is acceptable at household scale and is
+what makes "everything with a cursor above yours is visible to you" true. The convergence property
+test (§6.3) exercises exactly this interleaving against PostgreSQL.
+
+**Every change row names its audience, and the audience is either a conversation or a user.**
+Conversation-scoped kinds (conversation, message, thread, turn progress) carry `conversation_id` and
+are filtered at read time by the ownership predicate `GET /conversations` already uses, so ownership
+rules stay in one place. User-scoped kinds carry `owner_user_id`: a read marker belongs to its
+viewer, not to the conversation (another viewer of a shared conversation must not receive it), a
+confirmation to its `target_user_id` (it may have no origin conversation at all), a delegation to
+the user who started it. The sync query is the union of the two filters. A kind that fits neither is
+a design error, not a third filter.
 
 Retention: rows older than a bound (say 30 days) are pruned; a cursor older than the oldest retained
 row gets `410` and the client does a full bootstrap sync. Same contract as today's 410, but the
@@ -194,10 +208,13 @@ the progress materialisation, and in-process wake-ups for long polls and the liv
 `SyncEngine` is a transport-agnostic module owned by the app, not by a view model. It has four
 parts:
 
-- **Store**: materialised state (conversation rows, Home and threads, messages per conversation,
-  active turn progress, read markers, pending confirmations) plus the cursor. Persisted to disk; the
-  UI observes it. Views no longer own network state, so pushing a conversation over Home no longer
-  doubles every connection.
+- **Store**: materialised state plus the cursor, persisted to disk and observed by the UI. Its
+  collections are exactly the server's change kinds: conversation rows, Home and threads, messages
+  per conversation, active turn progress, read markers, pending confirmations, pending delegations
+  (status and child progress, which the 15 s poll observes today). **Anything the UI renders from a
+  poll or a stream today is a sync kind, and a poll is deleted only once its kind is in the
+  engine.** Views no longer own network state, so pushing a conversation over Home no longer doubles
+  every connection.
 - **Reducer**: `apply(SyncResponse)` and `apply(StreamFrame)`. Upsert by `(kind, entity_id)`, delete
   on tombstone, replace progress on snapshot, append progress on contiguous delta. No id prefixes,
   no `local_` filtering, no held-bubble maps: a running turn is rendered from `active_turns` and
