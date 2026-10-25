@@ -106,39 +106,48 @@ trips) is the one fast path the app has, which is why the reply appears a moment
 
 ## 3. Server design
 
-### 3.1 Change log (the chokepoint)
+### 3.1 Change tracking (the chokepoint)
 
-A `sync_changes` table: `cursor`, `conversation_id` (nullable), `owner_user_id` (nullable), `kind`
-(`conversation`, `message`, `thread`, `read_marker`, `confirmation`, `delegation`), `entity_id`,
-`op` (`upsert` | `delete`), `committed_at`. Rows are written **inside the same transaction** as the
-state change, at the repository layer, so every writer feeds sync without enumeration: web turns,
-Telegram, the task worker, scheduled callbacks, move-to-thread (which becomes tombstones plus
-upserts), in-place row mutations (attachments, tracebacks). Writing a message-history row without a
-change row is impossible by construction, because the repository method is the only writer.
+Every synced row carries a `sync_cursor`: the cursor of the transaction that last wrote it. The
+synced tables are the ones behind the client's collections: `message_history`,
+`conversation_threads`, `conversation_read_markers`, `confirmation_requests` and `delegation_runs`.
+"What changed since N" is then a query of the state itself, `WHERE sync_cursor > N`, and the answer
+is already compacted: a row written five times appears once, in its current state. Deletes leave a
+row in `sync_tombstones` (kind, entity id, audience, cursor), because a deleted row cannot answer a
+query.
+
+**The stamp is applied by the transaction executor, not by each writer.** `DatabaseTransaction`
+already sees every symbolic `INSERT`, `UPDATE` and `DELETE` before it runs. For a statement on a
+synced table it allocates the transaction's cursor (once per transaction), adds
+`sync_cursor = <cursor>` to inserts and updates, and turns a delete into "record a tombstone for
+each matching row, then delete". A write path added next year is stamped without anyone remembering
+to stamp it; Telegram, the task worker, move-to-thread and in-place mutations are covered the same
+way as web turns. Raw SQL text is not stamped, and the project already forbids it for writes.
 
 **The cursor is commit-ordered, not sequence-ordered.** A PostgreSQL sequence hands out values
 outside the transaction, so two writers can take 10 and 11, 11 commits first, a client advances to
 11, and 10 becomes visible afterwards below the client's cursor and is never delivered. The cursor
 is therefore allocated from a single counter row that the writing transaction updates and holds
-locked until commit (`UPDATE sync_cursor SET value = value + 1 RETURNING value`). Writers serialise
-on that row for the duration of their transaction, which is acceptable at household scale and is
-what makes "everything with a cursor above yours is visible to you" true. The convergence property
-test (§6.3) exercises exactly this interleaving against PostgreSQL.
+locked until commit (`UPDATE sync_cursor SET value = value + 1 RETURNING value`). Writers to synced
+tables serialise on that row for the rest of their transaction, which is acceptable at household
+scale and is what makes "everything with a cursor above yours is visible to you" true. The
+convergence property test (§6.3) exercises exactly this interleaving against PostgreSQL.
 
-**Every change row names its audience, and the audience is either a conversation or a user.**
-Conversation-scoped kinds (conversation, message, thread, turn progress) carry `conversation_id` and
-are filtered at read time by the ownership predicate `GET /conversations` already uses, so ownership
-rules stay in one place. User-scoped kinds carry `owner_user_id`: a read marker belongs to its
-viewer, not to the conversation (another viewer of a shared conversation must not receive it), a
-confirmation to its `target_user_id` (it may have no origin conversation at all), a delegation to
-the user who started it. The sync query is the union of the two filters. A kind that fits neither is
-a design error, not a third filter.
+**Every synced row names its audience, and the audience is either a conversation or a user.**
+Conversation-scoped kinds (messages, threads, and the conversation rows derived from messages) are
+filtered at read time by the ownership predicate `GET /conversations` already uses, so ownership
+rules stay in one place. User-scoped kinds are filtered by their user column: a read marker belongs
+to its viewer, not to the conversation (another viewer of a shared conversation must not receive
+it), a confirmation to its `target_user_id` (it may have no origin conversation at all), a
+delegation to the user who started it. A kind that fits neither is a design error, not a third
+filter. Tombstones record the same audience as the row they replace.
 
-Retention: rows older than a bound (say 30 days) are pruned; a cursor older than the oldest retained
-row gets `410` and the client does a full bootstrap sync. Same contract as today's 410, but the
-bootstrap is one request, not a different code path.
+The transaction's commit callback wakes waiting long polls in-process, so a client hears about a
+commit without the server polling the database.
 
-The repository already has a precedent for this shape in `memory_change_log`.
+Retention: tombstones older than a bound (say 30 days) are pruned; a cursor older than the oldest
+retained tombstone gets `410` and the client does a bootstrap sync. Same contract as today's 410,
+but the bootstrap is one request, not a different code path.
 
 ### 3.2 The sync endpoint
 
@@ -286,7 +295,7 @@ unconfirmed-reply marker machinery.
 
 Measure before and after; the plan ships its own ruler.
 
-### 6.1 Network impairment proxy (`tests/support/netem/`)
+### 6.1 Network impairment proxy (`tests/netem/`)
 
 An in-repo asyncio TCP proxy (no external binary, runs in CI) with composable, seeded impairments:
 fixed latency + jitter, bandwidth cap, random connection reset, **blackhole windows** (drop traffic
@@ -304,21 +313,23 @@ SSE-buffering case), and scheduled outages. Named profiles:
 
 ### 6.2 Benchmark: time-to-consistency
 
-`scripts/sync_benchmark.py` starts the app, the proxy and a client, drives scenarios and reports the
-**time from server commit to client render** (p50/p95) per profile, plus bytes and request counts:
+`poe sync-benchmark` starts the app, puts the impairment proxy in front of it and drives a client
+through scenarios, reporting the **time from the moment a change could be shown to the moment the
+client shows it** (p50/p95) per profile, plus connections opened and bytes moved. A driver commits
+changes over a perfect link, so only the client under test sees the bad network:
 
-- turn completes while the client is connected and idle;
-- turn completes during a blackhole; measure from blackhole end;
-- app resume after N minutes away with M changed conversations;
-- cold launch;
-- push received while backgrounded (simulated via the trigger API).
+- a reply completes in the open conversation while the client is connected and idle;
+- a reply completes while the page is still loading the conversation;
+- the client sends a message itself;
+- a reply completes during a blackhole, measured from the blackhole's end;
+- a reply completes just after a hand-over resets every connection;
+- a reply completes in a conversation other than the open one (the list must update);
+- cold load of a conversation.
 
-Clients under test: the **Python reference sync client** (`tests/support/sync_client.py`, which
-doubles as the protocol's executable specification and runs in backend functional tests), the real
-web client via Playwright (CDP `Network.emulateNetworkConditions` for latency/throughput, the proxy
-for drops), and, on demand, the iOS simulator against a local backend through the proxy driven by
-XCUITest. A small subset with generous bounds runs as functional tests in CI; the full table runs on
-demand and is recorded in this document.
+Clients under test: the real web client via Playwright from M0, the **Python reference sync client**
+from M1 (it doubles as the protocol's executable specification and runs in backend functional
+tests), and, on demand, the iOS simulator against a local backend through the proxy. A regression
+subset with generous bounds runs in CI; the full table runs on demand and is recorded in §6.6.
 
 ### 6.3 Deterministic client scenarios
 
@@ -341,9 +352,70 @@ arrive before the app updates" into a number with a baseline and a target.
 
 ### 6.5 Front door check
 
-`scripts/check_sse_frontdoor.py`: timestamped `curl -N` of the live stream and the long poll through
-`assistant.andrewgarrett.dev`, reporting whether heartbeats arrive at cadence and whether a 25 s
-long poll completes. Run in M0 so the proxy profiles match reality, and again after M1.
+`scripts/check_sse_frontdoor.py` holds an event stream open through `assistant.andrewgarrett.dev`
+and prints when each frame arrives, so late, bunched or missing heartbeats show the front door
+buffering or cutting it. After M1 it gains a long-poll probe. It needs a user access token: the
+read-only diagnostics token is rejected at the gateway, so it has not yet been run against
+production.
+
+### 6.6 Baseline (M0, current web client)
+
+Recorded 2026-10-25 with `poe sync-benchmark`, five runs per cell, against a local backend through
+the impairment proxy. The app is loaded over a good link before the profile applies, as for someone
+whose connection degrades with the app open; the two load scenarios then reload under the profile
+with assets already cached. "KB down" includes that initial page load and is not comparable between
+scenarios. A timeout means the client had not shown the change 60 seconds later.
+
+| Client | Scenario           | Profile        | Runs | p50 (s) | p95 (s) | Timeouts | Connections | KB down |
+| ------ | ------------------ | -------------- | ---- | ------- | ------- | -------- | ----------- | ------- |
+| web    | after_blackhole    | good           | 5    | 0.20    | 0.22    | 0        | 27          | 3063    |
+| web    | after_blackhole    | lossy_cellular | 5    | 0.50    | 0.69    | 0        | 31          | 3062    |
+| web    | after_blackhole    | airplane_wifi  | 5    | 1.28    | 1.57    | 0        | 31          | 3062    |
+| web    | after_blackhole    | hotel_wifi     | 5    | timeout | timeout | 5        | 37          | 3038    |
+| web    | after_handover     | good           | 5    | 6.99    | 7.06    | 0        | 32          | 3062    |
+| web    | after_handover     | lossy_cellular | 5    | 7.41    | 23.22   | 0        | 34          | 3060    |
+| web    | after_handover     | airplane_wifi  | 5    | 8.92    | timeout | 1        | 34          | 3058    |
+| web    | after_handover     | hotel_wifi     | 5    | 7.23    | 7.28    | 0        | 38          | 3061    |
+| web    | cold_load          | good           | 5    | 0.66    | 0.80    | 0        | 6           | 3219    |
+| web    | cold_load          | lossy_cellular | 5    | 1.28    | 1.46    | 0        | 22          | 3181    |
+| web    | cold_load          | airplane_wifi  | 5    | 2.60    | 2.65    | 0        | 17          | 3147    |
+| web    | cold_load          | hotel_wifi     | 5    | 0.95    | 1.02    | 0        | 17          | 3218    |
+| web    | commit_during_load | good           | 5    | timeout | timeout | 5        | 46          | 3263    |
+| web    | commit_during_load | lossy_cellular | 5    | 59.78   | timeout | 2        | 52          | 3254    |
+| web    | commit_during_load | airplane_wifi  | 5    | timeout | timeout | 3        | 49          | 3247    |
+| web    | commit_during_load | hotel_wifi     | 5    | timeout | timeout | 5        | 53          | 3254    |
+| web    | connected_idle     | good           | 5    | 0.15    | 0.18    | 0        | 8           | 3065    |
+| web    | connected_idle     | lossy_cellular | 5    | 0.63    | 0.68    | 0        | 10          | 3063    |
+| web    | connected_idle     | airplane_wifi  | 5    | 1.54    | 1.80    | 0        | 10          | 3062    |
+| web    | connected_idle     | hotel_wifi     | 5    | timeout | timeout | 5        | 32          | 3037    |
+| web    | other_conversation | good           | 5    | 0.12    | 0.21    | 0        | 6           | 3042    |
+| web    | other_conversation | lossy_cellular | 5    | 0.82    | 0.93    | 0        | 9           | 3039    |
+| web    | other_conversation | airplane_wifi  | 5    | 1.95    | 2.18    | 0        | 9           | 3038    |
+| web    | other_conversation | hotel_wifi     | 5    | timeout | timeout | 4        | 28          | 3037    |
+| web    | own_send           | good           | 5    | 0.13    | 0.24    | 0        | 6           | 3043    |
+| web    | own_send           | lossy_cellular | 5    | 0.79    | 1.12    | 0        | 13          | 3047    |
+| web    | own_send           | airplane_wifi  | 5    | 1.86    | 2.34    | 0        | 14          | 3047    |
+| web    | own_send           | hotel_wifi     | 5    | 5.42    | 5.46    | 0        | 28          | 3043    |
+
+What the table shows:
+
+- **A reply committed while the page loads is lost.** The client loads history, then opens its
+  follow stream about a second later from the live head and skips the reload on first connect, so a
+  turn that ends in between never appears until something else triggers a reload. This happens on a
+  perfect link. The design removes it structurally: a sync request carries the cursor its snapshot
+  was taken at.
+- **A buffering front door freezes the client.** On the hotel profile, idle updates, other
+  conversations and recovery after an outage never arrive, because nothing reaches the client until
+  the buffer fills. The client's own send recovers in about five seconds only because its stream
+  closes when the turn ends. Plain request and response, as in §3.2, is immune.
+- **Every hand-over costs about seven seconds**, the client's fixed reconnect delay plus a reload,
+  and on lossy links the tail reaches 23 seconds or never.
+- **Steady state on a working stream is fast**: about 0.15 s on a good link and 1.5 to 2 s on the
+  airplane profile, roughly one round trip plus a history reload. The new protocol has to match this
+  rather than beat it.
+- **The web bundle is about 3 MB.** On the airplane profile's 1 Mbit/s a first load takes longer
+  than the page-load timeout. That is outside this design, but it is why the benchmark loads the app
+  before degrading the link.
 
 ## 7. Decisions for review
 
@@ -380,18 +452,18 @@ long poll completes. Run in M0 so the proxy profiles match reality, and again af
 
 Each milestone ships independently and is verified before the next starts.
 
-**M0. Measure.** Impairment proxy with profiles; `sync_benchmark.py` running the current web client
-through Playwright; client telemetry for staleness and push gap on iOS and web; front-door check.
-*Outcome:* a baseline table in this document and a live push-gap metric from production. *Verified
-by:* the benchmark runs in CI on `good` and `airplane_wifi` against the current protocol and records
-numbers.
+**M0. Measure.** Impairment proxy with profiles; the time-to-consistency benchmark running the
+current web client through Playwright; the push-gap metric on iOS, fed by a `turn_id` in push
+payloads; front-door check. The web client's push gap is measured from M5, because M5 replaces the
+code it would instrument. *Outcome:* a baseline table in this document (§6.6) and a live push-gap
+metric from production. *Verified by:* a regression subset of the benchmark runs in CI on the good
+profile; the full table is recorded here.
 
-**M1. Server sync protocol.** `sync_changes` written at the repository chokepoint (with a
-conformance rule that no other module writes `message_history`), `GET /sync` with compaction,
-`focus`, `wait` and bootstrap, turn progress materialisation, `GET /sync/stream`, `internal_id`
-history paging. The Python reference client. Old endpoints untouched. *Verified by:* functional
-tests of the reference client through every proxy profile; convergence property test; benchmark
-table for the reference client.
+**M1. Server sync protocol.** Executor-stamped `sync_cursor` columns and tombstones (§3.1),
+`GET /sync` with `focus`, `wait` and bootstrap, turn progress materialisation, `GET /sync/stream`,
+`internal_id` history paging. The Python reference client. Old endpoints untouched. *Verified by:*
+functional tests of the reference client through every proxy profile; convergence property test,
+including the commit-order interleaving on PostgreSQL; benchmark table for the reference client.
 
 **M2. iOS engine for reads.** `SyncEngine` (store, reducer, scheduler) with on-disk persistence, one
 per account, replacing the follow stream, activity stream, resync orchestrator, catch-ups and both
