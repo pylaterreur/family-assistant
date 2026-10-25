@@ -197,13 +197,24 @@ class ImpairedNetworkProxy:
             connection.close()
 
     async def _supervise(self, connection: _Connection) -> None:
-        """Enforce the connection lifetime and the idle cut."""
+        """Enforce the connection lifetime and the idle cut.
+
+        Both follow the impairment in force now, not the one the connection
+        opened under, so a profile applied mid-scenario reaches connections
+        that were already open.
+        """
         loop = asyncio.get_running_loop()
-        lifetime = self._impairment.mean_connection_lifetime_s
-        reset_at = (
-            loop.time() + self._random.expovariate(1.0 / lifetime) if lifetime else None
-        )
+        scheduled_for: float | None = None
+        reset_at: float | None = None
         while True:
+            lifetime = self._impairment.mean_connection_lifetime_s
+            if lifetime != scheduled_for:
+                scheduled_for = lifetime
+                reset_at = (
+                    loop.time() + self._random.expovariate(1.0 / lifetime)
+                    if lifetime
+                    else None
+                )
             # ast-grep-ignore: no-asyncio-sleep-in-tests - the proxy's supervisor ticks on wall-clock time by design; it is the network simulator, not a test waiting on a condition
             await asyncio.sleep(0.05)
             now = loop.time()
@@ -304,20 +315,22 @@ class _EventStreamHold:
     """Withhold an event-stream response body the way a buffering proxy does.
 
     The response head goes through at once; the body is released only in
-    blocks of ``limit`` bytes, or when the upstream closes.
+    blocks of ``limit`` bytes, or when the upstream closes. Responses are
+    recognised whether or not buffering is on, so turning it on mid-stream
+    holds a stream that was already open.
     """
 
     def __init__(self) -> None:
-        self._holding = False
+        self._event_stream = False
         self._held = bytearray()
 
     def feed(self, received: bytes, limit: int | None) -> list[bytes]:
-        if limit is None and not self._holding:
-            return [received]
-        if not self._holding:
+        if not self._event_stream:
             if not _starts_event_stream(received):
                 return [received]
-            self._holding = True
+            # An event stream never ends while the connection is open, so
+            # everything after its head on this connection is its body.
+            self._event_stream = True
             head, body = _split_head(received)
             self._held.extend(body)
             return [head, *self._release(limit)]

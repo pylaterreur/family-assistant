@@ -127,6 +127,19 @@ async def test_mean_connection_lifetime_resets_long_lived_connections(
     writer.close()
 
 
+async def test_a_lifetime_applied_later_resets_connections_already_open(
+    echo_proxy: ImpairedNetworkProxy,
+) -> None:
+    reader, writer = await _connect(echo_proxy)
+    await _round_trip(reader, writer, b"warm")
+
+    echo_proxy.set_impairment(Impairment(mean_connection_lifetime_s=0.1))
+
+    with pytest.raises((ConnectionError, asyncio.IncompleteReadError)):
+        await asyncio.wait_for(reader.readexactly(1), timeout=10)
+    writer.close()
+
+
 async def test_idle_cut_closes_quiet_connections(
     echo_proxy: ImpairedNetworkProxy,
 ) -> None:
@@ -182,4 +195,43 @@ async def test_event_stream_body_is_held_until_upstream_closes() -> None:
         assert b"text/event-stream" in head
         assert not done
         assert body.startswith(b"event: heartbeat")
+        writer.close()
+
+
+async def test_buffering_turned_on_mid_stream_holds_a_stream_already_open() -> None:
+    send_more = asyncio.Event()
+    released = asyncio.Event()
+
+    async def handler(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(_SSE_HEAD)
+        writer.write(b"event: heartbeat\ndata: {}\n\n")
+        await writer.drain()
+        await send_more.wait()
+        writer.write(b"event: turn_ended\ndata: {}\n\n")
+        await writer.drain()
+        await released.wait()
+        writer.close()
+
+    async with (
+        _upstream(handler) as port,
+        ImpairedNetworkProxy("127.0.0.1", port) as proxy,
+    ):
+        reader, writer = await _connect(proxy)
+        writer.write(b"GET /stream HTTP/1.1\r\nHost: x\r\n\r\n")
+        await writer.drain()
+        await asyncio.wait_for(reader.readuntil(b"event: heartbeat"), timeout=10)
+        await asyncio.wait_for(reader.readuntil(b"\n\n"), timeout=10)
+
+        proxy.set_impairment(Impairment(event_stream_buffer_bytes=64 * 1024))
+        send_more.set()
+        held = asyncio.create_task(reader.read(1024))
+        done, _ = await asyncio.wait({held}, timeout=0.3)
+        released.set()
+        body = await asyncio.wait_for(held, timeout=10)
+
+        assert not done
+        assert body.startswith(b"event: turn_ended")
         writer.close()
