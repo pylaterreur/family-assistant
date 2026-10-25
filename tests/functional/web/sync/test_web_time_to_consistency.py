@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 import pytest
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -92,6 +93,19 @@ async def _wait_until_following(
     )
 
 
+async def _reload_conversation(page: Page, url: str) -> bool:
+    """Navigate under the current impairment; False if the page never loaded.
+
+    Only the load scenarios do this. On a thin link the app's assets can take
+    longer than the deadline, which is a result, not a harness failure.
+    """
+    try:
+        await page.goto(url, wait_until="commit", timeout=_DEADLINE_S * 1000)
+    except PlaywrightError:
+        return False
+    return True
+
+
 def _elapsed(seen: float | None, since: float) -> float | None:
     return None if seen is None else max(0.0, seen - since)
 
@@ -110,6 +124,9 @@ class _Scenario:
     ) -> None:
         self.seed_token = seed_token
         self.hub = hub
+        self.conversation_url = (
+            f"{chat.base_url}/chat?conversation_id={conversation_id}"
+        )
         self.page = page
         self.chat = chat
         self.proxy = proxy
@@ -120,19 +137,22 @@ class _Scenario:
     async def cold_load(self, token: str) -> float | None:
         seed_marker = reply_marker(self.seed_token)
         started = time.monotonic()
-        await self.page.goto(
-            f"{self.chat.base_url}/chat?conversation_id={self.conversation_id}"
-        )
+        if not await _reload_conversation(self.page, self.conversation_url):
+            return None
         return _elapsed(
             await _seen_at(self.page, _THREAD, seed_marker, _DEADLINE_S), started
         )
 
     async def commit_during_load(self, token: str) -> float | None:
         messages_path = f"/conversations/{self.conversation_id}/messages"
-        async with self.page.expect_response(lambda r: messages_path in r.url):
-            await self.page.goto(
-                f"{self.chat.base_url}/chat?conversation_id={self.conversation_id}"
-            )
+        try:
+            async with self.page.expect_response(
+                lambda r: messages_path in r.url, timeout=_DEADLINE_S * 1000
+            ):
+                if not await _reload_conversation(self.page, self.conversation_url):
+                    return None
+        except PlaywrightError:
+            return None
         committed = await self.driver.complete_turn(self.conversation_id, token)
         seen = await _seen_at(self.page, _THREAD, reply_marker(token), _DEADLINE_S)
         return _elapsed(seen, committed)
@@ -197,12 +217,15 @@ async def test_web_client_time_to_consistency(
     await turn_driver.complete_turn(conversation_id, seed_token)
     await turn_driver.complete_turn(other_conversation_id, uuid.uuid4().hex[:10])
 
-    impaired_proxy.set_impairment(PROFILES[profile_name])
+    # The app loads over a good link and the profile applies from then on, as
+    # for someone whose connection degrades with the app already open. The
+    # load scenarios reload under the profile themselves.
     chat = ChatPage(page, base_url=f"http://127.0.0.1:{impaired_proxy.port}")
     await chat.navigate_to_chat(conversation_id)
     assert await _seen_at(page, _THREAD, reply_marker(seed_token), _DEADLINE_S), (
         "the seeded conversation never rendered through the proxy"
     )
+    impaired_proxy.set_impairment(PROFILES[profile_name])
 
     scenario_runner = _Scenario(
         page,
