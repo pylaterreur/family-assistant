@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -86,6 +87,13 @@ class MCPAdapter:
             instructions=SERVER_INSTRUCTIONS,
             stateless_http=True,
             json_response=True,
+            # Left unset, the SDK admits only localhost Host headers, which
+            # rejects every request reaching the deployment's own hostname.
+            # The adapter only starts with authentication configured, and a
+            # DNS-rebinding page cannot present the caller's credentials.
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            ),
         )
         running_turns = RunningTurns()
         register_tools(mcp, running_turns)

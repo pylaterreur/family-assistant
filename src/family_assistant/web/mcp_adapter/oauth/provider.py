@@ -113,6 +113,13 @@ def _expiry_timestamp(value: datetime | None) -> int | None:
     return int(_as_utc(value).timestamp()) if value is not None else None
 
 
+def _client_id(client: OAuthClientInformationFull) -> str:
+    # The SDK types client_id as optional, but every client it hands this
+    # provider comes from get_client, so from a registration, which assigns one.
+    assert client.client_id is not None
+    return client.client_id
+
+
 class _MintedPair(NamedTuple):
     access: api_tokens_storage.MintedApiToken
     refresh: api_tokens_storage.MintedApiToken
@@ -337,7 +344,7 @@ class FamilyAssistantOAuthProvider(
                     code=code,
                     scopes=params.scopes or [ASSISTANT_SCOPE],
                     expires_at=time.time() + AUTHORIZATION_CODE_TTL_SECONDS,
-                    client_id=pending.client.client_id,
+                    client_id=_client_id(pending.client),
                     code_challenge=params.code_challenge,
                     redirect_uri=params.redirect_uri,
                     redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
@@ -429,7 +436,7 @@ class FamilyAssistantOAuthProvider(
             return None
         return StoredRefreshToken(
             token=refresh_token,
-            client_id=client.client_id,
+            client_id=_client_id(client),
             scopes=[ASSISTANT_SCOPE],
             expires_at=_expiry_timestamp(row["expires_at"]),
             token_id=row["id"],

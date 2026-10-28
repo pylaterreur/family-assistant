@@ -86,7 +86,9 @@ button.approve {{ background: #2563eb; border-color: #2563eb; color: #fff; }}
 
 
 def _consent_form(pending: PendingConsent, nonce: str | None) -> str:
-    client_name = html.escape(pending.client.client_name or pending.client.client_id)
+    client_name = html.escape(
+        pending.client.client_name or pending.client.client_id or ""
+    )
     redirect_host = html.escape(urlparse(str(pending.params.redirect_uri)).netloc)
     nonce_field = (
         f'<input type="hidden" name="nonce" value="{html.escape(nonce)}">'
