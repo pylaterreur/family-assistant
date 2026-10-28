@@ -212,33 +212,47 @@ def major_change(before: str, after: str) -> str | None:
 # rather than by its diff lines. Both sides are parsed as data.
 
 
-def uv_lock_versions(text: str) -> dict[str, str]:
-    return {
-        package["name"]: package["version"]
+# A lockfile can hold one package at several versions: a forked uv resolution,
+# or npm's nested node_modules. Each name maps to every version it is locked at.
+Versions = dict[str, frozenset[str]]
+
+
+def _group(pairs: list[tuple[str, str]]) -> Versions:
+    grouped: dict[str, set[str]] = {}
+    for name, version in pairs:
+        grouped.setdefault(name, set()).add(version)
+    return {name: frozenset(versions) for name, versions in grouped.items()}
+
+
+def uv_lock_versions(text: str) -> Versions:
+    return _group([
+        (package["name"], package["version"])
         for package in tomllib.loads(text).get("package", [])
         if "version" in package
-    }
+    ])
 
 
-def npm_lock_versions(text: str) -> dict[str, str]:
-    return {
-        path.rsplit("node_modules/", 1)[-1]: entry["version"]
+def npm_lock_versions(text: str) -> Versions:
+    return _group([
+        (path.rsplit("node_modules/", 1)[-1], entry["version"])
         for path, entry in json.loads(text).get("packages", {}).items()
         if path and "version" in entry
-    }
+    ])
 
 
-LOCKFILES: dict[str, Callable[[str], dict[str, str]]] = {
+LOCKFILES: dict[str, Callable[[str], Versions]] = {
     "uv.lock": uv_lock_versions,
     "package-lock.json": npm_lock_versions,
 }
 
 
-def lockfile(path: str) -> Callable[[str], dict[str, str]] | None:
+def lockfile(path: str) -> Callable[[str], Versions] | None:
     return LOCKFILES.get(path.rsplit("/", 1)[-1])
 
 
-def lock_changes(file: Json) -> dict[str, tuple[str | None, str | None]]:
+def lock_changes(
+    file: Json,
+) -> dict[str, tuple[frozenset[str] | None, frozenset[str] | None]]:
     """Each package whose resolved version the lockfile change moves."""
     parse = lockfile(file["filename"])
     assert parse is not None
@@ -305,9 +319,16 @@ def lock_rules(snapshot: Json, policy: Json) -> None:
                 raise EvidenceError(f"denied package {name} in {file['filename']}")
             # A package appearing or disappearing is a new or dropped
             # transitive dependency, not an upgrade of one already in use.
-            if before and after and major(before) != major(after):
+            # A package locked at several versions is compared by the set of
+            # majors it is locked at, so a fork gaining a new major is held.
+            if (
+                before
+                and after
+                and {major(v) for v in before} != {major(v) for v in after}
+            ):
                 raise EvidenceError(
-                    f"major version change in {file['filename']}: {name} {before} -> {after}"
+                    f"major version change in {file['filename']}: "
+                    f"{name} {', '.join(sorted(before))} -> {', '.join(sorted(after))}"
                 )
 
 
