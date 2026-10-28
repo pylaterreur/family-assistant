@@ -200,6 +200,31 @@ def test_new_or_dropped_transitive_package_is_not_a_major() -> None:
     assert lane.evaluate(snap, POLICY)["decision"] == "eligible"
 
 
+def test_every_fork_of_a_uv_package_is_checked() -> None:
+    """A forked resolution locks one package at several versions."""
+    file = _uv_lock_file({"httpx": "0.27.0"}, {"httpx": "0.28.1"})
+    fork = '[[package]]\nname = "example"\nversion = "{}"\n\n'
+    file["base_text"] += fork.format("1.9.0") + fork.format("3.0.0")
+    file["head_text"] += fork.format("2.0.0") + fork.format("3.0.0")
+    held(candidate(file), "example 1.9.0, 3.0.0 -> 2.0.0, 3.0.0")
+
+
+def test_nested_npm_copy_is_checked() -> None:
+    def lock(nested: str) -> str:
+        return json.dumps({
+            "packages": {
+                "": {},
+                "node_modules/semver": {"version": "7.6.0"},
+                "node_modules/a/node_modules/semver": {"version": nested},
+            }
+        })
+
+    file = _file(
+        "frontend/package-lock.json", base_text=lock("5.7.2"), head_text=lock("6.3.1")
+    )
+    held(candidate(file), "semver 5.7.2, 7.6.0 -> 6.3.1, 7.6.0")
+
+
 def test_npm_lockfile_major_change_is_manual() -> None:
     snap = candidate(
         _file(
