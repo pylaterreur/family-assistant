@@ -331,25 +331,39 @@ def review_state(snapshot: Json, policy: Json, committed_at: dt.datetime) -> str
     if "CHANGES_REQUESTED" in latest.values():
         return "changes-requested"
     reactions = [r for r in snapshot["reactions"] if mine(r)]
-    if any(r["content"] == "eyes" for r in reactions):
-        return "review-running"
     thumbs = [timestamp(r["created_at"]) for r in reactions if r["content"] == "+1"]
     receipts = [
-        c
+        timestamp(c["created_at"])
         for c in snapshot["comments"]
         if mine(c)
         and timestamp(c["created_at"]) > committed_at
         and (match := CLEAN_RECEIPT.match(c.get("body") or ""))
         and head.startswith(match[1])
     ]
+    # A 👀 is running only if no clean signal followed it: Codex can leave an
+    # old one behind when a later review finishes.
+    latest_clean = max(thumbs + receipts, default=None)
+    if any(
+        r["content"] == "eyes"
+        and (latest_clean is None or timestamp(r["created_at"]) >= latest_clean)
+        for r in reactions
+    ):
+        return "review-running"
     # Clean evidence for H: a +1 newer than H's commit, or a clean receipt naming H.
     if not receipts and (not thumbs or max(thumbs) <= committed_at):
         return "review-stale"
-    for comment in snapshot["comments"]:
-        if mine(comment) and SUMMARY_MARKER in (comment.get("body") or ""):
-            match = SUMMARY_SHA.search(comment["body"])
-            if not match or not head.startswith(match[1]):
-                return "review-summary-mismatch"
+    # Only the newest summary speaks for the current head; older ones describe
+    # earlier commits.
+    summaries = [
+        c
+        for c in snapshot["comments"]
+        if mine(c) and SUMMARY_MARKER in (c.get("body") or "")
+    ]
+    if summaries:
+        newest = max(summaries, key=lambda c: timestamp(c["created_at"]))
+        match = SUMMARY_SHA.search(newest["body"])
+        if not match or not head.startswith(match[1]):
+            return "review-summary-mismatch"
     return "clean"
 
 

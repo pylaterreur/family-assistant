@@ -315,6 +315,38 @@ def test_unanswered_review_request_blocks() -> None:
     assert held(snap, "review-unanswered")["status"] == "blocked"
 
 
+def test_eyes_left_behind_by_a_finished_review_is_ignored() -> None:
+    snap = candidate()
+    snap["reactions"].append({
+        "id": 8,
+        "user": REVIEWER,
+        "content": "eyes",
+        "created_at": "2026-10-10T00:36:00Z",
+    })
+    assert lane.evaluate(snap, POLICY)["decision"] == "eligible"
+
+
+def test_eyes_newer_than_the_clean_review_is_running() -> None:
+    snap = candidate()
+    snap["reactions"].append({
+        "id": 10,
+        "user": REVIEWER,
+        "content": "eyes",
+        "created_at": "2026-10-10T00:41:00Z",
+    })
+    assert held(snap, "review-running")["status"] == "waiting"
+
+
+def test_newer_summary_supersedes_one_for_an_earlier_head() -> None:
+    snap = candidate()
+    old = copy.deepcopy(snap["comments"][0])
+    old["id"] = 4
+    old["created_at"] = "2026-10-09T12:00:00Z"
+    old["body"] = old["body"].replace("aaaaaaa", "ccccccc")
+    snap["comments"].insert(0, old)
+    assert lane.evaluate(snap, POLICY)["decision"] == "eligible"
+
+
 def test_summary_naming_another_commit_waits() -> None:
     snap = candidate()
     snap["comments"][0]["body"] = snap["comments"][0]["body"].replace(
