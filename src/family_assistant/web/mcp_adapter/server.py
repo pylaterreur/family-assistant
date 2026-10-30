@@ -87,10 +87,10 @@ class MCPAdapter:
             instructions=SERVER_INSTRUCTIONS,
             stateless_http=True,
             json_response=True,
-            # Left unset, the SDK admits only localhost Host headers, which
-            # rejects every request reaching the deployment's own hostname.
-            # The adapter only starts with authentication configured, and a
-            # DNS-rebinding page cannot present the caller's credentials.
+            # FastMCP's default host turns on DNS-rebinding protection that
+            # accepts only localhost Host headers. This endpoint is mounted in
+            # the public app behind the edge's auth and bearer tokens, where
+            # Host is the deployment's own domain.
             transport_security=TransportSecuritySettings(
                 enable_dns_rebinding_protection=False
             ),

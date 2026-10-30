@@ -21,6 +21,7 @@ from family_assistant.web.mcp_adapter.oauth.provider import (
     CONSENT_PATH,
     PendingConsent,
     StoreFullError,
+    registered_client_id,
 )
 from family_assistant.web.mcp_adapter.oauth.routes import oauth_server
 
@@ -87,7 +88,7 @@ button.approve {{ background: #2563eb; border-color: #2563eb; color: #fff; }}
 
 def _consent_form(pending: PendingConsent, nonce: str | None) -> str:
     client_name = html.escape(
-        pending.client.client_name or pending.client.client_id or ""
+        pending.client.client_name or registered_client_id(pending.client)
     )
     redirect_host = html.escape(urlparse(str(pending.params.redirect_uri)).netloc)
     nonce_field = (
