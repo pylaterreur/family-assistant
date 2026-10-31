@@ -367,17 +367,18 @@ is **Waiting on you** or **Failed**; a thread that is still working can be marke
 stops. It reopens by itself when something new arrives in it.
 
 Home and threads count as read once you have scrolled to their newest message with the app open, so
-opening a thread clears its unread count. The **Chats** button at the top right (also in the menu at
-the top left) counts threads waiting on you. It opens the chat list: Home, then your threads grouped
-as **Waiting on you**, **Working**, **Failed** and **Done**, then all your other conversations,
-including those from before threads, under **Earlier**. The list also has search and **New Chat**.
-Something you share into the app lands in Home's composer. An intelligence level picked in Home
-applies to that one message. See [Home and threads](#home-and-threads) for how threads work.
+opening a thread clears its unread count. The **Chats** button at the top right counts threads
+waiting on you. It opens the chat list: Home, then your threads grouped as **Waiting on you**,
+**Working**, **Failed** and **Done**, then your conversations from before threads under **Earlier**.
+Those can still be read and continued, each with the profile it already has. The list also has
+search. Something you share into the app lands in Home's composer, and the **New Chat** quick action
+opens Home ready to type. An intelligence level picked in Home applies to that one message. See
+[Home and threads](#home-and-threads) for how threads work.
 
 You can start and fill threads yourself:
 
-- **New Thread**, at the top of the chat list: pick an assistant, write the opening message, and the
-  thread opens with its first reply on the way.
+- **New Thread**, the pencil at the top of Home and of the chat list: pick an assistant, write the
+  opening message, and the thread opens with its first reply on the way.
 - **Send as Thread**: long-press the send button in Home to send what you've written, with its
   attachments, as a new thread's first message instead. Pick the assistant next. The intelligence
   level you picked goes with it if that assistant offers the same level.

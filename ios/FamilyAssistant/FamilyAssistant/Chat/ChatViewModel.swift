@@ -692,11 +692,6 @@ final class ChatViewModel {
             // 404-loops the reconnect backoff and pins the connection indicator
             // to `.degraded`.
             opensGeneratedLaunchDraft = true
-            if role != .standalone {
-                // Minted here, so it is an ordinary conversation by construction.
-                conversationKind = .conversation
-                hasConversationMetadata = true
-            }
         } else if let initialPrompt, !initialPrompt.isEmpty {
             // Launched to start a brand-new chat (share extension / App Intent).
             self.conversationID = Self.generateConversationID()
@@ -815,6 +810,11 @@ final class ChatViewModel {
         }
         heldRoutedPrompts.append(prompt)
         await drainRoutedPrompts()
+    }
+
+    /// Bring the keyboard up in the composer.
+    func requestComposerFocus() {
+        composerFocusRequestID = UUID()
     }
 
     /// What the composer holds.
@@ -1245,13 +1245,11 @@ final class ChatViewModel {
         }
     }
 
-    /// Whether the user may move this conversation to another profile. Home
-    /// stays on its profile and a thread runs on its own; switching either
-    /// would start an unrelated conversation in their place. Over Home that
-    /// holds only once the conversation is known to be ordinary: until its
-    /// history has said so, a thread opened by a link must not offer it.
-    var allowsProfileChange: Bool {
-        role == .standalone || (role == .pushed && conversationKind == .conversation && threadSummary == nil)
+    /// Whether the server has said this is an ordinary conversation. A thread
+    /// opened by a link is not known to be a thread until its history loads,
+    /// so controls meant only for ordinary conversations wait for this.
+    var isConfirmedOrdinaryConversation: Bool {
+        conversationKind == .conversation && threadSummary == nil
     }
 
     /// Restore the tier the conversation just loaded is on, for its profile.
@@ -2068,6 +2066,24 @@ final class ChatViewModel {
             errorReporter.report(error, component: "Chat.profiles")
         }
         isLoadingProfiles = false
+    }
+
+    /// Load the profile list if it is still missing. It is otherwise fetched
+    /// once, at bootstrap, so a timeout or a server still starting up would
+    /// leave it empty for as long as the app runs.
+    func ensureProfilesLoaded() async {
+        guard profiles.isEmpty, !isLoadingProfiles else {
+            return
+        }
+        await loadProfiles()
+    }
+
+    /// What a control offering a choice of profile should show.
+    var profileListState: ProfileListState {
+        if !profiles.isEmpty {
+            return .ready
+        }
+        return isLoadingProfiles ? .loading : .unavailable
     }
 
     func sendDraft() async {
@@ -4514,6 +4530,9 @@ final class ChatViewModel {
         )
         for effect in effects {
             execute(effect)
+        }
+        if new == .active {
+            Task { await ensureProfilesLoaded() }
         }
     }
 
